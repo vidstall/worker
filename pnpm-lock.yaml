@@ -24,6 +24,18 @@ importers:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@22.19.13)(tsx@4.21.0)
 
+  apps/cp-daemon:
+    dependencies:
+      '@dvconf/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@mysten/sui':
+        specifier: ^1.0.0
+        version: 1.45.2(typescript@5.9.3)
+      dotenv:
+        specifier: ^16.0.0
+        version: 16.6.1
+
   apps/signaling:
     dependencies:
       '@dvconf/shared':
@@ -36,6 +48,22 @@ importers:
       '@types/ws':
         specifier: ^8.0.0
         version: 8.18.1
+
+  apps/validator-daemon:
+    dependencies:
+      '@dvconf/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@mysten/sui':
+        specifier: ^1.0.0
+        version: 1.45.2(typescript@5.9.3)
+      dotenv:
+        specifier: ^16.0.0
+        version: 16.6.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.13
 
   packages/shared:
     dependencies:
