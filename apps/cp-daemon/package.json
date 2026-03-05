@@ -1,0 +1,17 @@
+{
+  "name": "@dvconf/cp-daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "start": "node --import tsx/esm src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dvconf/shared": "workspace:*",
+    "dotenv": "^16.0.0"
+  }
+}
