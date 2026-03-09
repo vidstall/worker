@@ -171,7 +171,7 @@ async function runMeasurementCycle(
     const epoch = BigInt(Math.floor(Date.now() / 1000));
 
     const proof = buildSessionProof(
-      'pending-room',  // placeholder — room assignment happens in later phases
+      process.env['ROOM_ID'] ?? 'unassigned',  // placeholder — room assignment happens in later phases
       relayMinerId,
       validatorMinerId,
       sessionWalletAddress,

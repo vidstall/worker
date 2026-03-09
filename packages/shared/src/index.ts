@@ -41,7 +41,7 @@ export {
 // Chain helpers
 export { createSuiClient, loadNetworkConfig } from './chain/client.js';
 export { loadKeypair, generateSessionKeypair } from './chain/keypair.js';
-export { executeWithRetry } from './chain/tx.js';
+export { executeWithRetry, extractCreatedObjectByType } from './chain/tx.js';
 export { EventPoller } from './chain/events.js';
 export type { EventPollerOptions } from './chain/events.js';
 

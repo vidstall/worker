@@ -19,9 +19,9 @@ import { scoreRelays, type RelayCandidate, type ScoringWeights } from './scoring
 /** Default scoring weights (sum = 10_000). */
 export const DEFAULT_WEIGHTS: ScoringWeights = {
   reputation: 3_000n,
-  rtt: 3_000n,
+  rtt: 2_500n,
   load: 2_000n,
-  stake: 1_000n,
+  stake: 1_500n,
   regionMatch: 1_000n,
 };
 

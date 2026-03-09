@@ -11,6 +11,7 @@
     "dev:signaling": "pnpm --filter @dvconf/signaling dev",
     "dev:cp": "pnpm --filter @dvconf/cp-daemon dev",
     "dev:validator": "pnpm --filter @dvconf/validator-daemon dev",
+    "dev:client": "pnpm --filter @dvconf/client dev",
     "typecheck": "pnpm -r exec tsc --noEmit"
   },
   "devDependencies": {

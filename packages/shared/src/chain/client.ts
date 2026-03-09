@@ -36,7 +36,9 @@ export function createSuiClient(network: string): SuiClient {
  * Call `dotenv.config()` before this if loading from .env file.
  */
 export function loadNetworkConfig(): NetworkConfig {
-  config(); // load .env
+  // Load .env from CWD first, then try monorepo root
+  config();
+  config({ path: '../../.env' });
 
   const required = (key: string): string => {
     const val = process.env[key];

@@ -10,11 +10,16 @@
 
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import type { NetworkConfig, TxResult, Logger } from '@dvconf/shared';
-import { executeWithRetry, MinerRole } from '@dvconf/shared';
+import type { NetworkConfig, Logger } from '@dvconf/shared';
+import { executeWithRetry, extractCreatedObjectByType } from '@dvconf/shared';
 
-/** Minimum stake amount for registration (in MIST). */
-const MIN_STAKE_AMOUNT = 1_000_000n;
+/** Minimum stake for Validator role — 0.5 DVCONF (500_000_000 MIST). */
+const MIN_STAKE_AMOUNT = 500_000_000n;
+
+/** Encode a UTF-8 string as a u8 vector argument for Move vector<u8> params. */
+function strToU8Vec(s: string): number[] {
+  return Array.from(new TextEncoder().encode(s));
+}
 
 /**
  * Ensure the validator is registered on-chain.
@@ -37,7 +42,22 @@ export async function ensureRegistered(
 
   logger.info('VALIDATOR_CAP_ID not set — attempting auto-registration');
 
-  // Step 1: Register as miner with Validator role
+  // ── Step 1: Register as miner (role determined on-chain by staking::determine_role) ──────────
+  // Move signature: registration::register(
+  //   registry: &NetworkRegistry,       arg 0 — shared
+  //   store: &mut MinerStore,           arg 1 — shared
+  //   coin: Coin<TOKEN>,                arg 2 — owned (split from gas)
+  //   ip: vector<u8>,                   arg 3
+  //   port: u16,                        arg 4
+  //   stun_url: vector<u8>,             arg 5
+  //   turn_url: vector<u8>,             arg 6
+  //   region: vector<u8>,               arg 7
+  //   bandwidth_mbps: u64,              arg 8
+  //   max_concurrent: u64,              arg 9
+  //   cpu_cores: u64,                   arg 10
+  //   relay_mode: u8,                   arg 11
+  //   turn_credential_hash: vector<u8>, arg 12
+  // )  — 13 args total, no MinerRole arg
   const minerResult = await executeWithRetry(
     client,
     signer,
@@ -48,20 +68,19 @@ export async function ensureRegistered(
       tx.moveCall({
         target: `${config.packageId}::registration::register`,
         arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.minerStoreId),
-          stakeCoin,
-          tx.pure.u8(MinerRole.Validator),         // role = Validator (1)
-          tx.pure.string('0.0.0.0'),                // ip (placeholder — validators don't serve media)
-          tx.pure.u64(0),                            // port (placeholder)
-          tx.pure.string(''),                        // stun_url (placeholder)
-          tx.pure.string(''),                        // turn_url (placeholder)
-          tx.pure.string('global'),                  // region
-          tx.pure.u64(0),                            // bandwidth_mbps (N/A for validators)
-          tx.pure.u64(0),                            // max_concurrent (N/A)
-          tx.pure.u64(0),                            // cpu_cores (N/A)
-          tx.pure.u8(0),                             // relay_mode (N/A)
-          tx.pure.vector('u8', []),                  // turn_credential_hash (empty)
+          tx.object(config.networkRegistryId),                              // 0 &NetworkRegistry
+          tx.object(config.minerStoreId),                                   // 1 &mut MinerStore
+          stakeCoin,                                                         // 2 Coin<TOKEN>
+          tx.pure.vector('u8', strToU8Vec('0.0.0.0')),                      // 3 ip: vector<u8>
+          tx.pure.u16(0),                                                    // 4 port: u16
+          tx.pure.vector('u8', strToU8Vec('')),                              // 5 stun_url: vector<u8>
+          tx.pure.vector('u8', strToU8Vec('')),                              // 6 turn_url: vector<u8>
+          tx.pure.vector('u8', strToU8Vec('global')),                        // 7 region: vector<u8>
+          tx.pure.u64(0),                                                    // 8 bandwidth_mbps
+          tx.pure.u64(0),                                                    // 9 max_concurrent
+          tx.pure.u64(0),                                                    // 10 cpu_cores
+          tx.pure.u8(0),                                                     // 11 relay_mode
+          tx.pure.vector('u8', []),                                          // 12 turn_credential_hash
         ],
       });
     },
@@ -77,16 +96,30 @@ export async function ensureRegistered(
     process.exit(1);
   }
 
-  // Extract miner cap ID from created objects
-  const minerCapId = extractCreatedObjectId(minerResult);
+  // Extract both objects created by registration::register for Validator role:
+  //   - MinerCap  (caps::new_miner_cap + transfer::public_transfer)
+  //   - StakePosition (staking::create + staking::transfer_to)
+  const minerCapId = extractCreatedObjectByType(minerResult, '::caps::MinerCap');
+  const stakePositionId = extractCreatedObjectByType(minerResult, '::staking::StakePosition');
+
   if (!minerCapId) {
-    logger.error({ effects: minerResult.effects }, 'Failed to extract miner cap ID from TX effects');
+    logger.error({ effects: minerResult.effects }, 'Failed to extract MinerCap ID from TX effects');
+    process.exit(1);
+  }
+  if (!stakePositionId) {
+    logger.error({ effects: minerResult.effects }, 'Failed to extract StakePosition ID from TX effects');
     process.exit(1);
   }
 
-  logger.info({ minerCapId }, 'Miner registration succeeded');
+  logger.info({ minerCapId, stakePositionId }, 'Miner registration succeeded');
 
-  // Step 2: Register in ValidatorRegistry
+  // ── Step 2: Register in ValidatorRegistry ────────────────────────────────────────────────────
+  // Move signature: validator_registry::register_validator(
+  //   net_reg: &NetworkRegistry,         arg 0 — shared
+  //   registry: &mut ValidatorRegistry,  arg 1 — shared
+  //   cap: &MinerCap,                    arg 2 — owned (from Step 1)
+  //   stake: &StakePosition,             arg 3 — owned (from Step 1)
+  // )
   const validatorResult = await executeWithRetry(
     client,
     signer,
@@ -94,9 +127,10 @@ export async function ensureRegistered(
       tx.moveCall({
         target: `${config.packageId}::validator_registry::register_validator`,
         arguments: [
-          tx.object(config.validatorRegistryId),
-          tx.object(config.minerStoreId),
-          tx.object(minerCapId),
+          tx.object(config.networkRegistryId),   // 0 &NetworkRegistry
+          tx.object(config.validatorRegistryId), // 1 &mut ValidatorRegistry
+          tx.object(minerCapId),                 // 2 &MinerCap (from Step 1)
+          tx.object(stakePositionId),            // 3 &StakePosition (from Step 1)
         ],
       });
     },
@@ -109,7 +143,8 @@ export async function ensureRegistered(
     process.exit(1);
   }
 
-  const validatorCapId = extractCreatedObjectId(validatorResult) ?? minerCapId;
+  // register_validator does not create a new cap — the MinerCap from Step 1 is the validator cap
+  const validatorCapId = minerCapId;
 
   logger.info(
     { validatorCapId },
@@ -118,16 +153,4 @@ export async function ensureRegistered(
   );
 
   return { validatorCapId };
-}
-
-/**
- * Extract the first created object ID from TX effects.
- */
-function extractCreatedObjectId(result: TxResult): string | null {
-  const effects = result.effects as Record<string, unknown>;
-  const created = effects['created'] as Array<{ reference?: { objectId?: string } }> | undefined;
-  if (created && created.length > 0) {
-    return created[0]?.reference?.objectId ?? null;
-  }
-  return null;
 }

@@ -160,6 +160,36 @@ describe('Validator daemon', () => {
     expect(logProofSpy).toHaveBeenCalled();
   });
 
+  it('uses ROOM_ID from env when set', async () => {
+    process.env['ROOM_ID'] = 'test-room-42';
+
+    state = await startDaemon({
+      client: mockClient as any,
+      mainKeypair,
+      config: mockConfig,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(buildProofSpy.mock.calls[0]?.[0]).toBe('test-room-42');
+
+    delete process.env['ROOM_ID'];
+  });
+
+  it('defaults roomId to "unassigned" when ROOM_ID env is not set', async () => {
+    delete process.env['ROOM_ID'];
+
+    state = await startDaemon({
+      client: mockClient as any,
+      mainKeypair,
+      config: mockConfig,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(buildProofSpy.mock.calls[0]?.[0]).toBe('unassigned');
+  });
+
   it('proof is logged but NOT submitted (no executeWithRetry for proof submission)', async () => {
     mockExecuteWithRetry.mockClear();
 

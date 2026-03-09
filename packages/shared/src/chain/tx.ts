@@ -70,3 +70,33 @@ export async function executeWithRetry(
 
   return null;
 }
+
+/**
+ * Extract a created object ID from TX effects by matching the object type suffix.
+ *
+ * The effects.created array entries look like:
+ *   { owner: {...}, reference: { objectId: "0x..." }, objectType: "0xpkg::module::TypeName" }
+ *
+ * @param result     - TX result from executeWithRetry
+ * @param typeSuffix - e.g. '::caps::MinerCap' or '::staking::StakePosition'
+ * @returns The objectId if found, null otherwise
+ */
+export function extractCreatedObjectByType(result: TxResult, typeSuffix: string): string | null {
+  const raw = result.effects['created'];
+  if (!Array.isArray(raw)) return null;
+
+  const created = raw as Array<Record<string, unknown>>;
+
+  const match = created.find((entry) => {
+    const objectType = entry['objectType'];
+    return typeof objectType === 'string' && objectType.endsWith(typeSuffix);
+  });
+
+  if (!match) return null;
+
+  const reference = match['reference'];
+  if (reference === null || typeof reference !== 'object') return null;
+
+  const objectId = (reference as Record<string, unknown>)['objectId'];
+  return typeof objectId === 'string' ? objectId : null;
+}
