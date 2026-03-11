@@ -54,6 +54,7 @@ export interface RelayRegistered {
   operator: string;
   mode: number;
   region: number[];
+  endpoint_url: number[];  // relay WebSocket URL as UTF-8 bytes
   stake_amount: string;
 }
 
@@ -116,6 +117,31 @@ export interface UserProfileUpdated {
   display_name: number[];
 }
 
+// ── Signaling events (signaling_registry module) ────────────────────
+
+export interface SignalingRegistered {
+  miner_id: string;
+  operator: string;
+  endpoint_url: number[];
+  region: number[];
+  stake_amount: string;
+}
+
+export interface SignalingHeartbeat {
+  miner_id: string;
+  epoch: string;
+}
+
+export interface SignalingLoadUpdated {
+  miner_id: string;
+  new_load: string;
+}
+
+export interface SignalingUnregistered {
+  miner_id: string;
+  operator: string;
+}
+
 // ── Union type for all events ───────────────────────────────────────
 
 export type DvconfEvent =
@@ -135,4 +161,8 @@ export type DvconfEvent =
   | RoomClosed
   | RoomRulesUpdated
   | UserRegistered
-  | UserProfileUpdated;
+  | UserProfileUpdated
+  | SignalingRegistered
+  | SignalingHeartbeat
+  | SignalingLoadUpdated
+  | SignalingUnregistered;
