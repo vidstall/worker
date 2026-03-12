@@ -10,6 +10,7 @@
 
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
 import {
   executeWithRetry,
   type NetworkConfig,
@@ -144,4 +145,91 @@ export async function triggerDistribution(
     `Reward distribution failed for room=${roomId}`,
   );
   return false;
+}
+
+/**
+ * Look up a relay's StakePosition object ID given its miner ID.
+ *
+ * Two-step approach:
+ * 1. devInspect relay_registry::borrow_info + info_operator to get the relay operator address
+ * 2. Query getOwnedObjects filtered by staking::StakePosition to find the StakePosition
+ *
+ * @param client       - SuiClient instance
+ * @param config       - Network configuration (packageId, relayRegistryId)
+ * @param relayMinerId - The relay's miner object ID
+ * @param logger       - Logger instance
+ * @returns The StakePosition object ID, or undefined if not found
+ */
+export async function lookupRelayStakeId(
+  client: SuiClient,
+  config: NetworkConfig,
+  relayMinerId: string,
+  logger: Logger,
+): Promise<string | undefined> {
+  try {
+    // Step 1: Get relay operator address via devInspect
+    const tx = new Transaction();
+    const info = tx.moveCall({
+      target: `${config.packageId}::relay_registry::borrow_info`,
+      arguments: [tx.object(config.relayRegistryId), tx.pure.id(relayMinerId)],
+    });
+    tx.moveCall({
+      target: `${config.packageId}::relay_registry::info_operator`,
+      arguments: [info],
+    });
+
+    const result = await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    });
+
+    if (!result.results?.[1]?.returnValues?.[0]) {
+      logger.warn(
+        { relayMinerId },
+        `devInspect for relay operator returned no results -- relay=${relayMinerId}`,
+      );
+      return undefined;
+    }
+
+    const bytes = new Uint8Array(result.results[1].returnValues[0][0] as number[]);
+    // Sui address is 32 bytes, hex-encoded with 0x prefix
+    const operatorAddress =
+      '0x' +
+      Array.from(bytes)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+
+    logger.debug(
+      { relayMinerId, operatorAddress },
+      `Relay operator resolved: relay=${relayMinerId}, operator=${operatorAddress}`,
+    );
+
+    // Step 2: Find StakePosition owned by the operator
+    const owned = await client.getOwnedObjects({
+      owner: operatorAddress,
+      options: { showType: true },
+      filter: { StructType: `${config.packageId}::staking::StakePosition` },
+    });
+
+    const stakeObj = owned.data?.[0];
+    if (stakeObj?.data?.objectId) {
+      logger.debug(
+        { relayMinerId, operatorAddress, stakeId: stakeObj.data.objectId },
+        `StakePosition found for relay=${relayMinerId}`,
+      );
+      return stakeObj.data.objectId;
+    }
+
+    logger.warn(
+      { relayMinerId, operatorAddress },
+      `No StakePosition found for relay operator=${operatorAddress}`,
+    );
+    return undefined;
+  } catch (err) {
+    logger.warn(
+      { err, relayMinerId },
+      `Failed to look up relay StakePosition for relay=${relayMinerId}`,
+    );
+    return undefined;
+  }
 }
