@@ -47,8 +47,6 @@ const logger = createLogger('validator-daemon');
 export interface ValidatorConfig {
   /** Interval between measurement cycles in ms (default: 60000). */
   measurementIntervalMs: number;
-  /** Relay miner ID to measure (from env or placeholder). */
-  relayMinerId: string;
   /** Validator miner ID (from registration). */
   validatorMinerId: string;
 }
@@ -136,18 +134,17 @@ export async function startDaemon(overrides?: {
 
   // Read measurement config from env
   const measurementIntervalMs = parseInt(process.env['MEASUREMENT_INTERVAL_MS'] ?? '60000', 10);
-  const relayMinerId = process.env['RELAY_MINER_ID'] ?? 'demo-relay';
   const validatorMinerId = validatorCapId;
   const pollIntervalMs = 10_000;
 
   // Start periodic measurement loop -- cycles through all active rooms
   state.measurementTimer = setInterval(() => {
     if (!state.running) return;
-    void runMeasurementCycle(state, relayMinerId, validatorMinerId, log);
+    void runMeasurementCycle(state, validatorMinerId, log);
   }, measurementIntervalMs);
 
   // Run one cycle immediately
-  void runMeasurementCycle(state, relayMinerId, validatorMinerId, log);
+  void runMeasurementCycle(state, validatorMinerId, log);
 
   // Start event poller for validator_registry events
   const eventPoller = new EventPoller({
@@ -247,7 +244,7 @@ export async function startDaemon(overrides?: {
         );
 
         // Handle room close -> reward distribution
-        void handleRoomClosed(state, parsed.room_id, relayMinerId, log);
+        void handleRoomClosed(state, parsed.room_id, log);
       }
     }
 
@@ -306,7 +303,6 @@ export async function startDaemon(overrides?: {
 async function handleRoomClosed(
   state: DaemonState,
   roomId: string,
-  relayMinerId: string,
   log: Logger,
 ): Promise<void> {
   const escrowId = state.escrowMap.get(roomId);
@@ -378,7 +374,6 @@ async function handleRoomClosed(
  */
 async function runMeasurementCycle(
   state: DaemonState,
-  relayMinerId: string,
   validatorMinerId: string,
   log: Logger,
 ): Promise<void> {
@@ -395,7 +390,7 @@ async function runMeasurementCycle(
 
   for (const roomId of roomIds) {
     try {
-      await measureRoom(state, roomId, relayMinerId, validatorMinerId, log);
+      await measureRoom(state, roomId, validatorMinerId, log);
     } catch (err) {
       log.error({ err, roomId }, `Measurement cycle failed for room=${roomId}`);
     }
@@ -408,10 +403,20 @@ async function runMeasurementCycle(
 async function measureRoom(
   state: DaemonState,
   roomId: string,
-  relayMinerId: string,
   validatorMinerId: string,
   log: Logger,
 ): Promise<void> {
+  // Resolve relay miner ID from room's on-chain assignment (via RoomAssigned event)
+  const room = state.activeRooms.get(roomId);
+  const relayMinerId = room?.relayMinerId;
+  if (!relayMinerId) {
+    log.debug(
+      { roomId },
+      `No relay assigned to room=${roomId} yet -- skipping measurement`,
+    );
+    return;
+  }
+
   const measurement = collectMeasurements(relayMinerId);
   const epoch = BigInt(Math.floor(Date.now() / 1000));
 

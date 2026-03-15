@@ -21,7 +21,9 @@ const mockGenerateSessionKeypair = vi.fn();
 const mockEventPollerStart = vi.fn();
 const mockEventPollerStop = vi.fn();
 
-vi.mock('@dvconf/shared', () => {
+vi.mock('@dvconf/shared', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+
   const mockLogger = {
     info: vi.fn(),
     warn: vi.fn(),
@@ -35,6 +37,7 @@ vi.mock('@dvconf/shared', () => {
   };
 
   return {
+    ...actual,
     executeWithRetry: (...args: unknown[]) => mockExecuteWithRetry(...args),
     loadNetworkConfig: () => mockLoadNetworkConfig(),
     createSuiClient: () => mockCreateSuiClient(),
@@ -81,6 +84,7 @@ describe('Validator daemon', () => {
     validatorRegistryId: '0xvalreg',
     userRegistryId: '0xuserreg',
     roomManagerId: '0xroom',
+    signalingRegistryId: '0xsigreg',
   };
 
   const mockClient = {
@@ -90,7 +94,6 @@ describe('Validator daemon', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     process.env['VALIDATOR_CAP_ID'] = '0xval-cap';
-    process.env['RELAY_MINER_ID'] = 'test-relay';
     process.env['MEASUREMENT_INTERVAL_MS'] = '5000';
 
     mockGenerateSessionKeypair.mockReturnValue({
@@ -134,11 +137,12 @@ describe('Validator daemon', () => {
       config: mockConfig,
     });
 
-    // Initial call happens immediately
+    // Pre-populate an active room with relay assignment (from RoomAssigned event)
+    state.activeRooms.set('test-room', { relayMinerId: '0xrelay123' });
+
     // Wait for the async initial cycle
     await vi.advanceTimersByTimeAsync(0);
     const initialCalls = collectSpy.mock.calls.length;
-    expect(initialCalls).toBeGreaterThanOrEqual(1);
 
     // Advance by one interval (5000ms)
     await vi.advanceTimersByTimeAsync(5000);
@@ -152,42 +156,47 @@ describe('Validator daemon', () => {
       config: mockConfig,
     });
 
-    // Wait for initial cycle
-    await vi.advanceTimersByTimeAsync(0);
+    // Pre-populate an active room with relay assignment
+    state.activeRooms.set('test-room', { relayMinerId: '0xrelay123' });
+
+    // Advance to trigger a measurement cycle
+    await vi.advanceTimersByTimeAsync(5000);
 
     expect(buildProofSpy).toHaveBeenCalled();
     expect(dualKeySignSpy).toHaveBeenCalled();
     expect(logProofSpy).toHaveBeenCalled();
   });
 
-  it('uses ROOM_ID from env when set', async () => {
-    process.env['ROOM_ID'] = 'test-room-42';
-
+  it('uses relay ID from room assignment (not env var)', async () => {
     state = await startDaemon({
       client: mockClient as any,
       mainKeypair,
       config: mockConfig,
     });
 
-    await vi.advanceTimersByTimeAsync(0);
+    // Simulate RoomAssigned event populating activeRooms
+    state.activeRooms.set('test-room-42', { relayMinerId: '0xrelay456' });
 
-    expect(buildProofSpy.mock.calls[0]?.[0]).toBe('test-room-42');
+    await vi.advanceTimersByTimeAsync(5000);
 
-    delete process.env['ROOM_ID'];
+    // buildSessionProof should receive the room's relay ID
+    expect(buildProofSpy.mock.calls[0]?.[1]).toBe('0xrelay456');
   });
 
-  it('defaults roomId to "unassigned" when ROOM_ID env is not set', async () => {
-    delete process.env['ROOM_ID'];
-
+  it('skips measurement when room has no relay assignment', async () => {
     state = await startDaemon({
       client: mockClient as any,
       mainKeypair,
       config: mockConfig,
     });
 
-    await vi.advanceTimersByTimeAsync(0);
+    // Room without relay assignment
+    state.activeRooms.set('test-room', {});
 
-    expect(buildProofSpy.mock.calls[0]?.[0]).toBe('unassigned');
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // collectMeasurements should NOT be called (no relay to measure)
+    expect(collectSpy).not.toHaveBeenCalled();
   });
 
   it('proof is logged but NOT submitted (no executeWithRetry for proof submission)', async () => {
@@ -198,6 +207,9 @@ describe('Validator daemon', () => {
       mainKeypair,
       config: mockConfig,
     });
+
+    // Pre-populate an active room with relay assignment
+    state.activeRooms.set('test-room', { relayMinerId: '0xrelay123' });
 
     // Wait for initial cycle + one interval
     await vi.advanceTimersByTimeAsync(5000);
