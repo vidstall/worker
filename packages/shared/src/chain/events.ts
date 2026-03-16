@@ -104,7 +104,15 @@ export class EventPoller {
         }
       })
       .catch((err) => {
-        this.logger.error({ err }, 'EventPoller error, retrying');
+        // Stale cursor after chain regenesis — reset to start from beginning
+        const msg = String(err?.message ?? '');
+        if (msg.includes('Could not find the referenced transaction')) {
+          this.logger.warn('Stale cursor detected (chain regenesis?). Resetting to start.');
+          this.cursor = null;
+          this.saveCursor().catch(() => {});
+        } else {
+          this.logger.error({ err }, 'EventPoller error, retrying');
+        }
         if (this.running) {
           this.timer = setTimeout(
             () => this.poll(handler),

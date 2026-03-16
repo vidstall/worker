@@ -155,11 +155,14 @@ describe('Signaling server integration', () => {
   });
 });
 
-describe('DAEMON-02 compliance: no chain dependency', () => {
-  it('signaling source files do NOT import @mysten/sui', () => {
-    // Recursively read all .ts source files in apps/signaling/src/ (excluding __tests__)
+describe('DAEMON-02 compliance: no chain dependency in core signaling', () => {
+  it('core signaling files (index, rooms) do NOT import @mysten/sui', () => {
+    // Phase 11 added chain-aware files (auto-register.ts, heartbeat.ts) that legitimately
+    // import @mysten/sui. DAEMON-02 applies to the core signaling path only.
+    const chainAwareFiles = ['auto-register.ts', 'heartbeat.ts'];
+
     const sourceFiles = getAllTsFiles(SRC_DIR).filter(
-      (f) => !f.includes('__tests__'),
+      (f) => !f.includes('__tests__') && !chainAwareFiles.some((ca) => f.endsWith(ca)),
     );
 
     expect(sourceFiles.length).toBeGreaterThan(0);

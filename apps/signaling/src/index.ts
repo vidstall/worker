@@ -4,14 +4,23 @@
  * Minimal WebSocket server for WebRTC ICE candidate and SDP exchange.
  * Routes messages between peers in the same room.
  *
- * DAEMON-02: This server has ZERO chain dependencies.
- * It does NOT import any Sui SDK or chain-related module.
+ * Chain-aware: registers in SignalingRegistry, sends heartbeat + load updates.
+ * Requirements: SIG-01, SIG-02
  */
 
+import 'dotenv/config';
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
-import { createLogger } from '@dvconf/shared';
-import { RoomManager } from './rooms.js';
+import {
+  createSuiClient,
+  loadNetworkConfig,
+  loadKeypair,
+  createLogger,
+  SIGNALING_SESSION_REWARD,
+} from '@dvconf/shared';
+import { RoomManager, getSessionsRouted } from './rooms.js';
+import { ensureRegistered } from './auto-register.js';
+import { startHeartbeat } from './heartbeat.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
@@ -165,7 +174,78 @@ const isMainModule =
   (process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('index.js'));
 
 if (isMainModule) {
-  const wss = createServer();
-  process.on('SIGTERM', () => shutdown(wss));
-  process.on('SIGINT', () => shutdown(wss));
+  (async () => {
+    // Load chain configuration
+    const config = loadNetworkConfig();
+    const client = createSuiClient(config.rpcUrl);
+    const signer = loadKeypair('SIGNALING_KEYPAIR');
+
+    const endpointUrl = process.env['ENDPOINT_URL'] ?? `ws://127.0.0.1:${PORT}`;
+    const region = process.env['REGION'] ?? 'local';
+
+    const address = signer.toSuiAddress();
+    logger.info(
+      { address, rpcUrl: config.rpcUrl, packageId: config.packageId, endpointUrl, region },
+      'Signaling daemon starting',
+    );
+
+    // Step 1: Auto-register on-chain
+    const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger);
+
+    // Step 2: Start WebSocket server
+    const wss = createServer();
+
+    // Step 3: Start heartbeat loop (30s default)
+    const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
+    const stopHeartbeat = startHeartbeat(
+      client,
+      signer,
+      config,
+      minerCapId,
+      roomManager,
+      heartbeatIntervalMs,
+      logger,
+    );
+
+    logger.info(
+      { heartbeatIntervalMs, minerCapId, port: PORT },
+      'Signaling daemon started — chain-aware mode',
+    );
+
+    // Step 4: Periodic reward eligibility logging (economic tracking)
+    // Reports sessions routed for off-chain reward eligibility tracking.
+    // On-chain reward claims are deferred to Phase 14+.
+    //
+    // Signaling slashing criteria (enforcement deferred to Phase 14+):
+    //   - Dropping connections mid-session
+    //   - Offline during assigned sessions
+    //   - Failing to relay ICE/SDP messages between peers
+    const rewardLogHandle = setInterval(() => {
+      const routed = getSessionsRouted();
+      if (routed > 0) {
+        logger.info(
+          {
+            sessionsRouted: routed,
+            rewardEligibility: routed * SIGNALING_SESSION_REWARD,
+            rewardPerSession: SIGNALING_SESSION_REWARD,
+          },
+          `Sessions routed: ${routed} (reward eligibility: ${routed * SIGNALING_SESSION_REWARD})`,
+        );
+      }
+    }, heartbeatIntervalMs);
+
+    // Graceful shutdown with heartbeat cleanup
+    const chainShutdown = () => {
+      logger.info('Shutting down signaling daemon...');
+      clearInterval(rewardLogHandle);
+      stopHeartbeat();
+      shutdown(wss);
+    };
+
+    process.on('SIGTERM', chainShutdown);
+    process.on('SIGINT', chainShutdown);
+  })().catch((err) => {
+    logger.fatal({ err }, 'Signaling daemon crashed during startup');
+    process.exit(1);
+  });
 }

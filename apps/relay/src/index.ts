@@ -22,6 +22,7 @@ import { startHeartbeat } from './heartbeat.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
 import { createSignalingServer } from './signaling.js';
 import { MetricsTracker } from './metrics.js';
+import { startMetricsServer } from './metrics-server.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -61,7 +62,10 @@ if (isMainModule) {
     // Step 4: Start WebSocket signaling server
     const { wss, getRoomCount } = createSignalingServer(manager, metrics, logger);
 
-    // Step 5: Start heartbeat loop (30s default)
+    // Step 5: Start metrics HTTP server (default port 4001)
+    const metricsServer = startMetricsServer(metrics, logger);
+
+    // Step 6: Start heartbeat loop (30s default)
     const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
     const stopHeartbeat = startHeartbeat(
       client,
@@ -74,11 +78,13 @@ if (isMainModule) {
       logger,
     );
 
+    const metricsPort = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
     logger.info(
       {
         heartbeatIntervalMs,
         minerCapId,
         port: WS_PORT,
+        metricsPort,
         workers: manager.workers.length,
         mode: relayMode,
       },
@@ -89,6 +95,7 @@ if (isMainModule) {
     const chainShutdown = () => {
       logger.info('Shutting down relay daemon...');
       stopHeartbeat();
+      metricsServer.close();
       manager.close();
       wss.close(() => {
         logger.info('Relay daemon closed');

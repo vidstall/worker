@@ -22,6 +22,10 @@ import type {
   RoomRulesUpdated,
   UserRegistered,
   UserProfileUpdated,
+  SignalingRegistered,
+  SignalingHeartbeat,
+  SignalingLoadUpdated,
+  SignalingUnregistered,
 } from '../types/events.js';
 import { RelayMode, MinerRole, ErrorCodes } from '../types/constants.js';
 import type { NetworkConfig, TxResult, SuiObjectRef } from '../types/chain.js';
@@ -80,6 +84,7 @@ describe('Event types compile and conform to Move structs', () => {
       mode: RelayMode.SFU,
       region: [117, 115], // "us" as bytes
       stake_amount: '1000000000',
+      endpoint_url: [119, 115], // "ws" as bytes
     };
     expect(event.mode).toBe(0);
     expect(Array.isArray(event.region)).toBe(true);
@@ -159,6 +164,43 @@ describe('Event types compile and conform to Move structs', () => {
     };
     expect(event.display_name).toHaveLength(3);
   });
+
+  it('SignalingRegistered matches signaling_registry::SignalingRegistered', () => {
+    const event: SignalingRegistered = {
+      miner_id: '0xsig1',
+      operator: '0xop1',
+      endpoint_url: [119, 115, 115], // "wss"
+      region: [117, 115], // "us"
+      stake_amount: '250000000',
+    };
+    expect(event.miner_id).toBe('0xsig1');
+    expect(Array.isArray(event.endpoint_url)).toBe(true);
+    expect(Array.isArray(event.region)).toBe(true);
+  });
+
+  it('SignalingHeartbeat matches signaling_registry::SignalingHeartbeat', () => {
+    const event: SignalingHeartbeat = {
+      miner_id: '0xsig1',
+      epoch: '42',
+    };
+    expect(event.epoch).toBe('42');
+  });
+
+  it('SignalingLoadUpdated matches signaling_registry::SignalingLoadUpdated', () => {
+    const event: SignalingLoadUpdated = {
+      miner_id: '0xsig1',
+      new_load: '15',
+    };
+    expect(event.new_load).toBe('15');
+  });
+
+  it('SignalingUnregistered matches signaling_registry::SignalingUnregistered', () => {
+    const event: SignalingUnregistered = {
+      miner_id: '0xsig1',
+      operator: '0xop1',
+    };
+    expect(event.operator).toBe('0xop1');
+  });
 });
 
 describe('Constants match on-chain values', () => {
@@ -172,6 +214,7 @@ describe('Constants match on-chain values', () => {
     expect(MinerRole.Validator).toBe(1);
     expect(MinerRole.Relay).toBe(2);
     expect(MinerRole.CP).toBe(3);
+    expect(MinerRole.Signaling).toBe(4);
   });
 
   it('Error code namespaces', () => {
@@ -181,6 +224,11 @@ describe('Constants match on-chain values', () => {
     expect(ErrorCodes.relayRegistry.E_NOT_RELAY).toBe(520);
     expect(ErrorCodes.validatorRegistry.E_NOT_VALIDATOR).toBe(530);
     expect(ErrorCodes.userRegistry.E_ALREADY_REGISTERED).toBe(540);
+    expect(ErrorCodes.signalingRegistry.E_NOT_SIGNALING).toBe(600);
+    expect(ErrorCodes.signalingRegistry.E_ALREADY_REGISTERED).toBe(601);
+    expect(ErrorCodes.signalingRegistry.E_NOT_REGISTERED).toBe(602);
+    expect(ErrorCodes.signalingRegistry.E_PAUSED).toBe(603);
+    expect(ErrorCodes.signalingRegistry.E_NOT_OPERATOR).toBe(604);
   });
 });
 
@@ -196,6 +244,7 @@ describe('Chain types compile correctly', () => {
       validatorRegistryId: '0x5',
       userRegistryId: '0x6',
       roomManagerId: '0x7',
+      signalingRegistryId: '0x8',
     };
     expect(config.packageId).toBe('0xpkg');
   });

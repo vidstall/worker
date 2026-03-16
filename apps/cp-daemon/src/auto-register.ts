@@ -31,13 +31,16 @@ export async function ensureRegistered(
 
   logger.info('CP_CAP_ID not set — attempting auto-registration');
 
+  /** CP stake: 0.5 SUI (500_000_000 MIST). */
+  const CP_STAKE = 500_000_000n;
+
   // Step 1: Register as a miner with role=CP
   const minerResult = await executeWithRetry(
     client,
     signer,
     (tx: Transaction) => {
-      // Split a coin for stake — CP threshold is 2 DVCONF (2_000_000_000 MIST)
-      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(2_000_000_000n)]);
+      // Split stake from gas coin (registration uses Coin<SUI>)
+      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(CP_STAKE)]);
 
       tx.moveCall({
         target: `${config.packageId}::registration::register`,
@@ -64,7 +67,7 @@ export async function ensureRegistered(
 
   if (!minerResult) {
     logger.error(
-      'Auto-registration failed: ensure wallet has DVCONF tokens and SUI gas. ' +
+      'Auto-registration failed: ensure wallet has sufficient SUI balance. ' +
       'Set CP_CAP_ID in .env if already registered.',
     );
     process.exit(1);

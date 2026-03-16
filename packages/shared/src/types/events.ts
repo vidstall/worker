@@ -54,8 +54,8 @@ export interface RelayRegistered {
   operator: string;
   mode: number;
   region: number[];
-  endpoint_url: number[];  // relay WebSocket URL as UTF-8 bytes
   stake_amount: string;
+  endpoint_url: number[];  // relay WebSocket URL as UTF-8 bytes
 }
 
 export interface RelayLoadUpdated {
@@ -91,6 +91,12 @@ export interface RoomCreated {
   room_id: string;
   creator: string;
   relay_mode: number;
+}
+
+export interface RoomAssigned {
+  room_id: string;
+  relay_id: string;
+  signaling_id: string;
 }
 
 export interface RoomClosed {
@@ -142,6 +148,39 @@ export interface SignalingUnregistered {
   operator: string;
 }
 
+// ── Economic Layer events (economic_layer module) ───────────────────
+// Per ADD IC-5: Event Name/Field Alignment Contract
+
+export interface EscrowCreated {
+  escrow_id: string;
+  room_id: string;
+  creator: string;
+  amount: string;  // u64 serialized as string by Sui JSON
+}
+
+export interface SessionProofSubmitted {
+  room_id: string;
+  validator_id: string;
+  relay_miner_id: string;
+  bytes_transferred: string;
+  packet_loss_bps: string;
+}
+
+export interface RewardsDistributed {
+  room_id: string;
+  relay_reward: string;
+  validator_pool: string;
+  cp_pool: string;
+  remainder: string;
+}
+
+/** Per ADD IMP-2: Use RelaySlashed (not NodeSlashed) matching on-chain event name. */
+export interface RelaySlashed {
+  room_id: string;
+  relay_miner_id: string;
+  slash_amount: string;
+}
+
 // ── Union type for all events ───────────────────────────────────────
 
 export type DvconfEvent =
@@ -158,6 +197,7 @@ export type DvconfEvent =
   | SessionWalletAssigned
   | SessionWalletRevealed
   | RoomCreated
+  | RoomAssigned
   | RoomClosed
   | RoomRulesUpdated
   | UserRegistered
@@ -165,4 +205,8 @@ export type DvconfEvent =
   | SignalingRegistered
   | SignalingHeartbeat
   | SignalingLoadUpdated
-  | SignalingUnregistered;
+  | SignalingUnregistered
+  | EscrowCreated
+  | SessionProofSubmitted
+  | RewardsDistributed
+  | RelaySlashed;

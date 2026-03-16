@@ -15,6 +15,7 @@ export const MinerRole = {
   Validator: 1,
   Relay: 2,
   CP: 3,
+  Signaling: 4,
 } as const;
 export type MinerRole = (typeof MinerRole)[keyof typeof MinerRole];
 
@@ -79,4 +80,45 @@ export const ErrorCodes = {
     E_NOT_REGISTERED: 541,
     E_PAUSED: 542,
   },
+  signalingRegistry: {
+    E_NOT_SIGNALING: 600,
+    E_ALREADY_REGISTERED: 601,
+    E_NOT_REGISTERED: 602,
+    E_PAUSED: 603,
+    E_NOT_OPERATOR: 604,
+  },
+  economicLayer: {
+    E_PAUSED: 650,
+    E_NOT_ROOM_CREATOR: 651,
+    E_ROOM_NOT_FOUND: 652,
+    E_ROOM_NOT_PENDING: 653,
+    E_INVALID_SIGNATURE: 654,
+    E_SESSION_WALLET_NOT_FOUND: 655,
+    E_ALREADY_SUBMITTED: 656,
+    E_ROOM_NOT_CLOSED: 657,
+    E_INSUFFICIENT_PROOFS: 658,
+    E_ALREADY_DISTRIBUTED: 659,
+    E_ZERO_ESCROW: 660,
+    E_RELAY_NOT_REGISTERED: 661,
+  },
 } as const;
+
+// ── Economic layer constants ──────────────────────────────────────
+
+/** Flat reward per session routed by a signaling node. */
+export const SIGNALING_SESSION_REWARD = 50;
+
+/** Minimum validator proofs needed before reward distribution. */
+export const MIN_PROOFS_FOR_DISTRIBUTION = 2;
+
+/** Quality multiplier for excellent relay quality (100% reward). */
+export const QUALITY_EXCELLENT_BPS = 10_000;
+
+/** Quality multiplier for good relay quality (80% reward). */
+export const QUALITY_GOOD_BPS = 8_000;
+
+/** Quality multiplier for acceptable relay quality (50% reward). */
+export const QUALITY_ACCEPTABLE_BPS = 5_000;
+
+/** Slash percentage applied to relay stake on poor quality (10%). */
+export const SLASH_PERCENTAGE_BPS = 1_000;

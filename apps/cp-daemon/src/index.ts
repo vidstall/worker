@@ -45,8 +45,13 @@ async function main(): Promise<void> {
     logger,
   );
 
-  // Set up event handler
-  const { handler } = createEventHandler(logger);
+  // Set up event handler with TX context for room assignment
+  const { handler } = createEventHandler(logger, undefined, {
+    client,
+    signer,
+    config,
+    cpCapId,
+  });
 
   // Poll relay_registry events
   const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
@@ -78,11 +83,31 @@ async function main(): Promise<void> {
     logger: logger.child({ poller: 'room_manager' }),
   });
 
+  const signalingPoller = new EventPoller({
+    client,
+    packageId: config.packageId,
+    module: 'signaling_registry',
+    pollingIntervalMs: pollIntervalMs,
+    cursorPath: '.cursors/signaling_registry.json',
+    logger: logger.child({ poller: 'signaling_registry' }),
+  });
+
+  const economicPoller = new EventPoller({
+    client,
+    packageId: config.packageId,
+    module: 'economic_layer',
+    pollingIntervalMs: pollIntervalMs,
+    cursorPath: '.cursors/economic_layer.json',
+    logger: logger.child({ poller: 'economic_layer' }),
+  });
+
   // Start all pollers
   await Promise.all([
     relayPoller.start(handler),
     cpPoller.start(handler),
     roomPoller.start(handler),
+    signalingPoller.start(handler),
+    economicPoller.start(handler),
   ]);
 
   logger.info(
@@ -97,6 +122,8 @@ async function main(): Promise<void> {
     relayPoller.stop();
     cpPoller.stop();
     roomPoller.stop();
+    signalingPoller.stop();
+    economicPoller.stop();
     logger.info('CP daemon shut down cleanly');
     process.exit(0);
   };

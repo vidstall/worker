@@ -59,5 +59,6 @@ export function loadNetworkConfig(): NetworkConfig {
     validatorRegistryId: required('VALIDATOR_REGISTRY_ID'),
     userRegistryId: required('USER_REGISTRY_ID'),
     roomManagerId: required('ROOM_MANAGER_ID'),
+    signalingRegistryId: required('SIGNALING_REGISTRY_ID'),
   };
 }

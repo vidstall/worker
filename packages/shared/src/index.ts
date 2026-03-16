@@ -19,10 +19,19 @@ export type {
   SessionWalletAssigned,
   SessionWalletRevealed,
   RoomCreated,
+  RoomAssigned,
   RoomClosed,
   RoomRulesUpdated,
   UserRegistered,
   UserProfileUpdated,
+  SignalingRegistered,
+  SignalingHeartbeat,
+  SignalingLoadUpdated,
+  SignalingUnregistered,
+  EscrowCreated,
+  SessionProofSubmitted,
+  RewardsDistributed,
+  RelaySlashed,
   DvconfEvent,
 } from './types/events.js';
 
@@ -32,10 +41,18 @@ export type {
   TxResult,
 } from './types/chain.js';
 
+export { economicLayerModuleName } from './types/chain.js';
+
 export {
   RelayMode,
   MinerRole,
   ErrorCodes,
+  SIGNALING_SESSION_REWARD,
+  MIN_PROOFS_FOR_DISTRIBUTION,
+  QUALITY_EXCELLENT_BPS,
+  QUALITY_GOOD_BPS,
+  QUALITY_ACCEPTABLE_BPS,
+  SLASH_PERCENTAGE_BPS,
 } from './types/constants.js';
 
 // Chain helpers

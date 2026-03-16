@@ -1,40 +1,41 @@
 /**
- * Relay daemon auto-registration flow.
+ * Signaling daemon auto-registration flow.
  *
  * On startup, checks if MINER_CAP_ID is set in environment.
- * If not, registers as a miner (role=Relay) then registers in RelayRegistry.
- * If MINER_CAP_ID is set but not in RelayRegistry, runs step 2 only.
- * All TX calls go through executeWithRetry from @dvconf/shared.
+ * If not, registers as a miner (role=Signaling) then registers in SignalingRegistry.
+ * If MINER_CAP_ID is set but not in SignalingRegistry, runs step 2 only (per ADD Q3).
+ * All TX calls go through executeWithRetry from @dvconf/shared (DAEMON-07/DAEMON-12).
  *
- * Requirements: RELAY-05
+ * Requirements: SIG-01
  */
 
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { executeWithRetry, extractCreatedObjectByType, type NetworkConfig, type Logger } from '@dvconf/shared';
-import os from 'os';
 
-/** Relay stake: 0.25 SUI = 250_000_000 MIST (per constants.move DEFAULT_RELAY_THRESHOLD). */
-const RELAY_STAKE = 250_000_000n;
+/** Signaling stake: 0.05 SUI = 50_000_000 MIST (per constants.move DEFAULT_SIGNALING_THRESHOLD). */
+const SIGNALING_STAKE = 50_000_000n;
 
 /**
- * Check if a miner is registered in RelayRegistry via devInspect.
+ * Check if a miner is registered in SignalingRegistry via devInspect.
  */
-async function isRegisteredInRelayRegistry(
+async function isRegisteredInSignalingRegistry(
   client: SuiClient,
   config: NetworkConfig,
   minerCapId: string,
   logger: Logger,
 ): Promise<boolean> {
   try {
-    // Read the MinerCap object to extract the miner_id field
+    // Read the MinerCap object to extract the miner_id field inside it
     const cap = await client.getObject({ id: minerCapId, options: { showContent: true } });
     if (!cap.data) {
       logger.warn({ minerCapId }, 'MinerCap object not found on chain');
       return false;
     }
 
+    // Extract miner_id from MinerCap content — the Move function expects
+    // a raw ID (pure value), NOT the MinerCap object reference itself.
     const fields = (cap.data.content as { fields: Record<string, string> })?.fields;
     const minerId = fields?.['miner_id'];
     if (!minerId) {
@@ -42,12 +43,12 @@ async function isRegisteredInRelayRegistry(
       return false;
     }
 
-    // Use devInspect to call is_registered on RelayRegistry
+    // Use devInspect to call is_registered on SignalingRegistry
     const tx = new Transaction();
     tx.moveCall({
-      target: `${config.packageId}::relay_registry::is_registered`,
+      target: `${config.packageId}::signaling_registry::is_registered`,
       arguments: [
-        tx.object(config.relayRegistryId),
+        tx.object(config.signalingRegistryId),
         tx.pure.address(minerId),
       ],
     });
@@ -65,20 +66,20 @@ async function isRegisteredInRelayRegistry(
 
     return false;
   } catch (err) {
-    logger.warn({ err, minerCapId }, 'Could not verify RelayRegistry status via devInspect; assuming not registered');
+    logger.warn({ err, minerCapId }, 'Could not verify SignalingRegistry status via devInspect; assuming not registered');
     return false;
   }
 }
 
 /**
- * Ensure the relay daemon is registered on-chain.
+ * Ensure the signaling daemon is registered on-chain.
  *
  * Two-step process:
- *   1. Register as miner with 1 DVCONF stake (creates MinerCap + StakePosition)
- *   2. Register in RelayRegistry (using MinerCap + StakePosition)
+ *   1. Register as miner with 0.25 DVCONF stake (creates MinerCap + StakePosition)
+ *   2. Register in SignalingRegistry (using MinerCap + StakePosition)
  *
  * If MINER_CAP_ID is set, skips step 1.
- * If MINER_CAP_ID is set but not in RelayRegistry, runs step 2 only.
+ * If MINER_CAP_ID is set but not in SignalingRegistry, runs step 2 only.
  *
  * @returns The MinerCap object ID.
  */
@@ -93,18 +94,18 @@ export async function ensureRegistered(
   const envCapId = process.env['MINER_CAP_ID'];
 
   if (envCapId) {
-    logger.info({ minerCapId: envCapId }, 'MINER_CAP_ID set — checking RelayRegistry status');
+    logger.info({ minerCapId: envCapId }, 'MINER_CAP_ID set — checking SignalingRegistry status');
 
-    const registered = await isRegisteredInRelayRegistry(client, config, envCapId, logger);
+    const registered = await isRegisteredInSignalingRegistry(client, config, envCapId, logger);
     if (registered) {
-      logger.info({ minerCapId: envCapId }, 'Already registered in RelayRegistry');
+      logger.info({ minerCapId: envCapId }, 'Already registered in SignalingRegistry');
       return { minerCapId: envCapId };
     }
 
-    // MINER_CAP_ID set but not in RelayRegistry — run step 2 only
+    // Per ADD Q3: MINER_CAP_ID set but not in SignalingRegistry — run step 2 only
     logger.info(
       { minerCapId: envCapId },
-      'MINER_CAP_ID is set but node is not registered in RelayRegistry. Running Step 2 only.',
+      'MINER_CAP_ID is set but node is not registered in SignalingRegistry. Running Step 2 only.',
     );
 
     // Need StakePosition ID — query owned objects
@@ -120,19 +121,19 @@ export async function ensureRegistered(
       process.exit(1);
     }
 
-    await registerInRelayRegistry(client, signer, config, envCapId, stakePositionId, endpointUrl, region, logger);
+    await registerInSignalingRegistry(client, signer, config, envCapId, stakePositionId, endpointUrl, region, logger);
     return { minerCapId: envCapId };
   }
 
   logger.info('MINER_CAP_ID not set — attempting full auto-registration');
 
-  // Step 1: Register as a miner with role=Relay
+  // Step 1: Register as a miner with role=Signaling
   const minerResult = await executeWithRetry(
     client,
     signer,
     (tx: Transaction) => {
       // Split stake from gas coin (registration uses Coin<SUI>)
-      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(RELAY_STAKE)]);
+      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(SIGNALING_STAKE)]);
 
       tx.moveCall({
         target: `${config.packageId}::registration::register`,
@@ -141,14 +142,14 @@ export async function ensureRegistered(
           tx.object(config.minerStoreId),
           stakeCoin!,
           tx.pure.vector('u8', Array.from(new TextEncoder().encode('127.0.0.1'))), // ip (placeholder)
-          tx.pure.u16(4000),  // port (placeholder)
+          tx.pure.u16(8080),  // port (placeholder)
           tx.pure.vector('u8', Array.from(new TextEncoder().encode(''))), // stun_url
           tx.pure.vector('u8', Array.from(new TextEncoder().encode(''))), // turn_url
           tx.pure.vector('u8', Array.from(new TextEncoder().encode(region))), // region
-          tx.pure.u64(100),  // bandwidth_mbps
-          tx.pure.u64(50),   // max_concurrent
-          tx.pure.u64(os.cpus().length),  // cpu_cores
-          tx.pure.u8(relayModeFromEnv()), // relay_mode
+          tx.pure.u64(0),  // bandwidth_mbps (signaling doesn't serve media)
+          tx.pure.u64(0),  // max_concurrent
+          tx.pure.u64(1),  // cpu_cores
+          tx.pure.u8(0),   // relay_mode (unused for signaling)
           tx.pure.vector('u8', []), // turn_credential_hash
         ],
       });
@@ -179,24 +180,22 @@ export async function ensureRegistered(
 
   logger.info({ minerCapId, stakePositionId }, 'Miner registered successfully (Step 1)');
 
-  // Step 2: Register in RelayRegistry
-  await registerInRelayRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);
+  // Step 2: Register in SignalingRegistry
+  await registerInSignalingRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);
 
   logger.info(
     { minerCapId },
-    `Auto-registered as Relay node. Set MINER_CAP_ID=${minerCapId} in .env to skip registration on next startup.`,
+    `Auto-registered as Signaling node. Set MINER_CAP_ID=${minerCapId} in .env to skip registration on next startup.`,
   );
 
   return { minerCapId };
 }
 
 /**
- * Register in RelayRegistry (Step 2).
- *
- * On-chain signature:
- *   relay_registry::register_relay(net_reg, registry, cap, stake, region, endpoint_url, ctx)
+ * Register in SignalingRegistry (Step 2).
+ * Matches IC-1 from ADD: signaling_registry::register_signaling
  */
-async function registerInRelayRegistry(
+async function registerInSignalingRegistry(
   client: SuiClient,
   signer: Ed25519Keypair,
   config: NetworkConfig,
@@ -211,35 +210,28 @@ async function registerInRelayRegistry(
     signer,
     (tx: Transaction) => {
       tx.moveCall({
-        target: `${config.packageId}::relay_registry::register_relay`,
+        target: `${config.packageId}::signaling_registry::register_signaling`,
         arguments: [
           tx.object(config.networkRegistryId),          // net_reg: &NetworkRegistry
-          tx.object(config.relayRegistryId),             // registry: &mut RelayRegistry
+          tx.object(config.signalingRegistryId),         // registry: &mut SignalingRegistry
           tx.object(minerCapId),                         // cap: &MinerCap
           tx.object(stakePositionId),                    // stake: &StakePosition
-          tx.pure.vector('u8', Array.from(new TextEncoder().encode(region))),        // region
-          tx.pure.vector('u8', Array.from(new TextEncoder().encode(endpointUrl))),   // endpoint_url
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(endpointUrl))),  // endpoint_url
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(region))),       // region
         ],
       });
     },
-    'relay-registration',
+    'signaling-registration',
     logger,
   );
 
   if (!result) {
     logger.error(
-      'RelayRegistry registration failed after miner registration succeeded. ' +
+      'SignalingRegistry registration failed after miner registration succeeded. ' +
       'Manual intervention required.',
     );
     process.exit(1);
   }
 
-  logger.info({ minerCapId }, 'Registered in RelayRegistry (Step 2)');
-}
-
-/** Parse relay mode from env (default: SFU = 0). */
-function relayModeFromEnv(): number {
-  const mode = process.env['RELAY_MODE']?.toLowerCase();
-  if (mode === 'mcu') return 1;
-  return 0; // SFU
+  logger.info({ minerCapId }, 'Registered in SignalingRegistry (Step 2)');
 }

@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { SuiEvent } from '@mysten/sui/client';
+import type { RoomCreated } from '@dvconf/shared';
 import { handleEvent, createEventHandler, DEFAULT_WEIGHTS } from '../event-handler.js';
 import type { RelayCandidate } from '../scoring.js';
+import type { SignalingCandidate } from '../room-assignment.js';
 
 /** Create a mock Pino logger. */
 function mockLogger() {
@@ -31,6 +33,16 @@ function makeSuiEvent(eventName: string, parsedJson: Record<string, unknown>): S
   } as SuiEvent;
 }
 
+/** Create an empty signaling state map for handleEvent calls. */
+function emptySignalingState(): Map<string, SignalingCandidate> {
+  return new Map<string, SignalingCandidate>();
+}
+
+/** Create an empty pending rooms map for handleEvent calls. */
+function emptyPendingRooms(): Map<string, RoomCreated> {
+  return new Map<string, RoomCreated>();
+}
+
 describe('handleEvent', () => {
   it('RelayRegistered adds relay to state', () => {
     const logger = mockLogger();
@@ -42,9 +54,10 @@ describe('handleEvent', () => {
       mode: 0,
       region: [1, 2],
       stake_amount: '5000000000',
+      endpoint_url: [119, 115], // "ws" as bytes
     });
 
-    handleEvent(event, relayState, logger);
+    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
 
     expect(relayState.has('relay-1')).toBe(true);
     const relay = relayState.get('relay-1')!;
@@ -77,7 +90,7 @@ describe('handleEvent', () => {
       new_load: '42',
     });
 
-    handleEvent(event, relayState, logger);
+    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
 
     expect(relayState.get('relay-1')!.load).toBe(42n);
     expect(logger.info).toHaveBeenCalledWith(
@@ -103,7 +116,7 @@ describe('handleEvent', () => {
       rtt: '25',
     });
 
-    handleEvent(event, relayState, logger);
+    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
 
     expect(relayState.get('relay-1')!.rtt).toBe(25n);
     expect(logger.info).toHaveBeenCalledWith(
@@ -112,11 +125,50 @@ describe('handleEvent', () => {
     );
   });
 
-  it('RoomCreated triggers scoring and logs results', () => {
+  it('SignalingRegistered adds signaling node to state', () => {
     const logger = mockLogger();
     const relayState = new Map<string, RelayCandidate>();
+    const signalingState = new Map<string, SignalingCandidate>();
 
-    // Add two relays with different qualities
+    const event = makeSuiEvent('SignalingRegistered', {
+      miner_id: 'sig-1',
+      operator: '0xop',
+      endpoint_url: [119, 115],
+      region: [1],
+      stake_amount: '1000000000',
+    });
+
+    handleEvent(event, relayState, signalingState, emptyPendingRooms(), logger);
+
+    expect(signalingState.has('sig-1')).toBe(true);
+    const sig = signalingState.get('sig-1')!;
+    expect(sig.minerId).toBe('sig-1');
+    expect(sig.load).toBe(0n);
+    expect(sig.region).toBe('1');
+  });
+
+  it('SignalingLoadUpdated updates existing signaling node', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, RelayCandidate>();
+    const signalingState = new Map<string, SignalingCandidate>();
+    signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: '1' });
+
+    const event = makeSuiEvent('SignalingLoadUpdated', {
+      miner_id: 'sig-1',
+      new_load: '15',
+    });
+
+    handleEvent(event, relayState, signalingState, emptyPendingRooms(), logger);
+
+    expect(signalingState.get('sig-1')!.load).toBe(15n);
+  });
+
+  it('RoomCreated stores room in pendingRooms (no immediate assignment)', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, RelayCandidate>();
+    const signalingState = new Map<string, SignalingCandidate>();
+    const pendingRooms = new Map<string, RoomCreated>();
+
     relayState.set('relay-good', {
       minerId: 'relay-good',
       reputation: 9_000n,
@@ -125,14 +177,7 @@ describe('handleEvent', () => {
       stakeAmount: 8_000_000_000n,
       region: 'us',
     });
-    relayState.set('relay-bad', {
-      minerId: 'relay-bad',
-      reputation: 1_000n,
-      rtt: 400n,
-      load: 800n,
-      stakeAmount: 500_000_000n,
-      region: 'eu',
-    });
+    signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: 'us' });
 
     const event = makeSuiEvent('RoomCreated', {
       room_id: 'room-1',
@@ -140,21 +185,128 @@ describe('handleEvent', () => {
       relay_mode: 0,
     });
 
-    handleEvent(event, relayState, logger);
+    handleEvent(event, relayState, signalingState, pendingRooms, logger);
 
-    // Should log room created
+    // Room stored in pending, NOT assigned yet
+    expect(pendingRooms.has('room-1')).toBe(true);
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room-1' }),
-      'Room created',
+      'Room created — waiting for escrow before assignment',
     );
-    // Should log scoring results
+    // No assignment logs
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ topRelay: 'relay-good' }),
+      'Room assignment: submitting TX',
+    );
+  });
+
+  it('EscrowCreated triggers scoring and assignment (no TX context)', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, RelayCandidate>();
+    const signalingState = new Map<string, SignalingCandidate>();
+    const pendingRooms = new Map<string, RoomCreated>();
+
+    relayState.set('relay-good', {
+      minerId: 'relay-good',
+      reputation: 9_000n,
+      rtt: 20n,
+      load: 5n,
+      stakeAmount: 8_000_000_000n,
+      region: 'us',
+    });
+    signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: 'us' });
+
+    // Step 1: RoomCreated
+    const roomEvent = makeSuiEvent('RoomCreated', {
+      room_id: 'room-1',
+      creator: '0xcreator',
+      relay_mode: 0,
+    });
+    handleEvent(roomEvent, relayState, signalingState, pendingRooms, logger);
+
+    // Step 2: EscrowCreated
+    const escrowEvent = makeSuiEvent('EscrowCreated', {
+      escrow_id: 'escrow-1',
+      room_id: 'room-1',
+      creator: '0xcreator',
+      amount: '50000000',
+    });
+    handleEvent(escrowEvent, relayState, signalingState, pendingRooms, logger);
+
+    // Room removed from pending
+    expect(pendingRooms.has('room-1')).toBe(false);
+    // Assignment triggered
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({
         roomId: 'room-1',
-        relayCount: 2,
-        topRelays: expect.any(Array),
+        topRelay: 'relay-good',
+        signalingMinerId: 'sig-1',
       }),
-      expect.stringContaining('Relay scoring complete'),
+      'Room assignment: submitting TX',
+    );
+    // No TX context — should warn about skipping
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ roomId: 'room-1' }),
+      'No TX context — room assignment skipped (test mode)',
+    );
+  });
+
+  it('EscrowCreated for unknown room warns', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, RelayCandidate>();
+    const signalingState = new Map<string, SignalingCandidate>();
+    const pendingRooms = new Map<string, RoomCreated>();
+
+    const event = makeSuiEvent('EscrowCreated', {
+      escrow_id: 'escrow-1',
+      room_id: 'room-unknown',
+      creator: '0xcreator',
+      amount: '50000000',
+    });
+
+    handleEvent(event, relayState, signalingState, pendingRooms, logger);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ roomId: 'room-unknown' }),
+      'EscrowCreated for unknown room, ignoring',
+    );
+  });
+
+  it('EscrowCreated with no signaling nodes warns', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, RelayCandidate>();
+    const signalingState = new Map<string, SignalingCandidate>();
+    const pendingRooms = new Map<string, RoomCreated>();
+
+    relayState.set('relay-1', {
+      minerId: 'relay-1',
+      reputation: 5_000n,
+      rtt: 0n,
+      load: 0n,
+      stakeAmount: 1_000_000_000n,
+      region: 'us',
+    });
+
+    // RoomCreated first
+    const roomEvent = makeSuiEvent('RoomCreated', {
+      room_id: 'room-1',
+      creator: '0xcreator',
+      relay_mode: 0,
+    });
+    handleEvent(roomEvent, relayState, signalingState, pendingRooms, logger);
+
+    // EscrowCreated triggers assignment attempt
+    const escrowEvent = makeSuiEvent('EscrowCreated', {
+      escrow_id: 'escrow-1',
+      room_id: 'room-1',
+      creator: '0xcreator',
+      amount: '50000000',
+    });
+    handleEvent(escrowEvent, relayState, signalingState, pendingRooms, logger);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ roomId: 'room-1' }),
+      'No signaling nodes available for assignment',
     );
   });
 
@@ -164,7 +316,7 @@ describe('handleEvent', () => {
 
     const event = makeSuiEvent('SomeFutureEvent', { data: 'test' });
 
-    handleEvent(event, relayState, logger);
+    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
 
     expect(logger.debug).toHaveBeenCalledWith(
       expect.objectContaining({ eventName: 'SomeFutureEvent' }),
@@ -182,7 +334,7 @@ describe('handleEvent', () => {
       miner_id: 'unknown-relay',
       new_load: '100',
     });
-    handleEvent(loadEvent, relayState, logger);
+    handleEvent(loadEvent, relayState, emptySignalingState(), emptyPendingRooms(), logger);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ minerId: 'unknown-relay' }),
       'RelayLoadUpdated for unknown relay, ignoring',
@@ -193,24 +345,34 @@ describe('handleEvent', () => {
       miner_id: 'unknown-relay-2',
       rtt: '50',
     });
-    handleEvent(rttEvent, relayState, logger);
+    handleEvent(rttEvent, relayState, emptySignalingState(), emptyPendingRooms(), logger);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ minerId: 'unknown-relay-2' }),
       'RelayRTTUpdated for unknown relay, ignoring',
     );
   });
 
-  it('RoomCreated with no relays logs info instead of scoring', () => {
+  it('EscrowCreated with no relays logs info instead of scoring', () => {
     const logger = mockLogger();
     const relayState = new Map<string, RelayCandidate>();
+    const pendingRooms = new Map<string, RoomCreated>();
 
-    const event = makeSuiEvent('RoomCreated', {
+    // RoomCreated first
+    const roomEvent = makeSuiEvent('RoomCreated', {
       room_id: 'room-empty',
       creator: '0xcreator',
       relay_mode: 0,
     });
+    handleEvent(roomEvent, relayState, emptySignalingState(), pendingRooms, logger);
 
-    handleEvent(event, relayState, logger);
+    // EscrowCreated triggers assignment attempt
+    const escrowEvent = makeSuiEvent('EscrowCreated', {
+      escrow_id: 'escrow-1',
+      room_id: 'room-empty',
+      creator: '0xcreator',
+      amount: '50000000',
+    });
+    handleEvent(escrowEvent, relayState, emptySignalingState(), pendingRooms, logger);
 
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room-empty' }),
@@ -220,13 +382,17 @@ describe('handleEvent', () => {
 });
 
 describe('createEventHandler', () => {
-  it('returns handler function and relay state map', () => {
+  it('returns handler function and state maps', () => {
     const logger = mockLogger();
-    const { handler, relayState } = createEventHandler(logger);
+    const { handler, relayState, signalingState, pendingRooms } = createEventHandler(logger);
 
     expect(typeof handler).toBe('function');
     expect(relayState).toBeInstanceOf(Map);
     expect(relayState.size).toBe(0);
+    expect(signalingState).toBeInstanceOf(Map);
+    expect(signalingState.size).toBe(0);
+    expect(pendingRooms).toBeInstanceOf(Map);
+    expect(pendingRooms.size).toBe(0);
   });
 
   it('handler processes events and updates shared state', async () => {
@@ -239,11 +405,39 @@ describe('createEventHandler', () => {
       mode: 0,
       region: [3],
       stake_amount: '2000000000',
+      endpoint_url: [119, 115], // "ws" as bytes
     });
 
     await handler(event);
 
     expect(relayState.has('relay-x')).toBe(true);
     expect(relayState.get('relay-x')!.stakeAmount).toBe(2_000_000_000n);
+  });
+
+  it('handler with TX context processes signaling events', async () => {
+    const logger = mockLogger();
+    const mockClient = {} as any;
+    const mockSigner = {} as any;
+    const mockConfig = { packageId: '0x1', networkRegistryId: '0x2', roomManagerId: '0x3' } as any;
+
+    const { handler, signalingState } = createEventHandler(logger, undefined, {
+      client: mockClient,
+      signer: mockSigner,
+      config: mockConfig,
+      cpCapId: '0xcap',
+    });
+
+    const event = makeSuiEvent('SignalingRegistered', {
+      miner_id: 'sig-1',
+      operator: '0xop',
+      endpoint_url: [119, 115],
+      region: [2],
+      stake_amount: '1000000000',
+    });
+
+    await handler(event);
+
+    expect(signalingState.has('sig-1')).toBe(true);
+    expect(signalingState.get('sig-1')!.load).toBe(0n);
   });
 });

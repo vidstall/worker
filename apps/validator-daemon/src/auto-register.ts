@@ -13,8 +13,8 @@ import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { NetworkConfig, Logger } from '@dvconf/shared';
 import { executeWithRetry, extractCreatedObjectByType } from '@dvconf/shared';
 
-/** Minimum stake for Validator role — 0.5 DVCONF (500_000_000 MIST). */
-const MIN_STAKE_AMOUNT = 500_000_000n;
+/** Minimum stake for Validator role — 0.1 SUI (100_000_000 MIST). */
+const MIN_STAKE_AMOUNT = 100_000_000n;
 
 /** Encode a UTF-8 string as a u8 vector argument for Move vector<u8> params. */
 function strToU8Vec(s: string): number[] {
@@ -43,26 +43,11 @@ export async function ensureRegistered(
   logger.info('VALIDATOR_CAP_ID not set — attempting auto-registration');
 
   // ── Step 1: Register as miner (role determined on-chain by staking::determine_role) ──────────
-  // Move signature: registration::register(
-  //   registry: &NetworkRegistry,       arg 0 — shared
-  //   store: &mut MinerStore,           arg 1 — shared
-  //   coin: Coin<TOKEN>,                arg 2 — owned (split from gas)
-  //   ip: vector<u8>,                   arg 3
-  //   port: u16,                        arg 4
-  //   stun_url: vector<u8>,             arg 5
-  //   turn_url: vector<u8>,             arg 6
-  //   region: vector<u8>,               arg 7
-  //   bandwidth_mbps: u64,              arg 8
-  //   max_concurrent: u64,              arg 9
-  //   cpu_cores: u64,                   arg 10
-  //   relay_mode: u8,                   arg 11
-  //   turn_credential_hash: vector<u8>, arg 12
-  // )  — 13 args total, no MinerRole arg
   const minerResult = await executeWithRetry(
     client,
     signer,
     (tx) => {
-      // Split a coin for stake
+      // Split stake from gas coin (registration uses Coin<SUI>)
       const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(MIN_STAKE_AMOUNT)]);
 
       tx.moveCall({
@@ -70,7 +55,7 @@ export async function ensureRegistered(
         arguments: [
           tx.object(config.networkRegistryId),                              // 0 &NetworkRegistry
           tx.object(config.minerStoreId),                                   // 1 &mut MinerStore
-          stakeCoin,                                                         // 2 Coin<TOKEN>
+          stakeCoin,                                                         // 2 Coin<SUI>
           tx.pure.vector('u8', strToU8Vec('0.0.0.0')),                      // 3 ip: vector<u8>
           tx.pure.u16(0),                                                    // 4 port: u16
           tx.pure.vector('u8', strToU8Vec('')),                              // 5 stun_url: vector<u8>
@@ -90,7 +75,7 @@ export async function ensureRegistered(
 
   if (!minerResult) {
     logger.error(
-      'Auto-registration failed: ensure wallet has DVCONF tokens and SUI gas. ' +
+      'Auto-registration failed: ensure wallet has sufficient SUI balance. ' +
       'Set VALIDATOR_CAP_ID in .env if already registered.',
     );
     process.exit(1);

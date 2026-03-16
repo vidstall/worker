@@ -7,6 +7,18 @@
 
 import type { WebSocket } from 'ws';
 
+// ── Economic tracking (off-chain only) ──────────────────────────────
+// Tracks completed room sessions for reward eligibility reporting.
+// On-chain reward claims are deferred to Phase 14+.
+
+/** Number of room sessions that have completed (all peers left). */
+let sessionsRouted = 0;
+
+/** Get the total number of completed room sessions. */
+export function getSessionsRouted(): number {
+  return sessionsRouted;
+}
+
 /** Message sent to peers when another peer joins or leaves. */
 export interface PeerNotification {
   type: 'peer-joined' | 'peer-left';
@@ -77,9 +89,10 @@ export class RoomManager {
       };
       this.broadcastToRoom(roomId, ws, JSON.stringify(notification));
 
-      // Clean up empty rooms
+      // Clean up empty rooms -- counts as a completed session
       if (room.size === 0) {
         this.rooms.delete(roomId);
+        sessionsRouted++;
       }
     }
 

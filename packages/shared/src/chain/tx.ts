@@ -43,7 +43,7 @@ export async function executeWithRetry(
       const result = await client.signAndExecuteTransaction({
         signer,
         transaction: tx,
-        options: { showEffects: true, showEvents: true },
+        options: { showEffects: true, showEvents: true, showObjectChanges: true },
       });
 
       await client.waitForTransaction({ digest: result.digest });
@@ -54,6 +54,7 @@ export async function executeWithRetry(
         digest: result.digest,
         effects: (result.effects ?? {}) as Record<string, unknown>,
         events: (result.events ?? []) as Record<string, unknown>[],
+        objectChanges: (result.objectChanges ?? []) as Record<string, unknown>[],
       };
     } catch (err) {
       logger.warn({ err, attempt, delay }, `${label} failed, retrying`);
@@ -72,31 +73,29 @@ export async function executeWithRetry(
 }
 
 /**
- * Extract a created object ID from TX effects by matching the object type suffix.
+ * Extract a created object ID from TX objectChanges by matching the object type suffix.
  *
- * The effects.created array entries look like:
- *   { owner: {...}, reference: { objectId: "0x..." }, objectType: "0xpkg::module::TypeName" }
+ * The objectChanges array entries for created objects look like:
+ *   { type: "created", objectType: "0xpkg::module::TypeName", objectId: "0x...", ... }
  *
  * @param result     - TX result from executeWithRetry
  * @param typeSuffix - e.g. '::caps::MinerCap' or '::staking::StakePosition'
  * @returns The objectId if found, null otherwise
  */
 export function extractCreatedObjectByType(result: TxResult, typeSuffix: string): string | null {
-  const raw = result.effects['created'];
-  if (!Array.isArray(raw)) return null;
+  const changes = result.objectChanges;
+  if (!Array.isArray(changes)) return null;
 
-  const created = raw as Array<Record<string, unknown>>;
-
-  const match = created.find((entry) => {
-    const objectType = entry['objectType'];
-    return typeof objectType === 'string' && objectType.endsWith(typeSuffix);
+  const match = changes.find((entry) => {
+    return (
+      entry['type'] === 'created' &&
+      typeof entry['objectType'] === 'string' &&
+      (entry['objectType'] as string).endsWith(typeSuffix)
+    );
   });
 
   if (!match) return null;
 
-  const reference = match['reference'];
-  if (reference === null || typeof reference !== 'object') return null;
-
-  const objectId = (reference as Record<string, unknown>)['objectId'];
+  const objectId = match['objectId'];
   return typeof objectId === 'string' ? objectId : null;
 }

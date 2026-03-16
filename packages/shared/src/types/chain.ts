@@ -20,6 +20,7 @@ export interface NetworkConfig {
   validatorRegistryId: string;
   userRegistryId: string;
   roomManagerId: string;
+  signalingRegistryId: string;
 }
 
 /** Result of a successful transaction execution. */
@@ -27,4 +28,10 @@ export interface TxResult {
   digest: string;
   effects: Record<string, unknown>;
   events: Record<string, unknown>[];
+  objectChanges: Record<string, unknown>[];
 }
+
+// ── Move module name constants ────────────────────────────────────
+
+/** Module name for economic_layer.move (used with EventPoller). */
+export const economicLayerModuleName = 'economic_layer' as const;
