@@ -89,7 +89,7 @@ export function createSignalingServer(
   /** Track which room each WebSocket belongs to for cleanup. */
   const wsToRoom = new Map<WebSocket, { roomId: string; peerId: string }>();
 
-  const wss = new WebSocketServer({ port });
+  const wss = new WebSocketServer({ port, maxPayload: 64 * 1024 });
 
   wss.on('connection', (ws: WebSocket) => {
     logger.debug('New WebSocket connection');
@@ -201,6 +201,19 @@ export function createSignalingServer(
       rtpCapabilities: room.router.rtpCapabilities,
       mode: room.mode,
     });
+
+    // Notify newly joined peer about existing producers in the room
+    for (const [existingPeerId, existingPeer] of room.peers) {
+      if (existingPeerId === peerId) continue;
+      for (const producer of existingPeer.producers) {
+        sendJson(ws, {
+          type: 'newProducer',
+          peerId: existingPeerId,
+          producerId: producer.id,
+          kind: producer.kind,
+        });
+      }
+    }
 
     logger.info(
       { roomId, peerId, peerCount: room.peers.size },
