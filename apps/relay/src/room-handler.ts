@@ -4,25 +4,24 @@
  * SFU mode: When a new producer is created, iterate all other peers in the
  * room and create Consumers for them. Notify via 'newProducer' message.
  *
- * MCU mode: For thesis simplicity, MCU works the same as SFU (each client
- * gets individual streams). The mode field is communicated to the client
- * for adaptive UI.
+ * MCU mode: Streams are piped to McuPipeline (ffmpeg xstack compositing).
+ * Each client consumes a single composite Producer instead of N-1 individual streams.
+ * On ffmpeg crash, the room falls back to SFU behavior automatically.
  *
- * TODO: Full MCU mixing (via ffmpeg/GStreamer pipe to a PipeTransport) is
- * deferred to post-thesis. Currently MCU mode behaves identically to SFU.
- *
- * Requirements: RELAY-05
+ * Requirements: RELAY-05, MCU-02, MCU-03, MCU-04
  */
 
 import type { types as msTypes } from 'mediasoup';
 import type { WebSocket } from 'ws';
 import type { Logger } from '@dvconf/shared';
+import { McuPipeline } from './mcu-pipeline.js';
 
 export interface RoomState {
   roomId: string;
   router: msTypes.Router;
   mode: 'sfu' | 'mcu';
   peers: Map<string, PeerState>;
+  mcuPipeline?: McuPipeline;
 }
 
 export interface PeerState {
@@ -63,8 +62,9 @@ export async function createWebRtcTransport(
 }
 
 /**
- * When a new producer is created in a room, create consumers for all
- * other peers so they can receive the new stream.
+ * When a new producer is created in a room, route based on mode:
+ * - SFU: fan-out notifications to all other peers (unchanged)
+ * - MCU: pipe the stream into McuPipeline for composite mixing
  */
 export async function notifyNewProducer(
   room: RoomState,
@@ -72,6 +72,17 @@ export async function notifyNewProducer(
   producer: msTypes.Producer,
   logger: Logger,
 ): Promise<void> {
+  // MCU mode: add stream to pipeline (unless fallen back to SFU)
+  if (room.mode === 'mcu' && room.mcuPipeline && !room.mcuPipeline.sfuFallback) {
+    await room.mcuPipeline.addStream(producerPeerId, producer);
+    logger.info(
+      { roomId: room.roomId, peerId: producerPeerId, producerId: producer.id },
+      'MCU: stream added to pipeline',
+    );
+    return;
+  }
+
+  // SFU mode (or MCU fallback): fan-out to all peers
   for (const [peerId, peer] of room.peers) {
     // Skip the producer's own peer
     if (peerId === producerPeerId) continue;
@@ -94,9 +105,13 @@ export async function notifyNewProducer(
 /**
  * Create a consumer for a specific peer to receive a producer's stream.
  *
- * @param producerId - The ID of the producer to consume (not the full Producer object,
- *                     since the consumer peer only needs the ID for router.canConsume
- *                     and transport.consume).
+ * MCU mode: the consumer receives the composite output Producer from McuPipeline
+ * (ignoring the passed producerId in favor of the pipeline's outputProducer).
+ *
+ * SFU mode: standard individual producer consumption (unchanged).
+ *
+ * @param producerId - The ID of the producer to consume. In MCU mode this is
+ *                     overridden by the pipeline's composite output producer.
  */
 export async function createConsumer(
   room: RoomState,
@@ -105,10 +120,22 @@ export async function createConsumer(
   rtpCapabilities: msTypes.RtpCapabilities,
   logger: Logger,
 ): Promise<msTypes.Consumer | null> {
+  // MCU mode: consume the composite output producer (unless fallen back)
+  let targetProducerId = producerId;
+  if (room.mode === 'mcu' && room.mcuPipeline && !room.mcuPipeline.sfuFallback) {
+    const compositeProducer = room.mcuPipeline.outputProducer;
+    if (compositeProducer) {
+      targetProducerId = compositeProducer.id;
+    } else {
+      logger.warn({ roomId: room.roomId }, 'MCU: no composite producer available yet');
+      return null;
+    }
+  }
+
   // Check if the router can consume this producer for the given peer
-  if (!room.router.canConsume({ producerId, rtpCapabilities })) {
+  if (!room.router.canConsume({ producerId: targetProducerId, rtpCapabilities })) {
     logger.warn(
-      { producerId, peerId: consumerPeer.peerId },
+      { producerId: targetProducerId, peerId: consumerPeer.peerId },
       'Router cannot consume producer for this peer',
     );
     return null;
@@ -120,7 +147,7 @@ export async function createConsumer(
   }
 
   const consumer = await consumerPeer.recvTransport.consume({
-    producerId,
+    producerId: targetProducerId,
     rtpCapabilities,
     paused: false,
   });
@@ -128,7 +155,7 @@ export async function createConsumer(
   consumerPeer.consumers.push(consumer);
 
   logger.debug(
-    { consumerId: consumer.id, producerId, peerId: consumerPeer.peerId },
+    { consumerId: consumer.id, producerId: targetProducerId, peerId: consumerPeer.peerId, mode: room.mode },
     'Consumer created',
   );
 
@@ -137,10 +164,16 @@ export async function createConsumer(
 
 /**
  * Remove a peer from a room — close all transports, producers, consumers.
+ * MCU mode: also removes stream from pipeline and triggers recompose.
  */
-export function removePeer(room: RoomState, peerId: string, logger: Logger): void {
+export async function removePeer(room: RoomState, peerId: string, logger: Logger): Promise<void> {
   const peer = room.peers.get(peerId);
   if (!peer) return;
+
+  // MCU mode: remove stream from pipeline (triggers recompose)
+  if (room.mode === 'mcu' && room.mcuPipeline && !room.mcuPipeline.sfuFallback) {
+    await room.mcuPipeline.removeStream(peerId);
+  }
 
   // Close all consumers
   for (const consumer of peer.consumers) {

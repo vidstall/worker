@@ -148,7 +148,6 @@ export async function ensureRegistered(
           tx.pure.u64(100),  // bandwidth_mbps
           tx.pure.u64(50),   // max_concurrent
           tx.pure.u64(os.cpus().length),  // cpu_cores
-          tx.pure.u8(relayModeFromEnv()), // relay_mode
           tx.pure.vector('u8', []), // turn_credential_hash
         ],
       });
@@ -237,9 +236,5 @@ async function registerInRelayRegistry(
   logger.info({ minerCapId }, 'Registered in RelayRegistry (Step 2)');
 }
 
-/** Parse relay mode from env (default: SFU = 0). */
-function relayModeFromEnv(): number {
-  const mode = process.env['RELAY_MODE']?.toLowerCase();
-  if (mode === 'mcu') return 1;
-  return 0; // SFU
-}
+// relayModeFromEnv() removed — mode is per-room, not per-relay (MCU-01).
+// All relays support both SFU and MCU. See room-handler.ts for mode branching.

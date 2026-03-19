@@ -20,6 +20,7 @@ import {
   createConsumer,
   removePeer,
 } from './room-handler.js';
+import { McuPipeline } from './mcu-pipeline.js';
 
 // ── Protocol message types ──────────────────────────────────────────
 
@@ -27,6 +28,8 @@ interface JoinMessage {
   type: 'join';
   roomId: string;
   peerId: string;
+  /** Room mode: 'sfu' (default) or 'mcu'. First joiner sets the mode. */
+  mode?: 'sfu' | 'mcu';
 }
 
 interface CreateTransportMessage {
@@ -165,19 +168,27 @@ export function createSignalingServer(
   async function handleJoin(ws: WebSocket, msg: JoinMessage): Promise<void> {
     const { roomId, peerId } = msg;
 
-    // Get or create room
+    // Get or create room — mode is per-room, set by first joiner (or defaults to env)
     let room = rooms.get(roomId);
     if (!room) {
+      const roomMode = msg.mode ?? relayMode;
       const worker = manager.getNextWorker();
       const router = await manager.createRouter(worker);
       room = {
         roomId,
         router,
-        mode: relayMode,
+        mode: roomMode,
         peers: new Map(),
       };
+
+      // Initialize MCU pipeline for MCU rooms
+      if (roomMode === 'mcu') {
+        room.mcuPipeline = new McuPipeline(router, logger);
+        logger.info({ roomId }, 'MCU pipeline initialized for room');
+      }
+
       rooms.set(roomId, room);
-      logger.info({ roomId, mode: relayMode }, 'Room created');
+      logger.info({ roomId, mode: roomMode }, 'Room created');
     }
 
     // Create peer state
@@ -346,7 +357,7 @@ export function createSignalingServer(
     );
   }
 
-  function handleDisconnect(ws: WebSocket): void {
+  async function handleDisconnect(ws: WebSocket): Promise<void> {
     const mapping = wsToRoom.get(ws);
     if (!mapping) return;
 
@@ -354,11 +365,16 @@ export function createSignalingServer(
     const room = rooms.get(roomId);
 
     if (room) {
-      removePeer(room, peerId, logger);
+      await removePeer(room, peerId, logger);
       metrics.clearSession(roomId, peerId);
 
       // Clean up empty rooms
       if (room.peers.size === 0) {
+        // Close MCU pipeline if active
+        if (room.mcuPipeline) {
+          await room.mcuPipeline.close();
+          logger.info({ roomId }, 'MCU pipeline closed for room');
+        }
         room.router.close();
         rooms.delete(roomId);
         metrics.clearRoom(roomId);
