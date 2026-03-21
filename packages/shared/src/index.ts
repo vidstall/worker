@@ -9,6 +9,9 @@ export type {
   MinerRegistered,
   MinerUnregistered,
   RoleChanged,
+  RoleVoteCast,
+  RoleAssigned,
+  RoleApplied,
   CPRegistered,
   CPHeartbeat,
   CPAssignedToRoom,
@@ -61,6 +64,7 @@ export { loadKeypair, generateSessionKeypair } from './chain/keypair.js';
 export { executeWithRetry, extractCreatedObjectByType } from './chain/tx.js';
 export { EventPoller } from './chain/events.js';
 export type { EventPollerOptions } from './chain/events.js';
+export { waitForRoleAssignment, applyVotedRole } from './chain/role-assignment.js';
 
 // Logger
 export { createLogger } from './logger.js';

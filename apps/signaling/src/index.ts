@@ -65,19 +65,53 @@ type SignalingMessage =
 /** Map peerId -> WebSocket for targeted message delivery. */
 const peerSockets = new Map<string, WebSocket>();
 
-export function createServer(port: number = PORT): WebSocketServer {
-  const wss = new WebSocketServer({ port });
+// ── Rate limiting ───────────────────────────────────────────────────
 
-  wss.on('connection', (ws) => {
+const MAX_CONNECTIONS_PER_IP = 10;
+const ipConnectionCount = new Map<string, number>();
+
+const MAX_MESSAGES_PER_SECOND = 100;
+
+export function createServer(port: number = PORT): WebSocketServer {
+  const wss = new WebSocketServer({ port, maxPayload: 64 * 1024 });
+
+  wss.on('connection', (ws, req) => {
+    const ip = req.socket.remoteAddress ?? 'unknown';
+
+    // Per-IP connection rate limiting
+    const currentCount = ipConnectionCount.get(ip) ?? 0;
+    if (currentCount >= MAX_CONNECTIONS_PER_IP) {
+      logger.warn({ ip }, 'Connection rejected: too many connections from IP');
+      ws.close(4029, 'Too many connections');
+      return;
+    }
+    ipConnectionCount.set(ip, currentCount + 1);
+
+    // Per-connection message rate limiting state
+    const messageTimestamps: number[] = [];
+
     const peerId = randomUUID();
     peerSockets.set(peerId, ws);
 
     // Send the assigned peer ID to the client
     ws.send(JSON.stringify({ type: 'welcome', peerId }));
 
-    logger.info({ peerId }, 'Peer connected');
+    logger.info({ peerId, ip }, 'Peer connected');
 
     ws.on('message', (data) => {
+      // Message rate limit: max MAX_MESSAGES_PER_SECOND per second per connection
+      const now = Date.now();
+      const windowStart = now - 1000;
+      // Remove timestamps older than 1 second
+      while (messageTimestamps.length > 0 && messageTimestamps[0]! < windowStart) {
+        messageTimestamps.shift();
+      }
+      if (messageTimestamps.length >= MAX_MESSAGES_PER_SECOND) {
+        logger.warn({ peerId, ip }, 'Connection closed: message rate limit exceeded');
+        ws.close(4029, 'Rate limit exceeded');
+        return;
+      }
+      messageTimestamps.push(now);
       let msg: SignalingMessage;
       try {
         msg = JSON.parse(data.toString()) as SignalingMessage;
@@ -141,6 +175,13 @@ export function createServer(port: number = PORT): WebSocketServer {
     ws.on('close', () => {
       roomManager.leave(ws);
       peerSockets.delete(peerId);
+      // Decrement IP connection count
+      const count = ipConnectionCount.get(ip) ?? 1;
+      if (count <= 1) {
+        ipConnectionCount.delete(ip);
+      } else {
+        ipConnectionCount.set(ip, count - 1);
+      }
       logger.info({ peerId }, 'Peer disconnected');
     });
 

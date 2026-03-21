@@ -1,8 +1,13 @@
 /**
- * Event handler for CP daemon — processes relay/room/CP/signaling events from Sui chain.
+ * Event handler for CP daemon — processes relay/room/CP/signaling/voting events from Sui chain.
  *
- * Maintains in-memory relay and signaling state maps populated from events.
- * On RoomCreated, runs the scoring algorithm and submits assign_relay_and_signaling TX.
+ * Maintains in-memory relay, validator, and signaling state maps populated from events.
+ * On RoomCreated + EscrowCreated, runs scoring and submits pairing proposal via
+ * submit_pairing_proposal (PAIR-01).
+ *
+ * Tracks votedRooms to prevent duplicate proposals (PAIR-03).
+ * Handles RoomAssigned events to clear voted rooms (PAIR-03).
+ * MCU-aware scoring: 2x load weight for MCU rooms (MCU-05, MCU-06).
  */
 
 import type { SuiClient } from '@mysten/sui/client';
@@ -10,16 +15,34 @@ import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SuiEvent } from '@mysten/sui/client';
 import type { NetworkConfig, Logger } from '@dvconf/shared';
 import type {
+  MinerRegistered,
   RelayRegistered,
   RelayLoadUpdated,
   RelayRTTUpdated,
   RoomCreated,
+  RoomAssigned,
   EscrowCreated,
   SignalingRegistered,
   SignalingLoadUpdated,
+  ValidatorRegistered,
+  RoleAssigned as RoleAssignedEvent,
 } from '@dvconf/shared';
-import { scoreRelays, type RelayCandidate, type ScoringWeights } from './scoring.js';
-import { assignRoom, pickSignalingNode, type SignalingCandidate } from './room-assignment.js';
+import { MinerRole } from '@dvconf/shared';
+import {
+  scoreRelays,
+  scoreValidators,
+  type RelayCandidate,
+  type ValidatorCandidate,
+  type ScoringWeights,
+} from './scoring.js';
+import {
+  submitProposal,
+  pickSignalingNode,
+  clearVotedRoom,
+  votedRooms,
+  type SignalingCandidate,
+} from './room-assignment.js';
+import { clearVotedMiner, trackUnassignedMiner } from './role-voter.js';
 
 /** Default scoring weights (sum = 10_000). */
 export const DEFAULT_WEIGHTS: ScoringWeights = {
@@ -40,11 +63,11 @@ function extractEventName(eventType: string): string {
 }
 
 /**
- * Handle a single Sui event, updating relay/signaling state and scoring as needed.
+ * Handle a single Sui event, updating relay/validator/signaling state and scoring as needed.
  *
  * Room assignment is deferred until EscrowCreated is received. Flow:
- *   RoomCreated → store in pendingRooms
- *   EscrowCreated → match room_id → score relays → assign infrastructure
+ *   RoomCreated -> store in pendingRooms
+ *   EscrowCreated -> match room_id -> score relays + validators -> submit proposal
  */
 export function handleEvent(
   event: SuiEvent,
@@ -59,6 +82,8 @@ export function handleEvent(
     config: NetworkConfig;
     cpCapId: string;
   },
+  pendingEscrows?: Map<string, EscrowCreated>,
+  validatorState?: Map<string, ValidatorCandidate>,
 ): void {
   const eventName = extractEventName(event.type);
   const data = event.parsedJson as Record<string, unknown>;
@@ -78,7 +103,21 @@ export function handleEvent(
         region: regionStr,
       };
       relayState.set(e.miner_id, candidate);
-      logger.info({ minerId: e.miner_id, mode: e.mode, region: regionStr }, 'Relay registered');
+      logger.info({ minerId: e.miner_id, region: regionStr }, 'Relay registered');
+
+      // Re-attempt assignment for rooms deferred due to missing relays
+      if (pendingEscrows && pendingEscrows.size > 0) {
+        for (const [roomId, escrow] of pendingEscrows) {
+          if (pendingRooms.has(roomId)) {
+            logger.info({ roomId }, 'New relay registered — retrying deferred assignment');
+            pendingEscrows.delete(roomId);
+            handleEvent(
+              { ...event, type: `${event.type.split('::')[0]}::economic_layer::EscrowCreated`, parsedJson: escrow as unknown as Record<string, unknown> },
+              relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+            );
+          }
+        }
+      }
       break;
     }
 
@@ -102,6 +141,21 @@ export function handleEvent(
         logger.info({ minerId: e.miner_id, rtt: e.rtt }, 'Relay RTT updated');
       } else {
         logger.warn({ minerId: e.miner_id }, 'RelayRTTUpdated for unknown relay, ignoring');
+      }
+      break;
+    }
+
+    case 'ValidatorRegistered': {
+      const e = data as unknown as ValidatorRegistered;
+      if (validatorState) {
+        const candidate: ValidatorCandidate = {
+          minerId: e.miner_id,
+          reputation: 5_000n, // Default starting reputation (50%)
+          stakeAmount: BigInt(e.stake_amount),
+          region: '', // Validators don't have region in event
+        };
+        validatorState.set(e.miner_id, candidate);
+        logger.info({ minerId: e.miner_id }, 'Validator registered');
       }
       break;
     }
@@ -135,8 +189,22 @@ export function handleEvent(
 
     case 'RoomCreated': {
       const e = data as unknown as RoomCreated;
-      logger.info({ roomId: e.room_id, creator: e.creator, relayMode: e.relay_mode }, 'Room created — waiting for escrow before assignment');
-      pendingRooms.set(e.room_id, e);
+      // Check if escrow already arrived before this room event (race condition)
+      const earlyEscrow = pendingEscrows?.get(e.room_id);
+      if (earlyEscrow) {
+        pendingEscrows!.delete(e.room_id);
+        logger.info({ roomId: e.room_id, creator: e.creator, relayMode: e.relay_mode }, 'Room created -- escrow already pending, triggering assignment');
+        // Add room to pendingRooms so the EscrowCreated handler can find it
+        pendingRooms.set(e.room_id, e);
+        // Re-dispatch through EscrowCreated handler by synthesizing the event
+        handleEvent(
+          { ...event, type: `${event.type.split('::')[0]}::economic_layer::EscrowCreated`, parsedJson: earlyEscrow as unknown as Record<string, unknown> },
+          relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+        );
+      } else {
+        logger.info({ roomId: e.room_id, creator: e.creator, relayMode: e.relay_mode }, 'Room created — waiting for escrow before assignment');
+        pendingRooms.set(e.room_id, e);
+      }
       break;
     }
 
@@ -144,63 +212,141 @@ export function handleEvent(
       const e = data as unknown as EscrowCreated;
       const roomData = pendingRooms.get(e.room_id);
       if (!roomData) {
-        logger.warn({ roomId: e.room_id }, 'EscrowCreated for unknown room, ignoring');
+        // Room event hasn't arrived yet — stash escrow for when it does
+        if (pendingEscrows) {
+          pendingEscrows.set(e.room_id, e);
+          logger.info({ roomId: e.room_id, escrowId: e.escrow_id }, 'EscrowCreated arrived before RoomCreated — stashed for later');
+        } else {
+          logger.warn({ roomId: e.room_id }, 'EscrowCreated for unknown room, ignoring');
+        }
         break;
       }
       pendingRooms.delete(e.room_id);
       logger.info({ roomId: e.room_id, escrowId: e.escrow_id, amount: e.amount }, 'Escrow created — assigning infrastructure');
 
-      // Score all known relays for this room
-      const relays = Array.from(relayState.values());
-      if (relays.length === 0) {
-        logger.info({ roomId: e.room_id }, 'No relays available for scoring');
+      // PAIR-03: Skip rooms already voted on
+      if (votedRooms.has(e.room_id)) {
+        logger.debug({ roomId: e.room_id }, 'Already submitted proposal for this room, skipping');
         break;
       }
 
+      // Score all known relays for this room
+      const relays = Array.from(relayState.values());
+      if (relays.length === 0) {
+        logger.info({ roomId: e.room_id }, 'No relays available — deferring assignment');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
+        break;
+      }
+
+      // MCU-06: Determine room mode from RoomCreated event
+      const roomMode: 'sfu' | 'mcu' = roomData.relay_mode === 1 ? 'mcu' : 'sfu';
+
       // Use empty string as target region (room does not specify region)
-      const ranked = scoreRelays(relays, weights, '');
+      // MCU-05: Pass roomMode to scoring for 2x load penalty
+      const ranked = scoreRelays(relays, weights, '', roomMode);
       const topRelay = ranked[0];
       if (!topRelay) {
         logger.warn({ roomId: e.room_id }, 'Scoring returned no results');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
         break;
       }
 
       // Pick a signaling node
       const signalingMinerId = pickSignalingNode(signalingState);
       if (!signalingMinerId) {
-        logger.warn({ roomId: e.room_id }, 'No signaling nodes available for assignment');
+        logger.warn({ roomId: e.room_id }, 'No signaling nodes available — deferring assignment');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
         break;
       }
+
+      // PAIR-02: Score and select validators
+      const validators = validatorState ? Array.from(validatorState.values()) : [];
+      const rankedValidators = scoreValidators(validators, weights, '');
+
+      // Select top validators (at least 1 if available)
+      const topValidatorIds = rankedValidators
+        .slice(0, Math.max(1, Math.min(3, rankedValidators.length)))
+        .map(v => v.minerId);
+
+      // Get relay IDs for proposal (top 2 relays or all if fewer)
+      const topRelayIds = ranked
+        .slice(0, Math.max(1, Math.min(2, ranked.length)))
+        .map(r => r.minerId);
 
       logger.info(
         {
           roomId: e.room_id,
+          roomMode,
           relayCount: relays.length,
-          topRelay: topRelay.minerId,
+          topRelays: topRelayIds,
           topRelayScore: topRelay.score.toString(),
+          validatorCount: validators.length,
+          topValidators: topValidatorIds,
           signalingMinerId,
         },
-        'Room assignment: submitting TX',
+        'Room proposal: submitting TX',
       );
 
-      // Submit assignment TX (fire-and-forget with retry)
+      // Submit proposal TX (fire-and-forget with retry) — PAIR-01
       if (txContext) {
-        assignRoom(
+        submitProposal(
           txContext.client,
           txContext.signer,
           txContext.config,
           txContext.cpCapId,
           e.room_id,
-          topRelay.minerId,
+          topRelayIds,
+          topValidatorIds,
           signalingMinerId,
           logger,
         ).then(() => {
-          logger.info({ roomId: e.room_id, relayId: topRelay.minerId, signalingId: signalingMinerId }, 'Room assigned successfully');
+          logger.info(
+            { roomId: e.room_id, relays: topRelayIds, validators: topValidatorIds, signalingId: signalingMinerId },
+            'Pairing proposal submitted successfully',
+          );
         }).catch((err) => {
-          logger.error({ err, roomId: e.room_id }, 'Room assignment TX failed');
+          logger.error({ err, roomId: e.room_id }, 'Pairing proposal TX failed');
         });
       } else {
-        logger.warn({ roomId: e.room_id }, 'No TX context — room assignment skipped (test mode)');
+        logger.warn({ roomId: e.room_id }, 'No TX context — pairing proposal skipped (test mode)');
+      }
+      break;
+    }
+
+    case 'RoomAssigned': {
+      // PAIR-03: Clear voted rooms when assignment is finalized
+      const e = data as unknown as RoomAssigned;
+      clearVotedRoom(e.room_id);
+      logger.info(
+        { roomId: e.room_id, relayIds: e.relay_ids, signalingId: e.signaling_id },
+        'Room assigned — cleared from voted rooms',
+      );
+      break;
+    }
+
+    case 'RoleAssigned': {
+      // Clear voted miner from role-voter when role is assigned
+      const e = data as unknown as RoleAssignedEvent;
+      clearVotedMiner(e.miner_id);
+      logger.info(
+        { minerId: e.miner_id, role: e.role },
+        'Role assigned — cleared from voted miners',
+      );
+      break;
+    }
+
+    case 'MinerRegistered': {
+      // VOTE-05: Track unassigned miners (role=0/User) for role voting
+      const e = data as unknown as MinerRegistered;
+      if (e.role === MinerRole.User) {
+        trackUnassignedMiner(e.miner_id);
+        logger.info(
+          { minerId: e.miner_id },
+          'Unassigned miner registered — added to role voting queue',
+        );
       }
       break;
     }
@@ -213,7 +359,7 @@ export function handleEvent(
 }
 
 /**
- * Create an event handler function bound to its own relay and signaling state maps.
+ * Create an event handler function bound to its own relay, validator, and signaling state maps.
  *
  * Returns the handler and state maps for testing/inspection.
  */
@@ -230,15 +376,19 @@ export function createEventHandler(
   handler: (event: SuiEvent) => Promise<void>;
   relayState: Map<string, RelayCandidate>;
   signalingState: Map<string, SignalingCandidate>;
+  validatorState: Map<string, ValidatorCandidate>;
   pendingRooms: Map<string, RoomCreated>;
+  pendingEscrows: Map<string, EscrowCreated>;
 } {
   const relayState = new Map<string, RelayCandidate>();
   const signalingState = new Map<string, SignalingCandidate>();
+  const validatorState = new Map<string, ValidatorCandidate>();
   const pendingRooms = new Map<string, RoomCreated>();
+  const pendingEscrows = new Map<string, EscrowCreated>();
 
   const handler = async (event: SuiEvent): Promise<void> => {
-    handleEvent(event, relayState, signalingState, pendingRooms, logger, weights, txContext);
+    handleEvent(event, relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState);
   };
 
-  return { handler, relayState, signalingState, pendingRooms };
+  return { handler, relayState, signalingState, validatorState, pendingRooms, pendingEscrows };
 }

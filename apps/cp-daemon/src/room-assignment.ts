@@ -1,8 +1,10 @@
 /**
- * Room assignment — submits assign_relay_and_signaling TX on-chain.
+ * Room assignment — submits pairing proposals via submit_pairing_proposal TX.
  *
- * Picks the top-scored relay (from scoring.ts) and a signaling node,
- * then calls room_manager::assign_relay_and_signaling via executeWithRetry.
+ * Replaces the old assign_relay_and_signaling bypass with the proper multi-CP
+ * voting flow. CPs submit proposals; on-chain 2/3 threshold triggers assignment.
+ *
+ * Implements PAIR-01, PAIR-03.
  */
 
 import type { SuiClient } from '@mysten/sui/client';
@@ -38,35 +40,69 @@ export function pickSignalingNode(
 }
 
 /**
- * Submit assign_relay_and_signaling TX on-chain.
+ * Track rooms we have already voted on to prevent duplicate proposals (PAIR-03).
  */
-export async function assignRoom(
+export const votedRooms: Set<string> = new Set();
+
+/**
+ * Clear a room from the voted set (called when RoomAssigned event is received).
+ */
+export function clearVotedRoom(roomId: string): void {
+  votedRooms.delete(roomId);
+}
+
+/**
+ * Submit a pairing proposal TX on-chain (PAIR-01).
+ *
+ * Replaces the old assign_relay_and_signaling bypass with the proper
+ * multi-CP consensus flow via submit_pairing_proposal.
+ */
+export async function submitProposal(
   client: SuiClient,
   signer: Ed25519Keypair,
   config: NetworkConfig,
   cpCapId: string,
   roomId: string,
-  relayMinerId: string,
+  relayMinerIds: string[],
+  validatorMinerIds: string[],
   signalingMinerId: string,
   logger: Logger,
 ): Promise<void> {
+  // PAIR-03: Skip rooms already voted on
+  if (votedRooms.has(roomId)) {
+    logger.debug({ roomId }, 'Already submitted proposal for this room, skipping');
+    return;
+  }
+
   await executeWithRetry(
     client,
     signer,
     (tx: Transaction) => {
+      // Build vector<ID> arguments
+      const relayVec = tx.pure.vector('id', relayMinerIds);
+      const validatorVec = tx.pure.vector('id', validatorMinerIds);
+
       tx.moveCall({
-        target: `${config.packageId}::room_manager::assign_relay_and_signaling`,
+        target: `${config.packageId}::room_manager::submit_pairing_proposal`,
         arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.roomManagerId),
-          tx.object(cpCapId),
-          tx.pure.id(roomId),
-          tx.pure.id(relayMinerId),
-          tx.pure.id(signalingMinerId),
+          tx.object(config.networkRegistryId),      // &NetworkRegistry
+          tx.object(config.roomManagerId),           // &mut RoomManager
+          tx.object(config.cpRegistryId),            // &mut ControlPlaneRegistry
+          tx.object(config.relayRegistryId),         // &RelayRegistry
+          tx.object(config.validatorRegistryId),     // &ValidatorRegistry
+          tx.object(config.signalingRegistryId),     // &SignalingRegistry
+          tx.object(cpCapId),                        // &ControlPlaneCap
+          tx.pure.id(roomId),                        // room_id: ID
+          relayVec,                                   // relay_ids: vector<ID>
+          validatorVec,                               // validator_ids: vector<ID>
+          tx.pure.id(signalingMinerId),              // signaling_id: ID
         ],
       });
     },
-    'assign-room',
+    'submit-pairing-proposal',
     logger,
   );
+
+  // Track as voted
+  votedRooms.add(roomId);
 }

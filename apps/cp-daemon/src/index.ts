@@ -1,7 +1,9 @@
 /**
  * CP Daemon — Control Plane daemon entry point.
  *
- * Subscribes to relay/room events, runs relay scoring, sends heartbeat to ControlPlaneRegistry.
+ * Subscribes to relay/room/validator/signaling/voting events, runs relay + validator
+ * scoring, sends heartbeat to ControlPlaneRegistry, and participates in role voting.
+ *
  * Uses @dvconf/shared for all chain interactions (DAEMON-12) with exponential backoff (DAEMON-07).
  */
 
@@ -16,6 +18,7 @@ import {
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createEventHandler } from './event-handler.js';
+import { startRoleVoting } from './role-voter.js';
 
 const logger = createLogger('cp-daemon');
 
@@ -45,13 +48,45 @@ async function main(): Promise<void> {
     logger,
   );
 
+  // Start role voting loop (VOTE-06)
+  const roleVotingIntervalMs = parseInt(process.env['ROLE_VOTING_INTERVAL_MS'] ?? '30000', 10);
+  const stopRoleVoting = startRoleVoting(
+    client,
+    signer,
+    config,
+    cpCapId,
+    logger,
+    roleVotingIntervalMs,
+  );
+
   // Set up event handler with TX context for room assignment
-  const { handler } = createEventHandler(logger, undefined, {
+  const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
     client,
     signer,
     config,
     cpCapId,
   });
+
+  // Bootstrap: replay historical relay/signaling/validator events so state maps are populated
+  // before real-time polling starts (prevents race where relay registers before CP poller runs)
+  for (const mod of ['relay_registry', 'signaling_registry', 'validator_registry', 'registration'] as const) {
+    try {
+      const events = await client.queryEvents({
+        query: { MoveEventModule: { package: config.packageId, module: mod } },
+        limit: 100,
+      });
+      for (const ev of events.data) {
+        await handler(ev);
+      }
+      logger.info({ module: mod, count: events.data.length }, 'Bootstrap: replayed historical events');
+    } catch (err) {
+      logger.warn({ module: mod, err }, 'Bootstrap: failed to query historical events');
+    }
+  }
+  logger.info(
+    { relays: relayState.size, signaling: signalingState.size, validators: validatorState.size },
+    'Bootstrap complete — state maps populated',
+  );
 
   // Poll relay_registry events
   const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
@@ -101,6 +136,33 @@ async function main(): Promise<void> {
     logger: logger.child({ poller: 'economic_layer' }),
   });
 
+  const validatorPoller = new EventPoller({
+    client,
+    packageId: config.packageId,
+    module: 'validator_registry',
+    pollingIntervalMs: pollIntervalMs,
+    cursorPath: '.cursors/validator_registry.json',
+    logger: logger.child({ poller: 'validator_registry' }),
+  });
+
+  const roleVotingPoller = new EventPoller({
+    client,
+    packageId: config.packageId,
+    module: 'role_voting',
+    pollingIntervalMs: pollIntervalMs,
+    cursorPath: '.cursors/role_voting.json',
+    logger: logger.child({ poller: 'role_voting' }),
+  });
+
+  const registrationPoller = new EventPoller({
+    client,
+    packageId: config.packageId,
+    module: 'registration',
+    pollingIntervalMs: pollIntervalMs,
+    cursorPath: '.cursors/registration.json',
+    logger: logger.child({ poller: 'registration' }),
+  });
+
   // Start all pollers
   await Promise.all([
     relayPoller.start(handler),
@@ -108,22 +170,29 @@ async function main(): Promise<void> {
     roomPoller.start(handler),
     signalingPoller.start(handler),
     economicPoller.start(handler),
+    validatorPoller.start(handler),
+    roleVotingPoller.start(handler),
+    registrationPoller.start(handler),
   ]);
 
   logger.info(
-    { heartbeatIntervalMs, pollIntervalMs },
-    `CP daemon started — heartbeat every ${heartbeatIntervalMs}ms, polling events every ${pollIntervalMs}ms`,
+    { heartbeatIntervalMs, pollIntervalMs, roleVotingIntervalMs },
+    `CP daemon started — heartbeat every ${heartbeatIntervalMs}ms, polling events every ${pollIntervalMs}ms, role voting every ${roleVotingIntervalMs}ms`,
   );
 
   // Graceful shutdown
   const shutdown = (): void => {
     logger.info('Shutting down CP daemon...');
     stopHeartbeat();
+    stopRoleVoting();
     relayPoller.stop();
     cpPoller.stop();
     roomPoller.stop();
     signalingPoller.stop();
     economicPoller.stop();
+    validatorPoller.stop();
+    roleVotingPoller.stop();
+    registrationPoller.stop();
     logger.info('CP daemon shut down cleanly');
     process.exit(0);
   };

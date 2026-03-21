@@ -11,10 +11,13 @@
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { NetworkConfig, Logger } from '@dvconf/shared';
-import { executeWithRetry, extractCreatedObjectByType } from '@dvconf/shared';
+import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole } from '@dvconf/shared';
 
 /** Minimum stake for Validator role — 0.1 SUI (100_000_000 MIST). */
 const MIN_STAKE_AMOUNT = 100_000_000n;
+
+/** Minimum stake for voting-mode registration (0.01 SUI). */
+const MIN_VOTING_STAKE = 10_000_000n;
 
 /** Encode a UTF-8 string as a u8 vector argument for Move vector<u8> params. */
 function strToU8Vec(s: string): number[] {
@@ -42,13 +45,21 @@ export async function ensureRegistered(
 
   logger.info('VALIDATOR_CAP_ID not set — attempting auto-registration');
 
+  // Validators always self-register directly — they don't need CP votes.
+  // Voting mode only applies to relay/signaling daemons.
+  const votingMode = false;
+  if (process.env['REGISTRATION_MODE'] === 'voting') {
+    logger.info('REGISTRATION_MODE=voting ignored for validator — validators always self-register directly');
+  }
+  const stakeAmount = MIN_STAKE_AMOUNT;
+
   // ── Step 1: Register as miner (role determined on-chain by staking::determine_role) ──────────
   const minerResult = await executeWithRetry(
     client,
     signer,
     (tx) => {
       // Split stake from gas coin (registration uses Coin<SUI>)
-      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(MIN_STAKE_AMOUNT)]);
+      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)]);
 
       tx.moveCall({
         target: `${config.packageId}::registration::register`,
@@ -64,8 +75,7 @@ export async function ensureRegistered(
           tx.pure.u64(0),                                                    // 8 bandwidth_mbps
           tx.pure.u64(0),                                                    // 9 max_concurrent
           tx.pure.u64(0),                                                    // 10 cpu_cores
-          tx.pure.u8(0),                                                     // 11 relay_mode
-          tx.pure.vector('u8', []),                                          // 12 turn_credential_hash
+          tx.pure.vector('u8', []),                                          // 11 turn_credential_hash
         ],
       });
     },
@@ -97,6 +107,14 @@ export async function ensureRegistered(
   }
 
   logger.info({ minerCapId, stakePositionId }, 'Miner registration succeeded');
+
+  // Voting mode: wait for CPs to vote on our role, then apply it
+  if (votingMode) {
+    const minerId = signer.toSuiAddress();
+    await waitForRoleAssignment(client, config, minerId, logger);
+    await applyVotedRole(client, signer, config, minerCapId, stakePositionId, logger);
+    logger.info('Voted role applied — proceeding to registry enrollment');
+  }
 
   // ── Step 2: Register in ValidatorRegistry ────────────────────────────────────────────────────
   // Move signature: validator_registry::register_validator(

@@ -21,6 +21,7 @@ export interface NetworkConfig {
   userRegistryId: string;
   roomManagerId: string;
   signalingRegistryId: string;
+  roleVoteBoxId: string;
 }
 
 /** Result of a successful transaction execution. */

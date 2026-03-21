@@ -17,6 +17,7 @@
 import 'dotenv/config';
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
 import {
   createSuiClient,
   loadNetworkConfig,
@@ -39,7 +40,7 @@ import {
   logProofSummary,
   submitSessionProof,
 } from './session-proof.js';
-import { waitForProofs, triggerDistribution, lookupRelayStakeId } from './reward-trigger.js';
+import { waitForProofs, triggerDistribution } from './reward-trigger.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -55,8 +56,6 @@ export interface ValidatorConfig {
 export interface ActiveRoom {
   /** Escrow object ID for this room (discovered via EscrowCreated). */
   escrowId?: string;
-  /** Relay's StakePosition object ID for reward distribution. */
-  relayStakeId?: string;
   /** Relay miner ID assigned to this room (from RoomAssigned event). */
   relayMinerId?: string;
 }
@@ -103,6 +102,31 @@ export async function startDaemon(overrides?: {
 
   // Generate session wallet -- fresh Ed25519Keypair, NOT derived from main wallet
   const { keypair: sessionKeypair, address: sessionAddress } = generateSessionKeypair();
+
+  // Register session wallet on-chain so submit_session_proof can look it up
+  {
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${config.packageId}::validator_registry::self_assign_session_wallet`,
+      arguments: [
+        tx.object(config.networkRegistryId),
+        tx.object(config.validatorRegistryId),
+        tx.object(validatorCapId),
+        tx.pure.address(sessionAddress),
+      ],
+    });
+    const res = await client.signAndExecuteTransaction({ signer: mainKeypair, transaction: tx });
+    await client.waitForTransaction({ digest: res.digest });
+    log.info({ digest: res.digest, sessionAddress }, 'Session wallet registered on-chain');
+
+    // Fund session wallet with gas so it can send proof TXs
+    const fundTx = new Transaction();
+    const [coin] = fundTx.splitCoins(fundTx.gas, [500_000_000]); // 0.5 SUI
+    fundTx.transferObjects([coin], sessionAddress);
+    const fundRes = await client.signAndExecuteTransaction({ signer: mainKeypair, transaction: fundTx });
+    await client.waitForTransaction({ digest: fundRes.digest });
+    log.info({ digest: fundRes.digest, sessionAddress, amount: '0.5 SUI' }, 'Session wallet funded');
+  }
 
   log.info(
     { mainAddress, sessionAddress },
@@ -251,45 +275,19 @@ export async function startDaemon(overrides?: {
     // BUG-INT-001: Handle RoomAssigned to populate relayStakeId dynamically
     if (event.type.endsWith('::RoomAssigned')) {
       const parsed = event.parsedJson as unknown as RoomAssigned;
-      if (parsed.room_id && parsed.relay_id) {
+      const relayId = parsed.relay_ids?.[0];
+      if (parsed.room_id && relayId) {
         const room = activeRooms.get(parsed.room_id) ?? {};
-        room.relayMinerId = parsed.relay_id;
+        room.relayMinerId = relayId;
 
         if (!activeRooms.has(parsed.room_id)) {
           activeRooms.set(parsed.room_id, room);
         }
 
         log.info(
-          { roomId: parsed.room_id, relayId: parsed.relay_id },
-          `RoomAssigned -- room=${parsed.room_id}, relay=${parsed.relay_id}`,
+          { roomId: parsed.room_id, relayId },
+          `RoomAssigned -- room=${parsed.room_id}, relay=${relayId}`,
         );
-
-        // Look up the relay's StakePosition via devInspect + getOwnedObjects
-        try {
-          const stakeId = await lookupRelayStakeId(
-            state.client,
-            state.config,
-            parsed.relay_id,
-            log,
-          );
-          if (stakeId) {
-            room.relayStakeId = stakeId;
-            log.info(
-              { roomId: parsed.room_id, relayId: parsed.relay_id, stakeId },
-              `Relay StakePosition discovered for room=${parsed.room_id}`,
-            );
-          } else {
-            log.warn(
-              { roomId: parsed.room_id, relayId: parsed.relay_id },
-              `Could not find relay StakePosition for room=${parsed.room_id}`,
-            );
-          }
-        } catch (err) {
-          log.warn(
-            { err, roomId: parsed.room_id, relayId: parsed.relay_id },
-            `Failed to lookup relay StakePosition for room=${parsed.room_id}`,
-          );
-        }
       }
     }
   });
@@ -316,18 +314,6 @@ async function handleRoomClosed(
     return;
   }
 
-  const room = state.activeRooms.get(roomId);
-  const relayStakeId = room?.relayStakeId ?? process.env['RELAY_STAKE_ID'];
-
-  if (!relayStakeId) {
-    log.warn(
-      { roomId, escrowId },
-      `No relay stake ID known for room=${roomId} -- cannot distribute rewards`,
-    );
-    state.activeRooms.delete(roomId);
-    return;
-  }
-
   try {
     // Wait for sufficient session proofs to be submitted
     const hasProofs = await waitForProofs(
@@ -345,7 +331,6 @@ async function handleRoomClosed(
         state.config,
         escrowId,
         roomId,
-        relayStakeId,
         log,
       );
     } else {

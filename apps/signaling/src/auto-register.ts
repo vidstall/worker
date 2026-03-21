@@ -12,10 +12,13 @@
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
-import { executeWithRetry, extractCreatedObjectByType, type NetworkConfig, type Logger } from '@dvconf/shared';
+import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, type NetworkConfig, type Logger } from '@dvconf/shared';
 
 /** Signaling stake: 0.05 SUI = 50_000_000 MIST (per constants.move DEFAULT_SIGNALING_THRESHOLD). */
 const SIGNALING_STAKE = 50_000_000n;
+
+/** Minimum stake for voting-mode registration (0.01 SUI). */
+const MIN_VOTING_STAKE = 10_000_000n;
 
 /**
  * Check if a miner is registered in SignalingRegistry via devInspect.
@@ -127,13 +130,20 @@ export async function ensureRegistered(
 
   logger.info('MINER_CAP_ID not set — attempting full auto-registration');
 
-  // Step 1: Register as a miner with role=Signaling
+  const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
+  const stakeAmount = votingMode ? MIN_VOTING_STAKE : SIGNALING_STAKE;
+
+  if (votingMode) {
+    logger.info('Voting mode enabled — registering with minimum stake, awaiting CP role assignment');
+  }
+
+  // Step 1: Register as a miner with role=Signaling (or role=0 in voting mode)
   const minerResult = await executeWithRetry(
     client,
     signer,
     (tx: Transaction) => {
       // Split stake from gas coin (registration uses Coin<SUI>)
-      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(SIGNALING_STAKE)]);
+      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)]);
 
       tx.moveCall({
         target: `${config.packageId}::registration::register`,
@@ -149,7 +159,6 @@ export async function ensureRegistered(
           tx.pure.u64(0),  // bandwidth_mbps (signaling doesn't serve media)
           tx.pure.u64(0),  // max_concurrent
           tx.pure.u64(1),  // cpu_cores
-          tx.pure.u8(0),   // relay_mode (unused for signaling)
           tx.pure.vector('u8', []), // turn_credential_hash
         ],
       });
@@ -179,6 +188,14 @@ export async function ensureRegistered(
   }
 
   logger.info({ minerCapId, stakePositionId }, 'Miner registered successfully (Step 1)');
+
+  // Voting mode: wait for CPs to vote on our role, then apply it
+  if (votingMode) {
+    const minerId = signer.toSuiAddress();
+    await waitForRoleAssignment(client, config, minerId, logger);
+    await applyVotedRole(client, signer, config, minerCapId, stakePositionId, logger);
+    logger.info('Voted role applied — proceeding to registry enrollment');
+  }
 
   // Step 2: Register in SignalingRegistry
   await registerInSignalingRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);

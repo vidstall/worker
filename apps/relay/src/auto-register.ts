@@ -12,11 +12,14 @@
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
-import { executeWithRetry, extractCreatedObjectByType, type NetworkConfig, type Logger } from '@dvconf/shared';
+import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, type NetworkConfig, type Logger } from '@dvconf/shared';
 import os from 'os';
 
 /** Relay stake: 0.25 SUI = 250_000_000 MIST (per constants.move DEFAULT_RELAY_THRESHOLD). */
 const RELAY_STAKE = 250_000_000n;
+
+/** Minimum stake for voting-mode registration (0.01 SUI). */
+const MIN_VOTING_STAKE = 10_000_000n;
 
 /**
  * Check if a miner is registered in RelayRegistry via devInspect.
@@ -126,13 +129,20 @@ export async function ensureRegistered(
 
   logger.info('MINER_CAP_ID not set — attempting full auto-registration');
 
-  // Step 1: Register as a miner with role=Relay
+  const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
+  const stakeAmount = votingMode ? MIN_VOTING_STAKE : RELAY_STAKE;
+
+  if (votingMode) {
+    logger.info('Voting mode enabled — registering with minimum stake, awaiting CP role assignment');
+  }
+
+  // Step 1: Register as a miner with role=Relay (or role=0 in voting mode)
   const minerResult = await executeWithRetry(
     client,
     signer,
     (tx: Transaction) => {
       // Split stake from gas coin (registration uses Coin<SUI>)
-      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(RELAY_STAKE)]);
+      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(stakeAmount)]);
 
       tx.moveCall({
         target: `${config.packageId}::registration::register`,
@@ -177,6 +187,14 @@ export async function ensureRegistered(
   }
 
   logger.info({ minerCapId, stakePositionId }, 'Miner registered successfully (Step 1)');
+
+  // Voting mode: wait for CPs to vote on our role, then apply it
+  if (votingMode) {
+    const minerId = signer.toSuiAddress();
+    await waitForRoleAssignment(client, config, minerId, logger);
+    await applyVotedRole(client, signer, config, minerCapId, stakePositionId, logger);
+    logger.info('Voted role applied — proceeding to registry enrollment');
+  }
 
   // Step 2: Register in RelayRegistry
   await registerInRelayRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);

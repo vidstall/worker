@@ -60,5 +60,6 @@ export function loadNetworkConfig(): NetworkConfig {
     userRegistryId: required('USER_REGISTRY_ID'),
     roomManagerId: required('ROOM_MANAGER_ID'),
     signalingRegistryId: required('SIGNALING_REGISTRY_ID'),
+    roleVoteBoxId: required('ROLE_VOTE_BOX_ID'),
   };
 }

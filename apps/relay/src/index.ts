@@ -16,6 +16,7 @@ import {
   loadNetworkConfig,
   loadKeypair,
   createLogger,
+  EventPoller,
 } from '@dvconf/shared';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
@@ -77,6 +78,39 @@ if (isMainModule) {
       heartbeatIntervalMs,
       logger,
     );
+
+    // Step 7: Poll room_manager events for MCU room assignments
+    const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
+    const myMinerId = signer.toSuiAddress();
+    const roomPoller = new EventPoller({
+      client,
+      packageId: config.packageId,
+      module: 'room_manager',
+      pollingIntervalMs: pollIntervalMs,
+      cursorPath: '.cursors/room_manager.json',
+      logger: logger.child({ poller: 'room_manager' }),
+    });
+    roomPoller.start(async (event) => {
+      const eventName = event.type.split('::').pop() ?? '';
+      if (eventName === 'RoomAssigned') {
+        const data = event.parsedJson as Record<string, unknown>;
+        const relayIds = data['relay_ids'] as string[] | undefined;
+        const relayMode = data['relay_mode'] as number | undefined;
+        if (relayIds && relayIds.includes(myMinerId)) {
+          if (relayMode === 1) {
+            logger.info(
+              { roomId: data['room_id'], relayMode },
+              'MCU pipeline initialized for room — composite output mode',
+            );
+          } else {
+            logger.info(
+              { roomId: data['room_id'], relayMode },
+              'SFU room assigned — individual stream forwarding',
+            );
+          }
+        }
+      }
+    });
 
     const metricsPort = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
     logger.info(

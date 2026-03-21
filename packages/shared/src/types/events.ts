@@ -52,7 +52,6 @@ export interface CPAssignedToRoom {
 export interface RelayRegistered {
   miner_id: string;
   operator: string;
-  mode: number;
   region: number[];
   stake_amount: string;
   endpoint_url: number[];  // relay WebSocket URL as UTF-8 bytes
@@ -85,6 +84,29 @@ export interface SessionWalletRevealed {
   session_wallet: string;
 }
 
+// ── Role Voting events (role_voting module) ──────────────────────────
+
+export interface RoleVoteCast {
+  miner_id: string;
+  role: number;
+  voter: string;
+  current_votes: string;
+  required: string;
+}
+
+export interface RoleAssigned {
+  miner_id: string;
+  role: number;
+  vote_count: string;
+  threshold: string;
+}
+
+export interface RoleApplied {
+  miner_id: string;
+  role: number;
+  owner: string;
+}
+
 // ── Room events (room_manager module) ───────────────────────────────
 
 export interface RoomCreated {
@@ -95,7 +117,7 @@ export interface RoomCreated {
 
 export interface RoomAssigned {
   room_id: string;
-  relay_id: string;
+  relay_ids: string[];
   signaling_id: string;
 }
 
@@ -171,6 +193,7 @@ export interface RewardsDistributed {
   relay_reward: string;
   validator_pool: string;
   cp_pool: string;
+  signaling_pool: string;
   remainder: string;
 }
 
@@ -187,6 +210,9 @@ export type DvconfEvent =
   | MinerRegistered
   | MinerUnregistered
   | RoleChanged
+  | RoleVoteCast
+  | RoleAssigned
+  | RoleApplied
   | CPRegistered
   | CPHeartbeat
   | CPAssignedToRoom
