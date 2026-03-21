@@ -41,6 +41,7 @@ function mockConfig(): NetworkConfig {
     userRegistryId: '0xuser',
     roomManagerId: '0xroom',
     signalingRegistryId: '0xsig',
+    roleVoteBoxId: '0xvotebox',
   };
 }
 
@@ -54,18 +55,19 @@ const mockSigner = { toSuiAddress: () => '0xsigner' } as any;
 function step1Effects() {
   return {
     digest: 'digest-1',
-    effects: {
-      created: [
-        {
-          reference: { objectId: '0xcp-cap' },
-          objectType: '0xpkg::caps::ControlPlaneCap',
-        },
-        {
-          reference: { objectId: '0xstake-pos' },
-          objectType: '0xpkg::staking::StakePosition',
-        },
-      ],
-    },
+    objectChanges: [
+      {
+        type: 'created',
+        objectId: '0xcp-cap',
+        objectType: '0xpkg::caps::ControlPlaneCap',
+      },
+      {
+        type: 'created',
+        objectId: '0xstake-pos',
+        objectType: '0xpkg::staking::StakePosition',
+      },
+    ],
+    effects: { created: [] },
     events: [],
   };
 }
@@ -200,14 +202,14 @@ describe('ensureRegistered', () => {
     // Step 1 effects only return StakePosition — ControlPlaneCap absent
     mockExecuteWithRetry.mockResolvedValueOnce({
       digest: 'digest-1',
-      effects: {
-        created: [
-          {
-            reference: { objectId: '0xstake-pos' },
-            objectType: '0xpkg::staking::StakePosition',
-          },
-        ],
-      },
+      objectChanges: [
+        {
+          type: 'created',
+          objectId: '0xstake-pos',
+          objectType: '0xpkg::staking::StakePosition',
+        },
+      ],
+      effects: { created: [] },
       events: [],
     });
 
@@ -229,14 +231,14 @@ describe('ensureRegistered', () => {
     // Step 1 effects only return ControlPlaneCap — StakePosition absent
     mockExecuteWithRetry.mockResolvedValueOnce({
       digest: 'digest-1',
-      effects: {
-        created: [
-          {
-            reference: { objectId: '0xcp-cap' },
-            objectType: '0xpkg::caps::ControlPlaneCap',
-          },
-        ],
-      },
+      objectChanges: [
+        {
+          type: 'created',
+          objectId: '0xcp-cap',
+          objectType: '0xpkg::caps::ControlPlaneCap',
+        },
+      ],
+      effects: { created: [] },
       events: [],
     });
 

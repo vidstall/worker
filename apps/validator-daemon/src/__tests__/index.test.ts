@@ -85,6 +85,7 @@ describe('Validator daemon', () => {
     userRegistryId: '0xuserreg',
     roomManagerId: '0xroom',
     signalingRegistryId: '0xsigreg',
+    roleVoteBoxId: '0xvotebox',
   };
 
   const mockClient = {

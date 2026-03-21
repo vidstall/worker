@@ -195,8 +195,8 @@ describe('handleEvent', () => {
     );
     // No assignment logs
     expect(logger.info).not.toHaveBeenCalledWith(
-      expect.objectContaining({ topRelay: 'relay-good' }),
-      'Room assignment: submitting TX',
+      expect.objectContaining({ signalingMinerId: 'sig-1' }),
+      'Room proposal: submitting TX',
     );
   });
 
@@ -239,15 +239,14 @@ describe('handleEvent', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({
         roomId: 'room-1',
-        topRelay: 'relay-good',
         signalingMinerId: 'sig-1',
       }),
-      'Room assignment: submitting TX',
+      'Room proposal: submitting TX',
     );
     // No TX context — should warn about skipping
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room-1' }),
-      'No TX context — room assignment skipped (test mode)',
+      'No TX context — pairing proposal skipped (test mode)',
     );
   });
 
@@ -306,7 +305,7 @@ describe('handleEvent', () => {
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room-1' }),
-      'No signaling nodes available for assignment',
+      'No signaling nodes available — deferring assignment',
     );
   });
 
@@ -376,7 +375,7 @@ describe('handleEvent', () => {
 
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room-empty' }),
-      'No relays available for scoring',
+      'No relays available — deferring assignment',
     );
   });
 });
@@ -384,15 +383,19 @@ describe('handleEvent', () => {
 describe('createEventHandler', () => {
   it('returns handler function and state maps', () => {
     const logger = mockLogger();
-    const { handler, relayState, signalingState, pendingRooms } = createEventHandler(logger);
+    const { handler, relayState, signalingState, validatorState, pendingRooms, pendingEscrows } = createEventHandler(logger);
 
     expect(typeof handler).toBe('function');
     expect(relayState).toBeInstanceOf(Map);
     expect(relayState.size).toBe(0);
     expect(signalingState).toBeInstanceOf(Map);
     expect(signalingState.size).toBe(0);
+    expect(validatorState).toBeInstanceOf(Map);
+    expect(validatorState.size).toBe(0);
     expect(pendingRooms).toBeInstanceOf(Map);
     expect(pendingRooms.size).toBe(0);
+    expect(pendingEscrows).toBeInstanceOf(Map);
+    expect(pendingEscrows.size).toBe(0);
   });
 
   it('handler processes events and updates shared state', async () => {

@@ -245,6 +245,7 @@ describe('Chain types compile correctly', () => {
       userRegistryId: '0x6',
       roomManagerId: '0x7',
       signalingRegistryId: '0x8',
+      roleVoteBoxId: '0x9',
     };
     expect(config.packageId).toBe('0xpkg');
   });
