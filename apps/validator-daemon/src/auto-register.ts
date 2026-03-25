@@ -45,13 +45,13 @@ export async function ensureRegistered(
 
   logger.info('VALIDATOR_CAP_ID not set — attempting auto-registration');
 
-  // Validators always self-register directly — they don't need CP votes.
-  // Voting mode only applies to relay/signaling daemons.
-  const votingMode = false;
-  if (process.env['REGISTRATION_MODE'] === 'voting') {
-    logger.info('REGISTRATION_MODE=voting ignored for validator — validators always self-register directly');
+  // In voting mode, validators register as role=0 and wait for CP votes
+  // (on-chain determine_role only auto-assigns CP; all others need voting).
+  const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
+  const stakeAmount = votingMode ? MIN_VOTING_STAKE : MIN_STAKE_AMOUNT;
+  if (votingMode) {
+    logger.info('REGISTRATION_MODE=voting — will register as role=0 and wait for CP vote');
   }
-  const stakeAmount = MIN_STAKE_AMOUNT;
 
   // ── Step 1: Register as miner (role determined on-chain by staking::determine_role) ──────────
   const minerResult = await executeWithRetry(

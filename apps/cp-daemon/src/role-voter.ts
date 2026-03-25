@@ -33,20 +33,27 @@ const votedMiners = new Set<string>();
 /** Set of unassigned miner IDs discovered from MinerRegistered events (role=0). */
 const unassignedMiners = new Set<string>();
 
-/**
- * Read a miner's bandwidth_mbps from on-chain MinerProfile via devInspect.
- * Returns the bandwidth value; 0 means non-relay (signaling/CP/validator).
- */
-async function readMinerBandwidth(
+/** Decode a BCS u64 (LE bytes) into a bigint. */
+function decodeU64(bytes: number[]): bigint {
+  let value = 0n;
+  for (let i = 0; i < Math.min(bytes.length, 8); i++) {
+    value |= BigInt(bytes[i]!) << BigInt(i * 8);
+  }
+  return value;
+}
+
+/** Read a u64 field from a miner's on-chain profile via devInspect. */
+async function readMinerField(
   client: SuiClient,
   packageId: string,
   minerStoreId: string,
   minerId: string,
+  fn: string,
   sender: string,
 ): Promise<bigint> {
   const tx = new Transaction();
   tx.moveCall({
-    target: `${packageId}::miner_store::get_miner_bandwidth`,
+    target: `${packageId}::miner_store::${fn}`,
     arguments: [tx.object(minerStoreId), tx.pure.id(minerId)],
   });
 
@@ -57,18 +64,32 @@ async function readMinerBandwidth(
     });
     const returnValues = result.results?.[0]?.returnValues;
     if (!returnValues || returnValues.length === 0) return 0n;
-
     const bytes = returnValues[0]![0];
     if (!bytes || bytes.length === 0) return 0n;
-
-    let value = 0n;
-    for (let i = 0; i < Math.min(bytes.length, 8); i++) {
-      value |= BigInt(bytes[i]!) << BigInt(i * 8);
-    }
-    return value;
+    return decodeU64(bytes);
   } catch {
     return 0n;
   }
+}
+
+/**
+ * Read a miner's bandwidth_mbps from on-chain MinerProfile via devInspect.
+ * Returns the bandwidth value; 0 means non-relay (signaling/CP/validator).
+ */
+async function readMinerBandwidth(
+  client: SuiClient, packageId: string, minerStoreId: string, minerId: string, sender: string,
+): Promise<bigint> {
+  return readMinerField(client, packageId, minerStoreId, minerId, 'get_miner_bandwidth', sender);
+}
+
+/**
+ * Read a miner's cpu_cores from on-chain MinerProfile via devInspect.
+ * Signaling registers with cpu_cores > 0; validators register with cpu_cores == 0.
+ */
+async function readMinerCpuCores(
+  client: SuiClient, packageId: string, minerStoreId: string, minerId: string, sender: string,
+): Promise<bigint> {
+  return readMinerField(client, packageId, minerStoreId, minerId, 'get_miner_cpu_cores', sender);
 }
 
 /**
@@ -249,21 +270,28 @@ export function startRoleVoting(
         'Role voting: registry counts loaded',
       );
 
-      // 3-4. For each unassigned miner, infer its intended role from on-chain
-      // profile metadata (bandwidth_mbps > 0 → relay, == 0 → signaling).
-      // Fall back to scarcity-based assignment if inference fails.
+      // 3-4. For each unassigned miner, infer its intended role from metadata:
+      //   bandwidth > 0 → relay
+      //   bandwidth == 0, cpu_cores > 0 → signaling
+      //   bandwidth == 0, cpu_cores == 0 → validator
 
       for (const minerId of pendingMiners) {
         let role: number;
 
-        // Read miner bandwidth to infer daemon type
+        // Read miner metadata to infer daemon type
         const bandwidth = await readMinerBandwidth(client, config.packageId, config.minerStoreId, minerId, sender);
         if (bandwidth > 0n) {
           role = ROLE_RELAY;
           logger.info({ minerId, bandwidth: bandwidth.toString() }, 'Inferred relay daemon from bandwidth');
         } else {
-          role = ROLE_SIGNALING;
-          logger.info({ minerId, bandwidth: '0' }, 'Inferred signaling daemon from zero bandwidth');
+          const cpuCores = await readMinerCpuCores(client, config.packageId, config.minerStoreId, minerId, sender);
+          if (cpuCores > 0n) {
+            role = ROLE_SIGNALING;
+            logger.info({ minerId, cpuCores: cpuCores.toString() }, 'Inferred signaling daemon from cpu_cores > 0');
+          } else {
+            role = ROLE_VALIDATOR;
+            logger.info({ minerId }, 'Inferred validator daemon from bandwidth=0, cpu_cores=0');
+          }
         }
 
         logger.info(

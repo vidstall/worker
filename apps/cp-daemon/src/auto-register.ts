@@ -31,8 +31,12 @@ export async function ensureRegistered(
 
   logger.info('CP_CAP_ID not set — attempting auto-registration');
 
-  /** CP stake: 0.5 SUI (500_000_000 MIST). */
-  const CP_STAKE = 500_000_000n;
+  /**
+   * CP stake: 1.0 SUI (1_000_000_000 MIST).
+   * Dynamic CP threshold = base(0.5) + cp_count * step(0.1), so 1.0 SUI
+   * covers up to 5 existing CPs.
+   */
+  const CP_STAKE = 1_000_000_000n;
   /** Minimum stake for voting-mode registration (0.01 SUI). */
   const MIN_VOTING_STAKE = 10_000_000n;
 
