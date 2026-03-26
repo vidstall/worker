@@ -249,6 +249,7 @@ export async function submitSessionProof(
     arguments: [
       tx.object(config.networkRegistryId),     // &NetworkRegistry
       tx.object(escrowId),                      // &mut RoomEscrow (from EscrowCreated event)
+      tx.object(config.roomManagerId),          // &RoomManager (Phase 18: validator assignment check)
       tx.object(config.validatorRegistryId),   // &mut ValidatorRegistry
       tx.object(config.relayRegistryId),       // &mut RelayRegistry
       tx.pure.id(proof.roomId),                // room_id
