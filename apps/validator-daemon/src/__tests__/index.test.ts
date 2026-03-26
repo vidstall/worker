@@ -90,6 +90,8 @@ describe('Validator daemon', () => {
 
   const mockClient = {
     queryEvents: vi.fn().mockResolvedValue({ data: [], hasNextPage: false }),
+    signAndExecuteTransaction: vi.fn().mockResolvedValue({ digest: '0xmockdigest' }),
+    waitForTransaction: vi.fn().mockResolvedValue({}),
   };
 
   beforeEach(() => {
@@ -102,6 +104,7 @@ describe('Validator daemon', () => {
       address: sessionAddress,
     });
 
+    mockEventPollerStart.mockClear();
     mockEventPollerStart.mockResolvedValue(undefined);
     mockEventPollerStop.mockReturnValue(undefined);
 
@@ -221,6 +224,88 @@ describe('Validator daemon', () => {
 
     // But logProofSummary should have been called (proof logged, not submitted)
     expect(logProofSpy).toHaveBeenCalled();
+  });
+
+  it('RoomAssigned adds room when own validator ID is in validator_ids', async () => {
+    state = await startDaemon({
+      client: mockClient as any,
+      mainKeypair,
+      config: mockConfig,
+    });
+
+    // The room poller is the 3rd EventPoller started (validator, escrow, room)
+    const roomPollerCallback = mockEventPollerStart.mock.calls[2]?.[0];
+    expect(roomPollerCallback).toBeDefined();
+
+    const roomId = '0xroom-assigned-1';
+    // validatorMinerId === validatorCapId === '0xval-cap'
+    await roomPollerCallback({
+      type: '0xpkg::room_manager::RoomAssigned',
+      parsedJson: {
+        room_id: roomId,
+        relay_ids: ['0xrelay-abc'],
+        signaling_id: '0xsig1',
+        relay_mode: 0,
+        verified_score: '100',
+        consensus_reached: true,
+        winning_cp: '0xcp1',
+        validator_ids: ['0xval-cap', '0xother-val'],
+      },
+    });
+
+    expect(state.activeRooms.has(roomId)).toBe(true);
+    expect(state.activeRooms.get(roomId)?.relayMinerId).toBe('0xrelay-abc');
+  });
+
+  it('RoomAssigned ignores room when own validator ID is NOT in validator_ids', async () => {
+    state = await startDaemon({
+      client: mockClient as any,
+      mainKeypair,
+      config: mockConfig,
+    });
+
+    const roomPollerCallback = mockEventPollerStart.mock.calls[2]?.[0];
+    expect(roomPollerCallback).toBeDefined();
+
+    const roomId = '0xroom-ignored-1';
+    await roomPollerCallback({
+      type: '0xpkg::room_manager::RoomAssigned',
+      parsedJson: {
+        room_id: roomId,
+        relay_ids: ['0xrelay-abc'],
+        signaling_id: '0xsig1',
+        relay_mode: 0,
+        verified_score: '100',
+        consensus_reached: true,
+        winning_cp: '0xcp1',
+        validator_ids: ['0xother1', '0xother2'],
+      },
+    });
+
+    expect(state.activeRooms.has(roomId)).toBe(false);
+  });
+
+  it('RoomCreated does NOT auto-add rooms', async () => {
+    state = await startDaemon({
+      client: mockClient as any,
+      mainKeypair,
+      config: mockConfig,
+    });
+
+    const roomPollerCallback = mockEventPollerStart.mock.calls[2]?.[0];
+    expect(roomPollerCallback).toBeDefined();
+
+    const roomId = '0xroom-created-no-add';
+    await roomPollerCallback({
+      type: '0xpkg::room_manager::RoomCreated',
+      parsedJson: {
+        room_id: roomId,
+        creator: '0xcreator1',
+        relay_mode: 0,
+      },
+    });
+
+    expect(state.activeRooms.has(roomId)).toBe(false);
   });
 
   it('graceful shutdown stops measurement loop', async () => {

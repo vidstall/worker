@@ -248,13 +248,10 @@ export async function startDaemon(overrides?: {
     if (event.type.endsWith('::RoomCreated')) {
       const parsed = event.parsedJson as unknown as RoomCreated;
       if (parsed.room_id) {
-        // Add to active rooms for measurement cycling
-        if (!activeRooms.has(parsed.room_id)) {
-          activeRooms.set(parsed.room_id, {});
-        }
+        // Phase 18: Don't auto-add. Wait for RoomAssigned with our validator ID.
         log.info(
-          { roomId: parsed.room_id, creator: parsed.creator },
-          `RoomCreated -- room=${parsed.room_id} added to active measurement set`,
+          { roomId: parsed.room_id, creator: (parsed as any).creator },
+          `RoomCreated -- room=${parsed.room_id} (waiting for assignment)`,
         );
       }
     }
@@ -276,7 +273,10 @@ export async function startDaemon(overrides?: {
     if (event.type.endsWith('::RoomAssigned')) {
       const parsed = event.parsedJson as unknown as RoomAssigned;
       const relayId = parsed.relay_ids?.[0];
-      if (parsed.room_id && relayId) {
+      const validatorIds: string[] = parsed.validator_ids ?? [];
+
+      // Phase 18: Only track rooms where we are an assigned validator
+      if (parsed.room_id && relayId && validatorIds.includes(validatorMinerId)) {
         const room = activeRooms.get(parsed.room_id) ?? {};
         room.relayMinerId = relayId;
 
@@ -286,7 +286,12 @@ export async function startDaemon(overrides?: {
 
         log.info(
           { roomId: parsed.room_id, relayId },
-          `RoomAssigned -- room=${parsed.room_id}, relay=${relayId}`,
+          `RoomAssigned -- assigned to room=${parsed.room_id}, relay=${relayId}`,
+        );
+      } else if (parsed.room_id) {
+        log.debug(
+          { roomId: parsed.room_id, validatorIds, ownId: validatorMinerId },
+          `RoomAssigned -- not assigned to room=${parsed.room_id}, ignoring`,
         );
       }
     }
