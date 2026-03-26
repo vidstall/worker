@@ -288,8 +288,8 @@ describe('ensureRegistered', () => {
     expect(mockTx.moveCall).toHaveBeenCalledTimes(1);
     const args = moveCallArgs[0]!;
 
-    // Exactly 13 args
-    expect(args).toHaveLength(13);
+    // Exactly 12 args (ctx is injected by Move VM, not passed explicitly)
+    expect(args).toHaveLength(12);
 
     // Arg 7 (region) must use pure.vector('u8', ...) — not pure.u8
     const regionArg = args[7] as { kind: string; type: string };
