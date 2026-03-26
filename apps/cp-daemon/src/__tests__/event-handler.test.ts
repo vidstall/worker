@@ -2,8 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import type { SuiEvent } from '@mysten/sui/client';
 import type { RoomCreated } from '@dvconf/shared';
 import { handleEvent, createEventHandler, DEFAULT_WEIGHTS } from '../event-handler.js';
-import type { RelayCandidate } from '../scoring.js';
+import type { NodeCandidate } from '../scoring.js';
 import type { SignalingCandidate } from '../room-assignment.js';
+import { PVR_DEFAULT_HISTORY } from '../scoring.js';
 
 /** Create a mock Pino logger. */
 function mockLogger() {
@@ -46,7 +47,7 @@ function emptyPendingRooms(): Map<string, RoomCreated> {
 describe('handleEvent', () => {
   it('RelayRegistered adds relay to state', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
 
     const event = makeSuiEvent('RelayRegistered', {
       miner_id: 'relay-1',
@@ -66,7 +67,8 @@ describe('handleEvent', () => {
     expect(relay.region).toBe('1,2');
     expect(relay.rtt).toBe(0n);
     expect(relay.load).toBe(0n);
-    expect(relay.reputation).toBe(5_000n); // Default 50%
+    expect(relay.heartbeatAge).toBe(0n);
+    expect(relay.historyScore).toBe(PVR_DEFAULT_HISTORY);
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ minerId: 'relay-1' }),
       'Relay registered',
@@ -75,14 +77,15 @@ describe('handleEvent', () => {
 
   it('RelayLoadUpdated updates existing relay', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     relayState.set('relay-1', {
       minerId: 'relay-1',
-      reputation: 5_000n,
       rtt: 50n,
       load: 10n,
       stakeAmount: 1_000_000_000n,
+      heartbeatAge: 0n,
       region: 'us',
+      historyScore: PVR_DEFAULT_HISTORY,
     });
 
     const event = makeSuiEvent('RelayLoadUpdated', {
@@ -101,14 +104,15 @@ describe('handleEvent', () => {
 
   it('RelayRTTUpdated updates existing relay', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     relayState.set('relay-1', {
       minerId: 'relay-1',
-      reputation: 5_000n,
       rtt: 0n,
       load: 0n,
       stakeAmount: 1_000_000_000n,
+      heartbeatAge: 0n,
       region: 'us',
+      historyScore: PVR_DEFAULT_HISTORY,
     });
 
     const event = makeSuiEvent('RelayRTTUpdated', {
@@ -127,7 +131,7 @@ describe('handleEvent', () => {
 
   it('SignalingRegistered adds signaling node to state', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     const signalingState = new Map<string, SignalingCandidate>();
 
     const event = makeSuiEvent('SignalingRegistered', {
@@ -149,7 +153,7 @@ describe('handleEvent', () => {
 
   it('SignalingLoadUpdated updates existing signaling node', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     const signalingState = new Map<string, SignalingCandidate>();
     signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: '1' });
 
@@ -165,17 +169,18 @@ describe('handleEvent', () => {
 
   it('RoomCreated stores room in pendingRooms (no immediate assignment)', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     const signalingState = new Map<string, SignalingCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
     relayState.set('relay-good', {
       minerId: 'relay-good',
-      reputation: 9_000n,
       rtt: 20n,
       load: 5n,
       stakeAmount: 8_000_000_000n,
+      heartbeatAge: 0n,
       region: 'us',
+      historyScore: PVR_DEFAULT_HISTORY,
     });
     signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: 'us' });
 
@@ -202,17 +207,18 @@ describe('handleEvent', () => {
 
   it('EscrowCreated triggers scoring and assignment (no TX context)', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     const signalingState = new Map<string, SignalingCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
     relayState.set('relay-good', {
       minerId: 'relay-good',
-      reputation: 9_000n,
       rtt: 20n,
       load: 5n,
       stakeAmount: 8_000_000_000n,
+      heartbeatAge: 0n,
       region: 'us',
+      historyScore: PVR_DEFAULT_HISTORY,
     });
     signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: 'us' });
 
@@ -252,7 +258,7 @@ describe('handleEvent', () => {
 
   it('EscrowCreated for unknown room warns', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     const signalingState = new Map<string, SignalingCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
@@ -273,17 +279,18 @@ describe('handleEvent', () => {
 
   it('EscrowCreated with no signaling nodes warns', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     const signalingState = new Map<string, SignalingCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
     relayState.set('relay-1', {
       minerId: 'relay-1',
-      reputation: 5_000n,
       rtt: 0n,
       load: 0n,
       stakeAmount: 1_000_000_000n,
+      heartbeatAge: 0n,
       region: 'us',
+      historyScore: PVR_DEFAULT_HISTORY,
     });
 
     // RoomCreated first
@@ -311,7 +318,7 @@ describe('handleEvent', () => {
 
   it('unknown event type is logged and skipped', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
 
     const event = makeSuiEvent('SomeFutureEvent', { data: 'test' });
 
@@ -326,7 +333,7 @@ describe('handleEvent', () => {
 
   it('events for unknown relays are handled gracefully', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
 
     // Load update for a relay not in state
     const loadEvent = makeSuiEvent('RelayLoadUpdated', {
@@ -353,7 +360,7 @@ describe('handleEvent', () => {
 
   it('EscrowCreated with no relays logs info instead of scoring', () => {
     const logger = mockLogger();
-    const relayState = new Map<string, RelayCandidate>();
+    const relayState = new Map<string, NodeCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
     // RoomCreated first

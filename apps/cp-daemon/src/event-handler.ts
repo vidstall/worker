@@ -29,10 +29,12 @@ import type {
 } from '@dvconf/shared';
 import { MinerRole } from '@dvconf/shared';
 import {
-  scoreRelays,
-  scoreValidators,
-  type RelayCandidate,
-  type ValidatorCandidate,
+  computeNodeScore,
+  computePairingScore,
+  canonicalSort,
+  PVR_WEIGHTS,
+  PVR_DEFAULT_HISTORY,
+  type NodeCandidate,
   type ScoringWeights,
 } from './scoring.js';
 import {
@@ -44,14 +46,8 @@ import {
 } from './room-assignment.js';
 import { clearVotedMiner, trackUnassignedMiner } from './role-voter.js';
 
-/** Default scoring weights (sum = 10_000). */
-export const DEFAULT_WEIGHTS: ScoringWeights = {
-  reputation: 3_000n,
-  rtt: 2_500n,
-  load: 2_000n,
-  stake: 1_500n,
-  regionMatch: 1_000n,
-};
+/** Default scoring weights — re-exported from scoring.ts for convenience. */
+export const DEFAULT_WEIGHTS: ScoringWeights = PVR_WEIGHTS;
 
 /**
  * Maps event type suffix to a known handler.
@@ -71,7 +67,7 @@ function extractEventName(eventType: string): string {
  */
 export function handleEvent(
   event: SuiEvent,
-  relayState: Map<string, RelayCandidate>,
+  relayState: Map<string, NodeCandidate>,
   signalingState: Map<string, SignalingCandidate>,
   pendingRooms: Map<string, RoomCreated>,
   logger: Logger,
@@ -83,7 +79,7 @@ export function handleEvent(
     cpCapId: string;
   },
   pendingEscrows?: Map<string, EscrowCreated>,
-  validatorState?: Map<string, ValidatorCandidate>,
+  validatorState?: Map<string, NodeCandidate>,
 ): void {
   const eventName = extractEventName(event.type);
   const data = event.parsedJson as Record<string, unknown>;
@@ -94,13 +90,14 @@ export function handleEvent(
       const regionStr = Array.isArray(e.region)
         ? e.region.map((n) => String(n)).join(',')
         : '';
-      const candidate: RelayCandidate = {
+      const candidate: NodeCandidate = {
         minerId: e.miner_id,
-        reputation: 5_000n, // Default starting reputation (50%)
         rtt: 0n, // Unknown until validator probes
         load: 0n, // No load at registration
         stakeAmount: BigInt(e.stake_amount),
+        heartbeatAge: 0n, // Assume fresh at registration
         region: regionStr,
+        historyScore: PVR_DEFAULT_HISTORY,
       };
       relayState.set(e.miner_id, candidate);
       logger.info({ minerId: e.miner_id, region: regionStr }, 'Relay registered');
@@ -148,11 +145,14 @@ export function handleEvent(
     case 'ValidatorRegistered': {
       const e = data as unknown as ValidatorRegistered;
       if (validatorState) {
-        const candidate: ValidatorCandidate = {
+        const candidate: NodeCandidate = {
           minerId: e.miner_id,
-          reputation: 5_000n, // Default starting reputation (50%)
+          rtt: 0n,
+          load: 0n,
           stakeAmount: BigInt(e.stake_amount),
+          heartbeatAge: 0n, // Assume fresh at registration
           region: '', // Validators don't have region in event
+          historyScore: PVR_DEFAULT_HISTORY,
         };
         validatorState.set(e.miner_id, candidate);
         logger.info({ minerId: e.miner_id }, 'Validator registered');
@@ -230,7 +230,7 @@ export function handleEvent(
         break;
       }
 
-      // Score all known relays for this room
+      // Score all known relays for this room using PVR scoring
       const relays = Array.from(relayState.values());
       if (relays.length === 0) {
         logger.info({ roomId: e.room_id }, 'No relays available — deferring assignment');
@@ -243,9 +243,11 @@ export function handleEvent(
       const roomMode: 'sfu' | 'mcu' = roomData.relay_mode === 1 ? 'mcu' : 'sfu';
 
       // Use empty string as target region (room does not specify region)
-      // MCU-05: Pass roomMode to scoring for 2x load penalty
-      const ranked = scoreRelays(relays, weights, '', roomMode);
-      const topRelay = ranked[0];
+      const targetRegion = '';
+
+      // Canonical sort relays by PVR score
+      const rankedRelays = canonicalSort(relays, targetRegion, weights);
+      const topRelay = rankedRelays[0];
       if (!topRelay) {
         logger.warn({ roomId: e.room_id }, 'Scoring returned no results');
         pendingRooms.set(e.room_id, roomData);
@@ -262,9 +264,9 @@ export function handleEvent(
         break;
       }
 
-      // PAIR-02: Score and select validators
+      // PAIR-02: Score and select validators via PVR canonicalSort
       const validators = validatorState ? Array.from(validatorState.values()) : [];
-      const rankedValidators = scoreValidators(validators, weights, '');
+      const rankedValidators = canonicalSort(validators, targetRegion, weights);
 
       // Select top validators (at least 1 if available)
       const topValidatorIds = rankedValidators
@@ -272,9 +274,21 @@ export function handleEvent(
         .map(v => v.minerId);
 
       // Get relay IDs for proposal (top 2 relays or all if fewer)
-      const topRelayIds = ranked
-        .slice(0, Math.max(1, Math.min(2, ranked.length)))
+      const topRelayIds = rankedRelays
+        .slice(0, Math.max(1, Math.min(2, rankedRelays.length)))
         .map(r => r.minerId);
+
+      // Compute individual node scores for submittedScore
+      const nodeScores: bigint[] = [];
+      for (const id of topRelayIds) {
+        const node = relayState.get(id);
+        if (node) nodeScores.push(computeNodeScore(node, targetRegion, weights));
+      }
+      for (const id of topValidatorIds) {
+        const node = validatorState?.get(id);
+        if (node) nodeScores.push(computeNodeScore(node, targetRegion, weights));
+      }
+      const submittedScore = computePairingScore(nodeScores);
 
       logger.info(
         {
@@ -282,10 +296,11 @@ export function handleEvent(
           roomMode,
           relayCount: relays.length,
           topRelays: topRelayIds,
-          topRelayScore: topRelay.score.toString(),
+          topRelayScore: computeNodeScore(topRelay, targetRegion, weights).toString(),
           validatorCount: validators.length,
           topValidators: topValidatorIds,
           signalingMinerId,
+          submittedScore: submittedScore.toString(),
         },
         'Room proposal: submitting TX',
       );
@@ -301,6 +316,7 @@ export function handleEvent(
           topRelayIds,
           topValidatorIds,
           signalingMinerId,
+          submittedScore,
           logger,
         ).then(() => {
           logger.info(
@@ -374,15 +390,15 @@ export function createEventHandler(
   },
 ): {
   handler: (event: SuiEvent) => Promise<void>;
-  relayState: Map<string, RelayCandidate>;
+  relayState: Map<string, NodeCandidate>;
   signalingState: Map<string, SignalingCandidate>;
-  validatorState: Map<string, ValidatorCandidate>;
+  validatorState: Map<string, NodeCandidate>;
   pendingRooms: Map<string, RoomCreated>;
   pendingEscrows: Map<string, EscrowCreated>;
 } {
-  const relayState = new Map<string, RelayCandidate>();
+  const relayState = new Map<string, NodeCandidate>();
   const signalingState = new Map<string, SignalingCandidate>();
-  const validatorState = new Map<string, ValidatorCandidate>();
+  const validatorState = new Map<string, NodeCandidate>();
   const pendingRooms = new Map<string, RoomCreated>();
   const pendingEscrows = new Map<string, EscrowCreated>();
 

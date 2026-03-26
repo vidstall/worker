@@ -66,6 +66,7 @@ export async function submitProposal(
   relayMinerIds: string[],
   validatorMinerIds: string[],
   signalingMinerId: string,
+  submittedScore: bigint,
   logger: Logger,
 ): Promise<void> {
   // PAIR-03: Skip rooms already voted on
@@ -96,6 +97,7 @@ export async function submitProposal(
           relayVec,                                   // relay_ids: vector<ID>
           validatorVec,                               // validator_ids: vector<ID>
           tx.pure.id(signalingMinerId),              // signaling_id: ID
+          tx.pure.u64(Number(submittedScore)),          // submitted_score: u64
         ],
       });
     },
