@@ -238,7 +238,8 @@ describe('Validator daemon', () => {
     expect(roomPollerCallback).toBeDefined();
 
     const roomId = '0xroom-assigned-1';
-    // validatorMinerId === validatorCapId === '0xval-cap'
+    // validatorMinerId === mainAddress (wallet address, not cap ID)
+    const mainAddress = mainKeypair.getPublicKey().toSuiAddress();
     await roomPollerCallback({
       type: '0xpkg::room_manager::RoomAssigned',
       parsedJson: {
@@ -249,7 +250,7 @@ describe('Validator daemon', () => {
         verified_score: '100',
         consensus_reached: true,
         winning_cp: '0xcp1',
-        validator_ids: ['0xval-cap', '0xother-val'],
+        validator_ids: [mainAddress, '0xother-val'],
       },
     });
 

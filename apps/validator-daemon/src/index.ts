@@ -158,7 +158,8 @@ export async function startDaemon(overrides?: {
 
   // Read measurement config from env
   const measurementIntervalMs = parseInt(process.env['MEASUREMENT_INTERVAL_MS'] ?? '60000', 10);
-  const validatorMinerId = validatorCapId;
+  // Miner ID = object::id_from_address(sender) on-chain, which equals the wallet address
+  const validatorMinerId = mainAddress;
   const pollIntervalMs = 10_000;
 
   // Start periodic measurement loop -- cycles through all active rooms
