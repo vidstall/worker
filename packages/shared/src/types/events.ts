@@ -119,6 +119,11 @@ export interface RoomAssigned {
   room_id: string;
   relay_ids: string[];
   signaling_id: string;
+  relay_mode: number;
+  verified_score: string;
+  consensus_reached: boolean;
+  winning_cp: string;
+  validator_ids: string[];
 }
 
 export interface RoomClosed {
