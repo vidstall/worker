@@ -15,14 +15,19 @@
     "dev:client": "pnpm --filter @dvconf/client dev",
     "typecheck": "pnpm -r exec tsc --noEmit",
     "load-test": "tsx scripts/load-test.ts",
-    "smoke-test": "tsx scripts/smoke-test.ts"
+    "smoke-test": "tsx scripts/smoke-test.ts",
+    "stress:smoke": "tsx scripts/stress/signaling-stress.ts --scenario smoke --peers 3 --duration 10",
+    "stress:s1": "tsx scripts/stress/signaling-stress.ts --scenario s1",
+    "stress:s3": "tsx scripts/stress/signaling-stress.ts --scenario s3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.0.0",
+    "@types/ws": "^8.18.1",
     "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
     "typescript": "^5.5.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "ws": "^8.20.1"
   },
   "engines": {
     "node": ">=20.0.0"
