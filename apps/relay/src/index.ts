@@ -24,6 +24,7 @@ import { createMediasoupManager } from './mediasoup-manager.js';
 import { createSignalingServer } from './signaling.js';
 import { MetricsTracker } from './metrics.js';
 import { startMetricsServer } from './metrics-server.js';
+import { closeRelayProbe } from './room-handler.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -129,6 +130,7 @@ if (isMainModule) {
     const chainShutdown = () => {
       logger.info('Shutting down relay daemon...');
       stopHeartbeat();
+      closeRelayProbe();
       metricsServer.close();
       manager.close();
       wss.close(() => {

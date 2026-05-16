@@ -19,6 +19,7 @@ import {
   notifyNewProducer,
   createConsumer,
   removePeer,
+  ensureRelayProbe,
 } from './room-handler.js';
 import { McuPipeline } from './mcu-pipeline.js';
 
@@ -199,6 +200,7 @@ export function createSignalingServer(
       recvTransport: null,
       producers: [],
       consumers: [],
+      samplerStops: new Map(),
     };
     room.peers.set(peerId, peer);
     wsToRoom.set(ws, { roomId, peerId });
@@ -252,6 +254,18 @@ export function createSignalingServer(
       peer.sendTransport = transport;
     } else {
       peer.recvTransport = transport;
+    }
+
+    // S23.1.A1: start a latency-probe sampler on this transport when
+    // BENCH_LATENCY=1. Probe is null otherwise — zero-cost branch.
+    const probe = ensureRelayProbe(logger);
+    if (probe !== null) {
+      const stop = probe.startSampler(transport, {
+        roomId: mapping.roomId,
+        peerId: mapping.peerId,
+        transportId: transport.id,
+      });
+      peer.samplerStops.set(transport.id, stop);
     }
 
     sendJson(ws, {

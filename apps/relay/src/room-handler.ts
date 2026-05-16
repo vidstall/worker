@@ -15,6 +15,7 @@ import type { types as msTypes } from 'mediasoup';
 import type { WebSocket } from 'ws';
 import type { Logger } from '@dvconf/shared';
 import { McuPipeline } from './mcu-pipeline.js';
+import { createRelayLatencyProbe, type RelayLatencyProbe } from './latency-probe.js';
 
 export interface RoomState {
   roomId: string;
@@ -31,6 +32,39 @@ export interface PeerState {
   recvTransport: msTypes.WebRtcTransport | null;
   producers: msTypes.Producer[];
   consumers: msTypes.Consumer[];
+  /**
+   * Per-transport latency-probe sampler stop fns (S23.1.A1, BENCH_LATENCY=1 only).
+   * Keyed by `transport.id`; called from `removePeer` before transport.close().
+   * Empty Map when `BENCH_LATENCY` is unset (probe singleton returns null).
+   */
+  samplerStops: Map<string, () => void>;
+}
+
+let cachedProbe: RelayLatencyProbe | null = null;
+let probeInitialized = false;
+
+/**
+ * Module-singleton accessor for the relay latency probe. Off-by-default —
+ * returns `null` unless `BENCH_LATENCY=1`. Follows the cp-daemon
+ * `latency-probe.ts` pattern (`ensureWriter` + `closeCpScoreProbe`).
+ */
+export function ensureRelayProbe(logger: Logger): RelayLatencyProbe | null {
+  if (probeInitialized) return cachedProbe;
+  probeInitialized = true;
+  cachedProbe = createRelayLatencyProbe(
+    process.env['RELAY_INSTANCE'] ?? 'relay-default',
+    logger,
+  );
+  return cachedProbe;
+}
+
+/** Close the probe writer at daemon shutdown. Idempotent. */
+export function closeRelayProbe(): void {
+  if (cachedProbe !== null) {
+    cachedProbe.close();
+    cachedProbe = null;
+    probeInitialized = false;
+  }
 }
 
 /** Send a JSON message to a WebSocket peer. */
@@ -174,6 +208,13 @@ export async function removePeer(room: RoomState, peerId: string, logger: Logger
   if (room.mode === 'mcu' && room.mcuPipeline && !room.mcuPipeline.sfuFallback) {
     await room.mcuPipeline.removeStream(peerId);
   }
+
+  // Stop any active latency-probe samplers before closing transports
+  // (S23.1.A1) to avoid getStats() on a closed transport.
+  for (const stop of peer.samplerStops.values()) {
+    stop();
+  }
+  peer.samplerStops.clear();
 
   // Close all consumers
   for (const consumer of peer.consumers) {

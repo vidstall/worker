@@ -17,13 +17,44 @@ import {
   loadKeypair,
   createLogger,
   SIGNALING_SESSION_REWARD,
+  type Logger,
 } from '@dvconf/shared';
 import { RoomManager, getSessionsRouted } from './rooms.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
+import {
+  createSignalingLatencyProbe,
+  type SignalingLatencyProbe,
+} from './latency-probe.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
+
+let cachedProbe: SignalingLatencyProbe | null = null;
+let probeInitialized = false;
+
+/**
+ * Module-singleton accessor for the signaling latency probe (S23.1.A2).
+ * Off-by-default: returns null unless `BENCH_LATENCY=1`. Mirrors cp-daemon +
+ * relay `latency-probe.ts` singleton pattern.
+ */
+function ensureSignalingProbe(log: Logger): SignalingLatencyProbe | null {
+  if (probeInitialized) return cachedProbe;
+  probeInitialized = true;
+  cachedProbe = createSignalingLatencyProbe(
+    process.env['SIGNALING_INSTANCE'] ?? 'signaling-default',
+    log,
+  );
+  return cachedProbe;
+}
+
+function closeSignalingProbe(): void {
+  if (cachedProbe !== null) {
+    cachedProbe.close();
+    cachedProbe = null;
+    probeInitialized = false;
+  }
+}
 
 const PORT = parseInt(process.env['SIGNALING_PORT'] ?? '8080', 10);
 
@@ -95,6 +126,11 @@ export function createServer(port: number = PORT): WebSocketServer {
 
     // Send the assigned peer ID to the client
     ws.send(JSON.stringify({ type: 'welcome', peerId }));
+
+    // S23.1.A2: attach bench-ping/bench-pong latency probe when BENCH_LATENCY=1.
+    // The probe is null otherwise — zero-cost branch.
+    const probe = ensureSignalingProbe(logger);
+    const detachProbe = probe !== null ? probe.attach(ws, peerId) : null;
 
     logger.info({ peerId, ip }, 'Peer connected');
 
@@ -173,6 +209,8 @@ export function createServer(port: number = PORT): WebSocketServer {
     });
 
     ws.on('close', () => {
+      // Stop bench-ping probe before clearing peer state (S23.1.A2)
+      if (detachProbe !== null) detachProbe();
       roomManager.leave(ws);
       peerSockets.delete(peerId);
       // Decrement IP connection count
@@ -280,6 +318,7 @@ if (isMainModule) {
       logger.info('Shutting down signaling daemon...');
       clearInterval(rewardLogHandle);
       stopHeartbeat();
+      closeSignalingProbe();
       shutdown(wss);
     };
 

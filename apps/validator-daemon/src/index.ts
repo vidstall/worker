@@ -41,6 +41,7 @@ import {
   submitSessionProof,
 } from './session-proof.js';
 import { waitForProofs, triggerDistribution } from './reward-trigger.js';
+import { timedMeasureRoom, closeValidatorProbe } from './latency-probe.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -381,7 +382,13 @@ async function runMeasurementCycle(
 
   for (const roomId of roomIds) {
     try {
-      await measureRoom(state, roomId, validatorMinerId, log);
+      // S23.1.A3: wrap measureRoom with `L_validator_check` timer.
+      // Pass-through when BENCH_LATENCY is unset (no allocation in hot path).
+      await timedMeasureRoom(
+        roomId,
+        () => state.activeRooms.get(roomId)?.relayMinerId ?? null,
+        () => measureRoom(state, roomId, validatorMinerId, log),
+      );
     } catch (err) {
       log.error({ err, roomId }, `Measurement cycle failed for room=${roomId}`);
     }
@@ -482,6 +489,9 @@ async function measureRoom(
 export function stopDaemon(state: DaemonState, log?: Logger): void {
   const l = log ?? logger;
   state.running = false;
+
+  // Close latency-probe writer (S23.1.A3, no-op when BENCH_LATENCY unset)
+  closeValidatorProbe();
 
   if (state.measurementTimer) {
     clearInterval(state.measurementTimer);
