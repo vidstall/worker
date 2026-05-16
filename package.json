@@ -19,6 +19,8 @@
     "stress:smoke": "tsx scripts/stress/signaling-stress.ts --scenario smoke --peers 3 --duration 10",
     "stress:s1": "tsx scripts/stress/signaling-stress.ts --scenario s1",
     "stress:s3": "tsx scripts/stress/signaling-stress.ts --scenario s3",
+    "bench:replay": "tsx scripts/bench/replay.ts",
+    "bench:harness": "tsx scripts/bench/mediasoup-client-harness.ts",
     "forensic": "tsx apps/forensic-cli/src/index.ts",
     "forensic:smoke": "tsx apps/forensic-cli/src/index.ts smoke",
     "forensic:collect": "tsx apps/forensic-cli/src/index.ts collect",
@@ -26,8 +28,10 @@
     "failover:smoke": "tsx scripts/failover/failover-smoke.ts"
   },
   "devDependencies": {
+    "@roamhq/wrtc": "^0.10.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "mediasoup-client": "^3.20.0",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0",

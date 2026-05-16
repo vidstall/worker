@@ -26,6 +26,10 @@ import {
   createSignalingLatencyProbe,
   type SignalingLatencyProbe,
 } from './latency-probe.js';
+import {
+  ensureBenchHttpServer,
+  closeBenchHttpServer,
+} from './bench-endpoint.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
@@ -291,6 +295,20 @@ if (isMainModule) {
       'Signaling daemon started — chain-aware mode',
     );
 
+    // S23.2.C2: optional /bench/event HTTP receiver for external clients
+    // (Node mediasoup-client harness + future browser RTCStats collector).
+    // Off-by-default — only listens when BENCH_LATENCY=1.
+    const benchHandle = ensureBenchHttpServer(logger);
+    if (benchHandle !== null) {
+      const benchPort = parseInt(process.env['BENCH_PORT'] ?? '8081', 10);
+      benchHandle.server.listen(benchPort, () => {
+        logger.info(
+          { benchPort, path: '/bench/event' },
+          'Bench HTTP endpoint listening',
+        );
+      });
+    }
+
     // Step 4: Periodic reward eligibility logging (economic tracking)
     // Reports sessions routed for off-chain reward eligibility tracking.
     // On-chain reward claims are deferred to Phase 14+.
@@ -319,6 +337,7 @@ if (isMainModule) {
       clearInterval(rewardLogHandle);
       stopHeartbeat();
       closeSignalingProbe();
+      closeBenchHttpServer();
       shutdown(wss);
     };
 
