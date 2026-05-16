@@ -31,12 +31,12 @@ import { MinerRole } from '@dvconf/shared';
 import {
   computeNodeScore,
   computePairingScore,
-  canonicalSort,
   PVR_WEIGHTS,
   PVR_DEFAULT_HISTORY,
   type NodeCandidate,
   type ScoringWeights,
 } from './scoring.js';
+import { timedCanonicalSort } from './latency-probe.js';
 import {
   submitProposal,
   pickSignalingNode,
@@ -245,8 +245,8 @@ export function handleEvent(
       // Use empty string as target region (room does not specify region)
       const targetRegion = '';
 
-      // Canonical sort relays by PVR score
-      const rankedRelays = canonicalSort(relays, targetRegion, weights);
+      // Canonical sort relays by PVR score (timed when BENCH_LATENCY=1)
+      const rankedRelays = timedCanonicalSort(relays, targetRegion, weights);
       const topRelay = rankedRelays[0];
       if (!topRelay) {
         logger.warn({ roomId: e.room_id }, 'Scoring returned no results');
@@ -264,9 +264,9 @@ export function handleEvent(
         break;
       }
 
-      // PAIR-02: Score and select validators via PVR canonicalSort
+      // PAIR-02: Score and select validators via PVR canonicalSort (timed when BENCH_LATENCY=1)
       const validators = validatorState ? Array.from(validatorState.values()) : [];
-      const rankedValidators = canonicalSort(validators, targetRegion, weights);
+      const rankedValidators = timedCanonicalSort(validators, targetRegion, weights);
 
       // Select top validators (at least 1 if available)
       const topValidatorIds = rankedValidators

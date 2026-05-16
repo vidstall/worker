@@ -69,3 +69,23 @@ export { waitForRoleAssignment, applyVotedRole } from './chain/role-assignment.j
 // Logger
 export { createLogger } from './logger.js';
 export type { Logger } from './logger.js';
+
+// Bench harness (Task #26)
+export {
+  LATENCY_EVENT_SCHEMA_VERSION,
+  LatencyWriter,
+  appendLatencyEvent,
+  isBenchEnabled,
+  resolveTraceId,
+  resolveScenario,
+  timeAsync,
+  timeSync,
+  startSampler,
+} from './bench/index.js';
+export type {
+  LatencyEvent,
+  LatencyMetric,
+  LatencyScenario,
+  LatencySource,
+  LatencyWriterOptions,
+} from './bench/index.js';
