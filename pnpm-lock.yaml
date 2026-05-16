@@ -42,6 +42,15 @@ importers:
         specifier: ^16.0.0
         version: 16.6.1
 
+  apps/forensic-cli:
+    dependencies:
+      '@dvconf/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@mysten/sui':
+        specifier: ^1.0.0
+        version: 1.45.2(typescript@5.9.3)
+
   apps/relay:
     dependencies:
       '@dvconf/shared':

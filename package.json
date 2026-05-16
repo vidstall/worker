@@ -18,7 +18,11 @@
     "smoke-test": "tsx scripts/smoke-test.ts",
     "stress:smoke": "tsx scripts/stress/signaling-stress.ts --scenario smoke --peers 3 --duration 10",
     "stress:s1": "tsx scripts/stress/signaling-stress.ts --scenario s1",
-    "stress:s3": "tsx scripts/stress/signaling-stress.ts --scenario s3"
+    "stress:s3": "tsx scripts/stress/signaling-stress.ts --scenario s3",
+    "forensic": "tsx apps/forensic-cli/src/index.ts",
+    "forensic:smoke": "tsx apps/forensic-cli/src/index.ts smoke",
+    "forensic:collect": "tsx apps/forensic-cli/src/index.ts collect",
+    "forensic:report": "tsx apps/forensic-cli/src/index.ts report"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
