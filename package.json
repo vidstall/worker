@@ -22,7 +22,8 @@
     "forensic": "tsx apps/forensic-cli/src/index.ts",
     "forensic:smoke": "tsx apps/forensic-cli/src/index.ts smoke",
     "forensic:collect": "tsx apps/forensic-cli/src/index.ts collect",
-    "forensic:report": "tsx apps/forensic-cli/src/index.ts report"
+    "forensic:report": "tsx apps/forensic-cli/src/index.ts report",
+    "failover:smoke": "tsx scripts/failover/failover-smoke.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
