@@ -31,8 +31,10 @@ import {
   startConsumerPoller,
   parseArgs,
   peerLabel,
+  buildIceServers,
   RelayClient,
   CAPTURE_ENCODE_RENDER_MS,
+  DEFAULT_STUN_URL,
   type RelayMessage,
   type WsLike,
 } from '../mediasoup-client-harness.js';
@@ -303,6 +305,7 @@ describe('parseArgs', () => {
       roomId: 'room-x',
       durationMs: 10_000,
       peers: 2,
+      iceMode: 'none',
     });
   });
 
@@ -340,6 +343,73 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['node', 'harness.ts', '--peers', 'four'])).toThrow(
       /peers/,
     );
+  });
+
+  // S28.B.1 — --ice-mode flag (Phase I prep for internet-benchmark-plan)
+  it('defaults --ice-mode to "none"', () => {
+    const args = parseArgs(['node', 'harness.ts']);
+    expect(args.iceMode).toBe('none');
+  });
+
+  it('honours --ice-mode stun', () => {
+    const args = parseArgs(['node', 'harness.ts', '--ice-mode', 'stun']);
+    expect(args.iceMode).toBe('stun');
+  });
+
+  it('honours --ice-mode turn', () => {
+    const args = parseArgs(['node', 'harness.ts', '--ice-mode', 'turn']);
+    expect(args.iceMode).toBe('turn');
+  });
+
+  it('rejects unknown --ice-mode values', () => {
+    expect(() =>
+      parseArgs(['node', 'harness.ts', '--ice-mode', 'mesh']),
+    ).toThrow(/ice-mode/);
+  });
+});
+
+// ── buildIceServers (S28.B.1 — Phase I prep) ─────────────────────────
+
+describe('buildIceServers', () => {
+  it('returns empty array for ice-mode "none"', () => {
+    expect(buildIceServers('none')).toEqual([]);
+  });
+
+  it('returns public Google STUN for ice-mode "stun"', () => {
+    const servers = buildIceServers('stun');
+    expect(servers).toEqual([{ urls: [DEFAULT_STUN_URL] }]);
+  });
+
+  it('exposes the default STUN URL as the canonical public-internet probe', () => {
+    expect(DEFAULT_STUN_URL).toBe('stun:stun.l.google.com:19302');
+  });
+
+  it('returns STUN + TURN for ice-mode "turn" with env-supplied config', () => {
+    const servers = buildIceServers('turn', {
+      turnUrl: 'turn:relay.example.com:3478?transport=udp',
+      turnUsername: '1737000000:alice',
+      turnCredential: 'base64hmac==',
+    });
+    expect(servers).toEqual([
+      { urls: [DEFAULT_STUN_URL] },
+      {
+        urls: ['turn:relay.example.com:3478?transport=udp'],
+        username: '1737000000:alice',
+        credential: 'base64hmac==',
+      },
+    ]);
+  });
+
+  it('throws on ice-mode "turn" when TURN env config is missing', () => {
+    expect(() => buildIceServers('turn')).toThrow(/BENCH_TURN_URL/);
+  });
+
+  it('throws on ice-mode "turn" when only URL is supplied (no creds)', () => {
+    expect(() =>
+      buildIceServers('turn', {
+        turnUrl: 'turn:relay.example.com:3478',
+      }),
+    ).toThrow(/BENCH_TURN_USERNAME|BENCH_TURN_CREDENTIAL/);
   });
 });
 

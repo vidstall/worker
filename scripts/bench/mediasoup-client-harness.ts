@@ -325,11 +325,78 @@ const DEFAULT_DURATION_S = 60;
 const DEFAULT_PEERS = 2;
 const MAX_PEERS = 26; // letter-based peer IDs (A..Z)
 
+/**
+ * Public Google STUN endpoint — the canonical free probe used by browsers
+ * + reference clients to learn server-reflexive candidates. Selected over
+ * Mozilla/Cloudflare because Google's anycast has the lowest RTT from APAC
+ * and is the de-facto example in WebRTC docs ([[ch2-01-webrtc-primer]] § ICE).
+ */
+export const DEFAULT_STUN_URL = 'stun:stun.l.google.com:19302';
+
+export type IceMode = 'none' | 'stun' | 'turn';
+const VALID_ICE_MODES: readonly IceMode[] = ['none', 'stun', 'turn'];
+
 export interface CliArgs {
   relayUrl: string;
   roomId: string;
   durationMs: number;
   peers: number;
+  iceMode: IceMode;
+}
+
+/**
+ * Build a mediasoup-compatible `iceServers` array for the chosen network
+ * mode. Phase I of [[internet-benchmark-plan]] threads STUN-only through
+ * the harness so the pipeline survives real NAT without TURN deployment;
+ * Phase II adds TURN once ADR-0005 credential issuance is wired.
+ *
+ * - `none` (default) → `[]`, the pre-S28 localhost behaviour. ICE uses
+ *   host candidates only; works on loopback + LAN.
+ * - `stun` → `[{ urls: [DEFAULT_STUN_URL] }]`. Adds srflx candidates so
+ *   peers behind cone NATs can connect directly.
+ * - `turn` → `[stun, turn]`. Last-resort relay path for symmetric NAT or
+ *   UDP-blocked firewalls. TURN config is env-driven, not flag-driven,
+ *   because credentials are short-lived secrets (ADR-0005 § TTL = 20 min).
+ *
+ * Note: this helper validates env presence but does NOT verify the
+ * HMAC-SHA1 signature against coturn's `static-auth-secret`. That contract
+ * is exercised end-to-end in S30 Phase II once `cp-daemon/turn-issuer.ts`
+ * is wired.
+ */
+export interface BuildIceServersOpts {
+  turnUrl?: string;
+  turnUsername?: string;
+  turnCredential?: string;
+}
+
+export function buildIceServers(
+  mode: IceMode,
+  opts: BuildIceServersOpts = {},
+): Array<{ urls: string[]; username?: string; credential?: string }> {
+  if (mode === 'none') return [];
+  const stun = { urls: [DEFAULT_STUN_URL] };
+  if (mode === 'stun') return [stun];
+  // mode === 'turn'
+  const { turnUrl, turnUsername, turnCredential } = opts;
+  if (turnUrl === undefined || turnUrl === '') {
+    throw new Error(
+      '--ice-mode turn requires BENCH_TURN_URL env (e.g. turn:relay.example.com:3478?transport=udp)',
+    );
+  }
+  if (turnUsername === undefined || turnUsername === '') {
+    throw new Error(
+      '--ice-mode turn requires BENCH_TURN_USERNAME env (HMAC-SHA1 username, typically "<unix-ts>:<userId>")',
+    );
+  }
+  if (turnCredential === undefined || turnCredential === '') {
+    throw new Error(
+      '--ice-mode turn requires BENCH_TURN_CREDENTIAL env (base64-encoded HMAC-SHA1 of username with static-auth-secret)',
+    );
+  }
+  return [
+    stun,
+    { urls: [turnUrl], username: turnUsername, credential: turnCredential },
+  ];
 }
 
 export function parseArgs(argv: readonly string[]): CliArgs {
@@ -338,6 +405,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   let roomId = `bench-${Date.now()}`;
   let durationMs = DEFAULT_DURATION_S * 1000;
   let peers = DEFAULT_PEERS;
+  let iceMode: IceMode = 'none';
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--relay-url') {
@@ -359,9 +427,20 @@ export function parseArgs(argv: readonly string[]): CliArgs {
           );
         }
       }
+    } else if (a === '--ice-mode') {
+      const m = args[++i];
+      if (m !== undefined) {
+        if ((VALID_ICE_MODES as readonly string[]).includes(m)) {
+          iceMode = m as IceMode;
+        } else {
+          throw new Error(
+            `--ice-mode must be one of ${VALID_ICE_MODES.join('|')}, got ${m}`,
+          );
+        }
+      }
     }
   }
-  return { relayUrl, roomId, durationMs, peers };
+  return { relayUrl, roomId, durationMs, peers, iceMode };
 }
 
 /** Map peer index (0-based) to a stable label: A..Z. */
@@ -485,6 +564,12 @@ interface VirtualPeerOptions {
   roomId: string;
   peerId: string;
   writer: WriterLike;
+  /** Optional iceServers list. When non-empty, both send + recv transports
+   *  use it for ICE gathering — Phase I (`stun`) adds srflx candidates so
+   *  peers behind cone NATs reach each other directly, Phase II (`turn`)
+   *  adds a relay-fallback path for symmetric NAT. Empty array (the
+   *  default) restores the pre-S28 localhost-only behaviour. */
+  iceServers?: Array<{ urls: string[]; username?: string; credential?: string }>;
 }
 
 class VirtualPeer {
@@ -556,20 +641,21 @@ class VirtualPeer {
     }
     this.client.send({ type: 'createTransport', direction });
     const params = await this.client.waitFor((m) => m.type === 'transportCreated');
+    const iceServers = this.opts.iceServers ?? [];
+    const transportParams: msTypes.TransportOptions = {
+      id: params['id'] as string,
+      iceParameters: params['iceParameters'] as msTypes.IceParameters,
+      iceCandidates: params['iceCandidates'] as msTypes.IceCandidate[],
+      dtlsParameters: params['dtlsParameters'] as msTypes.DtlsParameters,
+      // mediasoup-client honours the iceServers field even though it's
+      // optional — only matters when non-empty (Phase I/II of internet
+      // benchmark). Empty array preserves the pre-S28 localhost path.
+      ...(iceServers.length > 0 ? { iceServers } : {}),
+    };
     const transport =
       direction === 'send'
-        ? this.device.createSendTransport({
-            id: params['id'] as string,
-            iceParameters: params['iceParameters'] as msTypes.IceParameters,
-            iceCandidates: params['iceCandidates'] as msTypes.IceCandidate[],
-            dtlsParameters: params['dtlsParameters'] as msTypes.DtlsParameters,
-          })
-        : this.device.createRecvTransport({
-            id: params['id'] as string,
-            iceParameters: params['iceParameters'] as msTypes.IceParameters,
-            iceCandidates: params['iceCandidates'] as msTypes.IceCandidate[],
-            dtlsParameters: params['dtlsParameters'] as msTypes.DtlsParameters,
-          });
+        ? this.device.createSendTransport(transportParams)
+        : this.device.createRecvTransport(transportParams);
     transport.on('connect', ({ dtlsParameters }, callback, errback) => {
       try {
         this.client!.send({
@@ -722,8 +808,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const args = parseArgs(process.argv);
+  const iceServers = buildIceServers(args.iceMode, {
+    turnUrl: process.env['BENCH_TURN_URL'],
+    turnUsername: process.env['BENCH_TURN_USERNAME'],
+    turnCredential: process.env['BENCH_TURN_CREDENTIAL'],
+  });
   console.log(
-    `[harness] relay=${args.relayUrl} room=${args.roomId} peers=${args.peers} duration=${args.durationMs}ms`,
+    `[harness] relay=${args.relayUrl} room=${args.roomId} peers=${args.peers} duration=${args.durationMs}ms ice-mode=${args.iceMode} (${iceServers.length} ice-server${iceServers.length === 1 ? '' : 's'})`,
   );
 
   const writer = new LatencyWriter({
@@ -740,6 +831,7 @@ async function main(): Promise<void> {
         roomId: args.roomId,
         peerId: `harness-peer-${peerLabel(i)}`,
         writer,
+        iceServers,
       }),
     );
   }
