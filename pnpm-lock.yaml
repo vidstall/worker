@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@mysten/sui':
+        specifier: ^1.45.2
+        version: 1.45.2(typescript@5.9.3)
       '@roamhq/wrtc':
         specifier: ^0.10.0
         version: 0.10.0

@@ -28,6 +28,7 @@
     "failover:smoke": "tsx scripts/failover/failover-smoke.ts"
   },
   "devDependencies": {
+    "@mysten/sui": "^1.45.2",
     "@roamhq/wrtc": "^0.10.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
