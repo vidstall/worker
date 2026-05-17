@@ -27,6 +27,7 @@ import { EventEmitter } from 'node:events';
 import {
   computeG2GoptB,
   extractRelevantStats,
+  extractRttOnly,
   startConsumerPoller,
   parseArgs,
   peerLabel,
@@ -128,6 +129,37 @@ describe('extractRelevantStats', () => {
   });
 });
 
+// ── extractRttOnly (S25.C-followup.C) ────────────────────────────────
+
+describe('extractRttOnly', () => {
+  it('returns currentRoundTripTime from candidate-pair', () => {
+    const report = {
+      values: () =>
+        [
+          { type: 'candidate-pair', currentRoundTripTime: 0.05 },
+          { type: 'inbound-rtp', bytesReceived: 1234 },
+        ][Symbol.iterator](),
+    };
+    expect(extractRttOnly(report)).toBe(0.05);
+  });
+
+  it('accepts zero RTT (valid on localhost loopback — sub-microsecond probe)', () => {
+    const report = {
+      values: () =>
+        [{ type: 'candidate-pair', currentRoundTripTime: 0 }][Symbol.iterator](),
+    };
+    expect(extractRttOnly(report)).toBe(0);
+  });
+
+  it('returns null when no candidate-pair entry', () => {
+    const report = {
+      values: () =>
+        [{ type: 'inbound-rtp', bytesReceived: 1234 }][Symbol.iterator](),
+    };
+    expect(extractRttOnly(report)).toBeNull();
+  });
+});
+
 // ── startConsumerPoller ──────────────────────────────────────────────
 
 describe('startConsumerPoller', () => {
@@ -158,9 +190,12 @@ describe('startConsumerPoller', () => {
     );
 
     // Immediate first sample fires synchronously; allow microtasks.
+    // S25.C-followup.C: poller now emits L_g2g_RTT_proxy (narrowed Option B)
+    // instead of L_g2g_optB — jitter unit on @roamhq/wrtc is non-W3C; see
+    // ch5 §5.2.7. Expected: rtt(0.1s)*1000/2 + 50 = 100 ms.
     await vi.advanceTimersByTimeAsync(0);
     expect(writer.write).toHaveBeenCalledTimes(1);
-    expect(writer.write).toHaveBeenCalledWith('L_g2g_optB', 120, {
+    expect(writer.write).toHaveBeenCalledWith('L_g2g_RTT_proxy', 100, {
       room_id: 'r1',
       peer_b: 'pB',
     });
@@ -196,6 +231,55 @@ describe('startConsumerPoller', () => {
     const stop = startConsumerPoller(consumer, writer, {}, 1000);
     await vi.advanceTimersByTimeAsync(2500);
     expect(writer.write).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('falls back to transport.getStats when consumer.getStats throws (CI-20)', async () => {
+    const consumer = {
+      getStats: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Not yet implemented; file a feature request against node-webrtc'),
+        ),
+    };
+    const transport = {
+      getStats: vi.fn().mockResolvedValue({
+        values: () =>
+          [{ type: 'candidate-pair', currentRoundTripTime: 0.04 }][Symbol.iterator](),
+      }),
+    };
+    const writer = { write: vi.fn() };
+    const stop = startConsumerPoller(consumer, writer, { consumer_id: 'c1' }, 1000, {
+      transport,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writer.write).toHaveBeenCalledTimes(1);
+    // 0.04 s * 1000 / 2 + 50 = 70 ms
+    expect(writer.write).toHaveBeenCalledWith('L_g2g_RTT_proxy', 70, {
+      consumer_id: 'c1',
+    });
+    stop();
+  });
+
+  it('prefers transport.getStats result over consumer.getStats when both succeed', async () => {
+    const consumer = {
+      getStats: vi.fn().mockResolvedValue({
+        values: () =>
+          [{ type: 'candidate-pair', currentRoundTripTime: 0.9 }][Symbol.iterator](),
+      }),
+    };
+    const transport = {
+      getStats: vi.fn().mockResolvedValue({
+        values: () =>
+          [{ type: 'candidate-pair', currentRoundTripTime: 0.02 }][Symbol.iterator](),
+      }),
+    };
+    const writer = { write: vi.fn() };
+    const stop = startConsumerPoller(consumer, writer, {}, 1000, { transport });
+    await vi.advanceTimersByTimeAsync(0);
+    // Transport's 0.02 used, not consumer's 0.9 → 0.02 * 500 + 50 = 60 ms
+    expect(writer.write).toHaveBeenCalledWith('L_g2g_RTT_proxy', 60, {});
+    expect(consumer.getStats).not.toHaveBeenCalled();
     stop();
   });
 });

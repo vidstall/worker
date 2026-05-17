@@ -263,6 +263,37 @@ describe('Relay signaling server', () => {
     ws2.close();
   });
 
+  it('parallel joins to the same room create exactly one Router (CI-18 lock)', async () => {
+    // S25.C-followup.D: without the per-room async lock in handleJoin,
+    // two peers connecting in the same Node tick each create their own
+    // mediasoup Router and end up in separate rooms. Validates the lock
+    // by asserting getRoomCount === 1 after two concurrent joins fired
+    // without awaiting between sends.
+    const manager = createMockManager();
+    const createRouterSpy = manager.createRouter as ReturnType<typeof vi.fn>;
+    const { wss, port, getRoomCount } = await startServer(manager);
+    server = wss;
+
+    const ws1 = await connect(port);
+    const ws2 = await connect(port);
+
+    const reply1 = waitForMessage(ws1);
+    const reply2 = waitForMessage(ws2);
+
+    // Fire both joins synchronously — relay must not race.
+    ws1.send(JSON.stringify({ type: 'join', roomId: 'race-room', peerId: 'A' }));
+    ws2.send(JSON.stringify({ type: 'join', roomId: 'race-room', peerId: 'B' }));
+
+    await Promise.all([reply1, reply2]);
+    await tick(100);
+
+    expect(getRoomCount()).toBe(1);
+    expect(createRouterSpy).toHaveBeenCalledTimes(1);
+
+    ws1.close();
+    ws2.close();
+  });
+
   it('leave message removes peer from room', async () => {
     const { wss, port, getRoomCount } = await startServer();
     server = wss;

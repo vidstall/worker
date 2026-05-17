@@ -92,6 +92,14 @@ export function createSignalingServer(
   const rooms = new Map<string, RoomState>();
   /** Track which room each WebSocket belongs to for cleanup. */
   const wsToRoom = new Map<WebSocket, { roomId: string; peerId: string }>();
+  /** Per-room async lock for the "get or create" critical section in
+   *  handleJoin. Without serialization, two peers arriving in the same
+   *  Node tick both observe rooms.get(roomId) === undefined, both await
+   *  manager.createRouter, both write rooms.set — second wins, the loser's
+   *  Router is orphan and newProducer pushes never cross peers. Real fix
+   *  for CI-18; replaces the 250 ms inter-join delay workaround in
+   *  scripts/bench/mediasoup-client-harness.ts. */
+  const roomCreationLocks = new Map<string, Promise<void>>();
 
   const wss = new WebSocketServer({ port, maxPayload: 64 * 1024 });
 
@@ -169,27 +177,49 @@ export function createSignalingServer(
   async function handleJoin(ws: WebSocket, msg: JoinMessage): Promise<void> {
     const { roomId, peerId } = msg;
 
-    // Get or create room — mode is per-room, set by first joiner (or defaults to env)
+    // CI-18 real fix: serialize room creation per-room. If another join is
+    // already in flight for this roomId, await its completion before reading
+    // rooms.get(roomId). Without this, parallel joins each create their own
+    // Router and end up in separate rooms.
+    const pending = roomCreationLocks.get(roomId);
+    if (pending) await pending;
+
     let room = rooms.get(roomId);
     if (!room) {
-      const roomMode = msg.mode ?? relayMode;
-      const worker = manager.getNextWorker();
-      const router = await manager.createRouter(worker);
-      room = {
-        roomId,
-        router,
-        mode: roomMode,
-        peers: new Map(),
-      };
+      let release!: () => void;
+      const creation = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      roomCreationLocks.set(roomId, creation);
+      try {
+        // Re-check inside the lock — a concurrent waiter that completed
+        // between our await above and our set here may have already created
+        // the room.
+        room = rooms.get(roomId);
+        if (!room) {
+          const roomMode = msg.mode ?? relayMode;
+          const worker = manager.getNextWorker();
+          const router = await manager.createRouter(worker);
+          room = {
+            roomId,
+            router,
+            mode: roomMode,
+            peers: new Map(),
+          };
 
-      // Initialize MCU pipeline for MCU rooms
-      if (roomMode === 'mcu') {
-        room.mcuPipeline = new McuPipeline(router, logger);
-        logger.info({ roomId }, 'MCU pipeline initialized for room');
+          // Initialize MCU pipeline for MCU rooms
+          if (roomMode === 'mcu') {
+            room.mcuPipeline = new McuPipeline(router, logger);
+            logger.info({ roomId }, 'MCU pipeline initialized for room');
+          }
+
+          rooms.set(roomId, room);
+          logger.info({ roomId, mode: roomMode }, 'Room created');
+        }
+      } finally {
+        release();
+        roomCreationLocks.delete(roomId);
       }
-
-      rooms.set(roomId, room);
-      logger.info({ roomId, mode: roomMode }, 'Room created');
     }
 
     // Create peer state

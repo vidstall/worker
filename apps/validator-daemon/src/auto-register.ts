@@ -45,8 +45,14 @@ export async function ensureRegistered(
 
   logger.info('VALIDATOR_CAP_ID not set — attempting auto-registration');
 
-  // In voting mode, validators register as role=0 and wait for CP votes
-  // (on-chain determine_role only auto-assigns CP; all others need voting).
+  // S25.C-followup.E NOTE: an earlier attempt to hard-code votingMode=false
+  // for validators (matching G-009/G-012 docs) caused a regression — live
+  // smoke aborted at validator_registry::register_validator with MoveAbort
+  // 530 because staking::determine_role does NOT auto-assign role=Validator
+  // for MIN_STAKE_AMOUNT under the current Move-side stake thresholds. The
+  // voting path (register with MIN_VOTING_STAKE, CP votes role=3, apply)
+  // remains the working production path. G-014 stays open as a real
+  // code/doc tension to resolve on the Move side, not here.
   const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
   const stakeAmount = votingMode ? MIN_VOTING_STAKE : MIN_STAKE_AMOUNT;
   if (votingMode) {

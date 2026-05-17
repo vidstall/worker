@@ -1277,8 +1277,14 @@ export async function runBenchScenario(opts: BenchScenarioOpts): Promise<void> {
       },
     );
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-    if (result.code === 0) {
-      console.log(`[bench] scenario run ${i} done in ${elapsed}s`);
+    // Treat as success if the harness logged `[harness] done` (data was
+    // flushed) regardless of exit code — the harness deliberately SIGKILLs
+    // itself after flushing JSONL to skip the @roamhq/wrtc native cleanup
+    // crash on Windows (CI-19 mitigation, see harness main()).
+    const harnessDone = result.stdout.includes('[harness] done');
+    if (result.code === 0 || harnessDone) {
+      const exitNote = result.code === 0 ? '' : ` (exit=${result.code}, data flushed)`;
+      console.log(`[bench] scenario run ${i} done in ${elapsed}s${exitNote}`);
     } else {
       console.error(
         `[bench] scenario run ${i} FAILED (code=${result.code}, elapsed=${elapsed}s)`,

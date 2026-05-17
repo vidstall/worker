@@ -124,12 +124,16 @@ interface StatsReportLike {
  * methodology needs, or `null` if either is missing (e.g. the candidate pair
  * has not yet finished probing).
  */
+let statsDumpCount = 0;
+const STATS_DUMP_MAX = 2;
 export function extractRelevantStats(
   report: StatsReportLike,
 ): RelevantStats | null {
   let rtt: number | undefined;
   let jitter: number | undefined;
+  const collected: StatEntry[] = [];
   for (const stat of report.values()) {
+    collected.push(stat);
     if (
       stat.type === 'candidate-pair' &&
       typeof stat['currentRoundTripTime'] === 'number'
@@ -142,11 +146,50 @@ export function extractRelevantStats(
       jitter = stat['jitterBufferDelay'] as number;
     }
   }
+  // DEBUG S25.C-followup.A — dump first 2 reports to identify field mapping.
+  // Removed after triage (S25.C-followup.C).
+  if (statsDumpCount < STATS_DUMP_MAX && process.env['BENCH_DEBUG_STATS'] === '1') {
+    statsDumpCount++;
+    const summary = collected.map((s) => ({
+      type: s.type,
+      keys: Object.keys(s).filter((k) => k !== 'type').slice(0, 12),
+    }));
+    console.log(
+      `[debug-stats #${statsDumpCount}] entries=${collected.length} rtt=${rtt} jitter=${jitter}`,
+    );
+    console.log(`[debug-stats #${statsDumpCount}] shape=${JSON.stringify(summary)}`);
+  }
   if (rtt === undefined || jitter === undefined) return null;
   return { currentRoundTripTime: rtt, jitterBufferDelay: jitter };
 }
 
+/**
+ * Narrowed-metric fallback (S25.C-followup): pluck ICE `currentRoundTripTime`
+ * alone from candidate-pair stats when full Option-B data is unavailable
+ * (jitterBufferDelay is per-RTP-receiver and @roamhq/wrtc may not emit it).
+ * Used to drive `L_g2g_RTT_proxy = RTT/2 + 50 ms`.
+ *
+ * Accepts RTT = 0 (valid on localhost loopback — sub-microsecond probe
+ * RTT rounds to 0). Returns null only when the candidate-pair stat is
+ * absent or the value is non-numeric.
+ */
+export function extractRttOnly(report: StatsReportLike): number | null {
+  for (const stat of report.values()) {
+    if (
+      stat.type === 'candidate-pair' &&
+      typeof stat['currentRoundTripTime'] === 'number'
+    ) {
+      return stat['currentRoundTripTime'] as number;
+    }
+  }
+  return null;
+}
+
 export interface ConsumerLike {
+  getStats: () => Promise<StatsReportLike>;
+}
+
+export interface TransportLike {
   getStats: () => Promise<StatsReportLike>;
 }
 
@@ -158,30 +201,107 @@ export interface WriterLike {
   ) => void;
 }
 
+export interface ConsumerPollerOpts {
+  /** Optional transport. Tried FIRST — RTCPeerConnection.getStats() may
+   *  be implemented even when RTCRtpReceiver.getStats() is not (CI-20:
+   *  @roamhq/wrtc on Node throws "Not yet implemented; file a feature
+   *  request against node-webrtc" on receiver.getStats but the underlying
+   *  PeerConnection.getStats may return candidate-pair RTT). */
+  transport?: TransportLike;
+}
+
 /**
  * Poll a Consumer's getStats() at `intervalMs`, write one `L_g2g_optB` event
  * per successful poll. Returns a cancel function — call it from peer cleanup.
  * Transient `getStats()` failures are swallowed (one bad tick must not stop
  * the whole sampler).
+ *
+ * CI-20 (S25.C-followup): when an optional `transport` is supplied, the
+ * poller tries `transport.getStats()` first — this proxies to
+ * RTCPeerConnection.getStats() which @roamhq/wrtc may implement even when
+ * Consumer-level (RTCRtpReceiver.getStats) is not. If only RTT is available
+ * (no jitterBufferDelay), the poller emits `L_g2g_RTT_proxy` (RTT/2 + 50 ms)
+ * instead of `L_g2g_optB` — a narrowed metric disclosed in ch5 §5.2.7.
  */
 export function startConsumerPoller(
   consumer: ConsumerLike,
   writer: WriterLike,
   context: Record<string, unknown>,
   intervalMs = 1000,
+  pollerOpts: ConsumerPollerOpts = {},
 ): () => void {
   let stopped = false;
+  let tickCount = 0;
+  let writeCount = 0;
+  let nullCount = 0;
+  let errCount = 0;
+
+  const debug = process.env['BENCH_DEBUG_STATS'] === '1';
+  const transport = pollerOpts.transport;
+
+  // Try transport first if provided; on failure fall back to consumer.
+  // Returns null if both sources fail or yield no usable stats.
+  const fetchReport = async (): Promise<StatsReportLike | null> => {
+    if (transport !== undefined) {
+      try {
+        return await transport.getStats();
+      } catch {
+        // fall through to consumer
+      }
+    }
+    try {
+      return await consumer.getStats();
+    } catch {
+      return null;
+    }
+  };
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
-    try {
-      const report = await consumer.getStats();
-      const stats = extractRelevantStats(report);
-      if (stats !== null) {
-        writer.write('L_g2g_optB', computeG2GoptB(stats), context);
+    tickCount++;
+    const report = await fetchReport();
+    if (report === null) {
+      errCount++;
+      if (debug && errCount <= 2) {
+        console.log(
+          `[debug-poll consumer=${String(context['consumer_id'])}] tick=${tickCount} both transport+consumer getStats failed`,
+        );
       }
-    } catch {
-      // skip this tick
+      return;
+    }
+    // S25.C-followup.C decision: on Node + @roamhq/wrtc the W3C-spec'd
+    // `jitterBufferDelay` unit (seconds) is mis-reported as milliseconds —
+    // makes `L_g2g_optB = RTT/2 + jitter*1000 + 50` produce values in the
+    // tens of millions of ms after a few seconds of streaming. The full
+    // Option-B sum is therefore unreliable on this binding.
+    //
+    // Primary emitted metric is the **narrowed Option B**:
+    //   `L_g2g_RTT_proxy = currentRoundTripTime/2 + 50 ms`
+    // (capture/encode/render constant only; drops jitter contribution).
+    // Bound: under-counts true L_g2g by the per-frame jitter buffer delay,
+    // typically 20–60 ms per W3C reference samples. Methodology §1.3
+    // already labelled the Option-B error term as ±30–80 ms; the narrowed
+    // variant lands on the under-estimate side. Disclosure: ch5 §5.2.7.
+    const rttOnly = extractRttOnly(report);
+    if (rttOnly !== null) {
+      writer.write(
+        'L_g2g_RTT_proxy',
+        (rttOnly * 1000) / 2 + CAPTURE_ENCODE_RENDER_MS,
+        context,
+      );
+      writeCount++;
+    } else {
+      nullCount++;
+    }
+    // `extractRelevantStats` retained as importable helper for future
+    // browser-side harness or post-binding-fix re-enable — read but not
+    // emitted from Node today.
+    void extractRelevantStats;
+    void computeG2GoptB;
+    if (debug && tickCount <= 3) {
+      console.log(
+        `[debug-poll consumer=${String(context['consumer_id'])}] tick=${tickCount} stats=${stats === null ? 'null' : 'ok'} writes=${writeCount} nulls=${nullCount}`,
+      );
     }
   };
 
@@ -378,6 +498,10 @@ class VirtualPeer {
   private readonly pollerStops: Array<() => void> = [];
   private audioSource: { onData: (data: unknown) => void } | null = null;
   private audioInterval: NodeJS.Timeout | null = null;
+  /** Producers we were told about before recvTransport was ready
+   *  (CI-18 secondary race: relay forwards `newProducer` push as soon as
+   *  any peer produces, even if local peer is still in step 3-4). */
+  private readonly pendingProducers: RelayMessage[] = [];
 
   constructor(opts: VirtualPeerOptions) {
     this.opts = opts;
@@ -410,11 +534,20 @@ class VirtualPeer {
     // 3. Send transport
     this.sendTransport = await this.makeTransport('send');
 
-    // 4. Produce silent audio
+    // 4. Recv transport FIRST (so onNewProducer handler is ready when peer-A
+    //    produces in step 5 below; otherwise relay's `newProducer` push lands
+    //    while recvTransport=null and the message is dropped — observed at
+    //    S25.C.6 debug-stats run as "onNewProducer ABORTED — recvT=null").
+    this.recvTransport = await this.makeTransport('recv');
+
+    // 5. Produce silent audio (after recvTransport is in place)
     await this.startAudioProducer();
 
-    // 5. Recv transport (ready for newProducer handler)
-    this.recvTransport = await this.makeTransport('recv');
+    // Drain any newProducer pushes that landed while we were setting up.
+    const queued = this.pendingProducers.splice(0);
+    for (const msg of queued) {
+      void this.onNewProducer(msg);
+    }
   }
 
   private async makeTransport(direction: 'send' | 'recv'): Promise<Transport> {
@@ -508,11 +641,24 @@ class VirtualPeer {
   }
 
   private async onNewProducer(msg: RelayMessage): Promise<void> {
+    const debug = process.env['BENCH_DEBUG_STATS'] === '1';
+    if (debug) {
+      console.log(
+        `[debug-peer ${this.opts.peerId}] onNewProducer producerId=${String(msg['producerId'])} remotePeer=${String(msg['peerId'])}`,
+      );
+    }
     if (
       this.device === null ||
       this.recvTransport === null ||
       this.client === null
     ) {
+      // recvTransport not ready yet — queue, run() will drain after setup.
+      this.pendingProducers.push(msg);
+      if (debug) {
+        console.log(
+          `[debug-peer ${this.opts.peerId}] onNewProducer QUEUED — device=${this.device === null ? 'null' : 'ok'} recvT=${this.recvTransport === null ? 'null' : 'ok'} client=${this.client === null ? 'null' : 'ok'}`,
+        );
+      }
       return;
     }
     const producerId = msg['producerId'] as string;
@@ -525,12 +671,22 @@ class VirtualPeer {
     const consumed = await this.client.waitFor(
       (m) => m.type === 'consumed' && m['producerId'] === producerId,
     );
+    if (debug) {
+      console.log(
+        `[debug-peer ${this.opts.peerId}] consumed reply id=${String(consumed['consumerId'])} kind=${String(consumed['kind'])}`,
+      );
+    }
     const consumer = await this.recvTransport.consume({
       id: consumed['consumerId'] as string,
       producerId,
       kind: consumed['kind'] as 'audio' | 'video',
       rtpParameters: consumed['rtpParameters'] as msTypes.RtpParameters,
     });
+    if (debug) {
+      console.log(
+        `[debug-peer ${this.opts.peerId}] consumer created id=${consumer.id} — starting poller`,
+      );
+    }
     this.consumers.push(consumer);
     const stop = startConsumerPoller(
       consumer as unknown as ConsumerLike,
@@ -541,6 +697,8 @@ class VirtualPeer {
         peer_b: this.opts.peerId,
         consumer_id: consumer.id,
       },
+      1000,
+      { transport: this.recvTransport as unknown as TransportLike },
     );
     this.pollerStops.push(stop);
   }
@@ -585,25 +743,31 @@ async function main(): Promise<void> {
       }),
     );
   }
-  // CI-18: relay's handleJoin races when peers arrive in parallel — both pass
-  // the `rooms.get(roomId) === undefined` check, each creates its own router,
-  // and they end up in separate routers so newProducer never crosses peers.
-  // Sequential join ensures the second+ peer finds the first peer's router.
-  // Small inter-join delay lets the relay finish wiring the previous peer's
-  // transports before the next one races for the same room map slot.
+  // Sequential join — relay's per-room async lock (added at S25.C-followup.D
+  // in apps/relay/src/signaling.ts) removes the CI-18 parallel-join race.
+  // We keep sequential setup here to make per-peer log lines deterministic
+  // and easier to triage if something regresses; no inter-peer delay needed.
   for (let i = 0; i < peers.length; i++) {
     await peers[i]!.run();
-    if (i + 1 < peers.length) {
-      await new Promise((r) => setTimeout(r, 250));
-    }
   }
   console.log(`[harness] ${peers.length} peers joined, sampling…`);
 
   await new Promise((r) => setTimeout(r, args.durationMs));
 
-  await Promise.all(peers.map((p) => p.close()));
+  // Flush JSONL before the wrtc cleanup chain — LatencyWriter.close() does
+  // a final writeSync + fsync, must complete before we exit.
   writer.close();
   console.log('[harness] done');
+
+  // CI-19 mitigation: @roamhq/wrtc's native binding teardown crashes Node
+  // on Windows with STATUS_STACK_BUFFER_OVERRUN (0xC0000409) when
+  // Producer/Consumer/Transport close() chains fire during the same exit
+  // (G-016). Data layer is already flushed above. Skip the JS-level close
+  // chain and SIGKILL ourselves so the native cleanup doesn't run.
+  // Disclosure: this trades exit-code cleanliness for stable data emission;
+  // ch5 §5.2.7 documents the trade-off. Real fix (upstream binding swap)
+  // tracked separately.
+  process.kill(process.pid, 'SIGKILL');
 }
 
 const isMain =
