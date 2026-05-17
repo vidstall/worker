@@ -19,6 +19,7 @@ import type {
   RelayRegistered,
   RelayLoadUpdated,
   RelayRTTUpdated,
+  RelaySlashed,
   RoomCreated,
   RoomAssigned,
   EscrowCreated,
@@ -45,6 +46,7 @@ import {
   type SignalingCandidate,
 } from './room-assignment.js';
 import { clearVotedMiner, trackUnassignedMiner } from './role-voter.js';
+import type { TurnIssuer } from './turn-issuer.js';
 
 /** Default scoring weights — re-exported from scoring.ts for convenience. */
 export const DEFAULT_WEIGHTS: ScoringWeights = PVR_WEIGHTS;
@@ -77,6 +79,7 @@ export function handleEvent(
     signer: Ed25519Keypair;
     config: NetworkConfig;
     cpCapId: string;
+    turnIssuer?: TurnIssuer;
   },
   pendingEscrows?: Map<string, EscrowCreated>,
   validatorState?: Map<string, NodeCandidate>,
@@ -138,6 +141,27 @@ export function handleEvent(
         logger.info({ minerId: e.miner_id, rtt: e.rtt }, 'Relay RTT updated');
       } else {
         logger.warn({ minerId: e.miner_id }, 'RelayRTTUpdated for unknown relay, ignoring');
+      }
+      break;
+    }
+
+    case 'RelaySlashed': {
+      // ADR-0005 § Mid-room kill-switch — forward to TURN issuer so it stops
+      // issuing fresh credentials for this miner. Existing credentials remain
+      // technically valid against the slashed coturn until TTL expiry, but
+      // no compliant client will use them.
+      const e = data as unknown as RelaySlashed;
+      if (txContext?.turnIssuer) {
+        txContext.turnIssuer.markSlashed(e.relay_miner_id);
+        logger.info(
+          { relayMinerId: e.relay_miner_id, roomId: e.room_id, slashAmount: e.slash_amount },
+          'Relay slashed — TURN issuer kill-switch armed for this miner',
+        );
+      } else {
+        logger.warn(
+          { relayMinerId: e.relay_miner_id },
+          'RelaySlashed observed but no TurnIssuer in txContext — kill-switch not armed',
+        );
       }
       break;
     }
@@ -387,6 +411,7 @@ export function createEventHandler(
     signer: Ed25519Keypair;
     config: NetworkConfig;
     cpCapId: string;
+    turnIssuer?: TurnIssuer;
   },
 ): {
   handler: (event: SuiEvent) => Promise<void>;

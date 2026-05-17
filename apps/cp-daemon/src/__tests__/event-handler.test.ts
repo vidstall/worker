@@ -387,6 +387,75 @@ describe('handleEvent', () => {
   });
 });
 
+describe('handleEvent — RelaySlashed → TurnIssuer kill-switch (S30.B.7)', () => {
+  function makeEconomicEvent(eventName: string, parsedJson: Record<string, unknown>) {
+    return {
+      id: { txDigest: 'slash-digest', eventSeq: '0' },
+      packageId: '0xabc',
+      transactionModule: 'economic_layer',
+      sender: '0x123',
+      type: `0xabc::economic_layer::${eventName}`,
+      parsedJson,
+      bcs: '',
+      timestampMs: '2000',
+    } as any;
+  }
+
+  it('forwards RelaySlashed.relay_miner_id to turnIssuer.markSlashed', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, NodeCandidate>();
+    const markSlashedFn = vi.fn();
+    const turnIssuer = { markSlashed: markSlashedFn } as any;
+
+    const event = makeEconomicEvent('RelaySlashed', {
+      room_id: 'room-1',
+      relay_miner_id: 'bad-relay',
+      slash_amount: '100000000',
+    });
+
+    handleEvent(
+      event,
+      relayState,
+      emptySignalingState(),
+      emptyPendingRooms(),
+      logger,
+      undefined,
+      {
+        client: undefined as any,
+        signer: undefined as any,
+        config: undefined as any,
+        cpCapId: '0xcap',
+        turnIssuer,
+      },
+    );
+
+    expect(markSlashedFn).toHaveBeenCalledExactlyOnceWith('bad-relay');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ relayMinerId: 'bad-relay', roomId: 'room-1' }),
+      'Relay slashed — TURN issuer kill-switch armed for this miner',
+    );
+  });
+
+  it('logs a warning when RelaySlashed arrives without a turnIssuer in txContext', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, NodeCandidate>();
+
+    const event = makeEconomicEvent('RelaySlashed', {
+      room_id: 'room-1',
+      relay_miner_id: 'bad-relay',
+      slash_amount: '100000000',
+    });
+
+    // txContext absent entirely — kill-switch should warn, not throw
+    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ relayMinerId: 'bad-relay' }),
+      'RelaySlashed observed but no TurnIssuer in txContext — kill-switch not armed',
+    );
+  });
+});
+
 describe('createEventHandler', () => {
   it('returns handler function and state maps', () => {
     const logger = mockLogger();

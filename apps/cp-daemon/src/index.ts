@@ -19,6 +19,7 @@ import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createEventHandler } from './event-handler.js';
 import { startRoleVoting } from './role-voter.js';
+import { startTurnIssuer } from './turn-issuer.js';
 
 const logger = createLogger('cp-daemon');
 
@@ -59,12 +60,28 @@ async function main(): Promise<void> {
     roleVotingIntervalMs,
   );
 
-  // Set up event handler with TX context for room assignment
+  // Bootstrap TURN issuer (S30.B Option A — ADR-0005 hybrid 24h+on-slash rotation)
+  const turnRotationIntervalMs = parseInt(
+    process.env['TURN_ROTATION_INTERVAL_MS'] ?? '86400000',
+    10,
+  );
+  const { issuer: turnIssuer, stop: stopTurnIssuer } = await startTurnIssuer({
+    client,
+    signer,
+    packageId: config.packageId,
+    networkRegistryId: config.networkRegistryId,
+    cpCapId,
+    logger,
+    rotateIntervalMs: turnRotationIntervalMs,
+  });
+
+  // Set up event handler with TX context for room assignment + TURN kill-switch
   const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
     client,
     signer,
     config,
     cpCapId,
+    turnIssuer,
   });
 
   // Bootstrap: replay historical relay/signaling/validator events so state maps are populated
@@ -176,8 +193,8 @@ async function main(): Promise<void> {
   ]);
 
   logger.info(
-    { heartbeatIntervalMs, pollIntervalMs, roleVotingIntervalMs },
-    `CP daemon started — heartbeat every ${heartbeatIntervalMs}ms, polling events every ${pollIntervalMs}ms, role voting every ${roleVotingIntervalMs}ms`,
+    { heartbeatIntervalMs, pollIntervalMs, roleVotingIntervalMs, turnRotationIntervalMs },
+    `CP daemon started — heartbeat every ${heartbeatIntervalMs}ms, polling events every ${pollIntervalMs}ms, role voting every ${roleVotingIntervalMs}ms, TURN secret rotating every ${turnRotationIntervalMs}ms`,
   );
 
   // Graceful shutdown
@@ -185,6 +202,7 @@ async function main(): Promise<void> {
     logger.info('Shutting down CP daemon...');
     stopHeartbeat();
     stopRoleVoting();
+    stopTurnIssuer();
     relayPoller.stop();
     cpPoller.stop();
     roomPoller.stop();
