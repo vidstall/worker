@@ -48,6 +48,46 @@ import {
   isBenchEnabled,
 } from '../../packages/shared/src/index.js';
 
+// ── Node WebRTC handler bootstrap (S25.C.6 — CI-16) ───────────────────
+
+/**
+ * mediasoup-client `Device` was designed for browsers — its built-in handlers
+ * (`Chrome111`, `Firefox120`, …) read `RTCPeerConnection`, `MediaStream`, etc.
+ * from `globalThis`. In Node the globals are absent and `Device.load()` throws
+ * `UnsupportedError: device not supported` (the failure surfaced at S25.C.6).
+ *
+ * Fix: lazy-import `@roamhq/wrtc` (already a workspace devDep — used by
+ * `startAudioProducer`) and stitch its named exports onto `globalThis` once
+ * per process before the first `Device` is created. We pick `Chrome111` as
+ * the handler because @roamhq/wrtc's surface matches a recent Chromium build.
+ *
+ * Kept lazy so unit tests (which mock the WS and never construct a Device)
+ * don't pay the native-binding cost or fail in environments without wrtc.
+ */
+let wrtcGlobalsInstalled = false;
+async function ensureNodeWebRtcGlobals(): Promise<void> {
+  if (wrtcGlobalsInstalled) return;
+  const wrtcModule = (await import('@roamhq/wrtc')) as {
+    default?: Record<string, unknown>;
+    [k: string]: unknown;
+  };
+  const w = (wrtcModule.default ?? wrtcModule) as Record<string, unknown>;
+  const g = globalThis as unknown as Record<string, unknown>;
+  const names = [
+    'RTCPeerConnection',
+    'RTCSessionDescription',
+    'RTCIceCandidate',
+    'RTCRtpReceiver',
+    'RTCRtpSender',
+    'MediaStream',
+    'MediaStreamTrack',
+  ] as const;
+  for (const n of names) {
+    if (g[n] === undefined && w[n] !== undefined) g[n] = w[n];
+  }
+  wrtcGlobalsInstalled = true;
+}
+
 // ── Pure helpers ─────────────────────────────────────────────────────
 
 /**
@@ -360,8 +400,9 @@ class VirtualPeer {
       (m) => m.type === 'routerRtpCapabilities',
     );
 
-    // 2. Load device
-    this.device = new Device();
+    // 2. Load device — CI-16: wrtc globals + explicit handlerName required in Node
+    await ensureNodeWebRtcGlobals();
+    this.device = new Device({ handlerName: 'Chrome111' });
     await this.device.load({
       routerRtpCapabilities: caps['rtpCapabilities'] as msTypes.RtpCapabilities,
     });
@@ -544,7 +585,18 @@ async function main(): Promise<void> {
       }),
     );
   }
-  await Promise.all(peers.map((p) => p.run()));
+  // CI-18: relay's handleJoin races when peers arrive in parallel — both pass
+  // the `rooms.get(roomId) === undefined` check, each creates its own router,
+  // and they end up in separate routers so newProducer never crosses peers.
+  // Sequential join ensures the second+ peer finds the first peer's router.
+  // Small inter-join delay lets the relay finish wiring the previous peer's
+  // transports before the next one races for the same room map slot.
+  for (let i = 0; i < peers.length; i++) {
+    await peers[i]!.run();
+    if (i + 1 < peers.length) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
   console.log(`[harness] ${peers.length} peers joined, sampling…`);
 
   await new Promise((r) => setTimeout(r, args.durationMs));

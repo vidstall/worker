@@ -1155,11 +1155,14 @@ export async function ensureUserRegistered(
     ],
   });
   try {
-    await sui.signAndExecuteTransaction({
+    const result = await sui.signAndExecuteTransaction({
       transaction: tx,
       signer,
       options: { showEffects: true },
     });
+    // CI-14: without waitForTransaction, the next call's dry-run can
+    // execute against pre-register state and abort with E_USER_NOT_REGISTERED.
+    await sui.waitForTransaction({ digest: result.digest });
     console.log('[bench] registered deployer in UserRegistry');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1206,6 +1209,7 @@ export async function createBenchRoom(
     signer,
     options: { showEvents: true, showEffects: true },
   });
+  await sui.waitForTransaction({ digest: result.digest });
 
   const roomId = parseRoomIdFromEvents(
     result as SuiTxResult,
@@ -1279,7 +1283,10 @@ export async function runBenchScenario(opts: BenchScenarioOpts): Promise<void> {
       console.error(
         `[bench] scenario run ${i} FAILED (code=${result.code}, elapsed=${elapsed}s)`,
       );
-      console.error(`[bench]   stderr tail: ${result.stderr.split('\n').slice(-5).join(' / ')}`);
+      console.error('[bench] ── full stderr ──');
+      console.error(result.stderr);
+      console.error('[bench] ── full stdout (tail 30) ──');
+      console.error(result.stdout.split('\n').slice(-30).join('\n'));
     }
 
     if (i < opts.runs) {
