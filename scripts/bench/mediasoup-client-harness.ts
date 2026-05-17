@@ -162,11 +162,14 @@ export function startConsumerPoller(
 
 const DEFAULT_RELAY_URL = 'ws://localhost:4000';
 const DEFAULT_DURATION_S = 60;
+const DEFAULT_PEERS = 2;
+const MAX_PEERS = 26; // letter-based peer IDs (A..Z)
 
 export interface CliArgs {
   relayUrl: string;
   roomId: string;
   durationMs: number;
+  peers: number;
 }
 
 export function parseArgs(argv: readonly string[]): CliArgs {
@@ -174,6 +177,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   let relayUrl = DEFAULT_RELAY_URL;
   let roomId = `bench-${Date.now()}`;
   let durationMs = DEFAULT_DURATION_S * 1000;
+  let peers = DEFAULT_PEERS;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--relay-url') {
@@ -183,9 +187,29 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     } else if (a === '--duration') {
       const d = args[++i];
       if (d !== undefined) durationMs = Math.round(parseFloat(d) * 1000);
+    } else if (a === '--peers') {
+      const n = args[++i];
+      if (n !== undefined) {
+        const parsed = parseInt(n, 10);
+        if (Number.isFinite(parsed) && parsed >= 2 && parsed <= MAX_PEERS) {
+          peers = parsed;
+        } else {
+          throw new Error(
+            `--peers must be an integer in [2, ${MAX_PEERS}], got ${n}`,
+          );
+        }
+      }
     }
   }
-  return { relayUrl, roomId, durationMs };
+  return { relayUrl, roomId, durationMs, peers };
+}
+
+/** Map peer index (0-based) to a stable label: A..Z. */
+export function peerLabel(index: number): string {
+  if (index < 0 || index >= MAX_PEERS) {
+    throw new Error(`peerLabel: index ${index} out of range [0, ${MAX_PEERS})`);
+  }
+  return String.fromCharCode('A'.charCodeAt(0) + index);
 }
 
 // ── Relay protocol client ────────────────────────────────────────────
@@ -500,7 +524,7 @@ async function main(): Promise<void> {
   }
   const args = parseArgs(process.argv);
   console.log(
-    `[harness] relay=${args.relayUrl} room=${args.roomId} duration=${args.durationMs}ms`,
+    `[harness] relay=${args.relayUrl} room=${args.roomId} peers=${args.peers} duration=${args.durationMs}ms`,
   );
 
   const writer = new LatencyWriter({
@@ -509,22 +533,19 @@ async function main(): Promise<void> {
   });
   console.log(`[harness] writing to ${writer.getFilePath()}`);
 
-  const peers = [
-    new VirtualPeer({
-      relayUrl: args.relayUrl,
-      roomId: args.roomId,
-      peerId: 'harness-peer-A',
-      writer,
-    }),
-    new VirtualPeer({
-      relayUrl: args.relayUrl,
-      roomId: args.roomId,
-      peerId: 'harness-peer-B',
-      writer,
-    }),
-  ];
+  const peers: VirtualPeer[] = [];
+  for (let i = 0; i < args.peers; i++) {
+    peers.push(
+      new VirtualPeer({
+        relayUrl: args.relayUrl,
+        roomId: args.roomId,
+        peerId: `harness-peer-${peerLabel(i)}`,
+        writer,
+      }),
+    );
+  }
   await Promise.all(peers.map((p) => p.run()));
-  console.log('[harness] both peers joined, sampling…');
+  console.log(`[harness] ${peers.length} peers joined, sampling…`);
 
   await new Promise((r) => setTimeout(r, args.durationMs));
 

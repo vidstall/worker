@@ -29,6 +29,7 @@ import {
   extractRelevantStats,
   startConsumerPoller,
   parseArgs,
+  peerLabel,
   RelayClient,
   CAPTURE_ENCODE_RENDER_MS,
   type RelayMessage,
@@ -217,19 +218,64 @@ describe('parseArgs', () => {
       relayUrl: 'ws://relay:4000',
       roomId: 'room-x',
       durationMs: 10_000,
+      peers: 2,
     });
   });
 
-  it('defaults relay-url, duration when flags are absent', () => {
+  it('defaults relay-url, duration, peers when flags are absent', () => {
     const args = parseArgs(['node', 'harness.ts']);
     expect(args.relayUrl).toBe('ws://localhost:4000');
     expect(args.durationMs).toBe(60_000);
+    expect(args.peers).toBe(2);
     expect(args.roomId).toMatch(/^bench-\d+$/);
   });
 
   it('rounds fractional --duration to ms', () => {
     const args = parseArgs(['node', 'harness.ts', '--duration', '0.5']);
     expect(args.durationMs).toBe(500);
+  });
+
+  it('honours --peers N (S25.C.4 — N-peer extension)', () => {
+    const args = parseArgs(['node', 'harness.ts', '--peers', '4']);
+    expect(args.peers).toBe(4);
+  });
+
+  it('rejects --peers below 2', () => {
+    expect(() => parseArgs(['node', 'harness.ts', '--peers', '1'])).toThrow(
+      /peers/,
+    );
+  });
+
+  it('rejects --peers above 26', () => {
+    expect(() => parseArgs(['node', 'harness.ts', '--peers', '27'])).toThrow(
+      /peers/,
+    );
+  });
+
+  it('rejects non-numeric --peers', () => {
+    expect(() => parseArgs(['node', 'harness.ts', '--peers', 'four'])).toThrow(
+      /peers/,
+    );
+  });
+});
+
+// ── peerLabel ────────────────────────────────────────────────────────
+
+describe('peerLabel', () => {
+  it('maps 0..3 to A..D', () => {
+    expect(peerLabel(0)).toBe('A');
+    expect(peerLabel(1)).toBe('B');
+    expect(peerLabel(2)).toBe('C');
+    expect(peerLabel(3)).toBe('D');
+  });
+
+  it('maps 25 to Z', () => {
+    expect(peerLabel(25)).toBe('Z');
+  });
+
+  it('throws on out-of-range indices', () => {
+    expect(() => peerLabel(-1)).toThrow(/range/);
+    expect(() => peerLabel(26)).toThrow(/range/);
   });
 });
 

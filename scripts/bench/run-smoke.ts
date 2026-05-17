@@ -67,6 +67,21 @@ export interface SuiPublishResult {
   objectChanges?: SuiObjectChange[];
 }
 
+/**
+ * Subset of a Sui transaction event we care about. `parsedJson` is the BCS
+ * payload decoded by the SDK; we only ever read top-level string/number
+ * fields like `room_id` so the loose record type is sufficient.
+ */
+export interface SuiTxEvent {
+  type: string;
+  parsedJson?: Record<string, unknown>;
+}
+
+/** Tx result with events — what `signAndExecuteTransaction({showEvents:true})` returns. */
+export interface SuiTxResult {
+  events?: SuiTxEvent[];
+}
+
 function isShared(owner: SuiOwner | undefined): boolean {
   return owner !== undefined && typeof owner === 'object' && 'Shared' in owner;
 }
@@ -299,6 +314,111 @@ export async function waitForPort(
   throw new Error(
     `waitForPort: ${host}:${port} not reachable after ${timeoutMs}ms`,
   );
+}
+
+// ── parseRoomIdFromEvents ─────────────────────────────────────────────
+
+/**
+ * Pluck a string `room_id` from the first event whose `type` ends with
+ * `eventTypeSuffix` (typically `'::room_manager::RoomCreated'`). The Sui
+ * Move side emits `RoomCreated` from `create_room` instead of returning the
+ * object — the SDK surfaces it in `tx.events`, not `tx.objectChanges`.
+ *
+ * Throws when (a) `events` is missing, (b) no event matches the suffix, or
+ * (c) the matched event lacks a string `room_id`. Bench bring-up cannot
+ * recover from any of these; failing loudly beats a silent placeholder.
+ */
+export function parseRoomIdFromEvents(
+  result: SuiTxResult,
+  eventTypeSuffix: string,
+): string {
+  if (!Array.isArray(result.events)) {
+    throw new Error(
+      `parseRoomIdFromEvents: tx result has no events array (suffix=${eventTypeSuffix})`,
+    );
+  }
+  for (const ev of result.events) {
+    if (typeof ev.type !== 'string' || !ev.type.endsWith(eventTypeSuffix)) {
+      continue;
+    }
+    const roomId = ev.parsedJson?.['room_id'];
+    if (typeof roomId !== 'string') {
+      throw new Error(
+        `parseRoomIdFromEvents: matched ${ev.type} but room_id is not a string (got ${typeof roomId})`,
+      );
+    }
+    return roomId;
+  }
+  throw new Error(
+    `parseRoomIdFromEvents: no event matched ${eventTypeSuffix} in ${result.events.length} events`,
+  );
+}
+
+// ── waitForLogLine ────────────────────────────────────────────────────
+
+/** Minimal readable-stream shape — `child_process.spawn` stdout/stderr fit. */
+export interface LogStream {
+  on: (event: 'data', listener: (chunk: Buffer | string) => void) => unknown;
+  off?: (event: 'data', listener: (chunk: Buffer | string) => void) => unknown;
+  removeListener?: (
+    event: 'data',
+    listener: (chunk: Buffer | string) => void,
+  ) => unknown;
+}
+
+/**
+ * Watch a readable stream for the first complete line that matches `pattern`,
+ * resolving with the matched line text (without trailing newline). Lines
+ * without a terminating `\n` are kept in a buffer — they're not considered
+ * complete and never match. Rejects with `timeout` if `timeoutMs` passes.
+ *
+ * Used for ready-detection on daemons that don't expose a listening port:
+ *   - cp-daemon: `"Starting role voting loop"`
+ *   - validator-daemon: `"Validator daemon started"`
+ * And as a secondary check for those that do:
+ *   - signaling: `"Signaling daemon started — chain-aware mode"`
+ *   - relay: `"Relay daemon starting"` + later auto-register success
+ */
+export function waitForLogLine(
+  stream: LogStream,
+  pattern: RegExp,
+  timeoutMs: number,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let buffer = '';
+    let settled = false;
+
+    const onData = (chunk: Buffer | string): void => {
+      if (settled) return;
+      buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      // Split on \n; the last fragment (no trailing \n) stays in buffer.
+      let nlIdx: number;
+      while ((nlIdx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nlIdx).replace(/\r$/, '');
+        buffer = buffer.slice(nlIdx + 1);
+        if (pattern.test(line)) {
+          finish(null, line);
+          return;
+        }
+      }
+    };
+
+    const finish = (err: Error | null, value?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const detach = stream.off ?? stream.removeListener;
+      if (detach !== undefined) detach.call(stream, 'data', onData);
+      if (err !== null) reject(err);
+      else resolve(value!);
+    };
+
+    const timer = setTimeout(() => {
+      finish(new Error(`waitForLogLine: timeout after ${timeoutMs}ms waiting for ${pattern}`));
+    }, timeoutMs);
+
+    stream.on('data', onData);
+  });
 }
 
 // ── Orchestrator (S25.B) ──────────────────────────────────────────────
@@ -775,23 +895,455 @@ export async function bringUpBench(opts: {
   return { ids, identity, publishOut, sui, client, deployer };
 }
 
+// ── Daemon spawn + ready-wait (S25.C.2) ──────────────────────────────
+
+/**
+ * Per-daemon spec: where to spawn it, how to detect readiness, what env to
+ * pass on top of the shared `.env`. Ports are populated only for daemons that
+ * expose a listening socket (signaling 8080, relay 4000). Daemons without a
+ * port (cp-daemon, validator-daemon) rely on log-tail alone.
+ *
+ * Spawn order discipline (see docs/00-meta/gotchas.md G-014): cp-daemon FIRST
+ * so its role-voter loop is active before relay/signaling/validator register
+ * in voting mode. The other three can come up in parallel after CP is ready
+ * because the single-CP quorum (compute_threshold clamps `required >= 1`)
+ * satisfies each vote with one self-cast TX.
+ */
+export interface DaemonSpec {
+  name: 'cp-daemon' | 'relay' | 'signaling' | 'validator-daemon';
+  /** Path under `dvconf-daemons/apps/` — usually identical to `name`. */
+  appDir: string;
+  /** Open TCP port the daemon binds, or undefined for log-only ready check. */
+  port?: number;
+  /** First log line that signals the daemon is fully initialised. */
+  readyLogPattern: RegExp;
+  /** Per-daemon env overrides on top of the shared `dvconf-daemons/.env`. */
+  envOverrides?: Record<string, string>;
+}
+
+const DAEMON_SPECS: DaemonSpec[] = [
+  {
+    name: 'cp-daemon',
+    appDir: 'cp-daemon',
+    readyLogPattern: /CP daemon started/,
+  },
+  {
+    name: 'signaling',
+    appDir: 'signaling',
+    port: 8080,
+    readyLogPattern: /Signaling daemon started/,
+  },
+  {
+    name: 'relay',
+    appDir: 'relay',
+    port: 4000,
+    readyLogPattern: /Relay daemon started/,
+  },
+  {
+    name: 'validator-daemon',
+    appDir: 'validator-daemon',
+    readyLogPattern: /Validator daemon started/,
+  },
+];
+
+export interface DaemonHandle {
+  spec: DaemonSpec;
+  proc: ChildProcess;
+  logPath: string;
+  /** Last `tailBytes` of merged stdout+stderr — surfaced on failure. */
+  tail: string[];
+  killed: boolean;
+}
+
+const MAX_TAIL_LINES = 80;
+
+/**
+ * Launch a daemon as a long-lived child process. stdout + stderr stream to
+ * `<logDir>/daemon-<name>-<ts>.log` (file mirror for post-mortem) AND are
+ * re-emitted on the ChildProcess so `waitForDaemonReady` can pattern-match
+ * lines as they arrive. No shell — sidesteps Windows PS5.1's
+ * NativeCommandError class (the bug that gated S23.3).
+ */
+export function spawnDaemon(
+  spec: DaemonSpec,
+  daemonsDir: string,
+  logDir: string,
+  envOverrides: NodeJS.ProcessEnv = {},
+): DaemonHandle {
+  mkdirSync(logDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const logPath = join(logDir, `daemon-${spec.name}-${ts}.log`);
+  const logStream = createWriteStream(logPath, { flags: 'a' });
+
+  const entry = join('apps', spec.appDir, 'src', 'index.ts');
+  const proc = spawn(
+    process.execPath,
+    ['--import', 'tsx/esm', entry],
+    {
+      cwd: daemonsDir,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...spec.envOverrides, ...envOverrides },
+    },
+  );
+
+  const handle: DaemonHandle = {
+    spec,
+    proc,
+    logPath,
+    tail: [],
+    killed: false,
+  };
+
+  const onChunk = (chunk: Buffer): void => {
+    const text = chunk.toString('utf8');
+    logStream.write(text);
+    // Maintain a small in-memory tail for failure reporting.
+    for (const line of text.split('\n')) {
+      if (line.length === 0) continue;
+      handle.tail.push(line);
+      if (handle.tail.length > MAX_TAIL_LINES) handle.tail.shift();
+    }
+  };
+  proc.stdout?.on('data', onChunk);
+  proc.stderr?.on('data', onChunk);
+  proc.on('exit', () => {
+    logStream.end();
+  });
+
+  console.log(`[bench] spawned ${spec.name} (pid=${proc.pid}) → ${logPath}`);
+  return handle;
+}
+
+/**
+ * Block until either (a) the daemon's port accepts a TCP connection (when
+ * `spec.port` is set) AND (b) its `readyLogPattern` matches a log line.
+ * Both must succeed within `timeoutMs`. On timeout, throws an error containing
+ * the daemon name, the missing signal, and the last 20 log lines — without
+ * this, voting-mode hangs are silent because the daemon stays alive but
+ * never reaches the registered state.
+ *
+ * cp-daemon + validator-daemon have no port, so log-tail alone suffices.
+ */
+export async function waitForDaemonReady(
+  handle: DaemonHandle,
+  timeoutMs = 180_000,
+): Promise<void> {
+  const { spec, proc } = handle;
+  const tasks: Array<Promise<unknown>> = [];
+
+  if (spec.port !== undefined) {
+    tasks.push(waitForPort('127.0.0.1', spec.port, timeoutMs, 1000));
+  }
+
+  if (proc.stdout !== null) {
+    tasks.push(
+      waitForLogLine(
+        proc.stdout as unknown as LogStream,
+        spec.readyLogPattern,
+        timeoutMs,
+      ),
+    );
+  }
+
+  // Detect early exit — if the daemon crashes during ready-wait, surface the
+  // crash instead of waiting out the full timeout.
+  const exitPromise = new Promise<never>((_, reject) => {
+    proc.once('exit', (code, signal) => {
+      reject(
+        new Error(
+          `daemon ${spec.name} exited unexpectedly (code=${code}, signal=${signal ?? 'none'}) before ready`,
+        ),
+      );
+    });
+  });
+
+  try {
+    await Promise.race([Promise.all(tasks), exitPromise]);
+    console.log(`[bench] ${spec.name} ready (port=${spec.port ?? '—'})`);
+  } catch (err) {
+    const tail = handle.tail.slice(-20).join('\n');
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `waitForDaemonReady(${spec.name}): ${msg}\n--- last 20 log lines (full: ${handle.logPath}) ---\n${tail}`,
+    );
+  }
+}
+
+/**
+ * Spawn all 4 daemons in voting-safe order: cp-daemon first (await ready),
+ * then relay + signaling + validator in parallel. Returns all 4 handles for
+ * later teardown. On any failure, tears down whatever was already spawned and
+ * re-throws — leaving orphan daemon processes around would block subsequent
+ * runs on the same ports.
+ */
+export async function spawnAllDaemons(
+  daemonsDir: string,
+  logDir: string,
+): Promise<DaemonHandle[]> {
+  const handles: DaemonHandle[] = [];
+  try {
+    const cp = DAEMON_SPECS.find((s) => s.name === 'cp-daemon')!;
+    const cpHandle = spawnDaemon(cp, daemonsDir, logDir);
+    handles.push(cpHandle);
+    await waitForDaemonReady(cpHandle);
+
+    const others = DAEMON_SPECS.filter((s) => s.name !== 'cp-daemon');
+    const otherHandles = others.map((s) =>
+      spawnDaemon(s, daemonsDir, logDir),
+    );
+    handles.push(...otherHandles);
+    await Promise.all(otherHandles.map((h) => waitForDaemonReady(h)));
+
+    return handles;
+  } catch (err) {
+    await teardownDaemons(handles);
+    throw err;
+  }
+}
+
+/**
+ * SIGTERM all daemons in reverse-spawn order, wait up to 5 s each for graceful
+ * exit, then SIGKILL stragglers. Idempotent — calling on already-dead handles
+ * is a no-op.
+ */
+export async function teardownDaemons(
+  handles: readonly DaemonHandle[],
+): Promise<void> {
+  for (const h of [...handles].reverse()) {
+    if (h.killed || h.proc.exitCode !== null) continue;
+    h.killed = true;
+    console.log(`[bench] SIGTERM ${h.spec.name} (pid=${h.proc.pid})`);
+    h.proc.kill('SIGTERM');
+    const exited = await new Promise<boolean>((res) => {
+      const timer = setTimeout(() => res(false), 5_000);
+      h.proc.once('exit', () => {
+        clearTimeout(timer);
+        res(true);
+      });
+    });
+    if (!exited) {
+      console.log(`[bench] SIGKILL ${h.spec.name} (graceful exit timed out)`);
+      h.proc.kill('SIGKILL');
+    }
+  }
+}
+
+// ── Room creation (S25.C.3) ───────────────────────────────────────────
+
+/** user_registry::E_ALREADY_REGISTERED — idempotency check on second bring-up. */
+const E_USER_ALREADY_REGISTERED = 540;
+
+/**
+ * Best-effort `user_registry::register_user`. Swallows the E_ALREADY_REGISTERED
+ * abort (code 540) — bench may re-run against an existing localnet (--reuse-running)
+ * where the deployer is already in `UserRegistry`. Any other failure rethrows.
+ */
+export async function ensureUserRegistered(
+  sui: SuiClient,
+  signer: Ed25519Keypair,
+  ids: BenchIds,
+  displayName = 'bench-deployer',
+): Promise<void> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${ids.packageId}::user_registry::register_user`,
+    arguments: [
+      tx.object(ids.networkRegistryId),
+      tx.object(ids.userRegistryId),
+      tx.pure.vector('u8', Array.from(new TextEncoder().encode(displayName))),
+    ],
+  });
+  try {
+    await sui.signAndExecuteTransaction({
+      transaction: tx,
+      signer,
+      options: { showEffects: true },
+    });
+    console.log('[bench] registered deployer in UserRegistry');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes(`abort_code: ${E_USER_ALREADY_REGISTERED}`) || msg.includes(`, ${E_USER_ALREADY_REGISTERED})`)) {
+      console.log('[bench] deployer already registered in UserRegistry (idempotent)');
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Build + execute the `room_manager::create_room` PTB and pluck `room_id` out
+ * of the `RoomCreated` event. Default is SFU mode (relay_mode=0) with 4
+ * expected participants — matches the bench scenario in `mediasoup-client-harness.ts`.
+ *
+ * The Move side stores the Room in `RoomManager`'s internal table rather than
+ * minting a shared object, so we can't use `parseSharedObjectFromCreate`. The
+ * event carries the room ID — see `parseRoomIdFromEvents`.
+ */
+export async function createBenchRoom(
+  sui: SuiClient,
+  signer: Ed25519Keypair,
+  ids: BenchIds,
+  opts: { relayMode?: 'sfu' | 'mcu'; expectedParticipants?: number } = {},
+): Promise<string> {
+  const mode = opts.relayMode === 'mcu' ? 1 : 0;
+  const expected = opts.expectedParticipants ?? 4;
+
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${ids.packageId}::room_manager::create_room`,
+    arguments: [
+      tx.object(ids.networkRegistryId),
+      tx.object(ids.roomManagerId),
+      tx.object(ids.userRegistryId),
+      tx.pure.u8(mode),
+      tx.pure.u64(expected),
+    ],
+  });
+
+  const result = await sui.signAndExecuteTransaction({
+    transaction: tx,
+    signer,
+    options: { showEvents: true, showEffects: true },
+  });
+
+  const roomId = parseRoomIdFromEvents(
+    result as SuiTxResult,
+    '::room_manager::RoomCreated',
+  );
+  console.log(`[bench] created bench room id=${roomId} mode=${opts.relayMode ?? 'sfu'} expected=${expected}`);
+  return roomId;
+}
+
+// ── Scenario runner (S25.C.5) ─────────────────────────────────────────
+
+export interface BenchScenarioOpts {
+  /** dvconf-daemons working directory (cwd for harness spawn). */
+  daemonsDir: string;
+  /** On-chain room ID from createBenchRoom. */
+  roomId: string;
+  /** Peer count per run — passed to harness as --peers. */
+  peers: number;
+  /** How many times to run the scenario. */
+  runs: number;
+  /** Per-run capture duration in seconds (passed as --duration). */
+  durationSec: number;
+  /** Quiet period between runs so the relay can close stale transports. */
+  cooldownMs?: number;
+  /** Extra env vars (e.g. BENCH_LATENCY=1, BENCH_TRACE_ID). */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Sequentially execute `runs` copies of the N-peer harness against the bench
+ * room. Each run is a fresh `tsx mediasoup-client-harness.ts` child process
+ * with its own JSONL trace file (LatencyWriter generates a UUID per process).
+ *
+ * Failure of one run is logged but does not abort the loop — bench wants a
+ * sample set, not a fail-fast pipeline. Per-run hard timeout =
+ * `(durationSec + 30) * 1000` covers join + close overhead.
+ */
+export async function runBenchScenario(opts: BenchScenarioOpts): Promise<void> {
+  const cooldown = opts.cooldownMs ?? 5_000;
+  const perRunBudgetMs = (opts.durationSec + 30) * 1000;
+  const harnessEntry = join('scripts', 'bench', 'mediasoup-client-harness.ts');
+
+  for (let i = 1; i <= opts.runs; i++) {
+    console.log(
+      `[bench] scenario run ${i}/${opts.runs} — peers=${opts.peers} duration=${opts.durationSec}s`,
+    );
+    const startedAt = Date.now();
+    const result = await runCli(
+      process.execPath,
+      [
+        '--import',
+        'tsx/esm',
+        harnessEntry,
+        '--room-id',
+        opts.roomId,
+        '--peers',
+        String(opts.peers),
+        '--duration',
+        String(opts.durationSec),
+      ],
+      {
+        cwd: opts.daemonsDir,
+        timeoutMs: perRunBudgetMs,
+        env: { ...process.env, ...opts.env, BENCH_LATENCY: '1' },
+      },
+    );
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    if (result.code === 0) {
+      console.log(`[bench] scenario run ${i} done in ${elapsed}s`);
+    } else {
+      console.error(
+        `[bench] scenario run ${i} FAILED (code=${result.code}, elapsed=${elapsed}s)`,
+      );
+      console.error(`[bench]   stderr tail: ${result.stderr.split('\n').slice(-5).join(' / ')}`);
+    }
+
+    if (i < opts.runs) {
+      console.log(`[bench] cooldown ${cooldown}ms before next run`);
+      await new Promise((r) => setTimeout(r, cooldown));
+    }
+  }
+}
+
+// ── main ──────────────────────────────────────────────────────────────
+
 async function main(): Promise<void> {
   const reuseRunning = process.argv.includes('--reuse-running');
   const bringupOnly = process.argv.includes('--bringup-only');
+  const daemonsOnly = process.argv.includes('--daemons-only');
+  const peers = pickIntArg('--peers', 4);
+  const runs = pickIntArg('--runs', 5);
+  const durationSec = pickIntArg('--duration', 60);
+
   const result = await bringUpBench({ reuseRunning });
   console.log('[bench] bring-up complete');
   if (bringupOnly) {
     console.log('[bench] --bringup-only set; leaving sui node running');
     return;
   }
-  // S25.C extension point: daemon spawn + room create + 4-peer harness.
-  console.log(
-    '[bench] S25.C (daemon spawn + 4-peer scenario) lands in the next sub-task',
-  );
-  // For S25.B, keep the sui node alive long enough to inspect the .env then exit.
-  if (!reuseRunning) {
-    await result.sui.stop();
+
+  const daemonHandles = await spawnAllDaemons(DAEMONS_DIR, LOGS_DIR);
+  console.log(`[bench] all ${daemonHandles.length} daemons ready`);
+
+  if (daemonsOnly) {
+    console.log(
+      '[bench] --daemons-only set; leaving daemons + sui running. SIGINT to clean up.',
+    );
+    return;
   }
+
+  try {
+    await ensureUserRegistered(result.client, result.deployer, result.ids);
+    const roomId = await createBenchRoom(
+      result.client,
+      result.deployer,
+      result.ids,
+    );
+    await runBenchScenario({
+      daemonsDir: DAEMONS_DIR,
+      roomId,
+      peers,
+      runs,
+      durationSec,
+    });
+  } finally {
+    await teardownDaemons(daemonHandles);
+    if (!reuseRunning) {
+      await result.sui.stop();
+    }
+  }
+}
+
+/** Read an integer CLI flag like `--peers 4` from argv, or fall back. */
+function pickIntArg(flag: string, fallback: number): number {
+  const idx = process.argv.indexOf(flag);
+  if (idx < 0 || idx + 1 >= process.argv.length) return fallback;
+  const n = parseInt(process.argv[idx + 1]!, 10);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 const isMain =

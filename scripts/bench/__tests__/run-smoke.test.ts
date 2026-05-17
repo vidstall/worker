@@ -15,14 +15,18 @@
 
 import { describe, it, expect } from 'vitest';
 import { createServer, type Server } from 'node:net';
+import { Readable } from 'node:stream';
 import {
   parsePublishJson,
   parseSharedObjectFromCreate,
   buildEnvContent,
   waitForPort,
+  parseRoomIdFromEvents,
+  waitForLogLine,
   type BenchIds,
   type DaemonKeys,
   type SuiObjectChange,
+  type SuiTxEvent,
 } from '../run-smoke.js';
 
 // ── parsePublishJson ──────────────────────────────────────────────────
@@ -297,5 +301,120 @@ describe('waitForPort', () => {
     await expect(
       waitForPort('127.0.0.1', 1, 300, 50),
     ).rejects.toThrow(/not reachable/);
+  });
+});
+
+// ── parseRoomIdFromEvents ─────────────────────────────────────────────
+
+describe('parseRoomIdFromEvents', () => {
+  const ROOM_ID = '0xroom1111111111111111111111111111111111111111111111111111111111';
+
+  function roomCreatedEvent(): SuiTxEvent {
+    return {
+      type: `${PKG}::room_manager::RoomCreated`,
+      parsedJson: {
+        room_id: ROOM_ID,
+        creator: ADDR,
+        relay_mode: 1,
+      },
+    };
+  }
+
+  it('extracts room_id from a RoomCreated event in the events array', () => {
+    const result = { events: [roomCreatedEvent()] };
+    expect(parseRoomIdFromEvents(result, '::room_manager::RoomCreated')).toBe(
+      ROOM_ID,
+    );
+  });
+
+  it('skips events with non-matching type and returns the first match', () => {
+    const decoy: SuiTxEvent = {
+      type: `${PKG}::registration::MinerRegistered`,
+      parsedJson: { miner_id: '0xfake', role: 0 },
+    };
+    const result = { events: [decoy, roomCreatedEvent()] };
+    expect(parseRoomIdFromEvents(result, '::room_manager::RoomCreated')).toBe(
+      ROOM_ID,
+    );
+  });
+
+  it('throws when no matching event exists', () => {
+    const result = {
+      events: [
+        {
+          type: `${PKG}::registration::MinerRegistered`,
+          parsedJson: { miner_id: '0xfake', role: 0 },
+        },
+      ],
+    };
+    expect(() =>
+      parseRoomIdFromEvents(result, '::room_manager::RoomCreated'),
+    ).toThrow(/RoomCreated/);
+  });
+
+  it('throws when matching event has no parsedJson.room_id field', () => {
+    const result = {
+      events: [
+        {
+          type: `${PKG}::room_manager::RoomCreated`,
+          parsedJson: { creator: ADDR, relay_mode: 1 },
+        },
+      ],
+    };
+    expect(() =>
+      parseRoomIdFromEvents(result, '::room_manager::RoomCreated'),
+    ).toThrow(/room_id/);
+  });
+
+  it('throws when events array is missing entirely', () => {
+    expect(() =>
+      parseRoomIdFromEvents({}, '::room_manager::RoomCreated'),
+    ).toThrow(/events/);
+  });
+});
+
+// ── waitForLogLine ────────────────────────────────────────────────────
+
+describe('waitForLogLine', () => {
+  it('resolves when a matching line arrives on the stream', async () => {
+    const stream = new Readable({ read() {} });
+    const promise = waitForLogLine(stream, /Starting role voting loop/, 1000);
+    stream.push('some unrelated log\n');
+    stream.push('Starting role voting loop intervalMs=5000\n');
+    await expect(promise).resolves.toBe(
+      'Starting role voting loop intervalMs=5000',
+    );
+  });
+
+  it('handles chunked lines split across multiple push calls', async () => {
+    const stream = new Readable({ read() {} });
+    const promise = waitForLogLine(stream, /chain-aware mode/, 1000);
+    stream.push('Signaling daemon ');
+    stream.push('started — ');
+    stream.push('chain-aware mode\n');
+    await expect(promise).resolves.toMatch(/chain-aware mode/);
+  });
+
+  it('ignores non-matching lines', async () => {
+    const stream = new Readable({ read() {} });
+    const promise = waitForLogLine(stream, /never matches/, 200);
+    stream.push('hello\n');
+    stream.push('world\n');
+    await expect(promise).rejects.toThrow(/timeout/);
+  });
+
+  it('rejects on timeout when no matching line arrives', async () => {
+    const stream = new Readable({ read() {} });
+    const promise = waitForLogLine(stream, /Starting role voting loop/, 150);
+    await expect(promise).rejects.toThrow(/timeout/);
+  });
+
+  it('matches a partial line in the buffer at stream end', async () => {
+    // Some daemons log without trailing newline if process is killed mid-line.
+    // We DO require the newline — incomplete lines are not considered matches.
+    const stream = new Readable({ read() {} });
+    const promise = waitForLogLine(stream, /partial/, 150);
+    stream.push('partial line without newline');
+    await expect(promise).rejects.toThrow(/timeout/);
   });
 });
