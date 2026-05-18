@@ -21,10 +21,12 @@ import {
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
-import { createSignalingServer } from './signaling.js';
+import { createSignalingServer, type TurnContext } from './signaling.js';
 import { MetricsTracker } from './metrics.js';
 import { startMetricsServer } from './metrics-server.js';
 import { closeRelayProbe } from './room-handler.js';
+import { deriveCoturnUrl } from './coturn-url.js';
+import { fetchTurnCredential } from './turn-fetcher.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -61,8 +63,60 @@ if (isMainModule) {
     // Step 3: Create metrics tracker
     const metrics = new MetricsTracker();
 
-    // Step 4: Start WebSocket signaling server
-    const { wss, getRoomCount } = createSignalingServer(manager, metrics, logger);
+    // Step 4: Start WebSocket signaling server.
+    // S30.C: build optional TurnContext when ENABLE_TURN_DELIVERY=1 +
+    // CP_DAEMON_RPC_URL + TURN_RPC_TOKEN are set. The signaling layer
+    // delegates the credential fetch per createTransport so it stays
+    // decoupled from the cp-daemon RPC plumbing.
+    const turnContext: TurnContext | undefined =
+      process.env['ENABLE_TURN_DELIVERY'] === '1' &&
+      process.env['CP_DAEMON_RPC_URL'] &&
+      process.env['TURN_RPC_TOKEN']
+        ? (() => {
+            const coturnUrl = deriveCoturnUrl(endpointUrl);
+            if (!coturnUrl) {
+              logger.warn(
+                { endpointUrl },
+                'ENABLE_TURN_DELIVERY=1 but endpointUrl unparseable; TURN disabled',
+              );
+              return undefined;
+            }
+            const cpRpcUrl = process.env['CP_DAEMON_RPC_URL']!;
+            const token = process.env['TURN_RPC_TOKEN']!;
+            const stunUrl = process.env['STUN_URL'] ?? 'stun:stun.l.google.com:19302';
+            const myMinerId = signer.toSuiAddress();
+            logger.info(
+              { coturnUrl, cpRpcUrl, stunUrl },
+              'TURN delivery enabled; relay will inline iceServers in transportCreated',
+            );
+            return {
+              buildIceServers: async (peerId: string) => {
+                const cred = await fetchTurnCredential({
+                  cpRpcUrl,
+                  token,
+                  targetMinerId: myMinerId,
+                  userId: peerId,
+                });
+                if (cred === null) return null;
+                return [
+                  { urls: stunUrl },
+                  {
+                    urls: [coturnUrl],
+                    username: cred.username,
+                    credential: cred.password,
+                  },
+                ];
+              },
+            };
+          })()
+        : undefined;
+
+    const { wss, getRoomCount } = createSignalingServer(
+      manager,
+      metrics,
+      logger,
+      turnContext,
+    );
 
     // Step 5: Start metrics HTTP server (default port 4001)
     const metricsServer = startMetricsServer(metrics, logger);

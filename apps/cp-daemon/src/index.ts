@@ -20,6 +20,7 @@ import { startHeartbeat } from './heartbeat.js';
 import { createEventHandler } from './event-handler.js';
 import { startRoleVoting } from './role-voter.js';
 import { startTurnIssuer } from './turn-issuer.js';
+import { startTurnRpc } from './turn-rpc.js';
 
 const logger = createLogger('cp-daemon');
 
@@ -74,6 +75,20 @@ async function main(): Promise<void> {
     logger,
     rotateIntervalMs: turnRotationIntervalMs,
   });
+
+  // S30.C: Optional TURN RPC HTTP server. Enabled iff TURN_RPC_TOKEN is set.
+  // Relay daemon fetches credentials via POST /turn/issue during client room-join.
+  const turnRpcToken = process.env['TURN_RPC_TOKEN'];
+  const stopTurnRpc = turnRpcToken
+    ? (
+        await startTurnRpc({
+          issuer: turnIssuer,
+          port: parseInt(process.env['TURN_RPC_PORT'] ?? '8090', 10),
+          token: turnRpcToken,
+          logger,
+        })
+      ).stop
+    : null;
 
   // Set up event handler with TX context for room assignment + TURN kill-switch
   const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
@@ -203,6 +218,9 @@ async function main(): Promise<void> {
     stopHeartbeat();
     stopRoleVoting();
     stopTurnIssuer();
+    if (stopTurnRpc) {
+      void stopTurnRpc();
+    }
     relayPoller.stop();
     cpPoller.stop();
     roomPoller.stop();

@@ -69,6 +69,21 @@ type SignalingMessage =
   | ConsumeMessage
   | LeaveMessage;
 
+/**
+ * S30.C — Optional TURN credential injection. When provided, the signaling
+ * server calls `buildIceServers(peerId)` during createTransport and inlines
+ * the result into the `transportCreated` response so mediasoup-client can
+ * add TURN relay candidates. Returning null skips for that transport; the
+ * server logs and degrades gracefully on errors (no TURN, baseline path).
+ */
+export interface TurnContext {
+  buildIceServers(
+    peerId: string,
+  ): Promise<
+    Array<{ urls: string | string[]; username?: string; credential?: string }> | null
+  >;
+}
+
 /** Send a JSON message to a WebSocket. */
 function sendJson(ws: WebSocket, msg: Record<string, unknown>): void {
   if (ws.readyState === WebSocket.OPEN) {
@@ -85,6 +100,7 @@ export function createSignalingServer(
   manager: MediasoupManager,
   metrics: MetricsTracker,
   logger: Logger,
+  turnContext?: TurnContext,
 ): { wss: WebSocketServer; getRoomCount: () => number } {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
@@ -298,12 +314,28 @@ export function createSignalingServer(
       peer.samplerStops.set(transport.id, stop);
     }
 
+    let iceServers:
+      | Array<{ urls: string | string[]; username?: string; credential?: string }>
+      | undefined;
+    if (turnContext) {
+      try {
+        const built = await turnContext.buildIceServers(mapping.peerId);
+        if (built !== null) iceServers = built;
+      } catch (err) {
+        logger.warn(
+          { err, peerId: mapping.peerId },
+          'TURN credential fetch failed; sending transportCreated without iceServers',
+        );
+      }
+    }
+
     sendJson(ws, {
       type: 'transportCreated',
       id: transport.id,
       iceParameters: transport.iceParameters,
       iceCandidates: transport.iceCandidates,
       dtlsParameters: transport.dtlsParameters,
+      ...(iceServers ? { iceServers } : {}),
     });
 
     logger.debug(
