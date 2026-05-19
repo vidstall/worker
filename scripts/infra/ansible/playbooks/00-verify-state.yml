@@ -1,0 +1,128 @@
+---
+# Read-only VM state verification
+# Safe to run any time — gathers facts + queries existence/versions without modifying anything.
+# Usage: ansible-playbook playbooks/00-verify-state.yml
+
+- name: Verify dvconf VM state (READ-ONLY)
+  hosts: dvconf-vm
+  gather_facts: yes
+
+  tasks:
+    - name: VM identity
+      ansible.builtin.debug:
+        msg:
+          - "Hostname: {{ ansible_hostname }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_distribution_release }})"
+          - "Kernel: {{ ansible_kernel }}"
+          - "Arch: {{ ansible_architecture }}"
+          - "CPUs: {{ ansible_processor_vcpus }}"
+          - "RAM total/free: {{ ansible_memtotal_mb }}MB / {{ ansible_memfree_mb }}MB"
+          - "IP (default): {{ ansible_default_ipv4.address }}"
+
+    - name: Check user existence
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ item }}"
+      register: user_check
+      failed_when: false
+      changed_when: false
+      loop:
+        - deploy
+        - Chaienzero
+        - dvconf
+        - qvanle
+
+    - name: User existence summary
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ 'EXISTS (uid=' + item.ansible_facts.getent_passwd[item.item][1] + ')' if item.ansible_facts is defined else 'MISSING' }}"
+      loop: "{{ user_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Check binaries via 'command -v'
+      ansible.builtin.shell: "command -v {{ item }} || echo NOT_FOUND"
+      register: bin_check
+      changed_when: false
+      loop:
+        - node
+        - pnpm
+        - sui
+        - turnserver
+        - certbot
+        - docker
+        - git
+        - curl
+        - jq
+
+    - name: Binary availability summary
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ item.stdout }}"
+      loop: "{{ bin_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Tool versions
+      ansible.builtin.shell: "{{ item }}"
+      register: ver_check
+      changed_when: false
+      failed_when: false
+      loop:
+        - "node --version 2>&1 | head -1"
+        - "pnpm --version 2>&1 | head -1"
+        - "sui --version 2>&1 | head -1"
+        - "turnserver -h 2>&1 | head -1 | grep -oE 'Version [0-9.]+' || echo unknown"
+        - "certbot --version 2>&1 | head -1"
+        - "docker --version 2>&1 | head -1"
+
+    - name: Version summary
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ item.stdout }}"
+      loop: "{{ ver_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Disk usage on /
+      ansible.builtin.shell: "df -h /"
+      register: disk_check
+      changed_when: false
+
+    - name: Disk summary
+      ansible.builtin.debug:
+        var: disk_check.stdout_lines
+
+    - name: Running Docker containers (read-only)
+      ansible.builtin.shell: 'docker ps --no-trunc 2>&1 | head -20'
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Docker container summary
+      ansible.builtin.debug:
+        msg: "{{ docker_check.stdout_lines if docker_check.rc == 0 else ['docker unavailable for user ' + ansible_user + ' (group access?): ' + docker_check.stderr] }}"
+
+    - name: Check coturn systemd service state (read-only)
+      ansible.builtin.shell: "systemctl is-enabled coturn 2>&1; systemctl is-active coturn 2>&1"
+      register: coturn_check
+      changed_when: false
+      failed_when: false
+
+    - name: Coturn state summary
+      ansible.builtin.debug:
+        msg: "coturn enabled/active: {{ coturn_check.stdout_lines }}"
+
+    - name: Check listening ports (read-only)
+      ansible.builtin.shell: "ss -tln 2>/dev/null | awk 'NR>1 {print $4}' | sort -u | head -20"
+      register: ports_check
+      changed_when: false
+
+    - name: Listening TCP ports summary
+      ansible.builtin.debug:
+        var: ports_check.stdout_lines
+
+    - name: Final state summary
+      ansible.builtin.debug:
+        msg:
+          - "═══════════════════════════════════════════"
+          - "VM 103.67.197.249 state verified read-only."
+          - "No modifications applied — Ansible queried only."
+          - "═══════════════════════════════════════════"

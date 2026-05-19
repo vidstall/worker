@@ -150,6 +150,12 @@ install_sui() {
 # ── Firewall ─────────────────────────────────────────────────────────
 
 configure_ufw() {
+    if [ "${BOOTSTRAP_SKIP_UFW:-0}" = "1" ]; then
+        log "── UFW skipped (BOOTSTRAP_SKIP_UFW=1) — coexist-with-existing-services mode ──"
+        log "    Caller is responsible for firewall rules on host."
+        return
+    fi
+
     log "── UFW firewall ──"
 
     # default deny incoming, allow outgoing

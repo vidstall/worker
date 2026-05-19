@@ -1,0 +1,21 @@
+---
+# Inventory for dvconf VM 103.67.197.249
+# - dvconf-vm: deploy user (non-sudo, default for daemon ops)
+# - dvconf-vm-admin: Chaienzero user (sudo group, use ONLY when bootstrap/system config needed)
+#
+# Sudo password feeding: pass via --ask-become-pass when running a play that needs become
+
+all:
+  hosts:
+    dvconf-vm:
+      ansible_host: 103.67.197.249
+      ansible_user: deploy
+      ansible_ssh_private_key_file: ~/.ssh/dvconf_deploy
+      ansible_python_interpreter: /usr/bin/python3
+    dvconf-vm-admin:
+      ansible_host: 103.67.197.249
+      ansible_user: Chaienzero
+      ansible_ssh_private_key_file: ~/.ssh/dvconf_deploy
+      ansible_python_interpreter: /usr/bin/python3
+      ansible_become: yes
+      ansible_become_method: sudo
