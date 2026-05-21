@@ -66,23 +66,24 @@ function mockLogger(): Logger {
 
 /**
  * Step 1 effects: registration::register creates MinerCap + StakePosition.
- * Both entries include objectType for extractCreatedObjectByType() to find them.
+ * Uses objectChanges (post-Sui SDK 1.x) so extractCreatedObjectByType() can find them.
  */
 function step1Effects() {
   return {
     digest: 'digest1',
-    effects: {
-      created: [
-        {
-          reference: { objectId: '0xminer-cap' },
-          objectType: '0xpkg::caps::MinerCap',
-        },
-        {
-          reference: { objectId: '0xstake-pos' },
-          objectType: '0xpkg::staking::StakePosition',
-        },
-      ],
-    },
+    objectChanges: [
+      {
+        type: 'created',
+        objectId: '0xminer-cap',
+        objectType: '0xpkg::caps::MinerCap',
+      },
+      {
+        type: 'created',
+        objectId: '0xstake-pos',
+        objectType: '0xpkg::staking::StakePosition',
+      },
+    ],
+    effects: { created: [] },
     events: [],
   };
 }
@@ -304,8 +305,8 @@ describe('ensureRegistered', () => {
     expect(mockTx.moveCall).toHaveBeenCalledTimes(1);
     const args = moveCallArgs[0]!;
 
-    // Exactly 13 args (no extra MinerRole argument)
-    expect(args).toHaveLength(13);
+    // Exactly 12 args (role determined on-chain by determine_role, not passed as arg)
+    expect(args).toHaveLength(12);
 
     // tx.pure.string() must NEVER be called — all string fields use vector<u8>
     expect(mockTx.pure.string).not.toHaveBeenCalled();

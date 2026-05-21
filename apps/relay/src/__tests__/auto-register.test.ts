@@ -45,7 +45,7 @@ function mockConfig(): NetworkConfig {
     networkRegistryId: '0xreg',
     minerStoreId: '0xstore',
     cpRegistryId: '0xcp',
-    relayRegistryId: '0xrelay',
+    relayRegistryId: '0x0000000000000000000000000000000000000000000000000000000000000001',
     validatorRegistryId: '0xval',
     userRegistryId: '0xuser',
     roomManagerId: '0xroom',
@@ -56,22 +56,26 @@ function mockConfig(): NetworkConfig {
 
 const mockSigner = { toSuiAddress: () => '0xsigner' } as any;
 
-/** Step 1 effects: registration::register creates MinerCap + StakePosition. */
+/**
+ * Step 1 effects: registration::register creates MinerCap + StakePosition.
+ * Uses objectChanges (post-Sui SDK 1.x) so extractCreatedObjectByType() can find them.
+ */
 function step1Effects() {
   return {
     digest: 'digest-1',
-    effects: {
-      created: [
-        {
-          reference: { objectId: '0xminer-cap' },
-          objectType: '0xpkg::caps::MinerCap',
-        },
-        {
-          reference: { objectId: '0xstake-pos' },
-          objectType: '0xpkg::staking::StakePosition',
-        },
-      ],
-    },
+    objectChanges: [
+      {
+        type: 'created',
+        objectId: '0xminer-cap',
+        objectType: '0xpkg::caps::MinerCap',
+      },
+      {
+        type: 'created',
+        objectId: '0xstake-pos',
+        objectType: '0xpkg::staking::StakePosition',
+      },
+    ],
+    effects: { created: [] },
     events: [],
   };
 }
@@ -104,7 +108,7 @@ describe('ensureRegistered (relay)', () => {
     const mockClient = {
       getObject: vi.fn().mockResolvedValue({
         data: {
-          content: { fields: { miner_id: '0xminer-id' } },
+          content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } },
         },
       }),
       devInspectTransactionBlock: vi.fn().mockResolvedValue({
@@ -208,7 +212,7 @@ describe('ensureRegistered (relay)', () => {
 
     expect(mockTx.moveCall).toHaveBeenCalledTimes(1);
     const args = moveCallArgs[0]!;
-    expect(args).toHaveLength(13);
+    expect(args).toHaveLength(12);
   });
 
   it('Step 2 TX has correct 6 args for relay_registry::register_relay', async () => {
