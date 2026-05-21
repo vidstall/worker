@@ -6,7 +6,7 @@
  * - Calls registration::register then validator_registry::register_validator when not set
  * - Exits on registration failure
  * - Uses executeWithRetry for all TX calls (DAEMON-07/DAEMON-12)
- * - Step 1 TX: exactly 13 args, no MinerRole arg, all strings use vector<u8>
+ * - Step 1 TX: exactly 12 args, no MinerRole arg, all strings use vector<u8>
  * - Step 2 TX: exactly 4 args = [networkRegistryId, validatorRegistryId, minerCapId, stakePositionId]
  * - validatorCapId == minerCapId from Step 1 (register_validator creates no new objects)
  */
@@ -262,7 +262,7 @@ describe('ensureRegistered', () => {
 
   // ── Arg-verification tests: capture buildTx and inspect moveCall args ────────
 
-  it('Step 1 (registration::register): exactly 13 args, no MinerRole, strings use vector<u8>', async () => {
+  it('Step 1 (registration::register): exactly 12 args, no MinerRole, strings use vector<u8>', async () => {
     delete process.env['VALIDATOR_CAP_ID'];
 
     mockExecuteWithRetry

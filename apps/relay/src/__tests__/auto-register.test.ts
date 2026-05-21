@@ -131,7 +131,7 @@ describe('ensureRegistered (relay)', () => {
     const mockClient = {
       getObject: vi.fn().mockResolvedValue({
         data: {
-          content: { fields: { miner_id: '0xminer-id' } },
+          content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } },
         },
       }),
       devInspectTransactionBlock: vi.fn().mockResolvedValue({
@@ -180,7 +180,7 @@ describe('ensureRegistered (relay)', () => {
     );
   });
 
-  it('Step 1 TX has correct 13 args for registration::register', async () => {
+  it('Step 1 TX has correct 12 args for registration::register', async () => {
     delete process.env['MINER_CAP_ID'];
     const logger = mockLogger();
 
