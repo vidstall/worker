@@ -31,6 +31,7 @@ import {
 import type { NetworkConfig, Logger } from '@dvconf/shared';
 import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvconf/shared';
 import { ensureRegistered } from './auto-register.js';
+import { startHeartbeat } from './heartbeat.js';
 import { collectMeasurements } from './measurements.js';
 import { fetchRelayMetrics } from './probe.js';
 import {
@@ -75,6 +76,8 @@ export interface DaemonState {
   roomPoller: EventPoller | null;
   escrowMap: Map<string, string>;
   activeRooms: Map<string, ActiveRoom>;
+  /** Stop function returned by startHeartbeat (F40). */
+  heartbeatStop: (() => void) | null;
   running: boolean;
 }
 
@@ -154,8 +157,21 @@ export async function startDaemon(overrides?: {
     roomPoller: null,
     escrowMap,
     activeRooms,
+    heartbeatStop: null,
     running: true,
   };
+
+  // F40: Start periodic liveness heartbeat (signed by main wallet -- operator check on-chain).
+  // Cadence default 30s; consumed by room_manager.move PVR_HEARTBEAT_STALE=7 epochs eligibility.
+  const heartbeatIntervalMs = parseInt(process.env['VALIDATOR_HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
+  state.heartbeatStop = startHeartbeat(
+    client,
+    mainKeypair,
+    config,
+    validatorCapId,
+    heartbeatIntervalMs,
+    log,
+  );
 
   // Read measurement config from env
   const measurementIntervalMs = parseInt(process.env['MEASUREMENT_INTERVAL_MS'] ?? '60000', 10);
@@ -492,6 +508,12 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
 
   // Close latency-probe writer (S23.1.A3, no-op when BENCH_LATENCY unset)
   closeValidatorProbe();
+
+  if (state.heartbeatStop) {
+    state.heartbeatStop();
+    state.heartbeatStop = null;
+    l.info('Heartbeat loop stopped');
+  }
 
   if (state.measurementTimer) {
     clearInterval(state.measurementTimer);

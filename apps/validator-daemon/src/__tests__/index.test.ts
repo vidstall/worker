@@ -218,9 +218,13 @@ describe('Validator daemon', () => {
     // Wait for initial cycle + one interval
     await vi.advanceTimersByTimeAsync(5000);
 
-    // executeWithRetry should NOT have been called for proof submission
-    // (it may be called for registration, but ensureRegistered is mocked out)
-    expect(mockExecuteWithRetry).not.toHaveBeenCalled();
+    // F40: heartbeat loop calls executeWithRetry with label 'validator-heartbeat'.
+    // Filter those out -- the original intent of this test is that NO PROOF SUBMISSION
+    // calls happen when escrowMap is empty.
+    const proofSubmissionCalls = mockExecuteWithRetry.mock.calls.filter(
+      (c) => c[3] !== 'validator-heartbeat',
+    );
+    expect(proofSubmissionCalls).toHaveLength(0);
 
     // But logProofSummary should have been called (proof logged, not submitted)
     expect(logProofSpy).toHaveBeenCalled();

@@ -1,11 +1,16 @@
 /**
- * Periodic load reporting for RelayRegistry.
+ * Combined heartbeat + load reporting for RelayRegistry.
  *
- * RelayRegistry does NOT have a dedicated heartbeat function --
- * update_load serves as the liveness signal.
- * Uses executeWithRetry from @dvconf/shared for exponential backoff.
+ * heartbeat() is the liveness signal (writes last_heartbeat on-chain).
+ * update_load reports current load. Combined PTB per ADD IMP-3 pattern.
  *
- * Requirements: RELAY-05
+ * Post-F40: relay_registry now has a dedicated relay_heartbeat entry
+ * mirroring signaling_registry::heartbeat. update_load is no longer
+ * doubling as the liveness signal -- it only reports load.
+ *
+ * Uses executeWithRetry from @dvconf/shared for exponential backoff (DAEMON-07).
+ *
+ * Requirements: RELAY-05, F40
  */
 
 import type { SuiClient } from '@mysten/sui/client';
@@ -15,9 +20,31 @@ import { executeWithRetry, type NetworkConfig, type Logger } from '@dvconf/share
 import type { MetricsTracker } from './metrics.js';
 
 /**
+ * Build a heartbeat moveCall on the given transaction.
+ *
+ * Target: relay_registry::relay_heartbeat(net_reg, registry, cap)
+ * Liveness signal -- writes last_heartbeat. No load arg (mirrors signaling pattern).
+ */
+export function buildHeartbeatTx(
+  tx: Transaction,
+  config: NetworkConfig,
+  minerCapId: string,
+): void {
+  tx.moveCall({
+    target: `${config.packageId}::relay_registry::relay_heartbeat`,
+    arguments: [
+      tx.object(config.networkRegistryId),       // net_reg: &NetworkRegistry
+      tx.object(config.relayRegistryId),          // registry: &mut RelayRegistry
+      tx.object(minerCapId),                      // cap: &MinerCap
+    ],
+  });
+}
+
+/**
  * Build an update_load moveCall on the given transaction.
  *
  * Target: relay_registry::update_load(net_reg, registry, cap, new_load)
+ * Load reporting only (post-F40, no longer doubles as liveness signal).
  */
 export function buildUpdateLoadTx(
   tx: Transaction,
@@ -49,10 +76,10 @@ function calculateLoad(metrics: MetricsTracker, roomCount: number): number {
 }
 
 /**
- * Start the load reporting loop.
+ * Start the heartbeat + load reporting loop.
  *
- * Sends update_load PTB at the configured interval (default 30s).
- * update_load serves as the liveness signal for RelayRegistry.
+ * Sends a combined heartbeat + update_load PTB at the configured interval (default 30s).
+ * Mirrors signaling/heartbeat.ts pattern (combined PTB per ADD IMP-3).
  *
  * @param getRoomCount - Callback to get current active room count
  * @returns A stop function that clears the interval.
@@ -67,7 +94,7 @@ export function startHeartbeat(
   intervalMs: number,
   logger: Logger,
 ): () => void {
-  logger.info({ intervalMs, minerCapId }, 'Starting relay heartbeat/load-update loop');
+  logger.info({ intervalMs, minerCapId }, 'Starting relay heartbeat + load-update loop');
 
   const sendHeartbeat = async (): Promise<void> => {
     const roomCount = getRoomCount();
@@ -75,13 +102,15 @@ export function startHeartbeat(
 
     logger.debug(
       { currentLoad, rooms: roomCount, sessions: metrics.getActiveSessionCount() },
-      'Sending relay load update',
+      'Sending relay heartbeat + load update',
     );
 
     await executeWithRetry(
       client,
       signer,
       (tx: Transaction) => {
+        // Combined PTB: heartbeat (liveness) + update_load (load reporting) per ADD IMP-3
+        buildHeartbeatTx(tx, config, minerCapId);
         buildUpdateLoadTx(tx, config, minerCapId, currentLoad);
       },
       'relay-heartbeat',
