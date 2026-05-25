@@ -43,11 +43,20 @@ export interface CpKeystore {
    * (M-of-N quorum, REQ-ADM-003, D-B4 default M=2/N=3). Throws if quorum cannot be
    * assembled within the implementation-defined timeout — caller treats the throw as
    * "issuance temporarily unavailable" and logs an error.
+   *
+   * Returns:
+   *   - `qs`            : the QuorumSig struct (signers + signatures parallel arrays)
+   *   - `pubkeys`       : ed25519 pubkeys parallel to qs.signers (D-001 pattern)
+   *   - `aggregateSig`  : BCS-serialized QuorumSig blob — stored on-chain in the
+   *                       minted/refreshed RoomCapability's `aggregate_sig` field
+   *                       for off-chain audit replay. D-011 (S54): Move issue +
+   *                       refresh entries both take this as a separate `vector<u8>`
+   *                       param; revoke does NOT.
    */
   collectQuorumSignatures(
     canonicalMsg: Uint8Array,
     threshold: number,
-  ): Promise<{ qs: QuorumSig; pubkeys: number[][] }>;
+  ): Promise<{ qs: QuorumSig; pubkeys: number[][]; aggregateSig: number[] }>;
 }
 
 // ── Event payload shapes (real Move struct names per D-010-A / CONTRACTS § 4.6) ──
@@ -343,7 +352,7 @@ export class CapTokenIssuer {
       nonce,
     });
 
-    const { qs, pubkeys } = await this.keystore.collectQuorumSignatures(
+    const { qs, pubkeys, aggregateSig } = await this.keystore.collectQuorumSignatures(
       canonicalMsg,
       this.threshold,
     );
@@ -362,6 +371,10 @@ export class CapTokenIssuer {
         nonce,
         cpQuorumProof: qs,
         signerPubkeys: pubkeys,
+        // D-011: BCS-serialized QuorumSig blob stored on-chain as the minted
+        // RoomCapability's `aggregate_sig` field (Move param 11 between
+        // signer_pubkeys and ctx). Aligns TS daemon → Move chain SOT.
+        aggregateSig,
         canonicalMsg: Array.from(canonicalMsg),
       },
     });
