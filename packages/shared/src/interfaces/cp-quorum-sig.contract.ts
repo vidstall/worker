@@ -66,7 +66,7 @@ export interface QuorumConfigState {
 /**
  * Error codes for the `cp_quorum_sig` module.
  * Numeric values are frozen S53 — see D-001 + D-002 for rationale.
- * Reserved future range: 886-889 (activate in Stage 2 strict-abort wrappers).
+ * Phase 2.2 update: E_DUPLICATE_SIGNER=886 ACTIVE (F-01 fix). 887-889 still reserved.
  */
 export const QUORUM_SIG_ERRORS = {
   /** Signer count < min_quorum threshold. Currently soft-fail (emits QuorumInsufficient). Reserved for Stage 2 strict-abort. */
@@ -81,7 +81,16 @@ export const QUORUM_SIG_ERRORS = {
   E_PUBKEY_COUNT_MISMATCH: 884,
   /** A signer address is not found in the active ControlPlaneRegistry. Reserved for Stage 2. */
   E_SIGNER_NOT_REGISTERED: 885,
-  // 886-889: reserved-future (Stage 2+ strict-abort extensions — do not use)
+  /**
+   * Duplicate address in qs.signers vector — same CP counted twice toward quorum.
+   * ACTIVE Phase 2.2: verify_quorum soft-fails (returns false + emits QuorumInsufficient)
+   * when a duplicate signer address is detected. Prevents a single registered CP from
+   * satisfying M-of-N by submitting [alice, alice] with 2 valid sigs (F-01 fix).
+   * Reserved for Stage 2+ strict-abort wrappers; current callers see abort 906 via
+   * the assert!(quorum_ok, ...) in issue/revoke entry functions.
+   */
+  E_DUPLICATE_SIGNER: 886,
+  // 887-889: reserved-future (Stage 2+ strict-abort extensions — do not use)
 } as const;
 
 export type QuorumSigErrorCode = (typeof QUORUM_SIG_ERRORS)[keyof typeof QUORUM_SIG_ERRORS];
