@@ -158,8 +158,10 @@ describe('Signaling server integration', () => {
 describe('DAEMON-02 compliance: no chain dependency in core signaling', () => {
   it('core signaling files (index, rooms) do NOT import @mysten/sui', () => {
     // Phase 11 added chain-aware files (auto-register.ts, heartbeat.ts) that legitimately
-    // import @mysten/sui. DAEMON-02 applies to the core signaling path only.
-    const chainAwareFiles = ['auto-register.ts', 'heartbeat.ts'];
+    // import @mysten/sui. F62 M1 Stage 3 Phase 3.3 added cap-token-cache.ts which subscribes
+    // to capability_events via SuiClient (CONTRACTS § 4.3). DAEMON-02 applies to the core
+    // signaling path only.
+    const chainAwareFiles = ['auto-register.ts', 'heartbeat.ts', 'cap-token-cache.ts'];
 
     const sourceFiles = getAllTsFiles(SRC_DIR).filter(
       (f) => !f.includes('__tests__') && !chainAwareFiles.some((ca) => f.endsWith(ca)),
