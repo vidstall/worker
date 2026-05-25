@@ -70,7 +70,12 @@ function makeKeystoreOk(opts?: {
         signatures.push(new Array(64).fill(0xab + i));
         pubkeys.push(new Array(32).fill(0xaa + i));
       }
-      return { qs: { signers, signatures }, pubkeys };
+      // D-011: aggregate_sig is the BCS-serialized QuorumSig blob stored on-chain.
+      // Production keystores will use @mysten/bcs to encode the real struct; tests
+      // use a deterministic synthetic blob distinct from any single signature so
+      // assertions can verify the issuer is forwarding it (not duplicating sig[0]).
+      const aggregateSig = [0xff, threshold, ...signatures.flat()];
+      return { qs: { signers, signatures }, pubkeys, aggregateSig };
     },
   };
   return { keystore, collectCalls };
@@ -262,6 +267,28 @@ describe('CapTokenIssuer M-of-N quorum (REQ-ADM-003, M=2/N=3 default per D-B4)',
 
     const pubkeys = calls[0]!.args.signerPubkeys as number[][];
     expect(pubkeys.length).toBe(2);
+  });
+
+  it('D-011: issue TX args include aggregateSig (BCS-serialized QuorumSig for on-chain audit storage)', async () => {
+    const { submitFn, calls } = mkSubmit();
+    const issuer = mkIssuer({ submitFn });
+
+    await issuer.onRoomAssigned(ROOM_ASSIGNED, 'trace-d011');
+
+    // Move issue_capability_token param 11 (between signer_pubkeys and ctx)
+    // requires `aggregate_sig: vector<u8>` per dvconf-contracts e3780d3 + D-011.
+    // Issuer must forward the keystore's aggregateSig output verbatim.
+    const aggregateSig = calls[0]!.args.aggregateSig as number[];
+    expect(aggregateSig).toBeDefined();
+    expect(Array.isArray(aggregateSig)).toBe(true);
+    expect(aggregateSig.length).toBeGreaterThan(0);
+    // Synthetic blob shape in makeKeystoreOk: [0xff, threshold, ...sigsFlat]
+    expect(aggregateSig[0]).toBe(0xff);
+    expect(aggregateSig[1]).toBe(2); // threshold = M = 2
+    // Distinct from any individual signature (regression guard against
+    // accidentally piping a signature as the aggregate blob).
+    const qs = calls[0]!.args.cpQuorumProof as { signatures: number[][] };
+    expect(JSON.stringify(aggregateSig)).not.toBe(JSON.stringify(qs.signatures[0]));
   });
 
   it('on quorum collection failure: logs error + DOES NOT submit TX + does NOT crash the daemon', async () => {
