@@ -381,6 +381,11 @@ export interface RoomCapabilityRefreshArgs {
   cpQuorumProof: QuorumSig;
   /** ed25519 pubkeys parallel to cpQuorumProof.signers (D-001 pubkeys-as-parameter pattern). */
   signerPubkeys: number[][];
+  /** BCS-serialized QuorumSig aggregate (vector<u8>) stored on-chain as the refreshed token's
+   * `aggregate_sig` field for off-chain audit replay. Mirrors Phase 2.1/2.2/2.3 issue-entry
+   * convention; chain Move param order is `signer_pubkeys` → `aggregate_sig` → `ctx`. Added
+   * S54 via D-011 after lane-a-move ship (e3780d3) revealed spec § 4.1 omission. */
+  aggregateSig: number[];
 }
 
 /**
@@ -422,6 +427,7 @@ export declare function refreshCapabilityToken(
   newExpiresEpoch: bigint,
   cpQuorumProof: QuorumSig,
   signerPubkeys: number[][],
+  aggregateSig: number[],
 ): Promise<{ digest: string; newTokenId: string }>;
 
 // NOTE: `CapabilityRefreshedEvent` interface already exists in this file (Phase 1.2
