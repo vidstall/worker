@@ -70,6 +70,27 @@ export { waitForRoleAssignment, applyVotedRole } from './chain/role-assignment.j
 export { createLogger } from './logger.js';
 export type { Logger } from './logger.js';
 
+// Cap-token primitive contract types (F62 W1 Stage 1 + Phase 2.4-retro). Append-only
+// re-exports so daemon consumers (Phase 3.1 cap-token-issuer, Phase 3.2 signaling auth,
+// Phase 3.3 signaling cache) can import QuorumSig + Capability* types from the root.
+export type {
+  QuorumSig,
+  QuorumConfigState,
+  QuorumSigEvent,
+  QuorumVerifiedEvent,
+  QuorumInsufficientEvent,
+  QuorumConfigUpdatedEvent,
+  QuorumSigErrorCode,
+  CapabilityIssuedEvent,
+  CapabilityRevokedEvent,
+  CapabilityRefreshedEvent,
+  CapabilityEvent,
+  CapabilityErrorCode,
+  CapTokenPrimitiveEvent,
+  RoomCapabilityRefreshArgs,
+} from './interfaces/cp-quorum-sig.contract.js';
+export { QUORUM_SIG_ERRORS, CAPABILITY_ERRORS } from './interfaces/cp-quorum-sig.contract.js';
+
 // Bench harness (Task #26)
 export {
   LATENCY_EVENT_SCHEMA_VERSION,

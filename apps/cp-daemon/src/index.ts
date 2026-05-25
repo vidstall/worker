@@ -21,6 +21,22 @@ import { createEventHandler } from './event-handler.js';
 import { startRoleVoting } from './role-voter.js';
 import { startTurnIssuer } from './turn-issuer.js';
 import { startTurnRpc } from './turn-rpc.js';
+// F62 Phase 3.1 — cap-token-issuer module surface. Production keystore + peer-CP
+// discovery wiring is Phase 3.4 scope; this import keeps the symbol reachable +
+// surfaces type-side coupling now so cross-module TS checks include it.
+import './cap-token-issuer.js';
+
+export { CapTokenIssuer } from './cap-token-issuer.js';
+export type {
+  CapTokenIssuerOpts,
+  CpKeystore,
+  SubmitFn as CapTokenSubmitFn,
+  RoomAssignedEvent,
+  RoleChangedEvent,
+  RoleAssignedEvent,
+  RelaySlashedEvent,
+  SecretRotatedEvent,
+} from './cap-token-issuer.js';
 
 const logger = createLogger('cp-daemon');
 
