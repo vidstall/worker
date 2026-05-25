@@ -77,6 +77,19 @@ export interface RoleChangedEvent {
   oldRole: number;
   newRole: number;
   newStake: string;
+  /**
+   * Phase 3.4: optional active-token ID for the affected (room, peer) pair. When
+   * provided, the issuer schedules a refresh against this specific token after
+   * the grace window. When absent, the issuer dedupes + logs only (Phase 3.1 path
+   * preserved for back-compat with onRoleChanged test fixtures lacking this field).
+   * Production-wired callers populate this from chain devInspect; tests inject
+   * directly via the `rcWithToken` helper.
+   */
+  affectedTokenId?: string;
+  /** Phase 3.4: room the affected token belongs to. Required when affectedTokenId is set. */
+  roomId?: string;
+  /** Phase 3.4: peer-pubkey for the affected token, 32-byte ed25519. Required when affectedTokenId is set. */
+  peerPubkey?: number[];
 }
 
 export interface RoleAssignedEvent {
@@ -84,6 +97,10 @@ export interface RoleAssignedEvent {
   role: number;
   voteCount: string;
   threshold: string;
+  /** Phase 3.4: see RoleChangedEvent.affectedTokenId. */
+  affectedTokenId?: string;
+  roomId?: string;
+  peerPubkey?: number[];
 }
 
 export interface RelaySlashedEvent {
@@ -95,6 +112,26 @@ export interface RelaySlashedEvent {
 export interface SecretRotatedEvent {
   rotationId: string;
   newKeyEpoch: string;
+}
+
+/**
+ * Phase 3.4 REQ-ADM-015 — emergency rotation event. Trigger: external (e.g. F8
+ * secret-rotation cluster or operator-initiated key revocation). Bypasses the
+ * 60s grace timer used for routine role-change refresh. Dedupe key derived from
+ * `peerPubkey` hex prefix so the same emergency cannot be re-driven by event
+ * replay.
+ */
+export interface EmergencyRotationEvent {
+  /** 32-byte ed25519 pubkey of the affected peer. */
+  peerPubkey: number[];
+  /** Human-readable rotation reason (e.g. 'leaked-key', 'turn-revoked'). Logged at WARN. */
+  reason: string;
+  /** Sui object ID of the token being rotated out. */
+  oldTokenId: string;
+  /** Room scope. */
+  roomId: string;
+  /** New role to mint with (typically same as current role for emergency rotations). */
+  role: number;
 }
 
 // ── Options + class ──────────────────────────────────────────────────────
@@ -109,6 +146,8 @@ export interface CapTokenIssuerOpts {
   logger: Logger;
   /** M-of-N threshold (D-B4 default M=2). */
   quorumThreshold?: number;
+  /** Phase 3.4 grace window before role-change refresh fires. Default 60_000 per REQ-ADM-014. */
+  graceMs?: number;
 }
 
 /**
@@ -147,6 +186,28 @@ function buildRevokeCanonicalMsg(opts: { capObjectId: string; reason: number }):
 }
 
 /**
+ * Phase 3.4 — canonical refresh payload that the CP-quorum signs off-chain.
+ * Shape derived from CONTRACTS § 4.1 step 4 + SEQUENCES § 3 step 6:
+ *   BCS({old_token_id, new_role, new_expires_epoch, refresh_nonce})
+ * where refresh_nonce = old.nonce + 1 (D-010-B monotonic per-token).
+ */
+function buildRefreshCanonicalMsg(opts: {
+  oldTokenId: string;
+  newRole: number;
+  newExpiresEpoch: bigint;
+  refreshNonce: number;
+}): Uint8Array {
+  return utf8(
+    `refresh|${opts.oldTokenId}|${opts.newRole}|${opts.newExpiresEpoch.toString()}|${opts.refreshNonce}`,
+  );
+}
+
+/** Hex-encode a byte vector for use in dedupe keys / nonce-Map keys (no 0x prefix). */
+function bytesToHex(bytes: number[]): string {
+  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * Map a relay/signaling/validator address to its Move role enum value used by
  * room_capability.move (matches MinerRole constants in dvconf-contracts).
  *   1 = validator, 2 = relay, 3 = CP, 4 = signaling, 0 = user/default
@@ -171,8 +232,23 @@ export class CapTokenIssuer {
   private readonly keystore: CpKeystore;
   private readonly logger: Logger;
   private readonly threshold: number;
+  private readonly graceMs: number;
   /** Idempotency: per-handler dedupe key → seen-flag. Reset only on daemon restart. */
   private readonly seenKeys = new Set<string>();
+  /**
+   * Phase 3.4 REQ-ADM-013 — anti-replay nonce tracking. Key: `${roomId}::${peerHex}`,
+   * value: highest nonce dispatched on a refresh TX for that (room, peer) pair. Initial
+   * issuance starts at 1 (per D-010-B); the first refresh stores 1, subsequent refreshes
+   * monotonically increment. External invocations submitting a refresh nonce ≤ current
+   * are rejected with a nonce-replay WARN log.
+   */
+  private readonly nonces = new Map<string, number>();
+  /**
+   * Phase 3.4 REQ-ADM-014 — pending grace timers. Keyed by miner-id (role-change /
+   * role-assigned) so that a B→A revert can cancel a prior A→B pending timer via
+   * `clearTimeout`. Map entries are cleared when the timer fires OR is cancelled.
+   */
+  private readonly graceTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(opts: CapTokenIssuerOpts) {
     this.submitFn = opts.submitFn;
@@ -183,6 +259,7 @@ export class CapTokenIssuer {
     this.keystore = opts.cpKeystore;
     this.logger = opts.logger;
     this.threshold = opts.quorumThreshold ?? 2;
+    this.graceMs = opts.graceMs ?? 60_000;
   }
 
   // ── Public handlers ────────────────────────────────────────────────────
@@ -223,10 +300,12 @@ export class CapTokenIssuer {
   }
 
   /**
-   * REQ-ADM-013 (partial) — role-change refresh trigger.
-   * Phase 3.1 scope: dedupe + log only; Phase 3.4 dev extends with 60s grace timer +
-   * call to `refresh_capability_token` Move entry (CONTRACTS § 4.1, available via
-   * cp-quorum-sig.contract.ts since lane-a2 ship).
+   * REQ-ADM-013 + REQ-ADM-014 — role-change refresh trigger.
+   * Phase 3.4: dedupe + schedule 60s grace timer (cancellable on role-revert) →
+   * after grace, invoke `refresh_capability_token` Move entry per CONTRACTS § 4.1
+   * (uses aggregate_sig param per D-011). If a prior pending timer exists for the
+   * SAME minerId, cancel it (the role change has been superseded — most commonly
+   * a B→A revert before the original A→B grace elapsed).
    */
   async onRoleChanged(event: RoleChangedEvent, traceId: string): Promise<void> {
     this.logger.info(
@@ -237,20 +316,43 @@ export class CapTokenIssuer {
     const dedupeKey = `${event.minerId}::${event.newRole}::role-change`;
     if (this.markSeenOrSkip(dedupeKey, traceId, 'onRoleChanged')) return;
 
-    // Phase 3.1: no TX yet — Phase 3.4 will wire the 60s grace timer + refresh call.
+    const cancelled = this.cancelPendingGrace(event.minerId, 'role-change', traceId);
+    if (cancelled) {
+      // Revert detected — both directions cancel each other; do NOT schedule
+      // a new grace window. Role has settled back to the prior value before
+      // any refresh was needed. REQ-ADM-014 cancel-on-revert semantics.
+      return;
+    }
+    this.scheduleGraceRefresh(
+      event.minerId,
+      'role-change',
+      {
+        affectedTokenId: event.affectedTokenId,
+        roomId: event.roomId,
+        peerPubkey: event.peerPubkey,
+        newRole: event.newRole,
+      },
+      traceId,
+    );
+
     this.logger.info(
       {
         trace_id: traceId,
         module: 'cap-token-issuer',
-        context: { dedupe_key: dedupeKey, miner_id: event.minerId, new_role: event.newRole },
+        context: {
+          dedupe_key: dedupeKey,
+          miner_id: event.minerId,
+          new_role: event.newRole,
+          grace_ms: this.graceMs,
+        },
       },
-      'RoleChanged tracked — refresh scheduling deferred to Phase 3.4',
+      'RoleChanged — grace timer scheduled (REQ-ADM-014)',
     );
   }
 
   /**
-   * REQ-ADM-013 (partial) — vote consensus on role assignment.
-   * Phase 3.1 scope: dedupe + log only; Phase 3.4 extends with refresh-on-active-token.
+   * REQ-ADM-013 — vote consensus on role assignment. Phase 3.4: same grace pattern
+   * as onRoleChanged, dedupe key reflects "role-assigned" disambiguator.
    */
   async onRoleAssigned(event: RoleAssignedEvent, traceId: string): Promise<void> {
     this.logger.info(
@@ -261,13 +363,77 @@ export class CapTokenIssuer {
     const dedupeKey = `${event.minerId}::${event.role}::role-assigned`;
     if (this.markSeenOrSkip(dedupeKey, traceId, 'onRoleAssigned')) return;
 
+    const cancelled = this.cancelPendingGrace(event.minerId, 'role-assigned', traceId);
+    if (cancelled) {
+      return;
+    }
+    this.scheduleGraceRefresh(
+      event.minerId,
+      'role-assigned',
+      {
+        affectedTokenId: event.affectedTokenId,
+        roomId: event.roomId,
+        peerPubkey: event.peerPubkey,
+        newRole: event.role,
+      },
+      traceId,
+    );
+
     this.logger.info(
       {
         trace_id: traceId,
         module: 'cap-token-issuer',
-        context: { dedupe_key: dedupeKey, miner_id: event.minerId, role: event.role },
+        context: {
+          dedupe_key: dedupeKey,
+          miner_id: event.minerId,
+          role: event.role,
+          grace_ms: this.graceMs,
+        },
       },
-      'RoleAssigned tracked — refresh-or-new decision deferred to Phase 3.4',
+      'RoleAssigned — grace timer scheduled (REQ-ADM-014)',
+    );
+  }
+
+  /**
+   * REQ-ADM-015 — emergency rotation handler. Bypasses the 60s grace timer entirely;
+   * the rotation reason is logged at WARN level with the event payload for audit.
+   *
+   * Idempotency: dedupe by `${peerHex}::emergency-rotate` so replays of the same
+   * emergency event do not re-trigger the refresh + revoke-old pair.
+   *
+   * C4 Case B: invokes executeRefresh which submits the refresh TX AND a follow-up
+   * revoke-old TX (reason=4 refresh-driven) per CONTRACTS § 4.1 + cap-token-cache.ts
+   * fast-path eviction requirement (REQ-ADM-005 cross-tie).
+   */
+  async onEmergencyRotation(event: EmergencyRotationEvent, traceId: string): Promise<void> {
+    const peerHex = bytesToHex(event.peerPubkey);
+    const dedupeKey = `${peerHex}::emergency-rotate`;
+
+    this.logger.warn(
+      {
+        trace_id: traceId,
+        module: 'cap-token-issuer',
+        context: {
+          dedupe_key: dedupeKey,
+          reason: event.reason,
+          old_token_id: event.oldTokenId,
+          room_id: event.roomId,
+        },
+      },
+      'EmergencyRotation received — bypass grace + refresh immediately',
+    );
+
+    if (this.markSeenOrSkip(dedupeKey, traceId, 'onEmergencyRotation')) return;
+
+    await this.executeRefresh(
+      {
+        oldTokenId: event.oldTokenId,
+        roomId: event.roomId,
+        peerPubkey: event.peerPubkey,
+        newRole: event.role,
+      },
+      dedupeKey,
+      traceId,
     );
   }
 
@@ -437,5 +603,277 @@ export class CapTokenIssuer {
       },
       'TX submitted',
     );
+  }
+
+  // ── Phase 3.4 — grace timer + refresh helpers ────────────────────────────
+
+  /**
+   * Cancel any pending grace timer for the given minerId. Called BEFORE
+   * scheduling a new timer; if a prior timer exists (e.g. previous role-change
+   * is being superseded by a revert), `clearTimeout` aborts it and a single
+   * INFO log line records the cancellation for operator visibility.
+   *
+   * The cancel-on-revert mandate (REQ-ADM-014 + briefing) treats any
+   * subsequent role-change/role-assigned event for the same minerId as the
+   * canonical reverse-direction signal — the issuer does NOT inspect
+   * old_role/new_role pairings, since the second event by definition
+   * supersedes the first (whatever its direction). This is the safest
+   * interpretation: if both events ultimately fire refreshes, the second
+   * one's parameters win.
+   */
+  private cancelPendingGrace(minerId: string, kind: 'role-change' | 'role-assigned', traceId: string): boolean {
+    let cancelled = false;
+    const timerKey = `${minerId}::${kind}`;
+    const existing = this.graceTimers.get(timerKey);
+    if (existing) {
+      clearTimeout(existing);
+      this.graceTimers.delete(timerKey);
+      cancelled = true;
+      this.logger.info(
+        {
+          trace_id: traceId,
+          module: 'cap-token-issuer',
+          context: { timer_key: timerKey, miner_id: minerId, kind },
+        },
+        'grace timer cancelled — role reverted before 60s window',
+      );
+    }
+    // Also cancel a timer scheduled under the OPPOSITE kind for the same
+    // minerId — a role-change can be superseded by a role-assigned and vice
+    // versa, per REQ-ADM-014 cancel-on-revert semantics.
+    const oppositeKey = `${minerId}::${kind === 'role-change' ? 'role-assigned' : 'role-change'}`;
+    const opposite = this.graceTimers.get(oppositeKey);
+    if (opposite) {
+      clearTimeout(opposite);
+      this.graceTimers.delete(oppositeKey);
+      cancelled = true;
+      this.logger.info(
+        {
+          trace_id: traceId,
+          module: 'cap-token-issuer',
+          context: { timer_key: oppositeKey, miner_id: minerId, kind: 'opposite' },
+        },
+        'grace timer cancelled — role reverted before 60s window',
+      );
+    }
+    return cancelled;
+  }
+
+  /**
+   * Schedule a refresh that fires after `graceMs`. Only enqueues a real timer
+   * when the caller supplied affectedTokenId + roomId + peerPubkey (test
+   * fixtures without this context fall through to a log-only path so the
+   * existing onRoleChanged-without-token fixture still exercises dedupe).
+   */
+  private scheduleGraceRefresh(
+    minerId: string,
+    kind: 'role-change' | 'role-assigned',
+    ctx: {
+      affectedTokenId?: string;
+      roomId?: string;
+      peerPubkey?: number[];
+      newRole: number;
+    },
+    traceId: string,
+  ): void {
+    if (!ctx.affectedTokenId || !ctx.roomId || !ctx.peerPubkey) {
+      return;
+    }
+
+    const timerKey = `${minerId}::${kind}`;
+    const timer = setTimeout(() => {
+      this.graceTimers.delete(timerKey);
+      // executeRefresh is async; we intentionally do not await here (setTimeout
+      // callback is sync). Errors are absorbed inside executeRefresh.
+      void this.executeRefresh(
+        {
+          oldTokenId: ctx.affectedTokenId!,
+          roomId: ctx.roomId!,
+          peerPubkey: ctx.peerPubkey!,
+          newRole: ctx.newRole,
+        },
+        timerKey,
+        traceId,
+      );
+    }, this.graceMs);
+    this.graceTimers.set(timerKey, timer);
+  }
+
+  /**
+   * Phase 3.4 + C4 inject (Case B). Builds canonical refresh payload, increments
+   * the per-(room,peer) nonce, collects M-of-N quorum, submits refresh TX, then
+   * follows with a revoke_capability_token_via_quorum TX for the OLD token
+   * (reason=4 refresh-driven) so cap-token-cache.ts evicts the stale entry on
+   * the next CapabilityRevoked chain event.
+   *
+   * Case B chosen: Move `refresh_capability_token` (room_capability.move
+   * S54 commit `e3780d3`) emits ONLY `CapabilityRefreshed` — it does NOT emit
+   * `CapabilityRevoked` for the old token despite mutating `old_token.revoked =
+   * true`. cap-token-cache fast-path eviction at lines 156-159 depends on the
+   * revoke event. The follow-up TX ensures REQ-ADM-005 ≤5s eviction holds.
+   *
+   * Defense narrative: chain-as-SOT (Fork 3) — the cache reacts to canonical
+   * chain events; we never derive eviction logic from the refresh event
+   * payload (which lacks an old-token-id field), so the second TX is the
+   * defensible path until Move-side emits both events atomically (post-thesis).
+   */
+  private async executeRefresh(
+    ctx: { oldTokenId: string; roomId: string; peerPubkey: number[]; newRole: number },
+    dedupeKey: string,
+    traceId: string,
+  ): Promise<void> {
+    try {
+      const peerHex = bytesToHex(ctx.peerPubkey);
+      const nonceKey = `${ctx.roomId}::${peerHex}`;
+      const currentNonce = this.nonces.get(nonceKey) ?? 0;
+      const nextNonce = currentNonce + 1;
+
+      const newExpiresEpoch = DEFAULT_EXPIRES_OFFSET_EPOCHS;
+      const canonicalMsg = buildRefreshCanonicalMsg({
+        oldTokenId: ctx.oldTokenId,
+        newRole: ctx.newRole,
+        newExpiresEpoch,
+        refreshNonce: nextNonce,
+      });
+
+      const { qs, pubkeys, aggregateSig } = await this.keystore.collectQuorumSignatures(
+        canonicalMsg,
+        this.threshold,
+      );
+
+      // Increment nonce BEFORE TX submit so a concurrent replay attempt sees
+      // the bumped counter and gets rejected.
+      this.nonces.set(nonceKey, nextNonce);
+
+      const refreshResult = await this.submitFn({
+        label: 'refresh-capability-token',
+        args: {
+          target: `${this.packageId}::room_capability::refresh_capability_token`,
+          networkRegistryId: this.networkRegistryId,
+          cpRegistryObjectId: this.cpRegistryObjectId,
+          quorumStateObjectId: this.quorumStateObjectId,
+          oldTokenId: ctx.oldTokenId,
+          newRole: ctx.newRole,
+          newExpiresEpoch,
+          refreshNonce: nextNonce,
+          cpQuorumProof: qs,
+          signerPubkeys: pubkeys,
+          // D-011: aggregate_sig param between signer_pubkeys and ctx
+          aggregateSig,
+          canonicalMsg: Array.from(canonicalMsg),
+        },
+      });
+
+      this.logger.info(
+        {
+          trace_id: traceId,
+          module: 'cap-token-issuer',
+          context: {
+            dedupe_key: dedupeKey,
+            handler: 'executeRefresh',
+            tx_digest: refreshResult.digest,
+            old_token_id: ctx.oldTokenId,
+            refresh_nonce: nextNonce,
+          },
+        },
+        'TX submitted',
+      );
+
+      // C4 Case B: follow-up revoke-old TX so cap-token-cache evicts the old entry.
+      await this.submitRevokeOld(ctx.oldTokenId, dedupeKey, traceId);
+    } catch (err) {
+      this.logger.error(
+        {
+          trace_id: traceId,
+          module: 'cap-token-issuer',
+          context: { dedupe_key: dedupeKey, err: (err as Error).message },
+        },
+        'executeRefresh failed — quorum collection or TX submit error',
+      );
+    }
+  }
+
+  /**
+   * C4 Case B helper — submit `revoke_capability_token_via_quorum` for the OLD
+   * token after a successful refresh. reason=4 distinguishes refresh-driven
+   * revocations from slash (1) / admin (2) / turn-revoked (3) per the
+   * extensible reason enum noted in D-002 + capability_events.move.
+   */
+  private async submitRevokeOld(
+    oldTokenId: string,
+    dedupeKey: string,
+    traceId: string,
+  ): Promise<void> {
+    const reason = 4; // refresh-driven (extension of D-002 base enum 0/1/2)
+    const canonicalMsg = buildRevokeCanonicalMsg({ capObjectId: oldTokenId, reason });
+
+    const { qs, pubkeys } = await this.keystore.collectQuorumSignatures(
+      canonicalMsg,
+      this.threshold,
+    );
+
+    const result = await this.submitFn({
+      label: 'revoke-capability-token-via-quorum',
+      args: {
+        target: `${this.packageId}::room_capability::revoke_capability_token_via_quorum`,
+        networkRegistryId: this.networkRegistryId,
+        cpRegistryObjectId: this.cpRegistryObjectId,
+        quorumStateObjectId: this.quorumStateObjectId,
+        capObjectId: oldTokenId,
+        reason,
+        cpQuorumProof: qs,
+        signerPubkeys: pubkeys,
+        canonicalMsg: Array.from(canonicalMsg),
+      },
+    });
+
+    this.logger.info(
+      {
+        trace_id: traceId,
+        module: 'cap-token-issuer',
+        context: {
+          dedupe_key: dedupeKey,
+          handler: 'submitRevokeOld',
+          tx_digest: result.digest,
+          cap_object_id: oldTokenId,
+          reason,
+          cross_wave: 'C4-cache-fast-path-eviction',
+        },
+      },
+      'TX submitted',
+    );
+  }
+
+  /**
+   * REQ-ADM-013 test seam — synchronous nonce-replay guard. External callers
+   * (e.g. a hypothetical future "force-refresh" admin RPC) supply an explicit
+   * nonce; the issuer rejects any submission where nonce ≤ stored current.
+   * Returns true if the nonce is acceptable (would be accepted by a real
+   * refresh path) + bumps the stored counter; false if rejected.
+   *
+   * The leading underscore + ForTest suffix follows the existing dvconf-daemons
+   * test-seam naming convention (e.g. event-handler._setStateForTest).
+   */
+  _attemptRefreshWithNonceForTest(
+    roomId: string,
+    peerHex: string,
+    incomingNonce: number,
+    traceId: string,
+  ): boolean {
+    const nonceKey = `${roomId}::${peerHex}`;
+    const current = this.nonces.get(nonceKey) ?? 0;
+    if (incomingNonce <= current) {
+      this.logger.warn(
+        {
+          trace_id: traceId,
+          module: 'cap-token-issuer',
+          context: { reason: 'nonce-replay', incoming: incomingNonce, current, nonce_key: nonceKey },
+        },
+        'Nonce replay rejected — refresh skipped',
+      );
+      return false;
+    }
+    this.nonces.set(nonceKey, incomingNonce);
+    return true;
   }
 }
