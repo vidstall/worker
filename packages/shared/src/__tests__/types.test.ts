@@ -78,15 +78,16 @@ describe('Event types compile and conform to Move structs', () => {
   });
 
   it('RelayRegistered', () => {
+    // NOTE: 'mode' field was removed from RelayRegistered per F25 dead-code cleanup
+    // (Sprint 0 Green Baseline 2026-05-21). Mode is now per-room only, not per-relay.
     const event: RelayRegistered = {
       miner_id: '0x1',
       operator: '0x2',
-      mode: RelayMode.SFU,
       region: [117, 115], // "us" as bytes
       stake_amount: '1000000000',
       endpoint_url: [119, 115], // "ws" as bytes
     };
-    expect(event.mode).toBe(0);
+    expect(event.miner_id).toBe('0x1');
     expect(Array.isArray(event.region)).toBe(true);
   });
 
@@ -255,6 +256,7 @@ describe('Chain types compile correctly', () => {
       digest: 'abc123',
       effects: { status: { status: 'success' } },
       events: [{ type: 'test', parsedJson: {} }],
+      objectChanges: [],
     };
     expect(result.digest).toBeTruthy();
   });

@@ -156,7 +156,8 @@ describe('executeWithRetry', () => {
     await resultPromise;
 
     // Check warn calls have increasing delays
-    const warnCalls = mockLogger.warn.mock.calls as Array<
+    // Cast warn to vi.Mock to access .mock.calls (mockLogger is typed as Logger, but warn is a vi.fn()).
+    const warnCalls = (mockLogger.warn as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<
       [{ delay: number; attempt: number }, string]
     >;
     const delays = warnCalls
