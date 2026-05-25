@@ -62,10 +62,29 @@ function closeSignalingProbe(): void {
 
 const PORT = parseInt(process.env['SIGNALING_PORT'] ?? '8080', 10);
 
-/** Inbound message types from clients. */
+/**
+ * Inbound message types from clients.
+ *
+ * Phase 3.2 (REQ-ADM-004): the `token`, `signature`, and `nonce` fields are
+ * optional on the wire schema so this extension stays backwards-compatible
+ * with the Stage 1-2 unauthenticated test harness. Stage 4 will gate the
+ * mainline `join` switch case behind `auth.ts::AuthHook.verifyJoin` which
+ * REQUIRES the three new fields per CONTRACTS.md § 4.5.
+ *
+ * `token` is the Sui object ID STRING of the RoomCapability (NOT a BCS blob,
+ * per D-010-C). `signature` is base64-encoded raw ed25519 over the canonical
+ * BCS payload `{ roomId, peerPubkey, nonce }`. `nonce` is a monotonic
+ * per-peer counter; Phase 3.4 will enforce strict-greater.
+ */
 interface JoinMessage {
   type: 'join';
   roomId: string;
+  /** Sui object ID of the RoomCapability (Phase 3.2 — D-010-C). Optional during transition. */
+  token?: string;
+  /** Base64 ed25519 signature over BCS({roomId, peerPubkey, nonce}). */
+  signature?: string;
+  /** Monotonic per-peer counter (u64 fits in JS Number for thesis scale). */
+  nonce?: number;
 }
 
 interface OfferMessage {
