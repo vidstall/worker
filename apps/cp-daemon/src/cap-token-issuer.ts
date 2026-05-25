@@ -21,6 +21,20 @@
  */
 import type { Logger, QuorumSig } from '@dvconf/shared';
 
+// ── Cache wiring (Stage 4 Item #3) ───────────────────────────────────────
+
+/**
+ * Loose-coupling shape of `CapTokenCache.emergencyInvalidate` (Stage 4 Item #3,
+ * sibling lane-cache D-013). The issuer constructor accepts this optional
+ * dependency to avoid importing across the file-ownership boundary into
+ * `apps/signaling/src/cap-token-cache.ts`. When `undefined`, the canonical
+ * chain-event-driven invalidation path satisfies REQ-ADM-005 ≤5s steady-state
+ * eviction; cache fast-path is a sub-second optimization per D-012 Addendum.
+ */
+export interface CapTokenCacheLike {
+  emergencyInvalidate(tokenId: string, reason: string): void;
+}
+
 // ── Submit DI ────────────────────────────────────────────────────────────
 
 export interface SubmitResult {
@@ -148,6 +162,14 @@ export interface CapTokenIssuerOpts {
   quorumThreshold?: number;
   /** Phase 3.4 grace window before role-change refresh fires. Default 60_000 per REQ-ADM-014. */
   graceMs?: number;
+  /**
+   * Stage 4 Item #3 — optional cache for emergency-rotation fast-path eviction.
+   * When defined, `onEmergencyRotation` calls `cache.emergencyInvalidate(oldTokenId, ...)`
+   * BEFORE submitting the rotation TX (per D-012 Addendum). When `undefined`, the
+   * canonical `CapabilityRevoked` chain-event path still satisfies REQ-ADM-005 ≤5s
+   * eviction in steady state — the fast-path is a sub-second optimization.
+   */
+  cache?: CapTokenCacheLike;
 }
 
 /**
@@ -157,49 +179,108 @@ export interface CapTokenIssuerOpts {
  */
 const DEFAULT_EXPIRES_OFFSET_EPOCHS = 100n;
 
-/** Encode a UTF-8 string into a Uint8Array. Used to build the canonical signing message. */
-function utf8(s: string): Uint8Array {
-  return new TextEncoder().encode(s);
+// ── F62 Stage 4 Item #6 — BCS canonical-message encoders ────────────────
+//
+// Move SOT: `dvconf-contracts/sources/security/room_capability.move`:
+//   issue   §  473-482  : id_to_bytes(room_id) || peer_pubkey || role(u8)
+//                          || bcs_u64_le(expires) || bcs_u64_le(nonce)
+//   revoke  §  603-605  : id_to_bytes(cap_id)  || reason(u8)
+//   refresh § 1009-1016 : id_to_bytes(old_id)  || new_role(u8)
+//                          || bcs_u64_le(new_expires) || bcs_u64_le(refresh_nonce)
+//
+// Move's `vector::append` is raw concatenation with NO length prefix; Move's
+// `bcs_u64_le` emits 8 little-endian bytes (room_capability.move:665-673).
+// `object::id_to_bytes` produces the raw 32-byte ID. The encoders below match
+// byte-for-byte; the `bcs-equivalence.test.ts` fixture pins the contract.
+//
+// D-014 defense narrative: a hand-rolled raw-concat encoder is the defensible
+// choice because the Move chain is NOT BCS-struct-serializing (no length
+// prefixes; no struct framing). Using `@mysten/sui/bcs` `bcs.struct({...})`
+// would prepend ULEB128 length tags on the vector fields and produce different
+// bytes — daemon would sign one payload, Move would verify against another,
+// quorum check would silently reject. The raw concat path mirrors Move
+// 1-to-1; the byte-equivalence test in `bcs-equivalence.test.ts` is the
+// forcing function against future drift.
+
+/** Decode a 0x-prefixed (or raw) hex string into 32 raw bytes (Move `object::id_to_bytes` shape). */
+function hexToBytes(s: string): number[] {
+  const cleaned = s.startsWith('0x') ? s.slice(2) : s;
+  const out: number[] = [];
+  for (let i = 0; i < cleaned.length; i += 2) {
+    out.push(parseInt(cleaned.slice(i, i + 2), 16));
+  }
+  return out;
+}
+
+/** Encode a u64 as 8 little-endian bytes (mirrors Move's `bcs_u64_le` helper). */
+function u64Le(v: bigint): number[] {
+  const out: number[] = [];
+  let x = v;
+  for (let i = 0; i < 8; i++) {
+    out.push(Number(x & 0xffn));
+    x >>= 8n;
+  }
+  return out;
 }
 
 /**
- * Build the canonical issuance payload that CP-quorum signs off-chain. Shape derived
- * from SEQUENCES § 1: BCS({room_id, peer_pubkey, role, expires_epoch, nonce}). Encoded
- * here as a deterministic delimited byte string — a real BCS encoder would replace this
- * in production, but every signer must produce the same bytes for verify_quorum to pass.
+ * Build the canonical ISSUE payload that CP-quorum signs off-chain. Matches Move
+ * `room_capability::issue_capability_token` raw byte concat at lines 473-482.
+ *
+ * Layout (in order): id_to_bytes(room_id) || peer_pubkey || role(u8)
+ *                    || bcs_u64_le(expires_epoch) || bcs_u64_le(nonce)
  */
-function buildIssueCanonicalMsg(opts: {
+export function buildIssueCanonicalMsg(opts: {
   roomId: string;
-  peerId: string;
+  peerPubkey: number[];
   role: number;
   expiresEpoch: bigint;
   nonce: number;
 }): Uint8Array {
-  return utf8(
-    `issue|${opts.roomId}|${opts.peerId}|${opts.role}|${opts.expiresEpoch.toString()}|${opts.nonce}`,
-  );
-}
-
-/** Canonical revoke payload: BCS({cap_object_id, reason}). */
-function buildRevokeCanonicalMsg(opts: { capObjectId: string; reason: number }): Uint8Array {
-  return utf8(`revoke|${opts.capObjectId}|${opts.reason}`);
+  const bytes: number[] = [];
+  bytes.push(...hexToBytes(opts.roomId));
+  bytes.push(...opts.peerPubkey);
+  bytes.push(opts.role & 0xff);
+  bytes.push(...u64Le(opts.expiresEpoch));
+  bytes.push(...u64Le(BigInt(opts.nonce)));
+  return new Uint8Array(bytes);
 }
 
 /**
- * Phase 3.4 — canonical refresh payload that the CP-quorum signs off-chain.
- * Shape derived from CONTRACTS § 4.1 step 4 + SEQUENCES § 3 step 6:
- *   BCS({old_token_id, new_role, new_expires_epoch, refresh_nonce})
- * where refresh_nonce = old.nonce + 1 (D-010-B monotonic per-token).
+ * Build the canonical REVOKE payload. Matches Move
+ * `room_capability::revoke_capability_token_via_quorum` byte concat at lines 603-605.
+ *
+ * Layout: id_to_bytes(cap_id) || reason(u8)
  */
-function buildRefreshCanonicalMsg(opts: {
+export function buildRevokeCanonicalMsg(opts: {
+  capObjectId: string;
+  reason: number;
+}): Uint8Array {
+  const bytes: number[] = [];
+  bytes.push(...hexToBytes(opts.capObjectId));
+  bytes.push(opts.reason & 0xff);
+  return new Uint8Array(bytes);
+}
+
+/**
+ * Build the canonical REFRESH payload. Matches Move
+ * `room_capability::refresh_capability_token` byte concat at lines 1009-1016.
+ *
+ * Layout: id_to_bytes(old_token_id) || new_role(u8) || bcs_u64_le(new_expires_epoch)
+ *         || bcs_u64_le(refresh_nonce)
+ */
+export function buildRefreshCanonicalMsg(opts: {
   oldTokenId: string;
   newRole: number;
   newExpiresEpoch: bigint;
   refreshNonce: number;
 }): Uint8Array {
-  return utf8(
-    `refresh|${opts.oldTokenId}|${opts.newRole}|${opts.newExpiresEpoch.toString()}|${opts.refreshNonce}`,
-  );
+  const bytes: number[] = [];
+  bytes.push(...hexToBytes(opts.oldTokenId));
+  bytes.push(opts.newRole & 0xff);
+  bytes.push(...u64Le(opts.newExpiresEpoch));
+  bytes.push(...u64Le(BigInt(opts.refreshNonce)));
+  return new Uint8Array(bytes);
 }
 
 /** Hex-encode a byte vector for use in dedupe keys / nonce-Map keys (no 0x prefix). */
@@ -249,6 +330,8 @@ export class CapTokenIssuer {
    * `clearTimeout`. Map entries are cleared when the timer fires OR is cancelled.
    */
   private readonly graceTimers = new Map<string, NodeJS.Timeout>();
+  /** Stage 4 Item #3 — optional cache for fast-path emergency invalidation (D-012 Addendum). */
+  private readonly cache?: CapTokenCacheLike;
 
   constructor(opts: CapTokenIssuerOpts) {
     this.submitFn = opts.submitFn;
@@ -260,6 +343,7 @@ export class CapTokenIssuer {
     this.logger = opts.logger;
     this.threshold = opts.quorumThreshold ?? 2;
     this.graceMs = opts.graceMs ?? 60_000;
+    this.cache = opts.cache;
   }
 
   // ── Public handlers ────────────────────────────────────────────────────
@@ -425,6 +509,30 @@ export class CapTokenIssuer {
 
     if (this.markSeenOrSkip(dedupeKey, traceId, 'onEmergencyRotation')) return;
 
+    // Stage 4 Item #3 — D-012 Addendum fast-path: evict the OLD token from the
+    // signaling daemon's cache BEFORE submitting the rotation TX so any
+    // concurrent WS verify call short-circuits to null even if the chain
+    // `CapabilityRevoked` event has not yet landed in the cache via
+    // `handleEvent`. Loose-coupling: `cache` is the optional `CapTokenCacheLike`
+    // shape from constructor opts — cross-daemon process boundary makes
+    // `undefined` an acceptable runtime state (chain-event-driven invalidation
+    // still satisfies REQ-ADM-005 ≤5s in steady state).
+    if (this.cache) {
+      this.cache.emergencyInvalidate(event.oldTokenId, `rotation-${event.reason}`);
+      this.logger.info(
+        {
+          trace_id: traceId,
+          module: 'cap-token-issuer',
+          context: {
+            dedupe_key: dedupeKey,
+            old_token_id: event.oldTokenId,
+            cache_reason: `rotation-${event.reason}`,
+          },
+        },
+        'cache fast-path invalidated for emergency rotation',
+      );
+    }
+
     await this.executeRefresh(
       {
         oldTokenId: event.oldTokenId,
@@ -510,9 +618,19 @@ export class CapTokenIssuer {
   ): Promise<void> {
     const nonce = 1; // first issuance per (room, peer) — monotonic counter per D-010-B starts at 1
     const expiresEpoch = DEFAULT_EXPIRES_OFFSET_EPOCHS; // daemon does not know current epoch here; placeholder
+    // Stage 4 Item #6 + D-014 sub-decision: `peer.id` is the Sui miner-ID hex
+    // string (relay/signaling/validator ID from RoomAssigned event payload).
+    // The Move-side `issue_capability_token` expects the actual peer ed25519
+    // pubkey at this position — wiring the miner→pubkey lookup is a separate
+    // Stage 4 readiness gap (CONTRACTS § 4.6 — Phase 3.1 envelope). For
+    // byte-equivalence at the encoder layer, we hex-decode the miner ID into
+    // bytes so the daemon's canonical_msg and Move's canonical_msg agree
+    // structurally; production peer-pubkey resolution happens at the next
+    // wiring step (post-M1).
+    const peerPubkey = hexToBytes(peer.id);
     const canonicalMsg = buildIssueCanonicalMsg({
       roomId,
-      peerId: peer.id,
+      peerPubkey,
       role: peer.role,
       expiresEpoch,
       nonce,
@@ -532,6 +650,7 @@ export class CapTokenIssuer {
         quorumStateObjectId: this.quorumStateObjectId,
         roomId,
         peerId: peer.id,
+        peerPubkey,
         role: peer.role,
         expiresEpoch,
         nonce,

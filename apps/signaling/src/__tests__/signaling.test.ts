@@ -5,9 +5,13 @@
  * Also verifies DAEMON-02 compliance: no @mysten/sui imports in the signaling package.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { WebSocket, type WebSocketServer } from 'ws';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { bcs } from '@mysten/sui/bcs';
 import { createServer } from '../index.js';
+import { AuthHook, type AuthCacheConsumer, type CachedTokenSnapshot } from '../auth.js';
+import type { Logger } from '@dvconf/shared';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -198,3 +202,226 @@ function getAllTsFiles(dir: string): string[] {
   }
   return results;
 }
+
+// ── Stage 4 — case 'join' AuthHook wiring (REQ-ADM-010-partial) ─────────
+
+/** Build the canonical join payload that the peer signs (mirrors auth.ts). */
+function buildCanonicalJoinPayload(
+  roomId: string,
+  peerPubkey: number[],
+  nonce: number,
+): Uint8Array {
+  return bcs
+    .struct('JoinPayload', {
+      roomId: bcs.string(),
+      peerPubkey: bcs.vector(bcs.u8()),
+      nonce: bcs.u64(),
+    })
+    .serialize({ roomId, peerPubkey, nonce: BigInt(nonce) })
+    .toBytes();
+}
+
+function makeLoggerStub(): Logger {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    fatal: vi.fn(),
+    trace: vi.fn(),
+    child: vi.fn(),
+    level: 'info',
+  } as unknown as Logger;
+}
+
+function makeMockCache(initial: Map<string, CachedTokenSnapshot>): AuthCacheConsumer {
+  return {
+    get(tokenId) {
+      return initial.get(tokenId) ?? null;
+    },
+    has(tokenId) {
+      return initial.has(tokenId);
+    },
+    isStrictRejectMode() {
+      return false;
+    },
+  };
+}
+
+/** Send a JoinMessage and resolve with `{ closeCode, closeReason }` on WS close. */
+function sendJoinAndAwaitClose(
+  ws: WebSocket,
+  payload: Record<string, unknown>,
+  timeoutMs = 3000,
+): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('close timeout')), timeoutMs);
+    ws.once('close', (code, reasonBuf) => {
+      clearTimeout(timer);
+      resolve({ code, reason: reasonBuf.toString() });
+    });
+    ws.send(JSON.stringify(payload));
+  });
+}
+
+describe('Signaling case "join" — Stage 4 AuthHook wiring (REQ-ADM-010-partial)', () => {
+  const ROOM_ID = '0xroom-stage-4';
+  const TOKEN_ID = '0xtoken-stage-4';
+  const CURRENT_EPOCH = 100n;
+  const FUTURE_EPOCH = 200n;
+
+  it('rejects join with WS close 4401 when no AuthHook + token field provided AND server is enforce-auth mode', async () => {
+    const logger = makeLoggerStub();
+    const cache = makeMockCache(new Map());
+    const hook = new AuthHook({ cache, currentEpoch: () => CURRENT_EPOCH, logger });
+    const wss = createServer(0, { authHook: hook });
+    server = wss;
+    const addr = wss.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+
+    const client = await connectClient(port);
+    const result = await sendJoinAndAwaitClose(client.ws, {
+      type: 'join',
+      roomId: ROOM_ID,
+      token: '', // empty → no-token
+      signature: 'AA==',
+      nonce: 1,
+    });
+
+    expect(result.code).toBe(4401);
+  });
+
+  it('rejects join with WS close 4403 when cached token is revoked', async () => {
+    const peerKp = Ed25519Keypair.generate();
+    const peerPubkey = Array.from(peerKp.getPublicKey().toRawBytes());
+    const cache = makeMockCache(
+      new Map([
+        [
+          TOKEN_ID,
+          {
+            tokenId: TOKEN_ID,
+            roomId: ROOM_ID,
+            peerPubkey,
+            role: 2,
+            expiresEpoch: FUTURE_EPOCH,
+            revoked: true,
+          },
+        ],
+      ]),
+    );
+    const hook = new AuthHook({ cache, currentEpoch: () => CURRENT_EPOCH, logger: makeLoggerStub() });
+    const wss = createServer(0, { authHook: hook });
+    server = wss;
+    const addr = wss.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+
+    const client = await connectClient(port);
+    // Build a valid signature so the only reject reason is "revoked".
+    const payload = buildCanonicalJoinPayload(ROOM_ID, peerPubkey, 1);
+    const sigBytes = await peerKp.sign(payload);
+    const signature = Buffer.from(sigBytes).toString('base64');
+
+    const result = await sendJoinAndAwaitClose(client.ws, {
+      type: 'join',
+      roomId: ROOM_ID,
+      token: TOKEN_ID,
+      signature,
+      nonce: 1,
+    });
+
+    expect(result.code).toBe(4403);
+  });
+
+  it('accepts join when AuthHook.verifyJoin passes; peer is registered into the room', async () => {
+    const peerKp = Ed25519Keypair.generate();
+    const peerPubkey = Array.from(peerKp.getPublicKey().toRawBytes());
+    const cache = makeMockCache(
+      new Map([
+        [
+          TOKEN_ID,
+          {
+            tokenId: TOKEN_ID,
+            roomId: ROOM_ID,
+            peerPubkey,
+            role: 2,
+            expiresEpoch: FUTURE_EPOCH,
+            revoked: false,
+          },
+        ],
+      ]),
+    );
+    const hook = new AuthHook({ cache, currentEpoch: () => CURRENT_EPOCH, logger: makeLoggerStub() });
+    const wss = createServer(0, { authHook: hook });
+    server = wss;
+    const addr = wss.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+
+    const client = await connectClient(port);
+    const payload = buildCanonicalJoinPayload(ROOM_ID, peerPubkey, 1);
+    const sigBytes = await peerKp.sign(payload);
+    const signature = Buffer.from(sigBytes).toString('base64');
+
+    // We will NOT receive a close — instead the WS stays open after the join.
+    // Use a second client to detect the peer-joined notification, indicating
+    // the first peer is registered into the room.
+    const client2 = await connectClient(port);
+
+    const peerJoinedPromise = waitForMessage(client2.ws);
+
+    client.ws.send(
+      JSON.stringify({
+        type: 'join',
+        roomId: ROOM_ID,
+        token: TOKEN_ID,
+        signature,
+        nonce: 1,
+      }),
+    );
+
+    // Second client also joins — this is the trigger for first client's peer-joined notification.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // For the SECOND join, the server is in enforce-auth mode; client2 has no token →
+    // its join should close with 4401. We focus on confirming client1 stayed open.
+    const secondJoinCloseProm = sendJoinAndAwaitClose(client2.ws, {
+      type: 'join',
+      roomId: ROOM_ID,
+      token: '',
+      signature: '',
+      nonce: 2,
+    });
+    const secondClose = await secondJoinCloseProm;
+    expect(secondClose.code).toBe(4401);
+
+    // Client 1's WS must still be open (accepted join).
+    expect(client.ws.readyState).toBe(WebSocket.OPEN);
+
+    client.ws.close();
+    // peerJoinedPromise may have rejected on close — we don't await it.
+    void peerJoinedPromise.catch(() => undefined);
+  });
+
+  it('backwards-compat: when createServer called WITHOUT authHook option, join with no token still succeeds (Stage 1-2 baseline)', async () => {
+    const wss = createServer(0);
+    server = wss;
+    const addr = wss.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+
+    const client1 = await connectClient(port);
+    const client2 = await connectClient(port);
+
+    client1.ws.send(JSON.stringify({ type: 'join', roomId: 'bc-room' }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    const peerJoinedPromise = waitForMessage(client1.ws);
+    client2.ws.send(JSON.stringify({ type: 'join', roomId: 'bc-room' }));
+    const notification = await peerJoinedPromise;
+
+    expect(notification['type']).toBe('peer-joined');
+    expect(client1.ws.readyState).toBe(WebSocket.OPEN);
+    expect(client2.ws.readyState).toBe(WebSocket.OPEN);
+
+    client1.ws.close();
+    client2.ws.close();
+  });
+});

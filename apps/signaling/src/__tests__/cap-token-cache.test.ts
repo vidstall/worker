@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { SuiClient, SuiEvent } from '@mysten/sui/client';
 import { createLogger } from '@dvconf/shared';
 import {
   CapTokenCache,
@@ -203,6 +204,177 @@ describe('CapTokenCache', () => {
   });
 
   // ── Wave 2 lane-3.4-cache: REQ-ADM-015 emergency invalidate fast-path ────
+  // ── Stage 4 lane-cache Item #4: subscribeToChainEvents real poller ──────
+  it('subscribeToChainEvents_real_poller — mock SuiClient.queryEvents emits CapabilityIssued, handleEvent invoked within ≤5s window (REQ-ADM-005)', async () => {
+    const PKG = '0xpkgcap';
+    const issuedEvent: SuiEvent = {
+      id: { txDigest: 'tx-iss-1', eventSeq: '0' },
+      packageId: PKG,
+      transactionModule: 'capability_events',
+      sender: '0xsender',
+      type: `${PKG}::capability_events::CapabilityIssued`,
+      parsedJson: {
+        token_id: '0xtokIss',
+        room_id: '0xroomIss',
+        peer_pubkey: new Array(32).fill(0xab),
+        role: 2,
+        issuer_quorum: ['0xcp1', '0xcp2'],
+        expires_epoch: '500',
+      },
+      bcs: '',
+      timestampMs: '1000',
+    } as unknown as SuiEvent;
+    const revokedEvent: SuiEvent = {
+      id: { txDigest: 'tx-rev-1', eventSeq: '0' },
+      packageId: PKG,
+      transactionModule: 'capability_events',
+      sender: '0xsender',
+      type: `${PKG}::capability_events::CapabilityRevoked`,
+      parsedJson: {
+        token_id: '0xtokIss',
+        room_id: '0xroomIss',
+        revoker_quorum: ['0xcp1', '0xcp2'],
+        reason: 1,
+      },
+      bcs: '',
+      timestampMs: '1100',
+    } as unknown as SuiEvent;
+
+    // Two-phase mock: first call returns CapabilityIssued; second call returns
+    // CapabilityRevoked. Spaced across two ticks so the test can observe the
+    // intermediate populated-then-evicted transition (REQ-ADM-005 ≤5s budget).
+    let callCount = 0;
+    const mockClient = {
+      queryEvents: vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            data: [issuedEvent],
+            nextCursor: { txDigest: 'tx-iss-1', eventSeq: '0' },
+            hasNextPage: false,
+          };
+        }
+        if (callCount === 2) {
+          return {
+            data: [revokedEvent],
+            nextCursor: { txDigest: 'tx-rev-1', eventSeq: '0' },
+            hasNextPage: false,
+          };
+        }
+        return { data: [], nextCursor: null, hasNextPage: false };
+      }),
+    } as unknown as SuiClient;
+
+    const t0 = Date.now();
+    const unsubscribe = await cache.subscribeToChainEvents(mockClient, PKG, {
+      pollIntervalMs: 50,
+    });
+
+    // Wait up to 5s for the poller's first cycle to land the Issued event.
+    let elapsed = 0;
+    while (!cache.has('0xtokIss') && elapsed < 5_000) {
+      await new Promise((r) => setTimeout(r, 25));
+      elapsed = Date.now() - t0;
+    }
+
+    expect(cache.has('0xtokIss')).toBe(true);
+    const issued = cache.get('0xtokIss');
+    expect(issued?.roomId).toBe('0xroomIss');
+    expect(issued?.role).toBe(2);
+    expect(issued?.expiresEpoch).toBe(500n);
+    expect(issued?.peerPubkey).toEqual(new Array(32).fill(0xab));
+    expect(elapsed).toBeLessThan(5_000);
+
+    // Now wait for the second tick to deliver CapabilityRevoked → eviction.
+    let revokedElapsed = Date.now() - t0;
+    while (cache.has('0xtokIss') && revokedElapsed < 5_000) {
+      await new Promise((r) => setTimeout(r, 25));
+      revokedElapsed = Date.now() - t0;
+    }
+    expect(cache.has('0xtokIss')).toBe(false);
+    expect(revokedElapsed).toBeLessThan(5_000);
+
+    expect((mockClient.queryEvents as any).mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    await unsubscribe();
+  });
+
+  it('subscribeToChainEvents_idempotent_unsubscribe — repeated subscribe/unsubscribe leaks no timers', async () => {
+    const mockClient = {
+      queryEvents: vi.fn(async () => ({
+        data: [],
+        nextCursor: null,
+        hasNextPage: false,
+      })),
+    } as unknown as SuiClient;
+
+    const handles: Array<() => void | Promise<void>> = [];
+    for (let i = 0; i < 10; i++) {
+      const h = await cache.subscribeToChainEvents(mockClient, '0xpkg', {
+        pollIntervalMs: 25,
+      });
+      handles.push(h);
+    }
+    for (const h of handles) {
+      await h();
+    }
+    // Calling unsubscribe a second time must not throw.
+    for (const h of handles) {
+      await h();
+    }
+    // No outstanding work — give the loop a tick to settle.
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  // ── Stage 4 lane-cache Item #8: daemon-restart reload semantics (D-016 Path B) ──
+  it('daemon_restart_reload_transient_gap — startup emits WARN; first refresh re-aligns cache (D-016 Path B)', () => {
+    const warnSpy = vi.spyOn(testLogger, 'warn');
+    const localCache = new CapTokenCache({
+      logger: testLogger,
+      now: () => clockMs,
+    });
+
+    // D-016 Path B contract: on construction (= daemon-restart equivalent in
+    // a transient-gap world), one WARN is emitted to operators describing the
+    // bounded nonce-gap window.
+    localCache.announceColdStart('post-restart');
+    const coldStartWarns = warnSpy.mock.calls.filter(
+      (c) => (c[0] as { reason?: string })?.reason === 'cold-start-transient-gap',
+    );
+    expect(coldStartWarns.length).toBe(1);
+    const coldLog = coldStartWarns[0]?.[0] as {
+      module: string;
+      reason: string;
+      context: { trigger: string };
+    };
+    expect(coldLog.module).toBe('cap-token-cache');
+    expect(coldLog.reason).toBe('cold-start-transient-gap');
+    expect(coldLog.context.trigger).toBe('post-restart');
+
+    // Cache starts empty after restart. A CapabilityIssued for an existing peer
+    // re-seeds the local entry from the chain event payload — which is the
+    // peer's *latest* high-water value on the next refresh, not the historical
+    // session value. The first refresh from any peer aligns the cache; this
+    // test pins that behavior so future regressions surface immediately.
+    const issued: ChainCapabilityIssued = {
+      tokenId: '0xrestartTok',
+      roomId: '0xroom',
+      peerPubkey: new Array(32).fill(1),
+      role: 2,
+      expiresEpoch: 999n,
+      nonce: 7, // simulated post-refresh high-water value from chain
+    };
+    localCache.handleEvent('CapabilityIssued', issued);
+    expect(localCache.get('0xrestartTok')?.nonce).toBe(7);
+
+    // Bound assertion: any subsequent message MUST present nonce > 7 to advance.
+    expect(localCache.validateAndAdvanceNonce('0xrestartTok', 7)).toBe(false);
+    expect(localCache.validateAndAdvanceNonce('0xrestartTok', 8)).toBe(true);
+    expect(localCache.get('0xrestartTok')?.nonce).toBe(8);
+
+    warnSpy.mockRestore();
+  });
+
   it('emergency_invalidate_latency — bypasses TTL/revoked checks + WARN log + idempotent', () => {
     const warnSpy = vi.spyOn(testLogger, 'warn');
     const infoSpy = vi.spyOn(testLogger, 'info');

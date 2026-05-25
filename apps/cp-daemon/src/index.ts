@@ -8,6 +8,8 @@
  */
 
 import 'dotenv/config';
+import type { SuiClient } from '@mysten/sui/client';
+import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import {
   createSuiClient,
   loadNetworkConfig,
@@ -15,16 +17,21 @@ import {
   createLogger,
   EventPoller,
 } from '@dvconf/shared';
+import type { Logger } from '@dvconf/shared';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createEventHandler } from './event-handler.js';
 import { startRoleVoting } from './role-voter.js';
 import { startTurnIssuer } from './turn-issuer.js';
 import { startTurnRpc } from './turn-rpc.js';
-// F62 Phase 3.1 — cap-token-issuer module surface. Production keystore + peer-CP
-// discovery wiring is Phase 3.4 scope; this import keeps the symbol reachable +
-// surfaces type-side coupling now so cross-module TS checks include it.
-import './cap-token-issuer.js';
+import {
+  CapTokenIssuer,
+  type CapTokenIssuerOpts,
+  type CpKeystore,
+  type SubmitFn,
+  type SubmitResult,
+  type CapTokenCacheLike,
+} from './cap-token-issuer.js';
 
 export { CapTokenIssuer } from './cap-token-issuer.js';
 export type {
@@ -39,6 +46,150 @@ export type {
 } from './cap-token-issuer.js';
 
 const logger = createLogger('cp-daemon');
+
+// ── F62 Stage 4 Item #1 — bootstrap factory + LocalCpKeystore ─────────────
+//
+// Mirrors the `startTurnIssuer` factory shape in `turn-issuer.ts:257-291`. Lives
+// in index.ts (rather than a sibling file) to honour the dispatch lane file
+// ownership boundary which whitelists only `index.ts` + `cap-token-issuer.ts`.
+
+export interface StartCapTokenIssuerOptions {
+  submitFn?: SubmitFn;
+  client?: SuiClient;
+  signer: Ed25519Keypair;
+  packageId: string;
+  networkRegistryId: string;
+  cpRegistryObjectId: string;
+  quorumStateObjectId: string;
+  logger: Logger;
+  cpKeystore?: CpKeystore;
+  quorumThreshold?: number;
+  graceMs?: number;
+  cache?: CapTokenCacheLike;
+}
+
+export interface StartCapTokenIssuerResult {
+  issuer: CapTokenIssuer;
+  stop: () => void;
+}
+
+/**
+ * Build a local-CP keystore backed by the daemon's Ed25519 keypair. The `sign()`
+ * path is fully functional; `collectQuorumSignatures()` throws when threshold ≥
+ * 2 because peer-CP discovery is deferred per D-014 — the issuer's handlers
+ * catch + ERROR-log so operators see the degraded state without daemon crash.
+ */
+export function buildLocalCpKeystore(opts: {
+  signer: Ed25519Keypair;
+  logger: Logger;
+}): CpKeystore {
+  const { signer, logger: kLogger } = opts;
+  const localAddr = signer.toSuiAddress();
+  return {
+    async sign(message: Uint8Array) {
+      const { signature: combined } = await signer.signPersonalMessage(message);
+      const sigBytes = Buffer.from(combined, 'base64');
+      const sig64 = Array.from(sigBytes.slice(0, 64));
+      const pubkey = Array.from(signer.getPublicKey().toRawBytes());
+      return { signature: sig64, pubkey, addr: localAddr };
+    },
+    getCpAddress() {
+      return localAddr;
+    },
+    async collectQuorumSignatures(canonicalMsg, threshold) {
+      if (threshold <= 1) {
+        const { signature: combined } = await signer.signPersonalMessage(canonicalMsg);
+        const sigBytes = Buffer.from(combined, 'base64');
+        const sig64 = Array.from(sigBytes.slice(0, 64));
+        const pubkey = Array.from(signer.getPublicKey().toRawBytes());
+        const aggregateSig = [0x01, ...sig64];
+        return {
+          qs: { signers: [localAddr], signatures: [sig64] },
+          pubkeys: [pubkey],
+          aggregateSig,
+        };
+      }
+      kLogger.error(
+        {
+          module: 'cap-token-bootstrap',
+          context: { threshold, local_cp: localAddr },
+        },
+        'peer-CP discovery not yet implemented — degraded single-CP cannot meet M-of-N',
+      );
+      throw new Error(
+        `peer-CP discovery not implemented: threshold=${threshold} but only local CP available`,
+      );
+    },
+  };
+}
+
+/**
+ * Bootstrap a `CapTokenIssuer` with production wiring (mirrors `startTurnIssuer`).
+ *
+ * M1 wiring boundary (per ROADMAP § Phase 3.5.1 + STATUS.md § Stage 4 readiness
+ * #1): instantiate the issuer with a LocalCpKeystore that throws on
+ * `collectQuorumSignatures(_, threshold ≥ 2)`. Peer-CP discovery + the
+ * `executeWithRetry`-backed TX dispatcher are deferred to a follow-up phase
+ * (D-014 sub-decision). For now the production `submitFn` logs + throws so any
+ * accidental quorum success (e.g. threshold=1 test config) surfaces clearly.
+ */
+export async function startCapTokenIssuer(
+  opts: StartCapTokenIssuerOptions,
+): Promise<StartCapTokenIssuerResult> {
+  const submitFn = opts.submitFn ?? makeDeferredSubmit(opts.logger);
+  const cpKeystore =
+    opts.cpKeystore ?? buildLocalCpKeystore({ signer: opts.signer, logger: opts.logger });
+
+  const issuerOpts: CapTokenIssuerOpts = {
+    submitFn,
+    packageId: opts.packageId,
+    networkRegistryId: opts.networkRegistryId,
+    cpRegistryObjectId: opts.cpRegistryObjectId,
+    quorumStateObjectId: opts.quorumStateObjectId,
+    cpKeystore,
+    logger: opts.logger,
+    ...(opts.quorumThreshold !== undefined && { quorumThreshold: opts.quorumThreshold }),
+    ...(opts.graceMs !== undefined && { graceMs: opts.graceMs }),
+    ...(opts.cache !== undefined && { cache: opts.cache }),
+  };
+  const issuer = new CapTokenIssuer(issuerOpts);
+
+  opts.logger.info(
+    {
+      module: 'cap-token-bootstrap',
+      context: {
+        local_cp: cpKeystore.getCpAddress(),
+        threshold: opts.quorumThreshold ?? 2,
+        has_cache: opts.cache !== undefined,
+      },
+    },
+    'CapTokenIssuer started',
+  );
+
+  return {
+    issuer,
+    stop: () => {
+      opts.logger.info({ module: 'cap-token-bootstrap' }, 'CapTokenIssuer stopped');
+    },
+  };
+}
+
+/**
+ * Deferred-production submitFn — logs WARN and throws so the daemon does not
+ * silently submit malformed TXs. `executeWithRetry`-backed dispatch lands when
+ * peer-CP discovery is implemented (D-014 sub-decision).
+ */
+function makeDeferredSubmit(submitLogger: Logger): SubmitFn {
+  return async ({ label, args }): Promise<SubmitResult> => {
+    submitLogger.warn(
+      { module: 'cap-token-bootstrap', context: { label, args_keys: Object.keys(args) } },
+      'CapTokenIssuer submitFn — production dispatcher deferred (D-014); throwing to surface degraded state',
+    );
+    throw new Error(
+      `CapTokenIssuer submitFn deferred: production "${label}" dispatcher pending peer-CP discovery wiring (D-014)`,
+    );
+  };
+}
 
 async function main(): Promise<void> {
   // Load configuration
@@ -105,6 +256,32 @@ async function main(): Promise<void> {
         })
       ).stop
     : null;
+
+  // F62 Stage 4 Item #1 — bootstrap CapTokenIssuer.
+  // Wired with LocalCpKeystore (signs with local CP Ed25519 key). Peer-CP
+  // discovery for true M-of-N is post-thesis (D-014); the daemon currently
+  // runs with `quorumThreshold` defaulting to 2, so until peer-CP discovery
+  // lands the issuer will log ERROR + skip submit on each event — exactly the
+  // behavior STATUS.md § Stage 4 readiness #1 prescribes as the M1 wiring goal.
+  const capTokenIssuerThreshold = parseInt(
+    process.env['CAP_TOKEN_QUORUM_THRESHOLD'] ?? '2',
+    10,
+  );
+  const { issuer: capTokenIssuer, stop: stopCapTokenIssuer } = await startCapTokenIssuer({
+    client,
+    signer,
+    packageId: config.packageId,
+    networkRegistryId: config.networkRegistryId,
+    cpRegistryObjectId: process.env['CP_REGISTRY_OBJECT_ID'] ?? '',
+    quorumStateObjectId: process.env['QUORUM_STATE_OBJECT_ID'] ?? '',
+    quorumThreshold: capTokenIssuerThreshold,
+    logger,
+  });
+  // capTokenIssuer is registered with the event-handler chain in the next
+  // step (Stage 4 Item #3 cross-lane glue will inject its CapTokenCache
+  // reference). For now the bootstrap surface lets operators see the daemon
+  // boots with a live issuer + structured log breadcrumb.
+  void capTokenIssuer;
 
   // Set up event handler with TX context for room assignment + TURN kill-switch
   const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
@@ -234,6 +411,7 @@ async function main(): Promise<void> {
     stopHeartbeat();
     stopRoleVoting();
     stopTurnIssuer();
+    stopCapTokenIssuer();
     if (stopTurnRpc) {
       void stopTurnRpc();
     }

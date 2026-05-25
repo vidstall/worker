@@ -56,9 +56,20 @@ function asLogger(spy: LoggerSpy): Logger {
   return spy as unknown as Logger;
 }
 
-/** Build an in-memory mock of the lane-d CapTokenCache consumer interface. */
-function makeMockCache(initial: Map<string, CachedTokenSnapshot>, strictMode = false): AuthCacheConsumer {
+/** Build an in-memory mock of the lane-d CapTokenCache consumer interface.
+ *
+ * When `nonceState` is provided, the mock exposes `validateAndAdvanceNonce`
+ * (Stage 4 wiring per D-013). When omitted, the property is undefined and the
+ * Stage 4 nonce-check branch in auth.ts.verifyJoin is a no-op — this preserves
+ * the Stage 1-3 behavioral contract for the existing 7-reject+1-accept tests.
+ */
+function makeMockCache(
+  initial: Map<string, CachedTokenSnapshot>,
+  strictMode = false,
+  nonceState?: Map<string, number>,
+): AuthCacheConsumer {
   const store = new Map(initial);
+  const nonces = nonceState !== undefined ? new Map(nonceState) : undefined;
   return {
     get(tokenId: string): CachedTokenSnapshot | null {
       if (strictMode) return null;
@@ -70,6 +81,17 @@ function makeMockCache(initial: Map<string, CachedTokenSnapshot>, strictMode = f
     isStrictRejectMode(): boolean {
       return strictMode;
     },
+    ...(nonces !== undefined
+      ? {
+          validateAndAdvanceNonce(tokenId: string, incoming: number): boolean {
+            if (!store.has(tokenId)) return false;
+            const current = nonces.get(tokenId) ?? 1;
+            if (incoming <= current) return false;
+            nonces.set(tokenId, incoming);
+            return true;
+          },
+        }
+      : {}),
   };
 }
 
@@ -322,6 +344,214 @@ describe('AuthHook.verifyJoin — REQ-ADM-004', () => {
     const msg = await signedJoin(kp, ROOM_ID, '0xunknown');
 
     const result = await hook.verifyJoin(msg, makeWsStub(), 't-miss');
+
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toBe('no-token');
+  });
+
+  // ── Stage 4 Item #5 — nonce chain wiring (REQ-ADM-013-extended) ──────
+
+  it('reject_replay_nonce: cache.validateAndAdvanceNonce returns false after sig verify → replay-nonce + 4401', async () => {
+    // Seed cache with peer's high-water mark at 5 (prior session).
+    const cache = makeMockCache(
+      new Map([
+        [
+          TOKEN_ID,
+          {
+            tokenId: TOKEN_ID,
+            roomId: ROOM_ID,
+            peerPubkey,
+            role: 2,
+            expiresEpoch: FUTURE_EPOCH,
+            revoked: false,
+          },
+        ],
+      ]),
+      false,
+      new Map([[TOKEN_ID, 5]]),
+    );
+    const hook = new AuthHook({ cache, currentEpoch: () => CURRENT_EPOCH, logger: asLogger(logger) });
+    // Sign with stale nonce (3 < cache water-mark 5).
+    const msg = await signedJoin(kp, ROOM_ID, TOKEN_ID, 3);
+
+    const result = await hook.verifyJoin(msg, makeWsStub(), 't-replay');
+
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toBe('replay-nonce');
+    expect(result.closeCode).toBe(4401);
+  });
+
+  it('accept then replay rejected: monotonic per-token nonce advancement', async () => {
+    const cache = makeMockCache(
+      new Map([
+        [
+          TOKEN_ID,
+          {
+            tokenId: TOKEN_ID,
+            roomId: ROOM_ID,
+            peerPubkey,
+            role: 2,
+            expiresEpoch: FUTURE_EPOCH,
+            revoked: false,
+          },
+        ],
+      ]),
+      false,
+      new Map([[TOKEN_ID, 1]]),
+    );
+    const hook = new AuthHook({ cache, currentEpoch: () => CURRENT_EPOCH, logger: asLogger(logger) });
+
+    // First call at nonce=2 (> 1) advances + accepts.
+    const msg1 = await signedJoin(kp, ROOM_ID, TOKEN_ID, 2);
+    const r1 = await hook.verifyJoin(msg1, makeWsStub(), 't-n1');
+    expect(r1.accepted).toBe(true);
+
+    // Replaying the SAME nonce=2 now fails (==current).
+    const r2 = await hook.verifyJoin(msg1, makeWsStub(), 't-n2');
+    expect(r2.accepted).toBe(false);
+    expect(r2.reason).toBe('replay-nonce');
+
+    // nonce=3 (> 2) advances + accepts.
+    const msg3 = await signedJoin(kp, ROOM_ID, TOKEN_ID, 3);
+    const r3 = await hook.verifyJoin(msg3, makeWsStub(), 't-n3');
+    expect(r3.accepted).toBe(true);
+  });
+
+  it('nonce check runs AFTER sig verify (sig fails first if both broken)', async () => {
+    const cache = makeMockCache(
+      new Map([
+        [
+          TOKEN_ID,
+          {
+            tokenId: TOKEN_ID,
+            roomId: ROOM_ID,
+            peerPubkey,
+            role: 2,
+            expiresEpoch: FUTURE_EPOCH,
+            revoked: false,
+          },
+        ],
+      ]),
+      false,
+      new Map([[TOKEN_ID, 10]]),
+    );
+    const hook = new AuthHook({ cache, currentEpoch: () => CURRENT_EPOCH, logger: asLogger(logger) });
+
+    // Stale nonce AND bad sig — sig check fires first.
+    const msg = await signedJoin(kp, ROOM_ID, TOKEN_ID, 5);
+    msg.signature = msg.signature.slice(0, -4) + 'AAAA';
+
+    const result = await hook.verifyJoin(msg, makeWsStub(), 't-order');
+
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toBe('invalid-signature');
+  });
+
+  // ── Stage 4 Item #7 — devInspect 'revoked' fallback (REQ-ADM-016-partial) ─
+
+  it('devInspect fallback: cache miss + chain reports revoked → reason=revoked + 4403', async () => {
+    const cache = makeMockCache(new Map()); // empty cache
+    const chainProbe = vi.fn(async (tokenId: string) => {
+      expect(tokenId).toBe(TOKEN_ID);
+      return { revoked: true };
+    });
+    const hook = new AuthHook({
+      cache,
+      currentEpoch: () => CURRENT_EPOCH,
+      logger: asLogger(logger),
+      chainProbe,
+    });
+    const msg = await signedJoin(kp, ROOM_ID, TOKEN_ID);
+
+    const result = await hook.verifyJoin(msg, makeWsStub(), 't-devinspect-revoked');
+
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toBe('revoked');
+    expect(result.closeCode).toBe(4403);
+    expect(chainProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('devInspect fallback: cache miss + chain reports unknown → reason=no-token (existing behavior)', async () => {
+    const cache = makeMockCache(new Map());
+    const chainProbe = vi.fn(async () => null); // chain has no record
+    const hook = new AuthHook({
+      cache,
+      currentEpoch: () => CURRENT_EPOCH,
+      logger: asLogger(logger),
+      chainProbe,
+    });
+    const msg = await signedJoin(kp, ROOM_ID, TOKEN_ID);
+
+    const result = await hook.verifyJoin(msg, makeWsStub(), 't-devinspect-unknown');
+
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toBe('no-token');
+    expect(result.closeCode).toBe(4401);
+    expect(chainProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('devInspect fallback: probe throws → fall back to no-token (no escalation, audit logged)', async () => {
+    const cache = makeMockCache(new Map());
+    const chainProbe = vi.fn(async () => {
+      throw new Error('rpc-timeout');
+    });
+    const hook = new AuthHook({
+      cache,
+      currentEpoch: () => CURRENT_EPOCH,
+      logger: asLogger(logger),
+      chainProbe,
+    });
+    const msg = await signedJoin(kp, ROOM_ID, TOKEN_ID);
+
+    const result = await hook.verifyJoin(msg, makeWsStub(), 't-devinspect-throws');
+
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toBe('no-token');
+    expect(result.closeCode).toBe(4401);
+    // Probe failure logged for audit.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'auth' }),
+      expect.stringMatching(/devInspect|probe/i),
+    );
+  });
+
+  it('devInspect fallback: cache hit short-circuits — probe NOT called', async () => {
+    const cache = makeMockCache(
+      new Map([
+        [
+          TOKEN_ID,
+          {
+            tokenId: TOKEN_ID,
+            roomId: ROOM_ID,
+            peerPubkey,
+            role: 2,
+            expiresEpoch: FUTURE_EPOCH,
+            revoked: false,
+          },
+        ],
+      ]),
+    );
+    const chainProbe = vi.fn();
+    const hook = new AuthHook({
+      cache,
+      currentEpoch: () => CURRENT_EPOCH,
+      logger: asLogger(logger),
+      chainProbe,
+    });
+    const msg = await signedJoin(kp, ROOM_ID, TOKEN_ID);
+
+    const result = await hook.verifyJoin(msg, makeWsStub(), 't-devinspect-skip');
+
+    expect(result.accepted).toBe(true);
+    expect(chainProbe).not.toHaveBeenCalled();
+  });
+
+  it('devInspect fallback: not configured (no chainProbe) → preserves Stage 3 no-token behavior', async () => {
+    const cache = makeMockCache(new Map());
+    const hook = new AuthHook({ cache, currentEpoch: () => CURRENT_EPOCH, logger: asLogger(logger) });
+    const msg = await signedJoin(kp, ROOM_ID, TOKEN_ID);
+
+    const result = await hook.verifyJoin(msg, makeWsStub(), 't-devinspect-none');
 
     expect(result.accepted).toBe(false);
     expect(result.reason).toBe('no-token');

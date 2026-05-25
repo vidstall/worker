@@ -57,18 +57,57 @@ export interface CachedTokenSnapshot {
   revoked: boolean;
 }
 
-/** Minimal consumer surface of lane-d's CapTokenCache (READ-ONLY). */
+/** Minimal consumer surface of lane-d's CapTokenCache (READ-ONLY except nonce). */
 export interface AuthCacheConsumer {
   get(tokenId: string): CachedTokenSnapshot | null;
   has(tokenId: string): boolean;
   isStrictRejectMode(): boolean;
+  /**
+   * Stage 4 (REQ-ADM-013-extended): post-sig-check anti-replay gate.
+   * Returns `true` when `incomingNonce > current` AND the entry exists
+   * (advances the high-water mark as a side-effect); `false` on stale
+   * (`<= current`) or missing entry. Optional so legacy callers can
+   * stub the consumer without nonce semantics; the Stage 4 cache (D-013)
+   * provides this method.
+   */
+  validateAndAdvanceNonce?(tokenId: string, incomingNonce: number): boolean;
 }
+
+/**
+ * Stage 4 (REQ-ADM-016-partial, D-015): optional chain-probe callback used to
+ * distinguish "evicted-but-on-chain-revoked" from "cache-miss-truly-unknown".
+ *
+ * - Returns `{ revoked: true }` when the token is recorded on-chain as revoked
+ *   → caller emits `reason: 'revoked' + closeCode 4403`.
+ * - Returns `null` when the chain has no record of the token (or the daemon
+ *   cannot confidently determine) → caller falls back to existing `'no-token'`
+ *   behavior (closeCode 4401).
+ * - Throws on RPC / network / parsing failure → caller logs WARN + falls back
+ *   to `'no-token'` (no escalation; the auth flow is on the WS-handshake hot
+ *   path and a chain probe failure must not block legit joins indefinitely).
+ *
+ * Implementation contract: applies its own timeout + retry policy per D-015
+ * (recommend 2-3s timeout, 0 or 1 retry; the AuthHook itself does NOT layer
+ * additional timing on top — that would compound latency). Injection point:
+ * the daemon `main()` wires this to a `suiClient.devInspectTransactionBlock`
+ * call or equivalent chain-state probe.
+ */
+export type ChainTokenProbe = (
+  tokenId: string,
+) => Promise<{ revoked: boolean } | null>;
 
 export interface AuthHookOpts {
   cache: AuthCacheConsumer;
   /** Returns the current Sui epoch. Used for expiry checks. */
   currentEpoch: () => bigint;
   logger: Logger;
+  /**
+   * Stage 4 chain-state fallback for cache misses (D-015). When provided,
+   * cache-miss paths consult the chain to distinguish `'revoked'` from
+   * `'no-token'`. When omitted, Stage 3 behavior is preserved (all cache
+   * misses surface as `'no-token'`).
+   */
+  chainProbe?: ChainTokenProbe;
 }
 
 /** Reject reasons surfaced to the caller for close-code mapping + audit logs. */
@@ -79,6 +118,7 @@ export type VerifyReason =
   | 'revoked'
   | 'wrong-room'
   | 'wrong-peer'
+  | 'replay-nonce'
   | 'auth-degraded'
   | 'duplicate-connection';
 
@@ -120,6 +160,7 @@ export class AuthHook {
   private readonly cache: AuthCacheConsumer;
   private readonly currentEpoch: () => bigint;
   private readonly logger: Logger;
+  private readonly chainProbe?: ChainTokenProbe;
   /** peer_pubkey (hex string) → incumbent WebSocket. First-wins per D-010-D. */
   private readonly activeByPeer = new Map<string, WebSocket>();
 
@@ -127,6 +168,7 @@ export class AuthHook {
     this.cache = opts.cache;
     this.currentEpoch = opts.currentEpoch;
     this.logger = opts.logger;
+    this.chainProbe = opts.chainProbe;
   }
 
   /**
@@ -147,9 +189,30 @@ export class AuthHook {
       return this.reject('no-token', traceId, this.fingerprintFromMsg(msg));
     }
 
-    // 3. Cache lookup.
+    // 3. Cache lookup. On miss, optionally consult chain devInspect (D-015)
+    //    to distinguish 'revoked' (token exists on chain, marked revoked)
+    //    from 'no-token' (chain has no record OR probe failed).
     const cached = this.cache.get(msg.token);
     if (cached === null) {
+      if (this.chainProbe !== undefined) {
+        try {
+          const onChain = await this.chainProbe(msg.token);
+          if (onChain !== null && onChain.revoked) {
+            return this.reject('revoked', traceId, this.fingerprintFromMsg(msg));
+          }
+        } catch (err) {
+          // Probe failure is non-fatal — log + fall back to 'no-token'.
+          // D-015: WS-handshake hot path must not block on RPC errors.
+          this.logger.warn(
+            {
+              trace_id: traceId,
+              module: 'auth',
+              context: { tokenId: msg.token, err: String(err) },
+            },
+            'devInspect probe failed; falling back to no-token',
+          );
+        }
+      }
       return this.reject('no-token', traceId, this.fingerprintFromMsg(msg));
     }
 
@@ -179,6 +242,18 @@ export class AuthHook {
     );
     if (!sigOk) {
       return this.reject('invalid-signature', traceId, peerKeyHex(cached.peerPubkey));
+    }
+
+    // 8. Stage 4 anti-replay nonce check (REQ-ADM-013-extended, D-013).
+    //    The cache is SOT for "highest accepted nonce per token"; strictly
+    //    monotonic advancement. `validateAndAdvanceNonce` is OPTIONAL on the
+    //    consumer surface so legacy stubs (pre-D-013) still type-check; when
+    //    absent, this step is a no-op (Stage 3 behavior preserved).
+    if (typeof this.cache.validateAndAdvanceNonce === 'function') {
+      const nonceOk = this.cache.validateAndAdvanceNonce(msg.token, msg.nonce);
+      if (!nonceOk) {
+        return this.reject('replay-nonce', traceId, peerKeyHex(cached.peerPubkey));
+      }
     }
 
     return { accepted: true };

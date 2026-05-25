@@ -9,7 +9,7 @@
  * REQ-ADM-009: cache flips to strict-reject mode when chain RPC is unreachable >30s.
  */
 
-import type { SuiClient } from '@mysten/sui/client';
+import type { SuiClient, SuiEvent } from '@mysten/sui/client';
 import type { Logger } from '@dvconf/shared';
 
 /** Cached snapshot of a RoomCapability for fast WS handshake lookup. */
@@ -292,19 +292,153 @@ export class CapTokenCache {
   }
 
   /**
-   * Subscribe to `capability_events` chain events. Returns an unsubscribe
-   * handle. The production poller wiring is owned by Phase 3.4 (cp-daemon
-   * event-poller forwards parsed events into `handleEvent`); this method
-   * exists for API compatibility with CONTRACTS § 4.3 and is currently a
-   * no-op returning an idempotent unsubscribe.
+   * D-016 Path B (chosen 2026-05-25) — emit one WARN on daemon cold start
+   * describing the transient nonce-gap window. The cache reloads token entries
+   * from chain events as they arrive (CapabilityIssued payload carries the
+   * peer's high-water nonce); until the first refresh from each peer lands,
+   * a stale-nonce attempt against an evicted cache entry will simply miss
+   * (return null) and fall through to chain devInspect via auth.ts. Operators
+   * are notified once at startup so the WARN line is observable in pino logs
+   * but does NOT spam the steady-state path.
+   *
+   * Trade-off (D-013 § B): the gap window is bounded by
+   *   max-time-between-refreshes-for-any-peer ≤ token TTL (60s default).
+   * Acceptable at thesis scale (daemon restarts are infrequent + every refresh
+   * re-aligns the cache).
+   */
+  announceColdStart(trigger: string): void {
+    this.logger.warn(
+      {
+        module: 'cap-token-cache',
+        reason: 'cold-start-transient-gap',
+        context: { trigger },
+      },
+      'cache reloaded from chain; nonce high-water marks restored progressively as refresh events arrive (D-016 Path B)',
+    );
+  }
+
+  /**
+   * Subscribe to `capability_events` chain events using cursor-based
+   * polling against `SuiClient.queryEvents`. Parsed payloads are forwarded
+   * into `handleEvent`. Idempotent: the returned `unsubscribe` is safe to call
+   * multiple times. Reconnect: poll loop swallows transient errors and retries
+   * on the next interval (exponential backoff is the SuiClient's responsibility
+   * via the shared http-retry wiring).
+   *
+   * Mirrors the `EventPoller` pattern in `packages/shared/src/chain/events.ts`
+   * but stays self-contained because cap-token-cache lives in `apps/signaling`
+   * (which has its own `@mysten/sui` dependency and does not import an
+   * EventPoller cursor file). Cursor is in-memory only; on daemon restart,
+   * the poller starts from the beginning of the package's event history and
+   * `handleEvent` is idempotent against re-delivery (put is a Map.set; revoke
+   * is delete; refresh is put-then-put).
    */
   async subscribeToChainEvents(
-    _suiClient: SuiClient,
-    _packageId: string,
-  ): Promise<() => void> {
-    return () => {
-      /* no-op */
+    suiClient: SuiClient,
+    packageId: string,
+    opts?: { pollIntervalMs?: number },
+  ): Promise<() => Promise<void>> {
+    const intervalMs = opts?.pollIntervalMs ?? 2_000;
+    let running = true;
+    let cursor: { txDigest: string; eventSeq: string } | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let inFlight: Promise<void> | null = null;
+
+    const tick = async (): Promise<void> => {
+      try {
+        let hasMore = true;
+        while (hasMore && running) {
+          const page = await suiClient.queryEvents({
+            query: { MoveEventModule: { package: packageId, module: 'capability_events' } },
+            cursor: cursor ?? undefined,
+            limit: 50,
+            order: 'ascending',
+          });
+          for (const ev of page.data) {
+            this.dispatchSuiEvent(ev);
+          }
+          if (page.data.length > 0 && page.nextCursor) {
+            cursor = page.nextCursor;
+          }
+          hasMore = page.hasNextPage;
+        }
+      } catch (err) {
+        this.logger.warn(
+          { module: 'cap-token-cache', err: String(err) },
+          'capability_events poll error — will retry on next interval',
+        );
+      }
     };
+
+    const loop = (): void => {
+      if (!running) return;
+      inFlight = tick().finally(() => {
+        if (running) {
+          timer = setTimeout(loop, intervalMs);
+        }
+      });
+    };
+    loop();
+
+    return async () => {
+      if (!running) return;
+      running = false;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (inFlight) {
+        try {
+          await inFlight;
+        } catch {
+          /* swallow — loop already logged */
+        }
+      }
+    };
+  }
+
+  /**
+   * Map a raw `SuiEvent` from `queryEvents` into a `handleEvent` call.
+   * Field-name translation matches `capability_events.move` snake_case:
+   *   token_id → tokenId, room_id → roomId, peer_pubkey → peerPubkey,
+   *   expires_epoch → expiresEpoch, new_expires_epoch → newExpiresEpoch.
+   * Unknown event names are ignored (forward-compat with additive events).
+   */
+  private dispatchSuiEvent(ev: SuiEvent): void {
+    const parts = ev.type.split('::');
+    const name = parts[parts.length - 1] ?? '';
+    const data = ev.parsedJson as Record<string, unknown> | undefined;
+    if (!data) return;
+    if (name === 'CapabilityIssued') {
+      this.handleEvent('CapabilityIssued', {
+        tokenId: String(data['token_id']),
+        roomId: String(data['room_id']),
+        peerPubkey: data['peer_pubkey'] as number[],
+        role: Number(data['role']),
+        expiresEpoch: BigInt(String(data['expires_epoch'] ?? '0')),
+        ...(data['nonce'] !== undefined ? { nonce: Number(data['nonce']) } : {}),
+      });
+      return;
+    }
+    if (name === 'CapabilityRevoked') {
+      this.handleEvent('CapabilityRevoked', {
+        tokenId: String(data['token_id']),
+        roomId: String(data['room_id']),
+        reason: Number(data['reason']),
+      });
+      return;
+    }
+    if (name === 'CapabilityRefreshed') {
+      this.handleEvent('CapabilityRefreshed', {
+        tokenId: String(data['token_id']),
+        roomId: String(data['room_id']),
+        peerPubkey: data['peer_pubkey'] as number[],
+        ...(data['role'] !== undefined ? { role: Number(data['role']) } : {}),
+        newExpiresEpoch: BigInt(String(data['new_expires_epoch'] ?? '0')),
+        ...(data['nonce'] !== undefined ? { nonce: Number(data['nonce']) } : {}),
+      });
+      return;
+    }
   }
 }
 

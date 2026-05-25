@@ -30,6 +30,7 @@ import {
   ensureBenchHttpServer,
   closeBenchHttpServer,
 } from './bench-endpoint.js';
+import type { AuthHook, JoinAuthMessage } from './auth.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
@@ -126,8 +127,26 @@ const ipConnectionCount = new Map<string, number>();
 
 const MAX_MESSAGES_PER_SECOND = 100;
 
-export function createServer(port: number = PORT): WebSocketServer {
+/**
+ * Optional server-level injection point for Stage 4 capability-token auth
+ * (REQ-ADM-010-partial). When `authHook` is provided, every inbound `join`
+ * message is gated through `AuthHook.verifyJoin`; rejects close the WS with
+ * the close code returned by the hook (4401 / 4403 / 4409). When omitted,
+ * the server preserves Stage 1-2 baseline behavior (no auth, peers join
+ * directly). Injection (not internal construction) is required because
+ * `index.ts` is outside the DAEMON-02 chain-aware carve-out — the daemon
+ * `main()` block constructs the AuthHook and passes it in.
+ */
+export interface CreateServerOpts {
+  authHook?: AuthHook;
+}
+
+export function createServer(
+  port: number = PORT,
+  opts: CreateServerOpts = {},
+): WebSocketServer {
   const wss = new WebSocketServer({ port, maxPayload: 64 * 1024 });
+  const authHook = opts.authHook;
 
   wss.on('connection', (ws, req) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
@@ -181,6 +200,43 @@ export function createServer(port: number = PORT): WebSocketServer {
 
       switch (msg.type) {
         case 'join': {
+          // Stage 4 (REQ-ADM-010-partial): when an AuthHook is injected, every
+          // join must pass capability-token verification before joining the
+          // room. Failure closes the WS with the hook-returned close code.
+          if (authHook !== undefined) {
+            const joinMsg: JoinAuthMessage = {
+              type: 'join',
+              roomId: msg.roomId,
+              token: msg.token ?? '',
+              signature: msg.signature ?? '',
+              nonce: msg.nonce ?? 0,
+            };
+            const traceId = randomUUID();
+            // We do not block message processing on auth completion — the
+            // verifyJoin promise resolves shortly and we close-or-register
+            // before subsequent messages can race in (rate-limit pins to
+            // 100 msg/s, this awaits inside the handler).
+            // eslint-disable-next-line @typescript-eslint/no-floating-promises
+            authHook.verifyJoin(joinMsg, ws, traceId).then((verifyResult) => {
+              if (!verifyResult.accepted) {
+                const code = verifyResult.closeCode ?? 4401;
+                ws.close(code, verifyResult.reason ?? 'auth-rejected');
+                return;
+              }
+              roomManager.join(msg.roomId, ws, peerId);
+              logger.info(
+                {
+                  peerId,
+                  roomId: msg.roomId,
+                  roomSize: roomManager.getRoomSize(msg.roomId),
+                  trace_id: traceId,
+                  module: 'signaling',
+                },
+                'Peer joined room (auth-verified)',
+              );
+            });
+            break;
+          }
           roomManager.join(msg.roomId, ws, peerId);
           logger.info(
             { peerId, roomId: msg.roomId, roomSize: roomManager.getRoomSize(msg.roomId) },

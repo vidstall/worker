@@ -286,18 +286,22 @@ describe('Integration — Scenario 1: issuance → cache → auth happy path', (
     expect(cache.has(sigTokenId)).toBe(true);
 
     // ── Stage C: Auth verifies a valid JoinAuthMessage ──────────────────
-    const joinMsg = await signedJoin(relayKp, ROOM_ID, relayTokenId, 1);
+    // Stage 4 wiring: cache seeds nonce=1 from CapabilityIssued (D-013 fallback);
+    // the first signed message must advance with nonce > seed. Use 2 to match
+    // canonical "first signed message after mint" pattern.
+    const joinMsg = await signedJoin(relayKp, ROOM_ID, relayTokenId, 2);
     const result = await hook.verifyJoin(joinMsg, makeWsStub(), 'trace-s1-verify');
 
     expect(result.accepted).toBe(true);
     expect(result.reason).toBeUndefined();
 
     // Cached entry shape verification: room/pubkey/nonce/expiry intact.
+    // After Stage 4 wiring, cache.nonce has advanced to 2 (the join's nonce).
     const cached = cache.get(relayTokenId);
     expect(cached).not.toBeNull();
     expect(cached!.roomId).toBe(ROOM_ID);
     expect(cached!.peerPubkey).toEqual(relayPubkey);
-    expect(cached!.nonce).toBe(1);
+    expect(cached!.nonce).toBe(2); // advanced from seed=1 by validateAndAdvanceNonce
     expect(cached!.expiresEpoch).toBe(FUTURE_EPOCH);
   });
 });
@@ -617,31 +621,42 @@ describe('Integration — Scenario 5: anti-replay across boundary (REQ-ADM-013)'
     // Missing token → false
     expect(cache.validateAndAdvanceNonce('0xunknown', 100)).toBe(false);
 
-    // ── Stage B: Integration gap — auth.verifyJoin does NOT yet call
-    //  validateAndAdvanceNonce. Documenting via test:
+    // ── Stage B: Stage 4 wired — auth.verifyJoin calls
+    //  validateAndAdvanceNonce after sig-check (D-013 + D-015).
     //
-    //   Per CONTRACTS § 4.5 + DECISIONS.md beyond-scope observation #6:
+    //   Per CONTRACTS § 4.5 + DECISIONS.md D-015:
     //   "wiring of `auth.ts` to call `cache.validateAndAdvanceNonce(...)`
-    //    after sig-check is Stage 4 daemon-main bootstrap scope."
+    //    after sig-check is Stage 4 daemon-main bootstrap scope — landed in
+    //    lane-signaling cook step."
     //
-    // The cache-level enforcement (above) PROVES the anti-replay primitive
-    // works correctly. Stage 4 will compose it into the auth flow.
+    // The cache-level enforcement (Stage A above) PROVES the anti-replay
+    // primitive works in isolation; this stage proves auth.verifyJoin
+    // composes it correctly post-Stage-4 wiring.
     const hook = new AuthHook({
       cache,
       currentEpoch: () => CURRENT_EPOCH,
       logger: asLogger(makeLoggerSpy()),
     });
 
-    // Stale nonce (3 < cache.nonce=7) — Stage 3 verifyJoin accepts because
-    // it does not yet enforce nonce. This test pins the deferral.
+    // Stale nonce (3 < cache.nonce=7) — Stage 4 verifyJoin rejects with
+    // reason 'replay-nonce' per D-015. This assertion was the forcing-function
+    // for the Stage 4 wiring change (previously `.toBe(true)` to pin the gap).
     const staleJoin = await signedJoin(peerKp, ROOM_ID, tokenId, 3);
     const staleResult = await hook.verifyJoin(staleJoin, makeWsStub(), 'trace-s5-stale');
-    expect(staleResult.accepted).toBe(true); // ← documents Stage 4 gap
+    expect(staleResult.accepted).toBe(false); // ← FLIPPED S55-bis Stage 4
+    expect(staleResult.reason).toBe('replay-nonce');
+    expect(staleResult.closeCode).toBe(4401);
 
-    // When Stage 4 wires the call: verifyJoin will run validateAndAdvanceNonce
-    // post-sig-check, and the same stale claim above would return
-    // { accepted: false, reason: 'replay-nonce' }. This test should fail
-    // at that point — driving the Stage 4 wiring update.
+    // Fresh nonce > cache.nonce=7 — verifyJoin now accepts AND advances the
+    // cache high-water mark via the auth.verifyJoin → validateAndAdvanceNonce
+    // chain. Confirms post-flip the chain is composable end-to-end.
+    const freshJoin = await signedJoin(peerKp, ROOM_ID, tokenId, 8);
+    const freshResult = await hook.verifyJoin(freshJoin, makeWsStub(), 'trace-s5-fresh');
+    expect(freshResult.accepted).toBe(true);
+    // Re-running the same fresh nonce now fails (advanced to 8).
+    const replayResult = await hook.verifyJoin(freshJoin, makeWsStub(), 'trace-s5-replay');
+    expect(replayResult.accepted).toBe(false);
+    expect(replayResult.reason).toBe('replay-nonce');
   });
 });
 
