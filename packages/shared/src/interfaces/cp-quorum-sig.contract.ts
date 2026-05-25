@@ -323,3 +323,110 @@ export type CapabilityEvent =
 
 /** All cap-token primitive events (Phase 1.1 + Phase 1.2 combined). */
 export type CapTokenPrimitiveEvent = QuorumSigEvent | CapabilityEvent;
+
+// ── § Phase 2.4-retro — Refresh entry function stub (NEW S54) ─────────────────
+//
+// Mirrors Move entry function added to `room_capability.move` in Phase 2.4-retro:
+//   public entry fun refresh_capability_token(
+//     registry, cp_reg, quorum_state, &mut old_token,
+//     new_role, new_expires_epoch,
+//     cp_quorum_proof, signer_pubkeys, ctx
+//   )
+//
+// Atomic refresh — single TX validates + revokes old + mints new + emits the
+// frozen `CapabilityRefreshed` event. Phase 3.4 cap-token-issuer daemon invokes
+// this via SuiClient signAndExecuteTransaction. Co-update mandate (D-003): this
+// section MUST be updated alongside the Move entry per the contract-interface-lock
+// pre-merge hook.
+//
+// Field order in `RoomCapabilityRefreshArgs` mirrors the Move entry's parameter
+// declaration order from § 4.1 of CONTRACTS.md (snake_case → camelCase per the
+// TS convention established at the top of this file). The canonical signed
+// payload that the CP quorum signs off-chain is:
+//   BCS({old_token_id, new_role, new_expires_epoch, refresh_nonce})
+// where refresh_nonce = old_token.nonce + 1 (D-010-B monotonic per-token).
+
+/**
+ * Argument shape for `refreshCapabilityToken`. Mirrors the parameter list of
+ * `refresh_capability_token` in `room_capability.move` (§ 4.1).
+ *
+ * Move type → TS mapping:
+ *   `&NetworkRegistry`        → string (shared object ID, 0x-prefixed hex)
+ *   `&ControlPlaneRegistry`   → string (shared object ID)
+ *   `&QuorumConfigState`      → string (shared object ID)
+ *   `&mut RoomCapability`     → string (owned/shared object ID; passed mutably on-chain)
+ *   `u8`                      → number
+ *   `u64`                     → bigint  (NOTE: refresh-entry args use bigint for the
+ *                                          new_expires_epoch — TX-payload context.
+ *                                          Event-payload u64s elsewhere in this file
+ *                                          remain `string` per Sui JSON convention.)
+ *   `QuorumSig`               → QuorumSig (Phase 1.1 frozen interface above)
+ *   `vector<vector<u8>>`      → number[][]
+ *   `&mut TxContext`          → (implicit; provided by SuiClient call builder)
+ */
+export interface RoomCapabilityRefreshArgs {
+  /** Shared NetworkRegistry object — paused-flag invariant check on entry. */
+  registry: string;
+  /** Shared ControlPlaneRegistry object — CP-membership lookup for verify_quorum. */
+  cpReg: string;
+  /** Shared QuorumConfigState object — current M-of-N min_quorum threshold. */
+  quorumState: string;
+  /** Sui object ID of the RoomCapability being refreshed (Move param: `&mut old_token`). */
+  oldTokenId: string;
+  /** New role enum (0=user 1=validator 2=relay 3=CP 4=signaling). */
+  newRole: number;
+  /** New expiry epoch (Sui u64). Must be > current_epoch + MIN_REMAINING_EPOCHS (5). */
+  newExpiresEpoch: bigint;
+  /** CP-quorum aggregate signature value (Phase 1.1 frozen interface). */
+  cpQuorumProof: QuorumSig;
+  /** ed25519 pubkeys parallel to cpQuorumProof.signers (D-001 pubkeys-as-parameter pattern). */
+  signerPubkeys: number[][];
+}
+
+/**
+ * Mirrors Move entry function:
+ *   public entry fun refresh_capability_token(
+ *     registry, cp_reg, quorum_state, &mut old_token,
+ *     new_role, new_expires_epoch,
+ *     cp_quorum_proof, signer_pubkeys, ctx
+ *   )
+ *
+ * Atomic refresh — single TX validates + revokes old + mints new + emits the
+ * frozen `CapabilityRefreshed` event. Phase 3.4 cap-token-issuer daemon invokes
+ * this via SuiClient signAndExecuteTransaction.
+ *
+ * Aborts (raised as transaction errors on the daemon side):
+ *   882  E_CAP_PAUSED                  — NetworkRegistry paused
+ *   901  E_TOKEN_EXPIRED               — new_expires_epoch within MIN_REMAINING_EPOCHS window
+ *                                        (reuses 901 per D-007-A; semantically "window too small")
+ *   902  E_TOKEN_REVOKED               — old_token already revoked
+ *   906  E_TOKEN_QUORUM_INSUFFICIENT   — verify_quorum returned false (M-of-N not met or duplicate)
+ *   884  E_PUBKEY_COUNT_MISMATCH       — signerPubkeys.length != cpQuorumProof.signers.length
+ *
+ * @param registry          - objectId of NetworkRegistry (shared)
+ * @param cpReg             - objectId of ControlPlaneRegistry (shared)
+ * @param quorumState       - objectId of QuorumConfigState (shared)
+ * @param oldTokenId        - objectId of the RoomCapability being refreshed (passed as &mut)
+ * @param newRole           - u8 role enum (0=user 1=validator 2=relay 3=CP 4=signaling)
+ * @param newExpiresEpoch   - u64 future epoch (must be > current + MIN_REMAINING_EPOCHS=5)
+ * @param cpQuorumProof     - QuorumSig BCS struct (CP-quorum aggregate sig)
+ * @param signerPubkeys     - ed25519 pubkeys parallel to cpQuorumProof.signers
+ * @returns                  - Sui TX digest + the newly minted RoomCapability object ID
+ */
+export declare function refreshCapabilityToken(
+  registry: string,
+  cpReg: string,
+  quorumState: string,
+  oldTokenId: string,
+  newRole: number,
+  newExpiresEpoch: bigint,
+  cpQuorumProof: QuorumSig,
+  signerPubkeys: number[][],
+): Promise<{ digest: string; newTokenId: string }>;
+
+// NOTE: `CapabilityRefreshedEvent` interface already exists in this file (Phase 1.2
+// section, frozen S53). No new event types are needed for Phase 2.4-retro — the
+// Move entry emits the existing frozen event struct.
+//
+// NOTE: No edits to `CAPABILITY_ERRORS` constant block — the refresh entry reuses
+// 882 / 884 / 901 / 902 / 906. No new namespace values introduced.
