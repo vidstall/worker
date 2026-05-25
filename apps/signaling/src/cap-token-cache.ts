@@ -28,6 +28,15 @@ export interface CachedToken {
   revoked: boolean;
   /** unix-ms timestamp at which this entry was inserted. Used for sliding TTL. */
   cachedAt: number;
+  /**
+   * Highest monotonic per-token anti-replay nonce seen so far (REQ-ADM-013).
+   * Seeded from the chain event payload (CapabilityIssued.nonce, defaults to 1
+   * matching the initial daemon mint when the event payload omits the field).
+   * Updated via `validateAndAdvanceNonce` on each incoming WS message; the cache
+   * is the SOT for "latest accepted nonce per token" within the signaling daemon.
+   * Strictly monotonic: incoming must be > current to advance.
+   */
+  nonce: number;
 }
 
 /** Reason codes for invalidate() — used in structured logs only. */
@@ -116,6 +125,86 @@ export class CapTokenCache {
     }
   }
 
+  /**
+   * Validate an incoming anti-replay nonce against the cache entry and advance
+   * the high-water mark on accept (REQ-ADM-013). Strictly monotonic: incoming
+   * must be > current to be accepted. Missing entries cannot be validated and
+   * return false (caller is responsible for any cache-miss fallback policy).
+   *
+   * Does NOT change LRU order — auth flow already calls `get()` first for the
+   * room/peer/expiry checks, which gives the LRU touch. Splitting concerns
+   * keeps this method's contract narrow and side-effect-explicit.
+   *
+   * @returns true if incoming > current and the entry's nonce was advanced;
+   *          false on stale (incoming <= current) or missing entry.
+   */
+  validateAndAdvanceNonce(tokenId: string, incomingNonce: number): boolean {
+    const entry = this.entries.get(tokenId);
+    if (entry === undefined) {
+      this.logger.info(
+        {
+          module: 'cap-token-cache',
+          tokenId,
+          incoming: incomingNonce,
+          reason: 'nonce-missing-entry',
+        },
+        'nonce validation skipped — token not in cache',
+      );
+      return false;
+    }
+    if (incomingNonce <= entry.nonce) {
+      this.logger.info(
+        {
+          module: 'cap-token-cache',
+          tokenId,
+          incoming: incomingNonce,
+          current: entry.nonce,
+          reason: 'nonce-stale',
+        },
+        'nonce validation rejected — incoming <= current',
+      );
+      return false;
+    }
+    entry.nonce = incomingNonce;
+    return true;
+  }
+
+  /**
+   * Emergency fast-path eviction (REQ-ADM-015). Bypasses ALL TTL / revoked /
+   * strict-reject checks — synchronous Map.delete. Used by out-of-band admin
+   * action or threat-response handlers (cross-Wave: may be wired by lane-3.4-
+   * issuer's emergency rotation flow in a future stage).
+   *
+   * Distinct from `invalidate(tokenId, reason)`:
+   *   - `invalidate()`  → normal lifecycle (`'revoked' | 'refreshed' | 'expired'`), logs INFO.
+   *   - `emergencyInvalidate()` → out-of-band threat response with arbitrary
+   *     reason string, logs WARN at severity:'emergency'.
+   *
+   * Idempotent: re-calling on an already-evicted token logs an INFO audit trace
+   * (does not throw, does not warn-spam).
+   */
+  emergencyInvalidate(tokenId: string, reason: string): void {
+    if (this.entries.delete(tokenId)) {
+      this.logger.warn(
+        {
+          module: 'cap-token-cache',
+          context: { tokenId, reason },
+          severity: 'emergency',
+        },
+        'emergency invalidate executed',
+      );
+      return;
+    }
+    this.logger.info(
+      {
+        module: 'cap-token-cache',
+        context: { tokenId, reason },
+        reason: 'already-evicted',
+      },
+      'emergency invalidate — token not in cache (already evicted)',
+    );
+  }
+
   /** Current entry count — tests + observability. */
   size(): number {
     return this.entries.size;
@@ -170,6 +259,10 @@ export class CapTokenCache {
           expiresEpoch: e.expiresEpoch,
           revoked: false,
           cachedAt: this.clock(),
+          // REQ-ADM-013: CapabilityIssued seeds with 1 matching initial daemon
+          // mint. If the on-chain event currently omits the field, the default
+          // is the canonical first-mint value per D-013 fallback contract.
+          nonce: e.nonce ?? 1,
         });
         return;
       }
@@ -188,6 +281,10 @@ export class CapTokenCache {
           expiresEpoch: e.newExpiresEpoch,
           revoked: false,
           cachedAt: this.clock(),
+          // REQ-ADM-013 + D-010-B: refresh emits the new monotonic refresh_nonce
+          // (= old.nonce + 1 on chain). Passthrough when present; fallback to 1
+          // so a refreshed-but-payload-missing event still produces a valid entry.
+          nonce: e.nonce ?? 1,
         });
         return;
       }
@@ -220,6 +317,13 @@ export interface ChainCapabilityIssued {
   peerPubkey: number[];
   role: number;
   expiresEpoch: bigint;
+  /**
+   * REQ-ADM-013 + D-013: optional pass-through of on-chain anti-replay nonce.
+   * When absent (e.g., the Move event currently omits the field), the cache
+   * seeds `1` matching the initial daemon mint. Move-side propagation is a
+   * follow-up coordination item with lane-a (refresh-entry) — see DECISIONS.md.
+   */
+  nonce?: number;
 }
 
 export interface ChainCapabilityRevoked {
@@ -239,6 +343,13 @@ export interface ChainCapabilityRefreshed {
    * follows). */
   role?: number;
   newExpiresEpoch: bigint;
+  /**
+   * REQ-ADM-013 + D-010-B: the on-chain refresh entry mints with
+   * `nonce = old.nonce + 1`. When the event payload carries the new value,
+   * the cache replaces; when absent, defaults to 1 (same fallback as
+   * CapabilityIssued).
+   */
+  nonce?: number;
 }
 
 export type ChainCapabilityEvent =

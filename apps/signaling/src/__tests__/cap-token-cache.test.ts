@@ -32,6 +32,7 @@ function makeCached(tokenId: string, cachedAt: number): CachedToken {
     expiresEpoch: 999n,
     revoked: false,
     cachedAt,
+    nonce: 1,
   };
 }
 
@@ -155,5 +156,93 @@ describe('CapTokenCache', () => {
     localCache.setStrictRejectMode('rpc-timeout-30s');
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
+  });
+
+  // ── Wave 2 lane-3.4-cache: REQ-ADM-013 nonce validation on get ────────────
+  it('nonce_stale_reject — incoming <= current rejects; strictly-greater advances entry.nonce', () => {
+    const infoSpy = vi.spyOn(testLogger, 'info');
+    const tok = makeCached('0xnonceTok', clockMs);
+    tok.nonce = 5;
+    cache.put('0xnonceTok', tok);
+
+    // 1. incoming < current → reject, nonce unchanged
+    expect(cache.validateAndAdvanceNonce('0xnonceTok', 3)).toBe(false);
+    expect(cache.has('0xnonceTok')).toBe(true);
+    const afterStale = cache.get('0xnonceTok');
+    expect(afterStale?.nonce).toBe(5);
+
+    // 2. incoming > current → accept, advance to incoming
+    expect(cache.validateAndAdvanceNonce('0xnonceTok', 6)).toBe(true);
+    expect(cache.get('0xnonceTok')?.nonce).toBe(6);
+
+    // 3. incoming == current → strictly-greater rule → reject (must NOT advance)
+    expect(cache.validateAndAdvanceNonce('0xnonceTok', 6)).toBe(false);
+    expect(cache.get('0xnonceTok')?.nonce).toBe(6);
+
+    // 4. missing token → cannot validate against missing → reject
+    expect(cache.validateAndAdvanceNonce('0xmissing', 10)).toBe(false);
+
+    // structured INFO log emitted with reason: 'nonce-stale'
+    const staleLogs = infoSpy.mock.calls.filter(
+      (call) => call[0] && (call[0] as { reason?: string }).reason === 'nonce-stale',
+    );
+    expect(staleLogs.length).toBeGreaterThanOrEqual(2);
+    const firstStale = staleLogs[0]?.[0] as {
+      module: string;
+      tokenId: string;
+      incoming: number;
+      current: number;
+      reason: string;
+    };
+    expect(firstStale.module).toBe('cap-token-cache');
+    expect(firstStale.tokenId).toBe('0xnonceTok');
+    expect(firstStale.reason).toBe('nonce-stale');
+    expect(typeof firstStale.incoming).toBe('number');
+    expect(typeof firstStale.current).toBe('number');
+    infoSpy.mockRestore();
+  });
+
+  // ── Wave 2 lane-3.4-cache: REQ-ADM-015 emergency invalidate fast-path ────
+  it('emergency_invalidate_latency — bypasses TTL/revoked checks + WARN log + idempotent', () => {
+    const warnSpy = vi.spyOn(testLogger, 'warn');
+    const infoSpy = vi.spyOn(testLogger, 'info');
+
+    cache.put('0xemerg', makeCached('0xemerg', clockMs));
+    expect(cache.has('0xemerg')).toBe(true);
+
+    // Fast-path eviction — synchronous, no clock advance needed
+    cache.emergencyInvalidate('0xemerg', 'test-emergency');
+    expect(cache.has('0xemerg')).toBe(false);
+    expect(cache.get('0xemerg')).toBeNull();
+
+    // WARN log emitted with the supplied reason + severity: 'emergency'
+    const emergencyWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        call[0] && (call[0] as { context?: { reason?: string } }).context?.reason === 'test-emergency',
+    );
+    expect(emergencyWarns.length).toBe(1);
+    const emergencyLog = emergencyWarns[0]?.[0] as {
+      module: string;
+      context: { tokenId: string; reason: string };
+      severity: string;
+    };
+    expect(emergencyLog.module).toBe('cap-token-cache');
+    expect(emergencyLog.context.tokenId).toBe('0xemerg');
+    expect(emergencyLog.context.reason).toBe('test-emergency');
+    expect(emergencyLog.severity).toBe('emergency');
+
+    // Idempotency: second call on already-evicted token → INFO log (not in cache)
+    cache.emergencyInvalidate('0xemerg', 'test-emergency-2');
+    const evictedInfos = infoSpy.mock.calls.filter(
+      (call) =>
+        call[0] &&
+        (call[0] as { context?: { tokenId?: string }; reason?: string }).context?.tokenId === '0xemerg' &&
+        ((call[0] as { reason?: string }).reason === 'already-evicted' ||
+          (call[1] as string)?.includes('already evicted')),
+    );
+    expect(evictedInfos.length).toBe(1);
+
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
   });
 });
