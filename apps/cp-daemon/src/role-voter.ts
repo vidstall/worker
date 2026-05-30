@@ -197,13 +197,13 @@ async function castVote(
     client,
     signer,
     (tx: Transaction) => {
-      // ⚠️ F47 Phase 1.3 BREAKING CHANGE (on-chain, 2026-05): role_voting::cast_role_vote
-      // gained a 9th param `stake: &StakePosition` (inserted AFTER cap, BEFORE miner_id).
-      // This call is INTENTIONALLY still the old 10-arg form — it matches the currently
-      // DEPLOYED package. BEFORE the new contract is republished, this MUST resolve the
-      // miner's StakePosition object id and insert tx.object(stakeId) at index 8.
-      // Wiring deferred to Phase 2.1 (RV-009 revote-watcher). See
-      // plans/role-revote-pool/milestone-1/STATUS.md + ROADMAP Phase 1.3 / 2.1.
+      // F47 D-S70-4 (2026-05): cast_role_vote is canonically 10-arg — there is NO
+      // `stake: &StakePosition` param. An earlier plan added one, but it was REVERTED:
+      // a CP-signed cast cannot reference the miner's OWNED StakePosition (Sui owned-
+      // object input rule). The stake guards therefore live on the miner-signed side:
+      // stake-binding (role_voting.move:717) + role threshold (:713) are enforced in
+      // `registration::apply_voted_role`, not here. This call matches the deployed
+      // 10-arg entry; no stake arg to add.
       tx.moveCall({
         target: `${config.packageId}::role_voting::cast_role_vote`,
         arguments: [
@@ -356,9 +356,9 @@ export function startRoleVoting(
       }
 
       // 5. F47 RV-010 — re-vote pass: cast the scarcest role for marked candidates
-      // (cleared from revoteCandidates on RoleTransitioned). Reuses castVote, which is
-      // still the deployed 10-arg cast_role_vote — the +stake lockstep (OQ-PH13) lands
-      // with the contract republish in Phase 4.1 (see the castVote marker above).
+      // (cleared from revoteCandidates on RoleTransitioned). Reuses castVote, the
+      // canonical 10-arg cast_role_vote (no stake param — D-S70-4 moved the stake
+      // guards to the miner-signed apply_voted_role; see the castVote marker above).
       for (const minerId of pendingRevotes) {
         const role = computeBestRoleForRevote(counts);
         logger.info(
