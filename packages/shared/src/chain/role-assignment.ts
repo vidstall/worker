@@ -80,12 +80,20 @@ export async function applyVotedRole(
     (tx: Transaction) => {
       tx.moveCall({
         target: `${config.packageId}::registration::apply_voted_role`,
+        // F47 Phase 1.5 (REQ-RV-005): arg order MUST match the Move param order in
+        // registration::apply_voted_role. The 4 role registries were added so the
+        // entry can clean up the miner's stale OLD-role registry entry on a transition.
+        // ctx is auto-injected by the runtime and is NOT passed here.
         arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.minerStoreId),
-          tx.object(config.roleVoteBoxId),
-          tx.object(minerCapId),
-          tx.object(stakePositionId),
+          tx.object(config.networkRegistryId),    // registry
+          tx.object(config.minerStoreId),         // store
+          tx.object(config.roleVoteBoxId),        // vote_box
+          tx.object(config.signalingRegistryId),  // signaling_reg
+          tx.object(config.relayRegistryId),      // relay_reg
+          tx.object(config.validatorRegistryId),  // validator_reg
+          tx.object(config.cpRegistryId),         // cp_reg
+          tx.object(minerCapId),                  // cap
+          tx.object(stakePositionId),             // stake
         ],
       });
     },
