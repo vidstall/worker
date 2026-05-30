@@ -228,6 +228,15 @@ async function main(): Promise<void> {
     roleVotingIntervalMs,
   );
 
+  // F47 RV-009 — re-vote watcher (Phase 2.1): RevoteWatcher + makeMarkSubmitter +
+  // startRevoteWatcher are shipped in revote-watcher.ts but DELIBERATELY NOT started
+  // here yet. Live wiring is deferred to Phase 4.1 (RV-013): it needs a real
+  // SuiChainStateReader backed by on-chain view getters for per-miner last_heartbeat +
+  // RoleVoteBox fields (max_idle_epochs / revote_cooldown_epochs / revote_eligible_since),
+  // and the deployed package must be republished with the Phase-1 mark entries first.
+  // Cadence resolves from REVOTE_SCAN_INTERVAL_EPOCHS via resolveScanIntervalEpochs().
+  // const stopRevoteWatcher = startRevoteWatcher(reader, makeMarkSubmitter(client, signer, config, logger), logger, intervalMs);
+
   // Bootstrap TURN issuer (S30.B Option A — ADR-0005 hybrid 24h+on-slash rotation)
   const turnRotationIntervalMs = parseInt(
     process.env['TURN_ROTATION_INTERVAL_MS'] ?? '86400000',
