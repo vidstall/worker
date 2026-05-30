@@ -107,6 +107,22 @@ export interface RoleApplied {
   owner: string;
 }
 
+// F47 re-vote events (role_voting module). Field names match the Move structs
+// EXACTLY — a daemon decodes these by Sui-JSON key, so a rename breaks the wire
+// contract (locked by the OQ-PH16 field-name test + the Move #[test_only] pins).
+export interface RevoteEligibleMarked {
+  miner_id: string;
+  reason: number;        // u8 — 1=IDLE, 2=COMPOSITION_SHIFT, 3=MINER_REQUEST
+  current_role: number;  // u8
+  marked_at: string;     // u64 epoch
+}
+
+export interface RoleTransitioned {
+  miner_id: string;
+  old_role: number; // u8
+  new_role: number; // u8
+}
+
 // ── Room events (room_manager module) ───────────────────────────────
 
 export interface RoomCreated {

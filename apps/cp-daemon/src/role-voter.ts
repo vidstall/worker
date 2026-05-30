@@ -20,7 +20,7 @@ const ROLE_CP = MinerRole.CP;             // 3
 const ROLE_SIGNALING = MinerRole.Signaling; // 4
 
 /** Registry active counts snapshot. */
-interface RegistryCounts {
+export interface RegistryCounts {
   relay: bigint;
   validator: bigint;
   cp: bigint;
@@ -32,6 +32,9 @@ const votedMiners = new Set<string>();
 
 /** Set of unassigned miner IDs discovered from MinerRegistered events (role=0). */
 const unassignedMiners = new Set<string>();
+
+/** F47 RV-010 — miners marked re-vote-eligible (from RevoteEligibleMarked events). */
+const revoteCandidates = new Set<string>();
 
 /** Decode a BCS u64 (LE bytes) into a bigint. */
 function decodeU64(bytes: number[]): bigint {
@@ -170,6 +173,15 @@ function computeScarcestRole(counts: RegistryCounts): number {
 }
 
 /**
+ * F47 RV-010 — compute the best role for a re-vote candidate. Reuses the initial-vote
+ * scarcity selection (scarcest role wins, same tie-break) so re-votes rebalance the
+ * network toward the role most in need.
+ */
+export function computeBestRoleForRevote(counts: RegistryCounts): number {
+  return computeScarcestRole(counts);
+}
+
+/**
  * Cast a vote TX for a miner to be assigned to the scarcest role.
  */
 async function castVote(
@@ -185,6 +197,13 @@ async function castVote(
     client,
     signer,
     (tx: Transaction) => {
+      // ⚠️ F47 Phase 1.3 BREAKING CHANGE (on-chain, 2026-05): role_voting::cast_role_vote
+      // gained a 9th param `stake: &StakePosition` (inserted AFTER cap, BEFORE miner_id).
+      // This call is INTENTIONALLY still the old 10-arg form — it matches the currently
+      // DEPLOYED package. BEFORE the new contract is republished, this MUST resolve the
+      // miner's StakePosition object id and insert tx.object(stakeId) at index 8.
+      // Wiring deferred to Phase 2.1 (RV-009 revote-watcher). See
+      // plans/role-revote-pool/milestone-1/STATUS.md + ROADMAP Phase 1.3 / 2.1.
       tx.moveCall({
         target: `${config.packageId}::role_voting::cast_role_vote`,
         arguments: [
@@ -223,6 +242,28 @@ export function clearVotedMiner(minerId: string): void {
 }
 
 /**
+ * F47 RV-010 — add a miner to the re-vote candidate set
+ * (called from the event handler on `RevoteEligibleMarked`).
+ */
+export function trackRevoteCandidate(minerId: string): void {
+  revoteCandidates.add(minerId);
+}
+
+/**
+ * F47 RV-010 — remove a miner from the re-vote candidate AND voted sets
+ * (called on `RoleTransitioned`, so a future re-mark can vote again).
+ */
+export function clearRevoteCandidate(minerId: string): void {
+  revoteCandidates.delete(minerId);
+  votedMiners.delete(minerId);
+}
+
+/** F47 RV-010 — snapshot of current re-vote candidates (tests / observability). */
+export function getRevoteCandidates(): string[] {
+  return Array.from(revoteCandidates);
+}
+
+/**
  * Start the role voting loop.
  *
  * Periodically checks for unassigned miners (tracked from events),
@@ -250,10 +291,11 @@ export function startRoleVoting(
 
   const poll = async (): Promise<void> => {
     try {
-      // 1. Check for unassigned miners
+      // 1. Check for unassigned miners + re-vote candidates (RV-010)
       const pendingMiners = Array.from(unassignedMiners).filter(id => !votedMiners.has(id));
-      if (pendingMiners.length === 0) {
-        logger.debug('No unvoted unassigned miners found');
+      const pendingRevotes = Array.from(revoteCandidates).filter(id => !votedMiners.has(id));
+      if (pendingMiners.length === 0 && pendingRevotes.length === 0) {
+        logger.debug('No unvoted unassigned miners or re-vote candidates found');
         return;
       }
 
@@ -266,6 +308,7 @@ export function startRoleVoting(
           cp: counts.cp.toString(),
           signaling: counts.signaling.toString(),
           pendingCount: pendingMiners.length,
+          revoteCount: pendingRevotes.length,
         },
         'Role voting: registry counts loaded',
       );
@@ -309,6 +352,28 @@ export function startRoleVoting(
           );
         } catch (err) {
           logger.warn({ err, minerId }, 'Failed to cast role vote');
+        }
+      }
+
+      // 5. F47 RV-010 — re-vote pass: cast the scarcest role for marked candidates
+      // (cleared from revoteCandidates on RoleTransitioned). Reuses castVote, which is
+      // still the deployed 10-arg cast_role_vote — the +stake lockstep (OQ-PH13) lands
+      // with the contract republish in Phase 4.1 (see the castVote marker above).
+      for (const minerId of pendingRevotes) {
+        const role = computeBestRoleForRevote(counts);
+        logger.info(
+          { minerId, assignedRole: roleNames[role] ?? String(role), revote: true },
+          `Re-voting role for marked miner: ${roleNames[role] ?? role}`,
+        );
+        try {
+          await castVote(client, signer, config, cpCapId, minerId, role, logger);
+          votedMiners.add(minerId);
+          logger.info(
+            { minerId, role: roleNames[role] ?? String(role), revote: true },
+            'Re-vote cast successfully',
+          );
+        } catch (err) {
+          logger.warn({ err, minerId, revote: true }, 'Failed to cast re-vote');
         }
       }
     } catch (err) {

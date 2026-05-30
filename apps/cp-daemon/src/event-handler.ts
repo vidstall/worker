@@ -27,6 +27,8 @@ import type {
   SignalingLoadUpdated,
   ValidatorRegistered,
   RoleAssigned as RoleAssignedEvent,
+  RevoteEligibleMarked,
+  RoleTransitioned,
 } from '@dvconf/shared';
 import { MinerRole } from '@dvconf/shared';
 import {
@@ -45,7 +47,7 @@ import {
   votedRooms,
   type SignalingCandidate,
 } from './room-assignment.js';
-import { clearVotedMiner, trackUnassignedMiner } from './role-voter.js';
+import { clearVotedMiner, trackUnassignedMiner, trackRevoteCandidate, clearRevoteCandidate } from './role-voter.js';
 import type { TurnIssuer } from './turn-issuer.js';
 
 /** Default scoring weights — re-exported from scoring.ts for convenience. */
@@ -388,6 +390,29 @@ export function handleEvent(
           'Unassigned miner registered — added to role voting queue',
         );
       }
+      break;
+    }
+
+    case 'RevoteEligibleMarked': {
+      // F47 RV-010: a miner became re-vote-eligible → queue it for a re-vote.
+      // Field names read here MUST match the Move struct exactly (OQ-PH16 lock).
+      const e = data as unknown as RevoteEligibleMarked;
+      trackRevoteCandidate(e.miner_id);
+      logger.info(
+        { minerId: e.miner_id, reason: e.reason, currentRole: e.current_role, markedAt: e.marked_at },
+        'Re-vote eligible marked — added to re-vote queue',
+      );
+      break;
+    }
+
+    case 'RoleTransitioned': {
+      // F47 RV-010: a re-vote completed (role changed) → clear the candidate.
+      const e = data as unknown as RoleTransitioned;
+      clearRevoteCandidate(e.miner_id);
+      logger.info(
+        { minerId: e.miner_id, oldRole: e.old_role, newRole: e.new_role },
+        'Role transitioned — cleared from re-vote queue',
+      );
       break;
     }
 

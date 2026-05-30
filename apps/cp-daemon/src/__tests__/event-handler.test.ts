@@ -5,6 +5,7 @@ import { handleEvent, createEventHandler, DEFAULT_WEIGHTS } from '../event-handl
 import type { NodeCandidate } from '../scoring.js';
 import type { SignalingCandidate } from '../room-assignment.js';
 import { PVR_DEFAULT_HISTORY } from '../scoring.js';
+import { getRevoteCandidates, clearRevoteCandidate } from '../role-voter.js';
 
 /** Create a mock Pino logger. */
 function mockLogger() {
@@ -518,5 +519,55 @@ describe('createEventHandler', () => {
 
     expect(signalingState.has('sig-1')).toBe(true);
     expect(signalingState.get('sig-1')!.load).toBe(0n);
+  });
+});
+
+// F47 RV-010 — re-vote event routing + OQ-PH16 field-name decode lock.
+// These fire raw events using the EXACT Move struct field names; if the handler
+// were to read a renamed key (e.g. minerId instead of miner_id) the candidate set
+// + log context would be wrong, so these tests lock the JSON decode contract.
+describe('handleEvent — F47 re-vote routing (RV-010 + OQ-PH16 field-name lock)', () => {
+  it('RevoteEligibleMarked queues the miner + decodes miner_id/reason/current_role/marked_at', () => {
+    const logger = mockLogger();
+    const ev = makeSuiEvent('RevoteEligibleMarked', {
+      miner_id: '0xrv-1',
+      reason: 1,
+      current_role: 2,
+      marked_at: '100',
+    });
+
+    handleEvent(ev, new Map<string, NodeCandidate>(), emptySignalingState(), emptyPendingRooms(), logger);
+
+    expect(getRevoteCandidates()).toContain('0xrv-1');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ minerId: '0xrv-1', reason: 1, currentRole: 2, markedAt: '100' }),
+      expect.any(String),
+    );
+    clearRevoteCandidate('0xrv-1'); // reset module singleton
+  });
+
+  it('RoleTransitioned clears the candidate + decodes old_role/new_role', () => {
+    const logger = mockLogger();
+    handleEvent(
+      makeSuiEvent('RevoteEligibleMarked', { miner_id: '0xrv-2', reason: 2, current_role: 1, marked_at: '5' }),
+      new Map<string, NodeCandidate>(),
+      emptySignalingState(),
+      emptyPendingRooms(),
+      logger,
+    );
+    expect(getRevoteCandidates()).toContain('0xrv-2');
+
+    handleEvent(
+      makeSuiEvent('RoleTransitioned', { miner_id: '0xrv-2', old_role: 1, new_role: 2 }),
+      new Map<string, NodeCandidate>(),
+      emptySignalingState(),
+      emptyPendingRooms(),
+      logger,
+    );
+    expect(getRevoteCandidates()).not.toContain('0xrv-2');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ minerId: '0xrv-2', oldRole: 1, newRole: 2 }),
+      expect.any(String),
+    );
   });
 });

@@ -12,6 +12,8 @@ export type {
   RoleVoteCast,
   RoleAssigned,
   RoleApplied,
+  RevoteEligibleMarked,
+  RoleTransitioned,
   CPRegistered,
   CPHeartbeat,
   CPAssignedToRoom,
