@@ -45,7 +45,7 @@ interface SuiObjectChange {
   objectType?: string;
 }
 
-interface TxStatusLike {
+export interface TxStatusLike {
   effects?: { status?: { status?: string; error?: string } };
   objectChanges?: SuiObjectChange[];
   events?: Array<{ type?: string; parsedJson?: unknown }>;
@@ -253,6 +253,96 @@ export interface RelayResult {
   minerId: string;
   minerCapId: string;
   stakeId: string;
+  /** The miner's funded keypair — needed to sign a follow-up re-vote apply (Phase 4.3). */
+  kp: Ed25519Keypair;
+}
+
+/**
+ * CP-signed `role_voting::cast_role_vote` for `minerId` into `role`. Returns the TX
+ * result so callers can read the RoleVoteCast / RoleAssigned events. With one
+ * bootstrapped CP this meets the floored quorum (= 1) and writes
+ * assigned_roles[minerId] = role. INITIAL vote: current_role is User so the
+ * re-vote-eligibility guard is skipped. RE-vote: the miner MUST already be in the
+ * revote_eligible pool (i.e. a watcher mark landed) or the cast aborts.
+ *
+ * Arg order (role_voting.move:197): net_reg, vote_box, miner_store, cp_reg,
+ * relay_reg, validator_reg, signaling_reg, cap, miner_id, role. NOTE: cp_reg comes
+ * BEFORE relay/validator/signaling — DIFFERS from the mark_* entries.
+ */
+export async function castRoleVoteFromCp(
+  client: SuiClient,
+  cp: BootstrapCpResult,
+  minerId: string,
+  role: number,
+  config: NetworkConfig,
+  logger: Logger,
+): Promise<TxStatusLike> {
+  return signAndAssert(
+    client,
+    cp.kp,
+    (tx) => {
+      tx.moveCall({
+        target: `${config.packageId}::role_voting::cast_role_vote`,
+        arguments: [
+          tx.object(config.networkRegistryId), // net_reg: &NetworkRegistry
+          tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox
+          tx.object(config.minerStoreId), // miner_store: &MinerStore
+          tx.object(config.cpRegistryId), // cp_reg: &ControlPlaneRegistry
+          tx.object(config.relayRegistryId), // relay_reg: &RelayRegistry
+          tx.object(config.validatorRegistryId), // validator_reg: &ValidatorRegistry
+          tx.object(config.signalingRegistryId), // signaling_reg: &SignalingRegistry
+          tx.object(cp.cpCapId), // cap: &ControlPlaneCap
+          tx.pure.id(minerId), // miner_id: ID
+          tx.pure.u8(role), // role: u8
+        ],
+      });
+    },
+    'cast_role_vote',
+    logger,
+  );
+}
+
+/**
+ * Miner-signed `registration::apply_voted_role` — consumes the pending assignment,
+ * flips MinerCap + profile + stake to the voted role, and on a genuine change
+ * (old_role != new_role) cleans up the miner's stale OLD-role registry entry and
+ * emits RoleTransitioned. The apply-side stake guard requires
+ * `amount(stake) >= minimum_for_role(new_role)`. Returns the TX result so callers
+ * can read RoleTransitioned / RoleApplied.
+ *
+ * Arg order (registration.move:141): registry, store, vote_box, signaling_reg,
+ * relay_reg, validator_reg, cp_reg, cap, stake.
+ */
+export async function applyVotedRoleAs(
+  client: SuiClient,
+  minerKp: Ed25519Keypair,
+  minerCapId: string,
+  stakeId: string,
+  config: NetworkConfig,
+  logger: Logger,
+): Promise<TxStatusLike> {
+  return signAndAssert(
+    client,
+    minerKp,
+    (tx) => {
+      tx.moveCall({
+        target: `${config.packageId}::registration::apply_voted_role`,
+        arguments: [
+          tx.object(config.networkRegistryId), // registry: &NetworkRegistry
+          tx.object(config.minerStoreId), // store: &mut MinerStore
+          tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox
+          tx.object(config.signalingRegistryId), // signaling_reg: &mut SignalingRegistry
+          tx.object(config.relayRegistryId), // relay_reg: &mut RelayRegistry
+          tx.object(config.validatorRegistryId), // validator_reg: &mut ValidatorRegistry
+          tx.object(config.cpRegistryId), // cp_reg: &mut ControlPlaneRegistry
+          tx.object(minerCapId), // cap: &mut MinerCap
+          tx.object(stakeId), // stake: &mut StakePosition
+        ],
+      });
+    },
+    'apply_voted_role',
+    logger,
+  );
 }
 
 /**
@@ -281,60 +371,12 @@ export async function voteAndApplyRelay(
   const minerCapId = reg.minerCapId;
   const minerId = reg.minerId;
 
-  // 2. CP casts the relay vote.
-  // cast_role_vote arg order (role_voting.move:197): net_reg, vote_box,
-  // miner_store, cp_reg, relay_reg, validator_reg, signaling_reg, cap, miner_id, role.
-  // NOTE: cp_reg comes BEFORE relay/validator/signaling here — this DIFFERS from
-  // the mark_* entries (which order relay/validator/cp/signaling).
-  await signAndAssert(
-    client,
-    cp.kp,
-    (tx) => {
-      tx.moveCall({
-        target: `${config.packageId}::role_voting::cast_role_vote`,
-        arguments: [
-          tx.object(config.networkRegistryId), // net_reg: &NetworkRegistry
-          tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox
-          tx.object(config.minerStoreId), // miner_store: &MinerStore
-          tx.object(config.cpRegistryId), // cp_reg: &ControlPlaneRegistry
-          tx.object(config.relayRegistryId), // relay_reg: &RelayRegistry
-          tx.object(config.validatorRegistryId), // validator_reg: &ValidatorRegistry
-          tx.object(config.signalingRegistryId), // signaling_reg: &SignalingRegistry
-          tx.object(cp.cpCapId), // cap: &ControlPlaneCap
-          tx.pure.id(minerId), // miner_id: ID
-          tx.pure.u8(MinerRole.Relay), // role: u8 (Relay = 2)
-        ],
-      });
-    },
-    'cast_role_vote',
-    logger,
-  );
+  // 2. CP casts the relay vote (current_role User → eligibility guard skipped; 1 CP
+  //    meets the floored threshold = 1 → writes assigned_roles[miner_id] = Relay).
+  await castRoleVoteFromCp(client, cp, minerId, MinerRole.Relay, config, logger);
 
-  // 3. miner applies the voted role.
-  // apply_voted_role arg order (registration.move:141): registry, store,
-  // vote_box, signaling_reg, relay_reg, validator_reg, cp_reg, cap, stake.
-  await signAndAssert(
-    client,
-    minerKp,
-    (tx) => {
-      tx.moveCall({
-        target: `${config.packageId}::registration::apply_voted_role`,
-        arguments: [
-          tx.object(config.networkRegistryId), // registry: &NetworkRegistry
-          tx.object(config.minerStoreId), // store: &mut MinerStore
-          tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox
-          tx.object(config.signalingRegistryId), // signaling_reg: &mut SignalingRegistry
-          tx.object(config.relayRegistryId), // relay_reg: &mut RelayRegistry
-          tx.object(config.validatorRegistryId), // validator_reg: &mut ValidatorRegistry
-          tx.object(config.cpRegistryId), // cp_reg: &mut ControlPlaneRegistry
-          tx.object(minerCapId), // cap: &mut MinerCap
-          tx.object(reg.stakeId), // stake: &mut StakePosition
-        ],
-      });
-    },
-    'apply_voted_role',
-    logger,
-  );
+  // 3. miner applies the voted role (stake 0.3 ≥ relay min 0.25; binding miner_id).
+  await applyVotedRoleAs(client, minerKp, minerCapId, reg.stakeId, config, logger);
 
   // 4. miner enters the RelayRegistry.
   // register_relay arg order (relay_registry.move:105): net_reg, registry, cap,
@@ -363,7 +405,7 @@ export async function voteAndApplyRelay(
     { module: MODULE, action: 'vote_and_apply_relay', context: { minerId } },
     'miner is now a registered relay',
   );
-  return { minerId, minerCapId, stakeId: reg.stakeId };
+  return { minerId, minerCapId, stakeId: reg.stakeId, kp: minerKp };
 }
 
 /**
