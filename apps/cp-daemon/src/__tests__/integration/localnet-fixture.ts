@@ -13,7 +13,7 @@
  * `pnpm test:integration` (vitest.integration.config.ts), never `pnpm test`.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { existsSync, mkdirSync, readdirSync, rmSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -24,8 +24,8 @@ import { Transaction } from '@mysten/sui/transactions';
 import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
 import type { NetworkConfig } from '@dvconf/shared';
 
-const SUI_RPC_URL = 'http://127.0.0.1:9000';
-const FAUCET_URL = getFaucetHost('localnet');
+export const SUI_RPC_URL = 'http://127.0.0.1:9000';
+export const FAUCET_URL = getFaucetHost('localnet');
 
 // Resolve the contracts dir RELATIVE to the workspace root (no hardcoded
 // absolute path). This file sits at
@@ -124,9 +124,25 @@ function waitForPort(host: string, port: number, timeoutMs: number, pollInterval
   })();
 }
 
-/** Spawn `sui start --with-faucet --force-regenesis` as a long-lived child. */
-function spawnSuiNode(): { proc: ChildProcess; stop: () => Promise<void> } {
-  const proc = spawn('sui', ['start', '--with-faucet', '--force-regenesis'], {
+/**
+ * Spawn `sui start --with-faucet --force-regenesis` as a long-lived child.
+ *
+ * `epochDurationMs` (Phase 4.1, additive): when set, appends
+ * `--epoch-duration-ms <value>` so integration tests can advance epochs quickly.
+ * Unset → the `sui start` default (60s) is used, so the Phase 4.0 caller
+ * (`bootLocalnet()` with no args) is byte-for-byte unchanged.
+ *
+ * Teardown is platform-split (Phase 4.1 follow-up (a)): `child.kill()` does NOT
+ * reap the `sui` process TREE on Windows (a child `sui` proc leaked in 4.0), so
+ * on win32 we use `taskkill /PID <pid> /T /F` to kill the whole tree. Non-win32
+ * keeps the existing SIGTERM→SIGKILL escalation, unchanged.
+ */
+function spawnSuiNode(epochDurationMs?: number): { proc: ChildProcess; stop: () => Promise<void> } {
+  const args = ['start', '--with-faucet', '--force-regenesis'];
+  if (epochDurationMs !== undefined) {
+    args.push('--epoch-duration-ms', String(epochDurationMs));
+  }
+  const proc = spawn('sui', args, {
     env: { ...process.env, RUST_LOG: 'off,sui_node=info' },
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -144,6 +160,14 @@ function spawnSuiNode(): { proc: ChildProcess; stop: () => Promise<void> } {
         clearTimeout(killTimer);
         resolveStop();
       });
+      if (process.platform === 'win32' && proc.pid !== undefined) {
+        // child.kill() leaves orphaned `sui` children on Windows — reap the tree.
+        try {
+          spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F']);
+        } catch {
+          // best-effort; fall through to the SIGTERM path + kill timer below
+        }
+      }
       proc.kill('SIGTERM');
     });
   return { proc, stop };
@@ -168,6 +192,15 @@ async function waitForSuiRpc(timeoutMs = 180_000): Promise<void> {
     await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error('waitForSuiRpc: JSON-RPC not responding after 60s');
+}
+
+/**
+ * Faucet-fund an arbitrary address (Phase 4.1 helper). Mirrors the deployer
+ * signer-funding call in {@link bootLocalnet}; used by the relay-lifecycle
+ * helpers to fund freshly-generated miner/CP keypairs.
+ */
+export async function fundAddress(address: string): Promise<void> {
+  await requestSuiFromFaucetV2({ host: FAUCET_URL, recipient: address });
 }
 
 /** new-env + switch (G-018) + faucet-fund the active deployer address. */
@@ -320,9 +353,11 @@ async function loadActiveSigner(): Promise<Ed25519Keypair> {
  * faucet-funded keypair (the getters used by the 4.0 smoke are read-only, so
  * any funded address suffices).
  */
-export async function bootLocalnet(): Promise<LocalnetHandle> {
+export async function bootLocalnet(
+  opts: { epochDurationMs?: number } = {},
+): Promise<LocalnetHandle> {
   const alias = `phase40-${Date.now()}`;
-  const node = spawnSuiNode();
+  const node = spawnSuiNode(opts.epochDurationMs);
   try {
     await waitForSuiRpc();
     await setupSuiClient(alias);
