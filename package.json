@@ -7,6 +7,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:demo:revote": "vitest run --config vitest.demo.config.ts",
     "build": "pnpm -r run build",
     "dev:signaling": "pnpm --filter @dvconf/signaling dev",
     "dev:cp": "pnpm --filter @dvconf/cp-daemon dev",
