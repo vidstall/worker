@@ -37,6 +37,7 @@ export type {
   SessionProofSubmitted,
   RewardsDistributed,
   RelaySlashed,
+  SecretRotated,
   DvconfEvent,
 } from './types/events.js';
 

@@ -25,7 +25,6 @@ import {
   type RoleChangedEvent,
   type RoleAssignedEvent,
   type RelaySlashedEvent,
-  type SecretRotatedEvent,
 } from '../cap-token-issuer.js';
 
 /** Match the existing cp-daemon test convention (turn-issuer/event-handler/role-voter style). */
@@ -165,11 +164,6 @@ const RELAY_SLASHED: RelaySlashedEvent = {
   roomId: '0xroom1',
   relayMinerId: '0xrelay-bad',
   slashAmount: '500000000',
-};
-
-const SECRET_ROTATED: SecretRotatedEvent = {
-  rotationId: '0xrot-1',
-  newKeyEpoch: '42',
 };
 
 // ── REQ-ADM-001 — Issuance on RoomAssigned ───────────────────────────────
@@ -352,9 +346,9 @@ describe('CapTokenIssuer structured logging (REQ-ADM-006)', () => {
   });
 });
 
-// ── Additional listener coverage — onRoleChanged / onRoleAssigned / onRelaySlashed / onSecretRotated ─
+// ── Additional listener coverage — onRoleChanged / onRoleAssigned / onRelaySlashed ─
 
-describe('CapTokenIssuer.onRoleChanged + onRoleAssigned + onRelaySlashed + onSecretRotated', () => {
+describe('CapTokenIssuer.onRoleChanged + onRoleAssigned + onRelaySlashed', () => {
   it('onRoleChanged dedupes by (miner_id, new_role, "role-change") key', async () => {
     const { submitFn, calls } = mkSubmit();
     const logger = mockLogger();
@@ -410,25 +404,6 @@ describe('CapTokenIssuer.onRoleChanged + onRoleAssigned + onRelaySlashed + onSec
         '0xroom1::0xrelay-bad::slash',
     );
     expect(dedupeWarn).toBeDefined();
-  });
-
-  it('onSecretRotated is a stub: logs WARN + emits no TX (F8 not yet shipped)', async () => {
-    const { submitFn, calls } = mkSubmit();
-    const logger = mockLogger();
-    const issuer = mkIssuer({ submitFn, logger });
-
-    await issuer.onSecretRotated(SECRET_ROTATED, 'trace-sr-1');
-
-    expect(calls).toHaveLength(0);
-    expect(logger.warn).toHaveBeenCalled();
-    const stubWarn = (logger.warn.mock.calls as any[]).find(
-      (c) => c[1] === 'SecretRotated stub — F8 not yet shipped',
-    );
-    expect(stubWarn).toBeDefined();
-    expect(stubWarn[0]).toMatchObject({
-      trace_id: 'trace-sr-1',
-      module: 'cap-token-issuer',
-    });
   });
 });
 

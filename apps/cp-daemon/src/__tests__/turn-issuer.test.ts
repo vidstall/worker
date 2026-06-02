@@ -348,6 +348,52 @@ describe('TurnIssuer', () => {
       expect(iss.isSlashed('0xrelay1')).toBe(true);
     });
   });
+
+  describe('emergencyEvictSecret (F8 REQ-CRR-005 — emergency kill-switch)', () => {
+    it('evicts an existing leaked secret immediately, overriding the overlap window (returns true)', async () => {
+      const logger = mockLogger();
+      const iss = new TurnIssuer({
+        submitFn,
+        packageId: '0xpkg',
+        networkRegistryId: '0xnet',
+        cpCapId: '0xcap',
+        logger,
+      });
+      await iss.rotateSecret(); // secretId=1
+      await iss.rotateSecret(); // secretId=2 — id 1 normally stays in the 2-secret overlap window
+      expect(iss.getSecret(1)).toBeDefined();
+
+      const evicted = iss.emergencyEvictSecret(1, 0);
+
+      expect(evicted).toBe(true);
+      expect(iss.getSecret(1)).toBeUndefined(); // overlap grace overridden — leaked secret dropped now
+      expect(iss.getSecret(2)).toBeDefined(); // current secret untouched
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'turn-issuer',
+          context: expect.objectContaining({ secret_id: 1, reason: 0, evicted: true }),
+        }),
+        expect.stringContaining('emergency-evicted leaked secret'),
+      );
+    });
+
+    it('no-op on unknown / already-evicted secret_id (returns false; idempotent on replay)', async () => {
+      const logger = mockLogger();
+      const iss = new TurnIssuer({
+        submitFn,
+        packageId: '0xpkg',
+        networkRegistryId: '0xnet',
+        cpCapId: '0xcap',
+        logger,
+      });
+      await iss.rotateSecret(); // secretId=1
+
+      expect(iss.emergencyEvictSecret(99, 1)).toBe(false); // never existed
+
+      expect(iss.emergencyEvictSecret(1, 1)).toBe(true); // first eviction
+      expect(iss.emergencyEvictSecret(1, 1)).toBe(false); // replay → no-op
+    });
+  });
 });
 
 describe('startTurnIssuer (loop)', () => {

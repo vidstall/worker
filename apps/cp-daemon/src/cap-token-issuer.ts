@@ -6,7 +6,12 @@
  *   - miner::registration::RoleChanged → trigger refresh (Phase 3.4 grace timer; here stub-stage)
  *   - role_voting::RoleAssigned    → trigger refresh on vote consensus
  *   - economic_layer::RelaySlashed → bulk-revoke tokens for the slashed relay
- *   - F8 stub SecretRotated         → log WARN (no TX until F8 ships)
+ *
+ * NOTE (F8 / REQ-CRR-005): the `turn_credential::SecretRotated` emergency event
+ * is NOT handled here. It rotates the TURN shared SECRET (orthogonal to the
+ * RoomCapability admission token — ADR-0010 D-009), so its daemon reaction lives
+ * in the TURN issuer kill-switch (`event-handler.ts` → `turn-issuer.ts`
+ * `emergencyEvictSecret`), not in this cap-token module.
  *
  * Spec sources:
  *   - CONTRACTS.md § 4.4 (interface)
@@ -121,11 +126,6 @@ export interface RelaySlashedEvent {
   roomId: string;
   relayMinerId: string;
   slashAmount: string;
-}
-
-export interface SecretRotatedEvent {
-  rotationId: string;
-  newKeyEpoch: string;
 }
 
 /**
@@ -570,18 +570,6 @@ export class CapTokenIssuer {
         'onRelaySlashed failed — quorum collection or TX submit error',
       );
     }
-  }
-
-  /**
-   * F8 stub — no real Move event yet. Phase 3.4 dev fills in real refresh-all loop
-   * once F8 secret rotation event is brainstormed. Phase 3.1 logs a WARN so operators
-   * see the no-op explicitly during integration testing.
-   */
-  async onSecretRotated(event: SecretRotatedEvent, traceId: string): Promise<void> {
-    this.logger.warn(
-      { trace_id: traceId, module: 'cap-token-issuer', context: { event } },
-      'SecretRotated stub — F8 not yet shipped',
-    );
   }
 
   // ── Internal helpers ───────────────────────────────────────────────────

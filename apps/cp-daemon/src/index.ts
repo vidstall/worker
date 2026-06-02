@@ -44,7 +44,6 @@ export type {
   RoleChangedEvent,
   RoleAssignedEvent,
   RelaySlashedEvent,
-  SecretRotatedEvent,
 } from './cap-token-issuer.js';
 
 const logger = createLogger('cp-daemon');
@@ -414,6 +413,20 @@ async function main(): Promise<void> {
     logger: logger.child({ poller: 'registration' }),
   });
 
+  // F8 (REQ-CRR-005) — poll turn_credential events so the cp-daemon observes
+  // emergency relay-secret rotations (SecretRotated) and arms the TURN issuer
+  // kill-switch via handleEvent → turnIssuer.emergencyEvictSecret. Live-only
+  // (no historical replay): SecretRotated is an emergency kill-switch; replaying
+  // past rotations on restart would only re-evict already-evicted secrets (no-op).
+  const turnCredentialPoller = new EventPoller({
+    client,
+    packageId: config.packageId,
+    module: 'turn_credential',
+    pollingIntervalMs: pollIntervalMs,
+    cursorPath: '.cursors/turn_credential.json',
+    logger: logger.child({ poller: 'turn_credential' }),
+  });
+
   // Start all pollers
   await Promise.all([
     relayPoller.start(handler),
@@ -424,6 +437,7 @@ async function main(): Promise<void> {
     validatorPoller.start(handler),
     roleVotingPoller.start(handler),
     registrationPoller.start(handler),
+    turnCredentialPoller.start(handler),
   ]);
 
   logger.info(
@@ -450,6 +464,7 @@ async function main(): Promise<void> {
     validatorPoller.stop();
     roleVotingPoller.stop();
     registrationPoller.stop();
+    turnCredentialPoller.stop();
     logger.info('CP daemon shut down cleanly');
     process.exit(0);
   };

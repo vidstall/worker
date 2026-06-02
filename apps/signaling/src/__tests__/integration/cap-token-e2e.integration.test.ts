@@ -749,18 +749,21 @@ describe('Integration — Bonus: composition smoke test', () => {
       logger: asLogger(sharedLogger),
     });
 
-    // Drive a no-op handler to confirm logging path.
-    await issuer.onSecretRotated(
-      { rotationId: '0xrot1', newKeyEpoch: '42' },
+    // Drive a benign handler to confirm the issuer's logging path composes with
+    // the shared logger. (F8 SecretRotated is no longer handled by the issuer —
+    // it moved to the TURN-issuer kill-switch, REQ-CRR-005 / D-009.) onRoleChanged
+    // with a fixture lacking an affected token logs only — no TX.
+    await issuer.onRoleChanged(
+      { minerId: '0xminer-smoke', oldRole: 2, newRole: 4, newStake: '1000000000' },
       'trace-smoke',
     );
 
-    // SecretRotated is a stub — WARN log emitted, no TX.
+    // No TX submitted (no affected token to refresh); structured log emitted.
     expect(calls).toHaveLength(0);
-    const stubWarn = (sharedLogger.warn.mock.calls as any[]).find(
+    const issuerLog = (sharedLogger.info.mock.calls as any[]).find(
       (c) => c[0]?.trace_id === 'trace-smoke' && c[0]?.module === 'cap-token-issuer',
     );
-    expect(stubWarn).toBeDefined();
+    expect(issuerLog).toBeDefined();
 
     // Auth + Cache wire through without throwing.
     expect(hook.registerActiveConnection(new Array(32).fill(0x42), makeWsStub()).accepted).toBe(true);

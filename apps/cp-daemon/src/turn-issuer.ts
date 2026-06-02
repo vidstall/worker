@@ -139,6 +139,41 @@ export class TurnIssuer {
     );
   }
 
+  /**
+   * F8 (REQ-CRR-005) — emergency kill-switch for a LEAKED TURN shared secret.
+   *
+   * Drops `secretId` from the in-memory secret map IMMEDIATELY, deliberately
+   * overriding the normal 2-secret overlap-grace window (ADR-0005 § Per-relay
+   * shared secret lifecycle): an emergency rotation means the old secret is
+   * compromised, so the daemon must stop serving/reusing it now rather than
+   * honour it through its full TTL. Mirrors the `markSlashed` kill-switch
+   * precedent (chain `RelaySlashed` → `markSlashed`); here it is the chain
+   * `turn_credential::SecretRotated` event → `emergencyEvictSecret`.
+   *
+   * Idempotent: a replay of the same on-chain `SecretRotated` event is a no-op.
+   * Returns true iff a secret was actually present and evicted; false when there
+   * was nothing to evict (already-evicted / unknown secret_id) — the caller uses
+   * this for no-op dedupe logging.
+   *
+   * Scope boundary (honest, no silent cap): this is issuance-side enforcement in
+   * the cp-daemon only. The coturn-side secret eviction + multi-CP coordination
+   * remain the deferred operational piece (see this module's scope header — "NO
+   * coturn lifecycle integration").
+   */
+  emergencyEvictSecret(secretId: number, reason: number): boolean {
+    const evicted = this._secrets.delete(secretId);
+    this._logger.warn(
+      {
+        module: 'turn-issuer',
+        context: { secret_id: secretId, reason, evicted, action: 'emergency_evict_secret' },
+      },
+      evicted
+        ? 'TURN issuer: emergency-evicted leaked secret (F8 kill-switch)'
+        : 'TURN issuer: emergency-evict no-op — secret_id not present (already evicted / unknown)',
+    );
+    return evicted;
+  }
+
   async rotateSecret(): Promise<RotateResult> {
     const secretId = this._currentSecretId + 1;
     const secret = generateSharedSecret();

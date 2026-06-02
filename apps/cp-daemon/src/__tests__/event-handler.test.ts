@@ -571,3 +571,79 @@ describe('handleEvent — F47 re-vote routing (RV-010 + OQ-PH16 field-name lock)
     );
   });
 });
+
+describe('handleEvent — SecretRotated → TurnIssuer emergency kill-switch (F8 REQ-CRR-005)', () => {
+  function makeTurnCredentialEvent(eventName: string, parsedJson: Record<string, unknown>) {
+    return {
+      id: { txDigest: 'rotate-digest', eventSeq: '0' },
+      packageId: '0xabc',
+      transactionModule: 'turn_credential',
+      sender: '0x123',
+      type: `0xabc::turn_credential::${eventName}`,
+      parsedJson,
+      bcs: '',
+      timestampMs: '3000',
+    } as any;
+  }
+
+  it('forwards old_secret_id (u64 string → number) to turnIssuer.emergencyEvictSecret + WARN audit log', () => {
+    const logger = mockLogger();
+    const evictFn = vi.fn().mockReturnValue(true);
+    const turnIssuer = { emergencyEvictSecret: evictFn } as any;
+
+    const event = makeTurnCredentialEvent('SecretRotated', {
+      cp_miner_id: '0xcp1',
+      old_secret_id: '7',
+      new_secret_id: '8',
+      reason: 0,
+      rotated_at_epoch: '42',
+    });
+
+    handleEvent(
+      event,
+      new Map<string, NodeCandidate>(),
+      emptySignalingState(),
+      emptyPendingRooms(),
+      logger,
+      undefined,
+      {
+        client: undefined as any,
+        signer: undefined as any,
+        config: undefined as any,
+        cpCapId: '0xcap',
+        turnIssuer,
+      },
+    );
+
+    expect(evictFn).toHaveBeenCalledExactlyOnceWith(7, 0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ oldSecretId: '7', newSecretId: '8', reason: 0, evicted: true }),
+      'SecretRotated — TURN issuer emergency kill-switch (F8)',
+    );
+  });
+
+  it('no TurnIssuer in txContext → WARN not-armed, does not throw', () => {
+    const logger = mockLogger();
+    const event = makeTurnCredentialEvent('SecretRotated', {
+      cp_miner_id: '0xcp1',
+      old_secret_id: '7',
+      new_secret_id: '8',
+      reason: 1,
+      rotated_at_epoch: '42',
+    });
+
+    expect(() =>
+      handleEvent(
+        event,
+        new Map<string, NodeCandidate>(),
+        emptySignalingState(),
+        emptyPendingRooms(),
+        logger,
+      ),
+    ).not.toThrow();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ oldSecretId: '7' }),
+      expect.stringContaining('no TurnIssuer in txContext'),
+    );
+  });
+});

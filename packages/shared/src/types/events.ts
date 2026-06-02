@@ -225,6 +225,25 @@ export interface RelaySlashed {
   slash_amount: string;
 }
 
+// ── TURN credential events (turn_credential module) ──────────────────
+/**
+ * F8 (REQ-CRR-004/005) — emergency relay-secret rotation, emitted by
+ * dvconf::turn_credential::emergency_rotate_relay_secret. Field names + order
+ * mirror the Move struct EXACTLY (a daemon decodes these by Sui-JSON key, so a
+ * rename breaks the wire contract). NOTE the orthogonality (ADR-0010 D-009):
+ * this rotates the TURN shared SECRET (`secret_id`), distinct from a
+ * RoomCapability admission token — the daemon reaction lives in the TURN issuer
+ * kill-switch, not the cap-token cache.
+ *   reason: u8 — 0=leakage, 1=compromise, 2=admin.
+ */
+export interface SecretRotated {
+  cp_miner_id: string; // ID (hex)
+  old_secret_id: string; // u64
+  new_secret_id: string; // u64
+  reason: number; // u8
+  rotated_at_epoch: string; // u64
+}
+
 // ── Union type for all events ───────────────────────────────────────
 
 export type DvconfEvent =
@@ -256,4 +275,5 @@ export type DvconfEvent =
   | EscrowCreated
   | SessionProofSubmitted
   | RewardsDistributed
-  | RelaySlashed;
+  | RelaySlashed
+  | SecretRotated;

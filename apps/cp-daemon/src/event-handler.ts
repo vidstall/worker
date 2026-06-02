@@ -29,6 +29,7 @@ import type {
   RoleAssigned as RoleAssignedEvent,
   RevoteEligibleMarked,
   RoleTransitioned,
+  SecretRotated,
 } from '@dvconf/shared';
 import { MinerRole } from '@dvconf/shared';
 import {
@@ -163,6 +164,38 @@ export function handleEvent(
         logger.warn(
           { relayMinerId: e.relay_miner_id },
           'RelaySlashed observed but no TurnIssuer in txContext — kill-switch not armed',
+        );
+      }
+      break;
+    }
+
+    case 'SecretRotated': {
+      // F8 (REQ-CRR-005) — emergency relay-secret rotation kill-switch. Mirrors
+      // the RelaySlashed → markSlashed precedent above: forward the LEAKED
+      // `old_secret_id` to the TURN issuer so it stops serving/reusing the
+      // compromised secret immediately, deliberately overriding the 2-secret
+      // overlap grace. The on-chain SecretRotated event is the audit anchor;
+      // coturn-side eviction + multi-CP coordination stay deferred (turn-issuer
+      // scope boundary). Orthogonal to RoomCapability admission tokens (D-009):
+      // this is a TURN shared-secret rotation, not a cap-token revoke.
+      const e = data as unknown as SecretRotated;
+      if (txContext?.turnIssuer) {
+        const secretId = Number(e.old_secret_id);
+        const evicted = txContext.turnIssuer.emergencyEvictSecret(secretId, e.reason);
+        logger.warn(
+          {
+            cpMinerId: e.cp_miner_id,
+            oldSecretId: e.old_secret_id,
+            newSecretId: e.new_secret_id,
+            reason: e.reason,
+            evicted,
+          },
+          'SecretRotated — TURN issuer emergency kill-switch (F8)',
+        );
+      } else {
+        logger.warn(
+          { oldSecretId: e.old_secret_id },
+          'SecretRotated observed but no TurnIssuer in txContext — emergency evict not armed',
         );
       }
       break;
