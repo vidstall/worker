@@ -8,6 +8,7 @@
  */
 
 import 'dotenv/config';
+import { pathToFileURL } from 'node:url';
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import {
@@ -34,6 +35,7 @@ import {
   type SubmitResult,
   type CapTokenCacheLike,
 } from './cap-token-issuer.js';
+import { makeCapTokenSubmitter } from './cap-token-submitter.js';
 
 export { CapTokenIssuer } from './cap-token-issuer.js';
 export type {
@@ -137,7 +139,7 @@ export function buildLocalCpKeystore(opts: {
 export async function startCapTokenIssuer(
   opts: StartCapTokenIssuerOptions,
 ): Promise<StartCapTokenIssuerResult> {
-  const submitFn = opts.submitFn ?? makeDeferredSubmit(opts.logger);
+  const submitFn = opts.submitFn ?? selectProductionSubmitFn(opts);
   const cpKeystore =
     opts.cpKeystore ?? buildLocalCpKeystore({ signer: opts.signer, logger: opts.logger });
 
@@ -176,8 +178,22 @@ export async function startCapTokenIssuer(
 }
 
 /**
+ * Select the production submitFn (W-P1 / D-W6). Single-CP (threshold<=1) with a wired
+ * `client` -> the real `makeCapTokenSubmitter` PTB dispatcher (a live CP now publishes
+ * `capability_events` on-chain). Multi-CP (threshold>=2), or a missing client, falls
+ * back to the deferred throwing stub — peer-CP discovery stays DEFERRED (D-014).
+ */
+function selectProductionSubmitFn(opts: StartCapTokenIssuerOptions): SubmitFn {
+  const threshold = opts.quorumThreshold ?? 2;
+  if (threshold <= 1 && opts.client) {
+    return makeCapTokenSubmitter(opts.client, opts.signer, opts.logger);
+  }
+  return makeDeferredSubmit(opts.logger);
+}
+
+/**
  * Deferred-production submitFn — logs WARN and throws so the daemon does not
- * silently submit malformed TXs. `executeWithRetry`-backed dispatch lands when
+ * silently submit malformed TXs. Used for the multi-CP (threshold>=2) path until
  * peer-CP discovery is implemented (D-014 sub-decision).
  */
 function makeDeferredSubmit(submitLogger: Logger): SubmitFn {
@@ -473,7 +489,13 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
 }
 
-main().catch((err) => {
-  logger.fatal({ err }, 'CP daemon crashed');
-  process.exit(1);
-});
+// Only run the daemon when executed as the entrypoint (`node index.js` / `tsx
+// src/index.ts`). Stays inert on import so unit tests can exercise the exported
+// factories (startCapTokenIssuer, buildLocalCpKeystore) without auto-starting main().
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]!).href;
+if (isMain) {
+  main().catch((err) => {
+    logger.fatal({ err }, 'CP daemon crashed');
+    process.exit(1);
+  });
+}
