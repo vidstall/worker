@@ -10,6 +10,7 @@
  * MCU-aware scoring: 2x load weight for MCU rooms (MCU-05, MCU-06).
  */
 
+import { randomUUID } from 'node:crypto';
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SuiEvent } from '@mysten/sui/client';
@@ -27,6 +28,7 @@ import type {
   SignalingLoadUpdated,
   ValidatorRegistered,
   RoleAssigned as RoleAssignedEvent,
+  RoleChanged,
   RevoteEligibleMarked,
   RoleTransitioned,
   SecretRotated,
@@ -50,6 +52,13 @@ import {
 } from './room-assignment.js';
 import { clearVotedMiner, trackUnassignedMiner, trackRevoteCandidate, clearRevoteCandidate } from './role-voter.js';
 import type { TurnIssuer } from './turn-issuer.js';
+import type {
+  CapTokenIssuer,
+  RoomAssignedEvent as IssuerRoomAssigned,
+  RoleChangedEvent as IssuerRoleChanged,
+  RoleAssignedEvent as IssuerRoleAssigned,
+  RelaySlashedEvent as IssuerRelaySlashed,
+} from './cap-token-issuer.js';
 
 /** Default scoring weights — re-exported from scoring.ts for convenience. */
 export const DEFAULT_WEIGHTS: ScoringWeights = PVR_WEIGHTS;
@@ -61,6 +70,21 @@ export const DEFAULT_WEIGHTS: ScoringWeights = PVR_WEIGHTS;
 function extractEventName(eventType: string): string {
   const parts = eventType.split('::');
   return parts[parts.length - 1] ?? eventType;
+}
+
+/**
+ * W-P2 (D-W9) — fire-and-forget a cap-token issuer dispatch. `handleEvent` is a
+ * synchronous void function (the poller awaits the handler, but each arm runs
+ * sync); the issuer's `onX` handlers are async + already wrap their own bodies in
+ * try/catch, so we do not await here. The `.catch` is a defensive backstop that
+ * keeps any unexpected rejection from becoming an unhandled promise rejection.
+ */
+function dispatchCapToken(
+  p: Promise<void>,
+  logger: Logger,
+  ctx: Record<string, unknown>,
+): void {
+  p.catch((err) => logger.error({ err, ...ctx }, 'cap-token issuer dispatch failed'));
 }
 
 /**
@@ -83,6 +107,7 @@ export function handleEvent(
     config: NetworkConfig;
     cpCapId: string;
     turnIssuer?: TurnIssuer;
+    capTokenIssuer?: CapTokenIssuer;
   },
   pendingEscrows?: Map<string, EscrowCreated>,
   validatorState?: Map<string, NodeCandidate>,
@@ -164,6 +189,23 @@ export function handleEvent(
         logger.warn(
           { relayMinerId: e.relay_miner_id },
           'RelaySlashed observed but no TurnIssuer in txContext — kill-switch not armed',
+        );
+      }
+      // F62 M2 W-P2 (D-W8) — ADDITIVE cap-token revoke on slash, orthogonal to the
+      // TURN kill-switch above. The issuer revokes the slashed relay's RoomCapability
+      // (REQ-ADM via revoke_capability_token_via_quorum); the cache evicts on the
+      // resulting CapabilityRevoked chain event.
+      if (txContext?.capTokenIssuer) {
+        const traceId = randomUUID();
+        const evt: IssuerRelaySlashed = {
+          roomId: e.room_id,
+          relayMinerId: e.relay_miner_id,
+          slashAmount: e.slash_amount,
+        };
+        dispatchCapToken(
+          txContext.capTokenIssuer.onRelaySlashed(evt, traceId),
+          logger,
+          { roomId: e.room_id, relayMinerId: e.relay_miner_id, handler: 'onRelaySlashed' },
         );
       }
       break;
@@ -399,6 +441,26 @@ export function handleEvent(
         { roomId: e.room_id, relayIds: e.relay_ids, signalingId: e.signaling_id },
         'Room assigned — cleared from voted rooms',
       );
+      // F62 M2 W-P2 (D-W9) — issue cap-tokens to every assigned peer (REQ-ADM-001).
+      // Map the snake_case Move event payload to the issuer's camelCase shape.
+      if (txContext?.capTokenIssuer) {
+        const traceId = randomUUID();
+        const evt: IssuerRoomAssigned = {
+          roomId: e.room_id,
+          relayIds: e.relay_ids,
+          signalingId: e.signaling_id,
+          relayMode: e.relay_mode,
+          verifiedScore: e.verified_score,
+          consensusReached: e.consensus_reached,
+          winningCp: e.winning_cp,
+          validatorIds: e.validator_ids,
+        };
+        dispatchCapToken(
+          txContext.capTokenIssuer.onRoomAssigned(evt, traceId),
+          logger,
+          { roomId: e.room_id, handler: 'onRoomAssigned' },
+        );
+      }
       break;
     }
 
@@ -410,6 +472,50 @@ export function handleEvent(
         { minerId: e.miner_id, role: e.role },
         'Role assigned — cleared from voted miners',
       );
+      // F62 M2 W-P2 (D-W9) — vote-consensus role assignment drives the cap-token
+      // refresh path (REQ-ADM-013/014, grace-timer inside the issuer).
+      if (txContext?.capTokenIssuer) {
+        const traceId = randomUUID();
+        const evt: IssuerRoleAssigned = {
+          minerId: e.miner_id,
+          role: e.role,
+          voteCount: e.vote_count,
+          threshold: e.threshold,
+        };
+        dispatchCapToken(
+          txContext.capTokenIssuer.onRoleAssigned(evt, traceId),
+          logger,
+          { minerId: e.miner_id, handler: 'onRoleAssigned' },
+        );
+      }
+      break;
+    }
+
+    case 'RoleChanged': {
+      // F62 M2 W-P2 (D-W8) — NEW case arm. registration::RoleChanged was emitted
+      // (registration.move:51) but previously had no handler. Drives the cap-token
+      // role-change refresh (REQ-ADM-013/014); the issuer schedules a cancellable
+      // grace timer (a B→A revert cancels a pending A→B refresh).
+      const e = data as unknown as RoleChanged;
+      if (txContext?.capTokenIssuer) {
+        const traceId = randomUUID();
+        const evt: IssuerRoleChanged = {
+          minerId: e.miner_id,
+          oldRole: e.old_role,
+          newRole: e.new_role,
+          newStake: e.new_stake,
+        };
+        dispatchCapToken(
+          txContext.capTokenIssuer.onRoleChanged(evt, traceId),
+          logger,
+          { minerId: e.miner_id, handler: 'onRoleChanged' },
+        );
+      } else {
+        logger.debug(
+          { minerId: e.miner_id, newRole: e.new_role },
+          'RoleChanged observed but no CapTokenIssuer in txContext — refresh not scheduled',
+        );
+      }
       break;
     }
 
@@ -470,6 +576,7 @@ export function createEventHandler(
     config: NetworkConfig;
     cpCapId: string;
     turnIssuer?: TurnIssuer;
+    capTokenIssuer?: CapTokenIssuer;
   },
 ): {
   handler: (event: SuiEvent) => Promise<void>;

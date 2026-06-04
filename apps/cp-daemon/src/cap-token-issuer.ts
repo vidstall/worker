@@ -170,6 +170,14 @@ export interface CapTokenIssuerOpts {
    * eviction in steady state — the fast-path is a sub-second optimization.
    */
   cache?: CapTokenCacheLike;
+  /**
+   * F62 M2 W-P2 (D-W7) — live-epoch source for token expiry. When provided, fresh
+   * tokens expire at `getCurrentEpoch() + DEFAULT_EXPIRES_OFFSET_EPOCHS`; read lazily
+   * at submit time so a cached-epoch refresher (wired in startCapTokenIssuer) keeps
+   * expiries current. When `undefined` (e.g. unit tests), `currentEpoch` resolves to
+   * 0 → the legacy 100-epoch offset is preserved (back-compat).
+   */
+  getCurrentEpoch?: () => bigint;
 }
 
 /**
@@ -332,6 +340,8 @@ export class CapTokenIssuer {
   private readonly graceTimers = new Map<string, NodeJS.Timeout>();
   /** Stage 4 Item #3 — optional cache for fast-path emergency invalidation (D-012 Addendum). */
   private readonly cache?: CapTokenCacheLike;
+  /** W-P2 (D-W7) — optional live-epoch source; read lazily in resolveExpiresEpoch(). */
+  private readonly getCurrentEpoch?: () => bigint;
 
   constructor(opts: CapTokenIssuerOpts) {
     this.submitFn = opts.submitFn;
@@ -344,6 +354,16 @@ export class CapTokenIssuer {
     this.threshold = opts.quorumThreshold ?? 2;
     this.graceMs = opts.graceMs ?? 60_000;
     this.cache = opts.cache;
+    this.getCurrentEpoch = opts.getCurrentEpoch;
+  }
+
+  /**
+   * W-P2 (D-W7) — resolve a fresh token's expiry epoch. `currentEpoch + offset`,
+   * read lazily so the cached-epoch refresher's latest value is used. Falls back
+   * to `0 + offset` (the legacy 100n placeholder) when no epoch source is wired.
+   */
+  private resolveExpiresEpoch(): bigint {
+    return (this.getCurrentEpoch?.() ?? 0n) + DEFAULT_EXPIRES_OFFSET_EPOCHS;
   }
 
   // ── Public handlers ────────────────────────────────────────────────────
@@ -605,7 +625,7 @@ export class CapTokenIssuer {
     traceId: string,
   ): Promise<void> {
     const nonce = 1; // first issuance per (room, peer) — monotonic counter per D-010-B starts at 1
-    const expiresEpoch = DEFAULT_EXPIRES_OFFSET_EPOCHS; // daemon does not know current epoch here; placeholder
+    const expiresEpoch = this.resolveExpiresEpoch(); // W-P2 D-W7: live epoch + offset (was 100n placeholder)
     // Stage 4 Item #6 + D-014 sub-decision: `peer.id` is the Sui miner-ID hex
     // string (relay/signaling/validator ID from RoomAssigned event payload).
     // The Move-side `issue_capability_token` expects the actual peer ed25519
@@ -835,7 +855,7 @@ export class CapTokenIssuer {
       const currentNonce = this.nonces.get(nonceKey) ?? 0;
       const nextNonce = currentNonce + 1;
 
-      const newExpiresEpoch = DEFAULT_EXPIRES_OFFSET_EPOCHS;
+      const newExpiresEpoch = this.resolveExpiresEpoch(); // W-P2 D-W7: live epoch + offset (was 100n placeholder)
       const canonicalMsg = buildRefreshCanonicalMsg({
         oldTokenId: ctx.oldTokenId,
         newRole: ctx.newRole,

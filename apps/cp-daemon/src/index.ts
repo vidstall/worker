@@ -69,6 +69,15 @@ export interface StartCapTokenIssuerOptions {
   quorumThreshold?: number;
   graceMs?: number;
   cache?: CapTokenCacheLike;
+  /**
+   * W-P2 (D-W7) — explicit live-epoch source. When provided it overrides the
+   * built-in cached-epoch refresher (tests/E2E inject a controlled epoch). When
+   * omitted but a `client` is present, startCapTokenIssuer primes + polls the live
+   * Sui epoch itself.
+   */
+  getCurrentEpoch?: () => bigint;
+  /** W-P2 (D-W7) — cached-epoch refresh cadence (ms). Default 60_000. */
+  epochRefreshIntervalMs?: number;
 }
 
 export interface StartCapTokenIssuerResult {
@@ -143,6 +152,35 @@ export async function startCapTokenIssuer(
   const cpKeystore =
     opts.cpKeystore ?? buildLocalCpKeystore({ signer: opts.signer, logger: opts.logger });
 
+  // W-P2 (D-W7) — cached-epoch source for token expiry. An explicit getCurrentEpoch
+  // (tests/E2E) wins; otherwise, when a client is present, prime + poll the live Sui
+  // epoch and expose it via a closure. Without either, the issuer falls back to the
+  // legacy 0-based offset (expiry = 100 epochs). The poll is unref'd so it never
+  // keeps the process alive, and stop() clears it.
+  let cachedEpoch = 0n;
+  let epochTimer: ReturnType<typeof setInterval> | undefined;
+  const refreshEpoch = async (): Promise<void> => {
+    if (!opts.client) return;
+    try {
+      const sys = await opts.client.getLatestSuiSystemState();
+      cachedEpoch = BigInt(sys.epoch);
+    } catch (err) {
+      opts.logger.warn(
+        { module: 'cap-token-bootstrap', context: { err: (err as Error).message } },
+        'epoch refresh failed — keeping last cached epoch',
+      );
+    }
+  };
+  const getCurrentEpoch = opts.getCurrentEpoch ?? (() => cachedEpoch);
+  if (!opts.getCurrentEpoch && opts.client) {
+    await refreshEpoch(); // prime so the first issuance uses a real epoch
+    const intervalMs = opts.epochRefreshIntervalMs ?? 60_000;
+    epochTimer = setInterval(() => {
+      void refreshEpoch();
+    }, intervalMs);
+    if (typeof epochTimer.unref === 'function') epochTimer.unref();
+  }
+
   const issuerOpts: CapTokenIssuerOpts = {
     submitFn,
     packageId: opts.packageId,
@@ -151,6 +189,7 @@ export async function startCapTokenIssuer(
     quorumStateObjectId: opts.quorumStateObjectId,
     cpKeystore,
     logger: opts.logger,
+    getCurrentEpoch,
     ...(opts.quorumThreshold !== undefined && { quorumThreshold: opts.quorumThreshold }),
     ...(opts.graceMs !== undefined && { graceMs: opts.graceMs }),
     ...(opts.cache !== undefined && { cache: opts.cache }),
@@ -172,6 +211,7 @@ export async function startCapTokenIssuer(
   return {
     issuer,
     stop: () => {
+      if (epochTimer) clearInterval(epochTimer);
       opts.logger.info({ module: 'cap-token-bootstrap' }, 'CapTokenIssuer stopped');
     },
   };
@@ -318,19 +358,16 @@ async function main(): Promise<void> {
     quorumThreshold: capTokenIssuerThreshold,
     logger,
   });
-  // capTokenIssuer is registered with the event-handler chain in the next
-  // step (Stage 4 Item #3 cross-lane glue will inject its CapTokenCache
-  // reference). For now the bootstrap surface lets operators see the daemon
-  // boots with a live issuer + structured log breadcrumb.
-  void capTokenIssuer;
-
   // Set up event handler with TX context for room assignment + TURN kill-switch
+  // + cap-token issuance (F62 M2 W-P2 — capTokenIssuer threaded into txContext so
+  // RoomAssigned/RoleAssigned/RoleChanged/RelaySlashed arms drive the issuer).
   const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
     client,
     signer,
     config,
     cpCapId,
     turnIssuer,
+    capTokenIssuer,
   });
 
   // Bootstrap: replay historical relay/signaling/validator events so state maps are populated
