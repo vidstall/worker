@@ -24,7 +24,7 @@
  */
 
 import { pathToFileURL } from 'node:url';
-import { Transaction } from '@mysten/sui/transactions';
+import type { Transaction } from '@mysten/sui/transactions';
 import {
   createSuiClient,
   createLogger,
@@ -71,5 +71,78 @@ export function buildRotateRelaySecretTx(
       tx.pure.u64(args.newSecretId), // new_secret_id: u64
       tx.pure.u8(args.reason), // reason: u8
     ],
+  });
+}
+
+/** Parse `<flag> <value>` from an argv slice. Returns null when absent/empty. */
+function parseFlag(argv: string[], flag: string): string | null {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === flag) {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) return next;
+    }
+  }
+  return null;
+}
+
+/** Like {@link parseFlag} but throws when the flag is missing. */
+function required(argv: string[], flag: string): string {
+  const v = parseFlag(argv, flag);
+  if (v === null) throw new Error(`rotate-relay-secret: missing required flag ${flag}`);
+  return v;
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  const logger = createLogger(MODULE);
+  const config = loadNetworkConfig();
+  // createSuiClient takes the network/url, NOT the whole config (sibling idiom:
+  // request-revote.ts / revoke-cap-token.ts both pass config.rpcUrl).
+  const client = createSuiClient(config.rpcUrl);
+  // Sibling idiom: SUI_PRIVATE_KEY is loaded via the shared loadKeypair helper, NOT
+  // Ed25519Keypair.fromSecretKey directly. Here it MUST be the AdminCap owner key.
+  const signer = loadKeypair('SUI_PRIVATE_KEY');
+
+  const args: RotateRelaySecretArgs = {
+    adminCapId: required(argv, '--admin-cap'),
+    cpMinerId: required(argv, '--cp-miner-id'),
+    oldSecretId: BigInt(required(argv, '--old-secret-id')),
+    newSecretId: BigInt(required(argv, '--new-secret-id')),
+    reason: Number(parseFlag(argv, '--reason') ?? '2'),
+  };
+
+  // executeWithRetry returns TxResult | null (null = retries exhausted). Its events
+  // are an untyped Record<string, unknown>[] (showEvents:true is set inside it).
+  const result = await executeWithRetry(
+    client,
+    signer,
+    (tx: Transaction) => buildRotateRelaySecretTx(tx, config, args),
+    'emergency-rotate-relay-secret',
+    logger,
+  );
+  if (result === null) {
+    throw new Error('rotate-relay-secret: tx submission failed (retries exhausted)');
+  }
+
+  const rotated = result.events.some(
+    (e: Record<string, unknown>) =>
+      typeof e['type'] === 'string' && (e['type'] as string).endsWith('::turn_credential::SecretRotated'),
+  );
+  logger.info(
+    { module: MODULE, digest: result.digest, secret_rotated_event: rotated, cp_miner_id: args.cpMinerId },
+    'emergency_rotate_relay_secret submitted',
+  );
+  if (!rotated) throw new Error('rotate-relay-secret: SecretRotated event NOT found in tx effects');
+  process.stdout.write(`SecretRotated digest=${result.digest}\n`);
+}
+
+// Only run when executed directly (`tsx rotate-relay-secret.ts …`); stays inert on
+// import so the unit test can exercise the builder without firing the CLI. Matches
+// the sibling pathToFileURL guard (NOT the raw `file://${process.argv[1]}` template).
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]!).href;
+if (isMain) {
+  main().catch((err) => {
+    process.stderr.write(`rotate-relay-secret: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
   });
 }
