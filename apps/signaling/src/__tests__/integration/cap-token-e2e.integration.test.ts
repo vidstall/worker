@@ -7,16 +7,27 @@
  * BELOW the true production E2E that would require Stage 4 daemon-main
  * bootstrap wiring.
  *
- * Stage 4 deferral boundary (per SPEC-REVIEW § Cross-lane integration findings):
- *   - signaling/src/index.ts case 'join' does NOT yet invoke AuthHook.verifyJoin
- *   - cp-daemon/src/index.ts does NOT instantiate CapTokenIssuer
- *   - cap-token-cache.subscribeToChainEvents is a no-op stub (Stage 4 poller)
- *   - Issuer↔Cache wiring (issuer's onEmergencyRotation does NOT call
- *     cache.emergencyInvalidate) — DEFERRED to Stage 4 daemon-main bootstrap
- *     per D-012 Addendum.
+ * Daemon-main wiring status (updated F62 M2 daemon-wiring W-P2/W-P3):
+ *   - signaling/src/index.ts case 'join' NOW invokes AuthHook.verifyJoin, and
+ *     main() wires a LIVE AuthHook via startCapTokenAdmission (W-P3, REQ-ADW-002).
+ *   - cp-daemon/src/index.ts main() NOW instantiates CapTokenIssuer via
+ *     startCapTokenIssuer (W-P2).
+ *   - cap-token-cache.subscribeToChainEvents is now a REAL cursor-based
+ *     capability_events poller (no longer a no-op stub), wired in
+ *     startCapTokenAdmission.
  *
- * What these tests prove: the COMPOSITION CONTRACT is correct — when Stage 4
- * wires daemon-main, these same tests should pass with minimal/no changes.
+ * Remaining DEFERRED boundary (production wiring, NOT code):
+ *   - The in-process Issuer→Cache emergency fast-path IS implemented
+ *     (cap-token-issuer.ts onEmergencyRotation calls cache.emergencyInvalidate
+ *     when a cache is injected), but production cp-daemon main()
+ *     (index.ts startCapTokenIssuer call) does NOT inject the signaling cache —
+ *     the two run in separate processes. By design (DESIGN D-W2 decoupling) the
+ *     production invalidation path is the chain-event poller (CapabilityRevoked),
+ *     so the in-process fast-path stays TEST-ONLY. This is a wiring deferral, not
+ *     a missing implementation.
+ *
+ * What these tests prove: the COMPOSITION CONTRACT is correct — the mock-wired
+ * issuer→cache→auth path matches the now-live daemon-main wiring.
  *
  * Scenarios (6 cross-boundary scenarios; each maps to ≥1 REQ-ID):
  *   1. Happy-path issuance → cache populated → auth accept (REQ-ADM-001/005/004)

@@ -31,6 +31,7 @@ import {
   closeBenchHttpServer,
 } from './bench-endpoint.js';
 import type { AuthHook, JoinAuthMessage } from './auth.js';
+import { startCapTokenAdmission } from './cap-token-admission.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
@@ -350,8 +351,13 @@ if (isMainModule) {
     // Step 1: Auto-register on-chain
     const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger);
 
-    // Step 2: Start WebSocket server
-    const wss = createServer();
+    // Step 1.5: Wire LIVE cap-token admission (W-P3, REQ-ADW-002) — real
+    // capability_events poller + cached-epoch refresher feeding an AuthHook that
+    // GATES room joins against on-chain cap-tokens.
+    const admission = await startCapTokenAdmission(client, config.packageId, logger);
+
+    // Step 2: Start WebSocket server (gated by the live cap-token AuthHook)
+    const wss = createServer(PORT, { authHook: admission.authHook });
 
     // Step 3: Start heartbeat loop (30s default)
     const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
@@ -407,17 +413,22 @@ if (isMainModule) {
     }, heartbeatIntervalMs);
 
     // Graceful shutdown with heartbeat cleanup
-    const chainShutdown = () => {
+    const chainShutdown = async () => {
       logger.info('Shutting down signaling daemon...');
       clearInterval(rewardLogHandle);
       stopHeartbeat();
       closeSignalingProbe();
       closeBenchHttpServer();
+      // Stop the cap-token poller + epoch timer FIRST and AWAIT the unsubscribe,
+      // so the in-flight capability_events RPC poll is torn down cleanly before
+      // shutdown(wss) calls process.exit(0) on wss.close (the fast path, which
+      // would otherwise abort a mid-flight unsubscribe).
+      await admission.shutdown();
       shutdown(wss);
     };
 
-    process.on('SIGTERM', chainShutdown);
-    process.on('SIGINT', chainShutdown);
+    process.on('SIGTERM', () => void chainShutdown());
+    process.on('SIGINT', () => void chainShutdown());
   })().catch((err) => {
     logger.fatal({ err }, 'Signaling daemon crashed during startup');
     process.exit(1);

@@ -167,9 +167,18 @@ describe('DAEMON-02 compliance: no chain dependency in core signaling', () => {
     //     (REQ-ADM-004), imports @mysten/sui/keypairs/ed25519.
     //   - Phase 3.3 cap-token-cache.ts — subscribes to capability_events via SuiClient
     //     (CONTRACTS § 4.3, REQ-ADM-005/009).
+    // F62 M2 daemon-wiring (W-P3) added one more:
+    //   - cap-token-admission.ts — the chain-wiring seam that passes the live SuiClient
+    //     into the cap-token poller + epoch refresher feeding AuthHook (REQ-ADW-002).
     // DAEMON-02 applies to the core signaling path only — chain-aware modules are the
     // documented carve-out.
-    const chainAwareFiles = ['auto-register.ts', 'heartbeat.ts', 'auth.ts', 'cap-token-cache.ts'];
+    const chainAwareFiles = [
+      'auto-register.ts',
+      'heartbeat.ts',
+      'auth.ts',
+      'cap-token-cache.ts',
+      'cap-token-admission.ts',
+    ];
 
     const sourceFiles = getAllTsFiles(SRC_DIR).filter(
       (f) => !f.includes('__tests__') && !chainAwareFiles.some((ca) => f.endsWith(ca)),
