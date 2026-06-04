@@ -9,7 +9,15 @@ export default defineConfig({
     // (vitest.integration.config.ts), never in the hermetic unit suite. This
     // exclude is scoped to cp-daemon ONLY, so the mock-based signaling
     // cap-token-e2e.integration.test.ts (no localnet) keeps running here.
-    exclude: [...configDefaults.exclude, '**/cp-daemon/**/__tests__/integration/**'],
+    //
+    // The relay __tests__/integration/ dir holds REAL-mediasoup-worker tests
+    // (spawn worker child processes + push RTP) — excluded here and gated
+    // behind vitest.relay-integration.config.ts (`pnpm test:integration:relay`).
+    exclude: [
+      ...configDefaults.exclude,
+      '**/cp-daemon/**/__tests__/integration/**',
+      '**/apps/relay/**/__tests__/integration/**',
+    ],
     globals: false,
     testTimeout: 10_000,
   },
