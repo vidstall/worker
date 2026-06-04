@@ -54,7 +54,9 @@ import {
   type NetworkConfig,
   type Logger,
   type QuorumSig,
-} from '@dvconf/shared';
+  // relative SOURCE import (NOT bare '@dvconf/shared'): scripts/ is outside the pnpm
+  // workspace graph -> bare name unresolvable from root under tsx. See seed-bootstrap.ts:61.
+} from '../../packages/shared/src/index.ts';
 
 const MODULE = 'cap-token-revoke';
 

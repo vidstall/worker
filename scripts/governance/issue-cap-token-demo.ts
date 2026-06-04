@@ -44,7 +44,11 @@ import {
   executeWithRetry,
   loadKeypair,
   extractCreatedObjectByType,
-} from '@dvconf/shared';
+  // relative SOURCE import, NOT the bare '@dvconf/shared': scripts/ sits OUTSIDE the pnpm
+  // workspace package graph, so the bare name is unresolvable from root node_modules when
+  // tsx runs this from the repo root (the docker one-shot does exactly that). Mirrors
+  // scripts/demo/seed-bootstrap.ts:61 (verified under tsx); vitest aliases it for unit tests.
+} from '../../packages/shared/src/index.ts';
 
 const MODULE = 'issue-cap-token-demo';
 
