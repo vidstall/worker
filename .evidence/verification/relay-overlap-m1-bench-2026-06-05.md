@@ -9,19 +9,19 @@
 | Metric | Value (ms) | Target | Pass |
 |---|---:|---|:--:|
 | N (runs) | 30 | >=30 | yes |
-| P50 MTTR | 57.0 | - | - |
-| **P95 MTTR** | **73.0** | <= 100 | yes |
-| **P99 MTTR** | **74.0** | <= 200 | yes |
-| mean | 58.0 | - | - |
-| min / max | 50.0 / 74.0 | - | - |
+| P50 MTTR | 60.0 | - | - |
+| **P95 MTTR** | **69.0** | <= 100 | yes |
+| **P99 MTTR** | **69.0** | <= 200 | yes |
+| mean | 60.3 | - | - |
+| min / max | 50.0 / 69.0 | - | - |
 | failed runs | 0 | 0 | yes |
 
 ### MTTR component breakdown
 
 | Component | P50 (ms) | P95 (ms) |
 |---|---:|---:|
-| detection window (kill -> watcher fired) | 54.0 | 63.0 |
-| relay + resume (watcher fired -> first standby RTP) | 1.0 | 17.0 |
+| detection window (kill -> watcher fired) | 59.0 | 65.0 |
+| relay + resume (watcher fired -> first standby RTP) | 0.0 | 15.0 |
 
 ## Knob values
 

@@ -472,7 +472,7 @@ function roleCodeFor(role: DaemonRole): number {
 
 /**
  * Full CP-voted lifecycle for ONE miner against the bootstrapped CP, generalised by
- * `role` (called 3x — relay, validator, signaling):
+ * `role` (called 4x — relay, relay-standby, validator, signaling):
  *   1. register the miner with 0.3 SUI (role User -> MinerCap)
  *   2. CP casts cast_role_vote(miner_id, roleCode) -> assigned_roles[miner_id] = role
  *   3. miner applies apply_voted_role -> flips MinerCap+profile+stake to the role

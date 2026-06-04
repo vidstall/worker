@@ -255,6 +255,11 @@ async function armRun(): Promise<RunScaffold> {
     0,
     pipedProducerId,
   );
+  // REQ-RO-005 invariant: the warm standby consumer MUST start paused
+  // (RTCP-only keepalive) — locks the paused-warm-pipe contract into the bench.
+  if (warmPipeConsumer === null || warmPipeConsumer.paused !== true) {
+    throw new Error('REQ-RO-005 violated: warm-pipe consumer must be created paused');
+  }
 
   // CLIENT: dual DirectTransport sinks
   const primarySinkT = await primaryRouter.createDirectTransport();
@@ -460,10 +465,10 @@ function buildReport(results: RunResult[], failures: number): string {
     '- **Detection**: the dvconf-client rtp-timeout-watcher replicated verbatim (fire once after RTP_TIMEOUT_MS of silence, reset per packet), attached to the primary sink.',
   );
   L.push(
-    '- **t0** = client last RTP from primary (primary media stops). **t1** = client first RTP from standby after resume. **MTTR = t1 - t0.**',
+    "- **t0** = client's last RTP from the primary sink (the primary relay drops the client). **t1** = client's first RTP from the standby after resume. **MTTR = t1 - t0.**",
   );
   L.push(
-    '- **"Kill primary"** = stop the synthetic publisher -> RTP silence at the client primary sink (the cleanest deterministic kill).',
+    '- **"Kill primary"** = the PRIMARY RELAY drops the client, modelled by closing the client\'s PRIMARY sink consumer (`primarySink.close()`). The room peer (publisher) keeps sending and the warm pipe keeps carrying RTP to the standby — exactly the failure relay-overlap redundancy protects against, so the resumed standby sink has real RTP to deliver. (Deliberately NOT "stop the publisher": starving the source would also starve the standby — a source outage, not a relay failover, which M1 does not address.)',
   );
   L.push('');
   L.push('## Honesty / bounds');
