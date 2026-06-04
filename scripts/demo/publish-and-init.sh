@@ -109,7 +109,7 @@ QUORUM_STATE_ID="$(node -e 'const o=require("/shared/qs-create.json");const c=(o
 echo "[publish-init] QuorumConfigState=$QUORUM_STATE_ID"
 
 # NetworkRegistry id is not held in a var above -- parse it from the publish output (node; jq absent).
-NETWORK_REGISTRY_ID="$(node -e 'const d=require(process.env.PUBLISH_OUTPUT);const o=(d.objectChanges||[]).find(c=>c.type==="created"&&/::NetworkRegistry(<|$)/.test(c.objectType||""));process.stdout.write(o&&o.objectId?o.objectId:"")')"
+NETWORK_REGISTRY_ID="$(node -e 'const d=require(process.env.PUBLISH_OUTPUT);const o=(d.objectChanges||[]).find(c=>c.type==="created"&&/::network_registry::NetworkRegistry(<|$)/.test(c.objectType||""));process.stdout.write(o&&o.objectId?o.objectId:"")')"
 [ -n "$NETWORK_REGISTRY_ID" ] || { echo "[publish-init] FATAL: no NetworkRegistry in publish output" >&2; exit 1; }
 
 echo "[publish-init] lowering min_quorum to 1 (cp_quorum_sig::update_threshold)"
@@ -138,9 +138,10 @@ console.log("[publish-init] merged QuorumConfigState into "+out);
 #    ever changes that field, the Task 0.2 fallback is to transfer the AdminCap to the seed CP
 #    in seed-bootstrap.ts instead of exporting the publisher secret here.
 echo "[publish-init] exporting demo-only admin creds"
-ADMIN_SECRET="$(sui keytool export --key-identity "$(sui client active-address)" --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(o.exportedPrivateKey||(o.key&&o.key.exportedPrivateKey)||"")})')"
+ADMIN_SECRET="$(sui keytool export --key-identity "$(sui client active-address)" --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(o.exportedPrivateKey||"")})')"
 [ -n "$ADMIN_SECRET" ] || { echo "[publish-init] FATAL: could not export publisher secret" >&2; exit 1; }
-CAP="$ADMIN" SK="$ADMIN_SECRET" node -e 'const fs=require("fs");fs.writeFileSync("/shared/admin-creds.json",JSON.stringify({adminCapId:process.env.CAP,adminSecretKey:process.env.SK},null,2)+"\n")'
+# umask 077 in a subshell so the private-key file lands 600 (codifies demo-only-throwaway in the bits).
+( umask 077; CAP="$ADMIN" SK="$ADMIN_SECRET" node -e 'const fs=require("fs");fs.writeFileSync("/shared/admin-creds.json",JSON.stringify({adminCapId:process.env.CAP,adminSecretKey:process.env.SK},null,2)+"\n")' )
 echo "[publish-init] admin-creds.json written (adminCapId=$ADMIN)"
 
 echo "[publish-init] done -- publish-output.json now carries package + all registries + QuorumConfigState"
