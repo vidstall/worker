@@ -94,7 +94,7 @@ interface SeededKey {
   stakeId: string;
 }
 
-type DaemonRole = 'cp' | 'relay' | 'validator' | 'signaling';
+type DaemonRole = 'cp' | 'relay' | 'relay-standby' | 'validator' | 'signaling';
 
 /**
  * Faucet-fund an address then settle for gas-coin indexing. FAUCET_URL is env-
@@ -426,6 +426,30 @@ async function enrollInRegistry(
       'register_signaling',
       logger,
     );
+  } else if (role === 'relay-standby') {
+    // relay-standby IS a relay on-chain — votes as Relay, enrolls via relay_registry::register_relay.
+    // Uses a DISTINCT endpoint (ws://relay-standby:4002, matching the compose service + WS_PORT 4002)
+    // so it is a separate relay_registry entry from the primary relay (ws://relay-daemon:4000).
+    const endpoint = Array.from(new TextEncoder().encode('ws://relay-standby:4002'));
+    await execOrThrow(
+      client,
+      minerKp,
+      (tx) => {
+        tx.moveCall({
+          target: `${config.packageId}::relay_registry::register_relay`,
+          arguments: [
+            tx.object(config.networkRegistryId), // net_reg: &NetworkRegistry
+            tx.object(config.relayRegistryId), // registry: &mut RelayRegistry
+            tx.object(minerCapId), // cap: &MinerCap
+            tx.object(stakeId), // stake: &StakePosition
+            tx.pure.vector('u8', REGION), // region: vector<u8>
+            tx.pure.vector('u8', endpoint), // endpoint_url: vector<u8>
+          ],
+        });
+      },
+      'register_relay',
+      logger,
+    );
   } else {
     throw new Error(`enrollInRegistry: unsupported voted role ${role}`);
   }
@@ -435,6 +459,7 @@ async function enrollInRegistry(
 function roleCodeFor(role: DaemonRole): number {
   switch (role) {
     case 'relay':
+    case 'relay-standby': // standby IS a relay on-chain — same role code (2)
       return MinerRole.Relay; // 2
     case 'validator':
       return MinerRole.Validator; // 1
@@ -499,17 +524,20 @@ async function main(): Promise<void> {
   const cp = await bootstrapCp(client, config, logger);
   const cpKey: SeededKey = { secretKey: cp.kp.getSecretKey(), capId: cp.cpCapId, stakeId: cp.stakeId };
 
-  // 2. relay / validator / signaling via the generalised CP-voted lifecycle.
+  // 2. relay / validator / signaling / relay-standby via the generalised CP-voted lifecycle.
   const relay = await voteAndApplyMiner(client, cp, 'relay', config, logger);
   const validator = await voteAndApplyMiner(client, cp, 'validator', config, logger);
   const signaling = await voteAndApplyMiner(client, cp, 'signaling', config, logger);
+  // 3. relay-standby: 5th funded keypair — a second relay enrolled at ws://relay-standby:4002
+  //    (REQ-RO-021 Phase 5.3 bench; matches the relay-standby service in the relay-overlap compose override).
+  const relayStandby = await voteAndApplyMiner(client, cp, 'relay-standby', config, logger);
 
-  const keys: Record<DaemonRole, SeededKey> = { cp: cpKey, relay, validator, signaling };
+  const keys: Record<DaemonRole, SeededKey> = { cp: cpKey, relay, 'relay-standby': relayStandby, validator, signaling };
   writeFileSync(KEYS_OUTPUT_PATH, `${JSON.stringify(keys, null, 2)}\n`, 'utf8');
 
   logger.info(
     { module: MODULE, action: 'done', context: { keysOut: KEYS_OUTPUT_PATH, roles: Object.keys(keys) } },
-    'seed-bootstrap complete — keys written, 4 daemons registered',
+    'seed-bootstrap complete — keys written, 5 daemons registered',
   );
 }
 
