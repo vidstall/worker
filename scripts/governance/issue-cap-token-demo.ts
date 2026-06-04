@@ -26,9 +26,9 @@
  *   pnpm --dir dvconf-daemons exec tsx scripts/governance/issue-cap-token-demo.ts \
  *     --quorum-state <objectId> [--room-id 0x..] [--role 0] [--nonce 1] [--expires-epoch N]
  * Env (same as the daemons): PACKAGE_ID, NETWORK_REGISTRY_ID, CP_REGISTRY_ID, …,
- *   RPC_URL, SUI_PRIVATE_KEY (the local CP operator key). --quorum-state may instead
- *   be supplied via QUORUM_STATE_OBJECT_ID; CP_REGISTRY_ID falls back to the
- *   NetworkConfig.cpRegistryId field.
+ *   RPC_URL, SUI_PRIVATE_KEY (the local CP operator key). The CP registry id comes
+ *   from loadNetworkConfig() (which hard-requires CP_REGISTRY_ID); --quorum-state may
+ *   instead be supplied via the QUORUM_STATE_OBJECT_ID env var.
  *
  * Prints EXACTLY one machine-parseable line on success (a later scenario sed-parses it):
  *   RoomCapability id=0x<objectId>
@@ -180,13 +180,9 @@ async function main(): Promise<void> {
     process.exit(2);
     return;
   }
-  // CP registry id: NetworkConfig.cpRegistryId, with an explicit env fallback.
-  const cpRegistryId = config.cpRegistryId || process.env['CP_REGISTRY_OBJECT_ID'] || '';
-  if (!cpRegistryId) {
-    process.stderr.write('issue-cap-token-demo: no cpRegistryId (set CP_REGISTRY_ID)\n');
-    process.exit(2);
-    return;
-  }
+  // CP registry id: loadNetworkConfig() already hard-requires CP_REGISTRY_ID
+  // (throws if missing), so config.cpRegistryId is guaranteed non-empty here.
+  const cpRegistryId = config.cpRegistryId;
 
   // ── demo args (defaults sane for a seed token) ───────────────────────────
   // room id: a fresh random 32-byte 0x hex unless overridden.
