@@ -1,0 +1,31 @@
+
+> relay@1.0.0 test C:\Thesis\dvconf\.claude\worktrees\agent-a7c7f49a1cb5a9f7d\dvconf-daemons-wt\apps\relay
+> vitest run "inter-relay-warmpipe"
+
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/.claude/worktrees/agent-a7c7f49a1cb5a9f7d/dvconf-daemons-wt/apps/relay[39m
+
+ [32m✓[39m src/__tests__/inter-relay-warmpipe.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 16[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m11 passed[39m[22m[90m (11)[39m
+[2m   Start at [22m 00:24:53
+[2m   Duration [22m 821ms[2m (transform 105ms, setup 0ms, collect 109ms, tests 16ms, environment 0ms, prepare 314ms)[22m
+
+
+=== FULL RELAY SUITE (non-regression: 99 -> 110) ===
+ [32m✓[39m src/__tests__/relay-worker-recovery.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 17[2mms[22m[39m
+ [32m✓[39m src/__tests__/metrics.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 11[2mms[22m[39m
+ [32m✓[39m src/__tests__/coturn-url.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m src/__tests__/relay-role-manager.test.ts [2m([22m[2m16 tests[22m[2m)[22m[32m 20[2mms[22m[39m
+ [32m✓[39m src/__tests__/inter-relay.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 18[2mms[22m[39m
+ [32m✓[39m src/__tests__/turn-fetcher.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 57[2mms[22m[39m
+ [32m✓[39m src/__tests__/inter-relay-warmpipe.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 28[2mms[22m[39m
+ [32m✓[39m src/__tests__/relay-heartbeat.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+ [32m✓[39m src/__tests__/latency-probe.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 16[2mms[22m[39m
+ [32m✓[39m src/__tests__/heartbeat.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 20[2mms[22m[39m
+ [32m✓[39m src/__tests__/auto-register.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 33[2mms[22m[39m
+ [32m✓[39m src/__tests__/inter-relay-wiring.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 307[2mms[22m[39m
+ [32m✓[39m src/__tests__/signaling.test.ts [2m([22m[2m12 tests[22m[2m)[22m[33m 756[2mms[22m[39m
+[2m Test Files [22m [1m[32m13 passed[39m[22m[90m (13)[39m
+[2m      Tests [22m [1m[32m110 passed[39m[22m[90m (110)[39m
