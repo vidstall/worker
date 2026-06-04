@@ -67,6 +67,11 @@ VALIDATOR_REGISTRY_ID="$(extract_shared ValidatorRegistry)"
 ROOM_MANAGER_ID="$(extract_shared RoomManager)"
 SIGNALING_REGISTRY_ID="$(extract_shared SignalingRegistry)"
 ROLE_VOTE_BOX_ID="$(extract_shared RoleVoteBox)"
+# W1 defense-demo Phase 5: cap-token issuance reads the QuorumConfigState id
+# (merged into publish-output.json by publish-and-init.sh as a created objectChange
+# with objectType ending ::cp_quorum_sig::QuorumConfigState). extract_shared matches
+# on the type suffix, so "QuorumConfigState" resolves it.
+QUORUM_STATE_OBJECT_ID="$(extract_shared QuorumConfigState)"
 
 if [ -z "$PACKAGE_ID" ]; then
   echo "[read-publish-output] FATAL: PACKAGE_ID empty (publish-output.json parse failed)" >&2
@@ -77,6 +82,11 @@ fi
 export PACKAGE_ID NETWORK_REGISTRY_ID MINER_STORE_ID USER_REGISTRY_ID
 export RELAY_REGISTRY_ID CP_REGISTRY_ID VALIDATOR_REGISTRY_ID
 export ROOM_MANAGER_ID SIGNALING_REGISTRY_ID ROLE_VOTE_BOX_ID
+export QUORUM_STATE_OBJECT_ID
+# W1 Phase 5: cp-daemon (index.ts) + the issue/revoke CLIs read CP_REGISTRY_OBJECT_ID
+# (long form), but the registry is extracted above as CP_REGISTRY_ID (short form, the
+# VITE_ convention). Alias it so the daemon's process.env['CP_REGISTRY_OBJECT_ID'] is set.
+export CP_REGISTRY_OBJECT_ID="$CP_REGISTRY_ID"
 
 # Client-side (Vite) exports -- read by dvconf-client/src/config.ts.
 export VITE_PACKAGE_ID="$PACKAGE_ID"
