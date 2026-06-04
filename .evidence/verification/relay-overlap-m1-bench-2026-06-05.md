@@ -9,19 +9,19 @@
 | Metric | Value (ms) | Target | Pass |
 |---|---:|---|:--:|
 | N (runs) | 30 | >=30 | yes |
-| P50 MTTR | 60.0 | - | - |
-| **P95 MTTR** | **70.0** | <= 100 | yes |
-| **P99 MTTR** | **71.0** | <= 200 | yes |
-| mean | 60.5 | - | - |
-| min / max | 51.0 / 71.0 | - | - |
+| P50 MTTR | 57.0 | - | - |
+| **P95 MTTR** | **73.0** | <= 100 | yes |
+| **P99 MTTR** | **74.0** | <= 200 | yes |
+| mean | 58.0 | - | - |
+| min / max | 50.0 / 74.0 | - | - |
 | failed runs | 0 | 0 | yes |
 
 ### MTTR component breakdown
 
 | Component | P50 (ms) | P95 (ms) |
 |---|---:|---:|
-| detection window (kill -> watcher fired) | 56.0 | 64.0 |
-| relay + resume (watcher fired -> first standby RTP) | 1.0 | 16.0 |
+| detection window (kill -> watcher fired) | 54.0 | 63.0 |
+| relay + resume (watcher fired -> first standby RTP) | 1.0 | 17.0 |
 
 ## Knob values
 
@@ -38,8 +38,8 @@
 - **In-process, real-mediasoup**: two real Workers (primary + standby relays, distinct child processes), two Routers, real PipeTransports, real Opus RTP. Warm pipe built by the production-faithful manual cross-PipeTransport pairing proven by the step-3a spike.
 - **Client model**: dual DirectTransport consumers — primary router (active) + standby router piped producer (pre-created PAUSED, REQ-RO-005). DirectTransport emits a per-packet rtp event -> sub-ms client-perceived arrival timestamps.
 - **Detection**: the dvconf-client rtp-timeout-watcher replicated verbatim (fire once after RTP_TIMEOUT_MS of silence, reset per packet), attached to the primary sink.
-- **t0** = client last RTP from primary (primary media stops). **t1** = client first RTP from standby after resume. **MTTR = t1 - t0.**
-- **"Kill primary"** = stop the synthetic publisher -> RTP silence at the client primary sink (the cleanest deterministic kill).
+- **t0** = client's last RTP from the primary sink (the primary relay drops the client). **t1** = client's first RTP from the standby after resume. **MTTR = t1 - t0.**
+- **"Kill primary"** = the PRIMARY RELAY drops the client, modelled by closing the client's PRIMARY sink consumer (`primarySink.close()`). The room peer (publisher) keeps sending and the warm pipe keeps carrying RTP to the standby — exactly the failure relay-overlap redundancy protects against, so the resumed standby sink has real RTP to deliver. (Deliberately NOT "stop the publisher": starving the source would also starve the standby — a source outage, not a relay failover, which M1 does not address.)
 
 ## Honesty / bounds
 
