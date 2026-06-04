@@ -18,7 +18,7 @@
  * factory; production peer-CP discovery topology is post-thesis.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Ed25519Keypair, Ed25519PublicKey } from '@mysten/sui/keypairs/ed25519';
 import {
   startCapTokenIssuer,
   buildLocalCpKeystore,
@@ -104,6 +104,48 @@ describe('startCapTokenIssuer (Item #1 — cp-daemon bootstrap factory)', () => 
     expect(out.signature.length).toBe(64);
     expect(out.pubkey.length).toBe(32);
     expect(out.addr).toBe(signer.toSuiAddress());
+  });
+
+  // ── W-P3.5b (OQ-CRR-9 / REQ-ADW-003) — RAW ed25519, not Sui intent-wrapped ──
+  //
+  // Move `cp_quorum_sig::verify_quorum` does `ed25519_verify` over the RAW canonical
+  // bytes. `buildLocalCpKeystore` must therefore sign RAW (signer.sign), NOT
+  // intent-wrapped (signer.signPersonalMessage). The verify primitive below is the
+  // SAME one Move uses: `Ed25519PublicKey.verify(canonicalMsg, sig64)`.
+  it('sign() produces a RAW ed25519 signature that verifies against the message with Ed25519PublicKey.verify (the Move primitive)', async () => {
+    const signer = Ed25519Keypair.generate();
+    const keystore = buildLocalCpKeystore({ signer, logger: mockLogger() });
+    const msg = new TextEncoder().encode('cp-quorum-canonical-message');
+    const out = await keystore.sign(msg);
+
+    const sig64 = Uint8Array.from(out.signature);
+    expect(sig64.length).toBe(64);
+    const pubkey = new Ed25519PublicKey(signer.getPublicKey().toRawBytes());
+    // RAW verification MUST pass (Move ed25519_verify over canonical bytes).
+    expect(await pubkey.verify(msg, sig64)).toBe(true);
+
+    // Negative control: the intent-wrapped (signPersonalMessage) sig would NOT
+    // verify raw against the plain message — prove the old code path fails this.
+    const { signature: wrapped } = await signer.signPersonalMessage(msg);
+    const wrapped64 = Uint8Array.from(Buffer.from(wrapped, 'base64').subarray(0, 64));
+    expect(await pubkey.verify(msg, wrapped64)).toBe(false);
+  });
+
+  it('collectQuorumSignatures(threshold=1) produces a RAW ed25519 sig that verifies against the canonical message (Move verify_quorum parity)', async () => {
+    const signer = Ed25519Keypair.generate();
+    const keystore = buildLocalCpKeystore({ signer, logger: mockLogger() });
+    const canonicalMsg = new TextEncoder().encode('canonical-revoke-or-issue-bytes');
+    const { qs, pubkeys } = await keystore.collectQuorumSignatures(canonicalMsg, 1);
+
+    expect(qs.signers).toEqual([signer.toSuiAddress()]);
+    expect(qs.signatures.length).toBe(1);
+    expect(qs.signatures[0].length).toBe(64);
+    expect(pubkeys).toEqual([Array.from(signer.getPublicKey().toRawBytes())]);
+
+    const sig64 = Uint8Array.from(qs.signatures[0]);
+    const pubkey = new Ed25519PublicKey(Uint8Array.from(pubkeys[0]));
+    // RAW verification MUST pass — byte-verifiable by Move ed25519_verify.
+    expect(await pubkey.verify(canonicalMsg, sig64)).toBe(true);
   });
 
   it('default keystore.collectQuorumSignatures throws when threshold >= 2 and no peer-CPs are configured (degraded mode is documented)', async () => {

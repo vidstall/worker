@@ -99,9 +99,12 @@ export function buildLocalCpKeystore(opts: {
   const localAddr = signer.toSuiAddress();
   return {
     async sign(message: Uint8Array) {
-      const { signature: combined } = await signer.signPersonalMessage(message);
-      const sigBytes = Buffer.from(combined, 'base64');
-      const sig64 = Array.from(sigBytes.slice(0, 64));
+      // RAW 64-byte ed25519 over the canonical message (NO Sui intent wrap) —
+      // matches Move `cp_quorum_sig::verify_quorum` (`ed25519_verify` over RAW
+      // bytes) and revoke-cap-token.ts `makeSingleCpKeystore` (OQ-CRR-9). Was
+      // `signer.signPersonalMessage`, which intent-wraps and fails Move verify.
+      const sig = await signer.sign(message);
+      const sig64 = Array.from(sig.slice(0, 64));
       const pubkey = Array.from(signer.getPublicKey().toRawBytes());
       return { signature: sig64, pubkey, addr: localAddr };
     },
@@ -110,9 +113,12 @@ export function buildLocalCpKeystore(opts: {
     },
     async collectQuorumSignatures(canonicalMsg, threshold) {
       if (threshold <= 1) {
-        const { signature: combined } = await signer.signPersonalMessage(canonicalMsg);
-        const sigBytes = Buffer.from(combined, 'base64');
-        const sig64 = Array.from(sigBytes.slice(0, 64));
+        // RAW 64-byte ed25519 over the canonical message (NO Sui intent wrap) —
+        // matches Move `cp_quorum_sig::verify_quorum` + makeSingleCpKeystore
+        // (OQ-CRR-9). Was `signer.signPersonalMessage`, which intent-wraps so the
+        // single-CP issue path's quorum sig failed Move verify (abort 906).
+        const sig = await signer.sign(canonicalMsg);
+        const sig64 = Array.from(sig.slice(0, 64));
         const pubkey = Array.from(signer.getPublicKey().toRawBytes());
         const aggregateSig = [0x01, ...sig64];
         return {
