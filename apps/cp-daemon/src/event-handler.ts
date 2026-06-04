@@ -60,6 +60,22 @@ import type {
   RelaySlashedEvent as IssuerRelaySlashed,
 } from './cap-token-issuer.js';
 
+// ── RelayPromoted observer types (CONTRACTS C8, REQ-RO-009) ─────────────────
+
+/** Shape of the RelayPromoted on-chain event (room_manager.move, Phase 1 RO-003). */
+export interface RelayPromotedEvent {
+  type: 'RelayPromoted';
+  room_id: string;
+  old_primary: string;
+  new_primary: string;
+  epoch: number;
+}
+
+/** Observer interface for RelayPromoted chain events. */
+export interface RelayPromotedObserver {
+  onRelayPromoted(event: RelayPromotedEvent, traceId: string): Promise<void>;
+}
+
 /** Default scoring weights — re-exported from scoring.ts for convenience. */
 export const DEFAULT_WEIGHTS: ScoringWeights = PVR_WEIGHTS;
 
@@ -108,6 +124,7 @@ export function handleEvent(
     cpCapId: string;
     turnIssuer?: TurnIssuer;
     capTokenIssuer?: CapTokenIssuer;
+    relayPromotedObserver?: RelayPromotedObserver;
   },
   pendingEscrows?: Map<string, EscrowCreated>,
   validatorState?: Map<string, NodeCandidate>,
@@ -555,6 +572,47 @@ export function handleEvent(
       break;
     }
 
+    case 'RelayPromoted': {
+      // M1 Phase 3.1 (REQ-RO-009) — chain-authoritative promotion event (C8).
+      // Emitted by room_manager::promote_relay after on-chain staleness assert.
+      // Drives client re-discovery via the injected RelayPromotedObserver.
+      const e = data as unknown as { room_id: string; old_primary: string; new_primary: string; epoch: number };
+      const traceId = randomUUID();
+      const evt: RelayPromotedEvent = {
+        type: 'RelayPromoted',
+        room_id: e.room_id,
+        old_primary: e.old_primary,
+        new_primary: e.new_primary,
+        epoch: e.epoch,
+      };
+      logger.info(
+        {
+          trace_id: traceId,
+          module: 'event-handler',
+          action: 'relay-promoted',
+          context: { roomId: e.room_id, oldPrimary: e.old_primary, newPrimary: e.new_primary, epoch: e.epoch },
+        },
+        'RelayPromoted — relay promotion observed; forwarding to observer',
+      );
+      if (txContext?.relayPromotedObserver !== undefined) {
+        // Fire-and-forget — same pattern as dispatchCapToken (D-W9)
+        txContext.relayPromotedObserver
+          .onRelayPromoted(evt, traceId)
+          .catch((err) =>
+            logger.error(
+              { trace_id: traceId, module: 'event-handler', err },
+              'RelayPromoted observer dispatch failed',
+            ),
+          );
+      } else {
+        logger.debug(
+          { trace_id: traceId, module: 'event-handler', context: { roomId: e.room_id } },
+          'RelayPromoted received but no observer registered',
+        );
+      }
+      break;
+    }
+
     default: {
       logger.debug({ eventType: event.type, eventName }, 'Unknown event type, skipping');
       break;
@@ -577,6 +635,7 @@ export function createEventHandler(
     cpCapId: string;
     turnIssuer?: TurnIssuer;
     capTokenIssuer?: CapTokenIssuer;
+    relayPromotedObserver?: RelayPromotedObserver;
   },
 ): {
   handler: (event: SuiEvent) => Promise<void>;

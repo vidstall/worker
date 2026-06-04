@@ -170,6 +170,11 @@ describe('DAEMON-02 compliance: no chain dependency in core signaling', () => {
     // F62 M2 daemon-wiring (W-P3) added one more:
     //   - cap-token-admission.ts — the chain-wiring seam that passes the live SuiClient
     //     into the cap-token poller + epoch refresher feeding AuthHook (REQ-ADW-002).
+    // M1 relay-overlap Phase 3.2 (REQ-RO-008) added one more:
+    //   - relay-dual-router.ts — subscribes to relay_registry::RelayRegistered +
+    //     room_manager::RoomAssigned via SuiClient.queryEvents to populate the relay
+    //     endpoint cache (D-RO-3). Chain-aware by design; the pure WS-routing module
+    //     (rooms.ts) stays chain-free.
     // DAEMON-02 applies to the core signaling path only — chain-aware modules are the
     // documented carve-out.
     const chainAwareFiles = [
@@ -178,6 +183,7 @@ describe('DAEMON-02 compliance: no chain dependency in core signaling', () => {
       'auth.ts',
       'cap-token-cache.ts',
       'cap-token-admission.ts',
+      'relay-dual-router.ts',
     ];
 
     const sourceFiles = getAllTsFiles(SRC_DIR).filter(

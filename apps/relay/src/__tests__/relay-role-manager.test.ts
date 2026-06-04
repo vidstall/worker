@@ -1,0 +1,183 @@
+/**
+ * Unit tests for relay-role-manager (REQ-RO-004 + REQ-RO-005).
+ *
+ * RED cases (TDD contract):
+ *   - Standby has NO active consumer pre first-peer-join (pipeConsumer is null)
+ *   - Standby has a PAUSED consumer after first peer join (consumer.pause() was called)
+ *   - determineRole: own ID at index 0 → primary; at index 1 → standby; not in list → throws
+ *   - parsePipePortRange: parses "40000-40100" → {min:40000, max:40100}
+ *   - ensureWarmPipe is idempotent (second call does NOT open a second pipe)
+ *
+ * Requirements: REQ-RO-004, REQ-RO-005
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  determineRole,
+  parsePipePortRange,
+  ensureWarmPipe,
+  type RoomTopology,
+} from '../relay-role-manager.js';
+
+// ── mediasoup mock factories ──────────────────────────────────────────
+
+function makeMockConsumer(paused = false) {
+  return {
+    id: `consumer-${Math.random().toString(36).slice(2)}`,
+    paused,
+    pause: vi.fn().mockResolvedValue(undefined),
+    resume: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn(),
+  };
+}
+
+function makeMockPipeTransport(consumer: ReturnType<typeof makeMockConsumer>) {
+  return {
+    id: `pipe-transport-${Math.random().toString(36).slice(2)}`,
+    consume: vi.fn().mockResolvedValue(consumer),
+    connect: vi.fn().mockResolvedValue(undefined),
+    tuple: { localIp: '127.0.0.1', localPort: 40000 },
+    close: vi.fn(),
+  };
+}
+
+function makeMockRouter(pipeTransport: ReturnType<typeof makeMockPipeTransport>) {
+  return {
+    id: `router-${Math.random().toString(36).slice(2)}`,
+    createPipeTransport: vi.fn().mockResolvedValue(pipeTransport),
+    rtpCapabilities: {} as any,
+  };
+}
+
+// ── determineRole ──────────────────────────────────────────────────────
+
+describe('determineRole', () => {
+  it('returns "primary" when ownRelayId is assigned_relays[0]', () => {
+    expect(determineRole(['relay-A', 'relay-B'], 'relay-A')).toBe('primary');
+  });
+
+  it('returns "standby" when ownRelayId is assigned_relays[1]', () => {
+    expect(determineRole(['relay-A', 'relay-B'], 'relay-B')).toBe('standby');
+  });
+
+  it('returns "standby" for any index > 0 (future-proof)', () => {
+    expect(determineRole(['relay-A', 'relay-B', 'relay-C'], 'relay-C')).toBe('standby');
+  });
+
+  it('throws when own ID is not in assignedRelays', () => {
+    expect(() => determineRole(['relay-A', 'relay-B'], 'relay-X')).toThrow();
+  });
+
+  it('reads assigned_relays.length, never hardcodes 2', () => {
+    // Single relay (edge/degraded) — own ID at 0 → primary
+    expect(determineRole(['relay-solo'], 'relay-solo')).toBe('primary');
+  });
+});
+
+// ── parsePipePortRange ─────────────────────────────────────────────────
+
+describe('parsePipePortRange', () => {
+  it('parses "40000-40100" correctly', () => {
+    const range = parsePipePortRange('40000-40100');
+    expect(range.min).toBe(40000);
+    expect(range.max).toBe(40100);
+  });
+
+  it('uses default range when env is undefined', () => {
+    const range = parsePipePortRange(undefined);
+    expect(range.min).toBe(40000);
+    expect(range.max).toBe(40100);
+  });
+
+  it('throws on malformed range string', () => {
+    expect(() => parsePipePortRange('not-a-range')).toThrow();
+  });
+});
+
+// ── ensureWarmPipe (REQ-RO-004 + REQ-RO-005) ─────────────────────────
+
+describe('ensureWarmPipe — standby pre-first-join', () => {
+  let topology: RoomTopology;
+
+  beforeEach(() => {
+    topology = {
+      roomId: 'room-1',
+      role: 'standby',
+      primaryEndpoint: 'ws://primary:4000',
+      standbyEndpoint: 'ws://standby:4000',
+      pipePort: 40000,
+      pipeConsumer: null,    // REQ-RO-004: no consumer yet pre-join
+    };
+  });
+
+  it('RED-RO-004: pipeConsumer is null before first peer join', () => {
+    // This is the pre-condition — standby has NO active consumer.
+    expect(topology.pipeConsumer).toBeNull();
+  });
+
+  it('RED-RO-005: after ensureWarmPipe, consumer is paused (consumer.pause() called)', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    const result = await ensureWarmPipe(topology, router as any, 40000);
+
+    // Consumer must exist and pause() must have been called
+    expect(result).not.toBeNull();
+    expect(consumer.pause).toHaveBeenCalledOnce();
+    // The consumer should be stored on topology
+    expect(topology.pipeConsumer).toBe(result);
+  });
+
+  it('RED-RO-005: consumer created with paused=true semantics (not active RTP)', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    await ensureWarmPipe(topology, router as any, 40000);
+
+    // The pipe transport was created (pipe established)
+    expect(router.createPipeTransport).toHaveBeenCalledOnce();
+    // consume() was called on the pipe transport
+    expect(pipeTransport.consume).toHaveBeenCalledOnce();
+    // pause() was called to keep consumer in RTCP-only state
+    expect(consumer.pause).toHaveBeenCalledOnce();
+  });
+
+  it('idempotent: second call returns same consumer, does not open second pipe', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    const first = await ensureWarmPipe(topology, router as any, 40000);
+    const second = await ensureWarmPipe(topology, router as any, 40000);
+
+    expect(first).toBe(second);
+    // createPipeTransport called only ONCE
+    expect(router.createPipeTransport).toHaveBeenCalledOnce();
+  });
+});
+
+// ── primary relay: no pipe consumer ───────────────────────────────────
+
+describe('ensureWarmPipe — primary role', () => {
+  it('returns null for primary relay (primary does not call pipeToRouter)', async () => {
+    const topology: RoomTopology = {
+      roomId: 'room-2',
+      role: 'primary',
+      primaryEndpoint: 'ws://primary:4000',
+      standbyEndpoint: 'ws://standby:4000',
+      pipePort: 40000,
+      pipeConsumer: null,
+    };
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    const result = await ensureWarmPipe(topology, router as any, 40000);
+
+    // Primary relay should NOT set up a pipe consumer
+    expect(result).toBeNull();
+    expect(router.createPipeTransport).not.toHaveBeenCalled();
+  });
+});

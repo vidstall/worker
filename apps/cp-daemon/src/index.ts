@@ -25,6 +25,11 @@ import { createEventHandler } from './event-handler.js';
 import { startRoleVoting } from './role-voter.js';
 import { startRevoteWatcher, makeMarkSubmitter, resolveScanIntervalEpochs } from './revote-watcher.js';
 import { SuiChainStateReader } from './sui-chain-state-reader.js';
+import {
+  startRelayHeartbeatWatcher,
+  makePromoteSubmitter,
+} from './relay-heartbeat-watcher.js';
+import { LiveRelayChainStateReader } from './relay-chain-state-reader.js';
 import { startTurnIssuer } from './turn-issuer.js';
 import { startTurnRpc } from './turn-rpc.js';
 import {
@@ -315,6 +320,31 @@ async function main(): Promise<void> {
   );
   logger.info({ module: 'cp-daemon', scanEpochs, revoteIntervalMs }, 'revote watcher started');
 
+  // M1 Phase 3.1 (REQ-RO-009) — RelayHeartbeatWatcher (Layer C, chain-authoritative).
+  // Mirrors the revote-watcher wiring above: a LiveRelayChainStateReader over the
+  // devInspect seam feeds the watcher, which submits permissionless `promote_relay`
+  // PTBs (via makePromoteSubmitter) when a primary's heartbeat is stale > 3 epochs
+  // and the standby is fresh. The chain re-asserts staleness (E_RELAY_NOT_STALE) so
+  // the daemon is advisory. Cadence: RELAY_HEARTBEAT_SCAN_INTERVAL_MS (default = the
+  // live epoch duration, so detection lands within the ~3-epoch threshold window;
+  // C2: this poll cadence is now honored, NOT hardcoded). Phase 5.3 bench tunes it.
+  const relayReader = new LiveRelayChainStateReader(client, config, logger);
+  const relayHeartbeatScanMs = parseInt(
+    process.env['RELAY_HEARTBEAT_SCAN_INTERVAL_MS'] ?? String(Number(sysState.epochDurationMs)),
+    10,
+  );
+  const relayHeartbeatWatcher = startRelayHeartbeatWatcher(
+    relayReader,
+    makePromoteSubmitter(client, signer, config, logger),
+    logger,
+    { pollIntervalMs: relayHeartbeatScanMs },
+  );
+  const stopRelayHeartbeatWatcher = (): void => relayHeartbeatWatcher.stop();
+  logger.info(
+    { module: 'cp-daemon', relayHeartbeatScanMs },
+    'relay heartbeat watcher started (Layer C)',
+  );
+
   // Bootstrap TURN issuer (S30.B Option A — ADR-0005 hybrid 24h+on-slash rotation)
   const turnRotationIntervalMs = parseInt(
     process.env['TURN_ROTATION_INTERVAL_MS'] ?? '86400000',
@@ -367,6 +397,33 @@ async function main(): Promise<void> {
   // Set up event handler with TX context for room assignment + TURN kill-switch
   // + cap-token issuance (F62 M2 W-P2 — capTokenIssuer threaded into txContext so
   // RoomAssigned/RoleAssigned/RoleChanged/RelaySlashed arms drive the issuer).
+  // M1 Phase 3.1 (REQ-RO-009 / C8) — RelayPromoted observer. The chain-authoritative
+  // promotion event is the split-brain resolver: when room_manager::promote_relay
+  // emits RelayPromoted, the cp-daemon records it (the canonical Stay decision). The
+  // client drives its own re-discovery off the same on-chain event via
+  // useRelayDiscovery; the daemon-side observer is the audit + future hook point.
+  const relayPromotedObserver = {
+    onRelayPromoted: async (
+      evt: { room_id: string; old_primary: string; new_primary: string; epoch: number },
+      traceId: string,
+    ): Promise<void> => {
+      logger.info(
+        {
+          trace_id: traceId,
+          module: 'cp-daemon',
+          action: 'relay-promoted-observed',
+          context: {
+            roomId: evt.room_id,
+            oldPrimary: evt.old_primary,
+            newPrimary: evt.new_primary,
+            epoch: evt.epoch,
+          },
+        },
+        'RelayPromoted observed — chain-authoritative promotion recorded (Layer C)',
+      );
+    },
+  };
+
   const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
     client,
     signer,
@@ -374,6 +431,7 @@ async function main(): Promise<void> {
     cpCapId,
     turnIssuer,
     capTokenIssuer,
+    relayPromotedObserver,
   });
 
   // Bootstrap: replay historical relay/signaling/validator events so state maps are populated
@@ -510,6 +568,7 @@ async function main(): Promise<void> {
     stopHeartbeat();
     stopRoleVoting();
     stopRevoteWatcher();
+    stopRelayHeartbeatWatcher();
     stopTurnIssuer();
     stopCapTokenIssuer();
     if (stopTurnRpc) {

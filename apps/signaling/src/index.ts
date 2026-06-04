@@ -32,6 +32,7 @@ import {
 } from './bench-endpoint.js';
 import type { AuthHook, JoinAuthMessage } from './auth.js';
 import { startCapTokenAdmission } from './cap-token-admission.js';
+import { DualRelayRouter, InMemoryRelayEndpointCache, subscribeRelayEndpoints } from './relay-dual-router.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
@@ -137,9 +138,17 @@ const MAX_MESSAGES_PER_SECOND = 100;
  * directly). Injection (not internal construction) is required because
  * `index.ts` is outside the DAEMON-02 chain-aware carve-out — the daemon
  * `main()` block constructs the AuthHook and passes it in.
+ *
+ * M1 Phase 3.2 (REQ-RO-008): when `dualRelayRouter` is provided, every
+ * successful join (admission accepted) sends a `relay-assigned` message with
+ * both primary + standby relay URLs. The router is injected (not constructed
+ * here) so tests can substitute a fake cache. When omitted, no relay-assigned
+ * message is sent (backward-compatible — Stage 1-2 baseline).
  */
 export interface CreateServerOpts {
   authHook?: AuthHook;
+  /** M1 Phase 3.2 (REQ-RO-008) dual-relay router. Additive — does not bypass auth. */
+  dualRelayRouter?: DualRelayRouter;
 }
 
 export function createServer(
@@ -148,6 +157,7 @@ export function createServer(
 ): WebSocketServer {
   const wss = new WebSocketServer({ port, maxPayload: 64 * 1024 });
   const authHook = opts.authHook;
+  const dualRelayRouter = opts.dualRelayRouter;
 
   wss.on('connection', (ws, req) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
@@ -225,6 +235,12 @@ export function createServer(
                 return;
               }
               roomManager.join(msg.roomId, ws, peerId);
+              // M1 Phase 3.2 (REQ-RO-008): after admission gate passes, send
+              // relay-assigned message with primary + standby URLs.
+              // ADDITIVE: never bypasses cap-token control (H5 / T4).
+              if (dualRelayRouter !== undefined) {
+                dualRelayRouter.sendRelayAssigned(ws, msg.roomId, traceId);
+              }
               logger.info(
                 {
                   peerId,
@@ -239,6 +255,12 @@ export function createServer(
             break;
           }
           roomManager.join(msg.roomId, ws, peerId);
+          // M1 Phase 3.2: no-auth path also advertises relay URLs if router is wired.
+          // This preserves the Stage 1-2 dual-relay test coverage path without
+          // requiring a live AuthHook.
+          if (dualRelayRouter !== undefined) {
+            dualRelayRouter.sendRelayAssigned(ws, msg.roomId, randomUUID());
+          }
           logger.info(
             { peerId, roomId: msg.roomId, roomSize: roomManager.getRoomSize(msg.roomId) },
             'Peer joined room',
@@ -356,8 +378,31 @@ if (isMainModule) {
     // GATES room joins against on-chain cap-tokens.
     const admission = await startCapTokenAdmission(client, config.packageId, logger);
 
-    // Step 2: Start WebSocket server (gated by the live cap-token AuthHook)
-    const wss = createServer(PORT, { authHook: admission.authHook });
+    // Step 1.6: Wire dual-relay endpoint cache (M1 Phase 3.2, REQ-RO-008, D-RO-3).
+    // The cache is populated by subscribeRelayEndpoints, which polls
+    // relay_registry::RelayRegistered (→ id→ws-URL) + room_manager::RoomAssigned
+    // (→ room→[primary,standby]) via the signaling daemon's existing chain-poll
+    // infra (N2 fix — no cross-daemon IPC). Primed once at startup so a relay that
+    // registered before this daemon booted is still resolvable.
+    const relayEndpointCache = new InMemoryRelayEndpointCache();
+    const dualRelayRouterInstance = new DualRelayRouter(relayEndpointCache, logger);
+    const relayEndpointPollMs = parseInt(
+      process.env['RELAY_ENDPOINT_POLL_INTERVAL_MS'] ?? '5000',
+      10,
+    );
+    const stopRelayEndpoints = await subscribeRelayEndpoints(
+      client,
+      config.packageId,
+      relayEndpointCache,
+      logger,
+      { pollIntervalMs: relayEndpointPollMs },
+    );
+
+    // Step 2: Start WebSocket server (gated by the live cap-token AuthHook + dual-relay router)
+    const wss = createServer(PORT, {
+      authHook: admission.authHook,
+      dualRelayRouter: dualRelayRouterInstance,
+    });
 
     // Step 3: Start heartbeat loop (30s default)
     const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
@@ -424,6 +469,9 @@ if (isMainModule) {
       // shutdown(wss) calls process.exit(0) on wss.close (the fast path, which
       // would otherwise abort a mid-flight unsubscribe).
       await admission.shutdown();
+      // Tear down the relay-endpoint poller too (M1 Phase 3.2, N2) — awaits the
+      // in-flight tick so no dangling queryEvents poll survives shutdown.
+      await stopRelayEndpoints();
       shutdown(wss);
     };
 
