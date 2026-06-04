@@ -33,6 +33,8 @@
  */
 
 import type { types as msTypes } from 'mediasoup';
+import type { Logger } from '@dvconf/shared';
+import { ensureWarmPipe, type RoomTopology } from './relay-role-manager.js';
 
 // ── Announce contract ──────────────────────────────────────────────────
 
@@ -109,6 +111,61 @@ export function createInterRelayAnnouncer(
   };
 }
 
+/**
+ * Minimal duck-type of a `ws` WebSocket the live inter-relay sink needs.
+ * Kept narrow (readyState + send) so the sender is unit-testable with a plain
+ * object and stays decoupled from the `ws` import in index.ts.
+ */
+export interface InterRelaySocketLike {
+  readyState: number;
+  send(data: string): void;
+}
+
+/** `ws` WebSocket.OPEN — the only readyState on which a send is attempted. */
+const WS_OPEN = 1;
+
+/**
+ * BENCH-2 / G1: builds the LIVE inter-relay sender used on the PRIMARY.
+ *
+ * The prior index.ts sink was a no-op log stub — `announceProducer` serialized
+ * a frame that never left the process, so the standby never received a real
+ * producerId. This sink ACTUALLY TRANSMITS: it pulls the current accepted
+ * standby socket from `getSocket()` (the wiring layer sets it when the standby
+ * opens its inter-relay link) and `.send()`s the frame when the socket is OPEN.
+ *
+ * Best-effort by contract (mirrors createInterRelayAnnouncer's swallow):
+ *   - no socket attached yet (standby not connected) → drop, no throw;
+ *   - socket not OPEN (connecting / closed)          → drop, no throw;
+ *   - socket.send throws (link died mid-flight)       → propagated to the
+ *     announcer's try/catch, which swallows it (produce path never crashes).
+ *
+ * @param getSocket - returns the live standby socket, or null when none.
+ * @param logger    - optional structured logger; logs drop reasons at debug.
+ */
+export function createWsInterRelaySender(
+  getSocket: () => InterRelaySocketLike | null | undefined,
+  logger?: Logger,
+): InterRelaySender {
+  return {
+    send(data: string): void {
+      const socket = getSocket();
+      if (!socket) {
+        logger?.debug('G1: inter-relay announce dropped — no standby link attached yet');
+        return;
+      }
+      if (socket.readyState !== WS_OPEN) {
+        logger?.debug(
+          { readyState: socket.readyState },
+          'G1: inter-relay announce dropped — standby link not OPEN',
+        );
+        return;
+      }
+      // Let send() throw propagate to createInterRelayAnnouncer's try/catch.
+      socket.send(data);
+    },
+  };
+}
+
 // ── Standby-side producer registry ─────────────────────────────────────
 
 /**
@@ -178,5 +235,178 @@ export class InterRelayProducerRegistry {
   /** Test/diagnostic — total rooms tracked. */
   get roomCount(): number {
     return this.byRoom.size;
+  }
+}
+
+// ── Standby warm-pipe coordinator (BENCH-2 / G1) ────────────────────────
+
+/**
+ * Per-room bookkeeping the coordinator needs to drive the not-ready re-run.
+ * `producerId` is the id the LAST ensureWarmPipe consumed for the room — either
+ * the resolved real id or the `pipe-producer-pending-<roomId>` placeholder.
+ */
+interface WarmPipeState {
+  topology: RoomTopology;
+  router: msTypes.Router;
+  pipePort: number;
+  /** The producerId consumed by the most recent ensureWarmPipe for this room. */
+  consumedProducerId: string;
+  /** True while we are still on the placeholder (announce not yet resolved). */
+  pending: boolean;
+}
+
+/** Mirrors the placeholder ensureWarmPipe falls back to (relay-role-manager). */
+function placeholderProducerId(roomId: string): string {
+  return `pipe-producer-pending-${roomId}`;
+}
+
+/**
+ * BENCH-2 / G1 — orchestrates the STANDBY warm pipe so it consumes the PRIMARY's
+ * REAL producer (replacing the `pipe-producer-pending-<roomId>` placeholder).
+ *
+ * This is the wiring the bench needs that did NOT exist before: on the first
+ * peer join the standby resolves the primary's producerId from the announce
+ * registry and passes it to ensureWarmPipe; if the announce hasn't arrived yet
+ * the placeholder is used AND the room is remembered so a later announce
+ * triggers a re-run (the not-ready re-run contract documented at
+ * relay-role-manager.ts L143-146):
+ *
+ *   1. ensure(topology, router, pipePort)
+ *        → resolve(roomId); call ensureWarmPipe with the real id when present,
+ *          else the placeholder (ensureWarmPipe's own fallback). Remember the
+ *          room either way.
+ *   2. onAnnounce(roomId, topology, router, pipePort)
+ *        → if the room is still on the placeholder AND the registry now resolves
+ *          a real id, reset topology.pipeConsumer = null and re-run
+ *          ensureWarmPipe with the real id (a fresh paused Consumer, REQ-RO-005).
+ *
+ * ensureWarmPipe's signature + paused-consumer semantics are UNCHANGED — this
+ * class only resolves + passes the producerId and drives the re-run. It does
+ * not bypass or duplicate ensureWarmPipe.
+ */
+export class StandbyWarmPipeCoordinator {
+  private readonly states = new Map<string, WarmPipeState>();
+
+  constructor(
+    private readonly registry: InterRelayProducerRegistry,
+    private readonly logger?: Logger,
+  ) {}
+
+  /**
+   * First-peer-join entry. Resolves the real producerId from the announce
+   * registry (null → placeholder fallback) and calls ensureWarmPipe. Idempotent
+   * at the ensureWarmPipe level (its pipeConsumer guard); we additionally track
+   * the room so a later announce can re-run when we are still on the placeholder.
+   */
+  async ensure(
+    topology: RoomTopology,
+    router: msTypes.Router,
+    pipePort: number,
+  ): Promise<msTypes.Consumer | null> {
+    const announced = this.registry.resolve(topology.roomId);
+    const realId = announced?.producerId;
+    const pending = realId === undefined;
+    const consumedProducerId = realId ?? placeholderProducerId(topology.roomId);
+
+    // Only record state for the standby (ensureWarmPipe returns null for primary).
+    if (topology.role === 'standby') {
+      this.states.set(topology.roomId, {
+        topology,
+        router,
+        pipePort,
+        consumedProducerId,
+        pending,
+      });
+    }
+
+    if (realId !== undefined) {
+      this.logger?.info(
+        { roomId: topology.roomId, producerId: realId },
+        'G1: standby warm pipe resolving REAL announced producerId',
+      );
+    } else {
+      this.logger?.debug(
+        { roomId: topology.roomId, placeholder: consumedProducerId },
+        'G1: standby warm pipe — no producer announced yet, using placeholder (re-run on announce)',
+      );
+    }
+
+    return ensureWarmPipe(topology, router, pipePort, realId);
+  }
+
+  /**
+   * Announce-arrival hook. Returns true iff a re-run actually re-consumed the
+   * room's pipe with the now-real producerId; false otherwise (no tracked
+   * topology / not pending / still unresolved / already real).
+   *
+   * Optional explicit args let the caller pass the room's live topology/router
+   * (the standby's signaling layer holds them); when omitted we fall back to the
+   * snapshot captured in ensure().
+   */
+  async onAnnounce(
+    roomId: string,
+    topology?: RoomTopology,
+    router?: msTypes.Router,
+    pipePort?: number,
+  ): Promise<boolean> {
+    const state = this.states.get(roomId);
+    if (!state) {
+      // Never ensured for this room — nothing to re-run.
+      return false;
+    }
+    if (!state.pending) {
+      // Already consuming the real producer — no double-pipe.
+      return false;
+    }
+
+    const announced = this.registry.resolve(roomId);
+    if (!announced) {
+      // Announce fired but still nothing resolvable — stay on the placeholder.
+      return false;
+    }
+
+    const useTopology = topology ?? state.topology;
+    const useRouter = router ?? state.router;
+    const usePipePort = pipePort ?? state.pipePort;
+
+    // Not-ready re-run contract: drop the placeholder consumer and re-open the
+    // pipe with the real producerId. Resetting pipeConsumer=null bypasses
+    // ensureWarmPipe's idempotency guard so it consumes the real id afresh.
+    const stale = useTopology.pipeConsumer;
+    if (stale) {
+      try {
+        stale.close();
+      } catch {
+        // Best-effort close of the placeholder consumer — must not block cutover.
+      }
+    }
+    useTopology.pipeConsumer = null;
+
+    this.logger?.info(
+      { roomId, producerId: announced.producerId, kind: announced.kind },
+      'G1: announce arrived — re-running warm pipe with REAL producerId (placeholder cutover)',
+    );
+
+    const consumer = await ensureWarmPipe(
+      useTopology,
+      useRouter,
+      usePipePort,
+      announced.producerId,
+    );
+
+    this.states.set(roomId, {
+      topology: useTopology,
+      router: useRouter,
+      pipePort: usePipePort,
+      consumedProducerId: announced.producerId,
+      pending: false,
+    });
+
+    return consumer !== null;
+  }
+
+  /** Drops a room's coordinator state (room close / worker rebuild). */
+  clear(roomId: string): void {
+    this.states.delete(roomId);
   }
 }

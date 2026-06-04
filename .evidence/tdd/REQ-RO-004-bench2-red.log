@@ -1,0 +1,39 @@
+
+> relay@1.0.0 test C:\Thesis\dvconf\.claude\worktrees\agent-a7c7f49a1cb5a9f7d\dvconf-daemons-wt\apps\relay
+> vitest run "inter-relay-warmpipe"
+
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/.claude/worktrees/agent-a7c7f49a1cb5a9f7d/dvconf-daemons-wt/apps/relay[39m
+
+ [31m❯[39m src/__tests__/inter-relay-warmpipe.test.ts [2m([22m[2m11 tests[22m[2m | [22m[31m11 failed[39m[2m)[22m[32m 15[2mms[22m[39m
+[31m   [31m×[31m StandbyWarmPipeCoordinator — registry HAS producer (ready path)[2m > [22mRED-BENCH2-1: ensureWarmPipe is called with the REAL producerId from the registry (not the placeholder)[39m[32m 8[2mms[22m[39m
+[31m     → StandbyWarmPipeCoordinator is not a constructor[39m
+[31m   [31m×[31m StandbyWarmPipeCoordinator — registry HAS producer (ready path)[2m > [22mRED-BENCH2-2: ready path still pauses the consumer (REQ-RO-005 preserved)[39m[32m 1[2mms[22m[39m
+[31m     → StandbyWarmPipeCoordinator is not a constructor[39m
+[31m   [31m×[31m StandbyWarmPipeCoordinator — NOT-READY path + announce re-run[2m > [22mRED-BENCH2-3: when registry has NO producer yet, the placeholder is used[39m[32m 1[2mms[22m[39m
+[31m     → StandbyWarmPipeCoordinator is not a constructor[39m
+[31m   [31m×[31m StandbyWarmPipeCoordinator — NOT-READY path + announce re-run[2m > [22mRED-BENCH2-4: a later announce triggers a RE-RUN that resets pipeConsumer and re-consumes with the REAL id[39m[32m 1[2mms[22m[39m
+[31m     → StandbyWarmPipeCoordinator is not a constructor[39m
+[31m   [31m×[31m StandbyWarmPipeCoordinator — NOT-READY path + announce re-run[2m > [22mRED-BENCH2-5: the re-run consumer is paused (REQ-RO-005 preserved across cutover)[39m[32m 1[2mms[22m[39m
+[31m     → StandbyWarmPipeCoordinator is not a constructor[39m
+[31m   [31m×[31m StandbyWarmPipeCoordinator — NOT-READY path + announce re-run[2m > [22mRED-BENCH2-6: announce re-run is a NO-OP once the real id is already consumed (no double-pipe)[39m[32m 1[2mms[22m[39m
+[31m     → StandbyWarmPipeCoordinator is not a constructor[39m
+[31m   [31m×[31m StandbyWarmPipeCoordinator — NOT-READY path + announce re-run[2m > [22mRED-BENCH2-7: onAnnounce for a room with no prior ensure() does nothing (no topology tracked)[39m[32m 1[2mms[22m[39m
+[31m     → StandbyWarmPipeCoordinator is not a constructor[39m
+[31m   [31m×[31m createWsInterRelaySender — primary announce reaches the wire[2m > [22mRED-BENCH2-8: with a live socket attached, send() puts the announce bytes on the wire[39m[32m 0[2mms[22m[39m
+[31m     → (0 , createWsInterRelaySender) is not a function[39m
+[31m   [31m×[31m createWsInterRelaySender — primary announce reaches the wire[2m > [22mRED-BENCH2-9: with NO socket attached yet, send() does not throw (best-effort queue/drop)[39m[32m 1[2mms[22m[39m
+[31m     → (0 , createWsInterRelaySender) is not a function[39m
+[31m   [31m×[31m createWsInterRelaySender — primary announce reaches the wire[2m > [22mRED-BENCH2-10: a socket that is not OPEN is treated as down (no send, no throw)[39m[32m 1[2mms[22m[39m
+[31m     → (0 , createWsInterRelaySender) is not a function[39m
+[31m   [31m×[31m createWsInterRelaySender — primary announce reaches the wire[2m > [22mRED-BENCH2-11: a throwing socket is swallowed by the announcer (produce path never crashes)[39m[32m 0[2mms[22m[39m
+[31m     → (0 , createWsInterRelaySender) is not a function[39m
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m11 failed[39m[22m[90m (11)[39m
+[2m   Start at [22m 00:21:56
+[2m   Duration [22m 704ms[2m (transform 81ms, setup 0ms, collect 77ms, tests 15ms, environment 0ms, prepare 299ms)[22m
+
+C:\Thesis\dvconf\.claude\worktrees\agent-a7c7f49a1cb5a9f7d\dvconf-daemons-wt\apps\relay:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  relay@1.0.0 test: `vitest run "inter-relay-warmpipe"`
+Exit status 1

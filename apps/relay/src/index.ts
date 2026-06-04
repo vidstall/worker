@@ -31,6 +31,9 @@ import { WebSocket } from 'ws';
 import {
   InterRelayProducerRegistry,
   createInterRelayAnnouncer,
+  createWsInterRelaySender,
+  StandbyWarmPipeCoordinator,
+  type InterRelaySocketLike,
 } from './inter-relay.js';
 import { determineRole } from './relay-role-manager.js';
 
@@ -129,16 +132,28 @@ if (isMainModule) {
     // verification is DEFERRED to the bench (Phase 5.3, held for advisor gate 1).
     const interRelayRegistry = new InterRelayProducerRegistry();
     /**
-     * Outbound inter-relay link sink. Backed by the WS socket to the standby
-     * once the live link is accepted (DEFERRED-LIVE, bench Phase 5.3). Until
-     * then it logs + drops (best-effort; the announcer swallows nothing here
-     * because the sink itself is a no-op, not a throw).
+     * BENCH-2 / G1: the LIVE accepted standby socket on the PRIMARY. Held in a
+     * mutable box and read by the WS sender on every announce. The RoomAssigned
+     * poller (Step 7) sets this when the standby opens its inter-relay link to
+     * the primary (relay-ID → endpoint resolution remains the bench's job).
+     * Until a socket is attached the sender drops best-effort (no throw).
      */
-    const interRelaySender = {
-      send: (data: string): void => {
-        logger.debug({ bytes: data.length }, 'G1: inter-relay announce queued (live link wired at bench)');
-      },
-    };
+    const interRelayLink: { socket: InterRelaySocketLike | null } = { socket: null };
+    /**
+     * Outbound inter-relay link sink — now a REAL transmitter (was a no-op log
+     * stub that never put bytes on the wire). When a standby socket is attached
+     * and OPEN, the announce frame is actually sent; otherwise dropped best-effort.
+     */
+    const interRelaySender = createWsInterRelaySender(() => interRelayLink.socket, logger);
+    /**
+     * STANDBY warm-pipe coordinator (BENCH-2 / G1). Resolves the primary's real
+     * producerId from the announce registry on first peer join + drives the
+     * not-ready re-run on announce arrival. The standby's signaling layer hands
+     * it the room topology/router at the bench; instantiated here so the wiring
+     * owns a single coordinator backed by the shared registry.
+     */
+    const standbyWarmPipe = new StandbyWarmPipeCoordinator(interRelayRegistry, logger);
+    void standbyWarmPipe; // standby topology/router handed in at the live bench
     /** Primary-side producer announcer (unit-tested factory). */
     const pushAnnounce = createInterRelayAnnouncer(interRelaySender);
     const interRelayContext: InterRelayContext = {
@@ -212,8 +227,12 @@ if (isMainModule) {
             // DEFERRED-LIVE (bench Phase 5.3): the relay-ID -> endpoint URL
             // resolution (via relay_registry::get_active_relays(), per
             // CONTEXT D-RO-3) + the accepted-socket bookkeeping are wired at
-            // the live bench. The announcer factory + push contract are
-            // unit-tested (inter-relay.test.ts createInterRelayAnnouncer).
+            // the live bench. BENCH-2: the announce SINK now genuinely transmits
+            // (createWsInterRelaySender) — the bench only needs to set
+            // `interRelayLink.socket` to the accepted standby `ws` socket and the
+            // primary's real producerId announces flow over it. The announcer
+            // factory + WS send contract are unit-tested
+            // (inter-relay-warmpipe.test.ts createWsInterRelaySender).
             logger.info(
               { roomId, relayMode, role },
               'G1: relay is PRIMARY for room — announcer installs on standby link (live-wire at bench)',
@@ -223,8 +242,12 @@ if (isMainModule) {
             // `pipe-producer` announces (handled by signaling.ts ->
             // registry.record). DEFERRED-LIVE: resolve relayIds[0] -> ws URL
             // then `new WebSocket(primaryUrl)` and feed inbound frames into the
-            // signaling server's pipe-producer handler. The record + resolve
-            // contract is unit-tested (inter-relay-wiring.test.ts).
+            // signaling server's pipe-producer handler. BENCH-2: on first peer
+            // join the standby calls standbyWarmPipe.ensure(topology, router,
+            // pipePort) (resolves the real producerId, else placeholder) and on
+            // each inbound announce standbyWarmPipe.onAnnounce(roomId) re-runs
+            // the warm pipe with the real id. The record + resolve + re-run
+            // contract is unit-tested (inter-relay-warmpipe.test.ts).
             void WebSocket; // referenced; live link opened at bench
             logger.info(
               { roomId, relayMode, role },
