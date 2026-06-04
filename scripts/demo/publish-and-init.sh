@@ -96,4 +96,51 @@ for(const m of mods){
 fs.writeFileSync(out, JSON.stringify(base,null,2)+"\n");
 console.log("[publish-init] merged "+added+" created object(s) into "+out);
 '
-echo "[publish-init] done -- publish-output.json now carries package + all registries"
+# 7. (W1 defense-demo Phase 3, ADDITIVE) Create + configure a single-CP QuorumConfigState so
+#    live cap-token issuance/revoke + the F8 rotate scenario can run on this demo stack.
+#    create_config is AdminCap-only and stores NO signer set (verify_quorum checks
+#    ControlPlaneRegistry membership, which seed-bootstrap enrolls), so creating it + lowering
+#    the threshold to 1 at publish time is safe with no CP-address dependency (W-P4 recipe).
+echo "[publish-init] creating QuorumConfigState (cp_quorum_sig::create_config)"
+sui client call --package "$PKG" --module cp_quorum_sig --function create_config \
+  --args "$ADMIN" --gas-budget 100000000 --json > /shared/qs-create.json
+QUORUM_STATE_ID="$(node -e 'const o=require("/shared/qs-create.json");const c=(o.objectChanges||[]).find(x=>x.type==="created"&&String(x.objectType||"").includes("::cp_quorum_sig::QuorumConfigState"));if(!c){console.error("FATAL: no QuorumConfigState created");process.exit(1)}process.stdout.write(c.objectId)')"
+[ -n "$QUORUM_STATE_ID" ] || { echo "[publish-init] FATAL: no QuorumConfigState created" >&2; exit 1; }
+echo "[publish-init] QuorumConfigState=$QUORUM_STATE_ID"
+
+# NetworkRegistry id is not held in a var above -- parse it from the publish output (node; jq absent).
+NETWORK_REGISTRY_ID="$(node -e 'const d=require(process.env.PUBLISH_OUTPUT);const o=(d.objectChanges||[]).find(c=>c.type==="created"&&/::NetworkRegistry(<|$)/.test(c.objectType||""));process.stdout.write(o&&o.objectId?o.objectId:"")')"
+[ -n "$NETWORK_REGISTRY_ID" ] || { echo "[publish-init] FATAL: no NetworkRegistry in publish output" >&2; exit 1; }
+
+echo "[publish-init] lowering min_quorum to 1 (cp_quorum_sig::update_threshold)"
+DEPLOYER_ADDR="$(sui client active-address)"
+sui client call --package "$PKG" --module cp_quorum_sig --function update_threshold \
+  --args "$ADMIN" "$NETWORK_REGISTRY_ID" "$QUORUM_STATE_ID" 1 "$DEPLOYER_ADDR" \
+  --gas-budget 100000000 --json > /dev/null
+
+# 8. Merge the QuorumConfigState id into PUBLISH_OUTPUT in the SAME shape read-publish-output.sh
+#    greps for (type:"created" + objectType ending ::cp_quorum_sig::QuorumConfigState), so a
+#    Phase-5 `QUORUM_STATE_OBJECT_ID="$(extract_shared QuorumConfigState)"` line will find it.
+PKG="$PKG" QS="$QUORUM_STATE_ID" node -e '
+const fs=require("fs");
+const out=process.env.PUBLISH_OUTPUT;
+const o=JSON.parse(fs.readFileSync(out,"utf8"));
+o.objectChanges=o.objectChanges||[];
+o.objectChanges.push({type:"created",objectType:process.env.PKG+"::cp_quorum_sig::QuorumConfigState",objectId:process.env.QS});
+fs.writeFileSync(out, JSON.stringify(o,null,2)+"\n");
+console.log("[publish-init] merged QuorumConfigState into "+out);
+'
+
+# 9. Export demo-only AdminCap creds for the cap-token issuer/revoke + F8 rotate scenarios.
+#    LOCALNET THROWAWAY KEY ONLY -- never run against a real network. On sui v1.66.2,
+#    `sui keytool export --json` returns a top-level .exportedPrivateKey (verified against the
+#    cp-daemon localnet-fixture / cap-token-wiring-e2e / run-smoke usages). If a later sui rev
+#    ever changes that field, the Task 0.2 fallback is to transfer the AdminCap to the seed CP
+#    in seed-bootstrap.ts instead of exporting the publisher secret here.
+echo "[publish-init] exporting demo-only admin creds"
+ADMIN_SECRET="$(sui keytool export --key-identity "$(sui client active-address)" --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(o.exportedPrivateKey||(o.key&&o.key.exportedPrivateKey)||"")})')"
+[ -n "$ADMIN_SECRET" ] || { echo "[publish-init] FATAL: could not export publisher secret" >&2; exit 1; }
+CAP="$ADMIN" SK="$ADMIN_SECRET" node -e 'const fs=require("fs");fs.writeFileSync("/shared/admin-creds.json",JSON.stringify({adminCapId:process.env.CAP,adminSecretKey:process.env.SK},null,2)+"\n")'
+echo "[publish-init] admin-creds.json written (adminCapId=$ADMIN)"
+
+echo "[publish-init] done -- publish-output.json now carries package + all registries + QuorumConfigState"
