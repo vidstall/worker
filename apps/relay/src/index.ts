@@ -21,12 +21,18 @@ import {
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
-import { createSignalingServer, type TurnContext } from './signaling.js';
+import { createSignalingServer, type TurnContext, type InterRelayContext } from './signaling.js';
 import { MetricsTracker } from './metrics.js';
 import { startMetricsServer } from './metrics-server.js';
 import { closeRelayProbe } from './room-handler.js';
 import { deriveCoturnUrl } from './coturn-url.js';
 import { fetchTurnCredential } from './turn-fetcher.js';
+import { WebSocket } from 'ws';
+import {
+  InterRelayProducerRegistry,
+  createInterRelayAnnouncer,
+} from './inter-relay.js';
+import { determineRole } from './relay-role-manager.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -111,11 +117,45 @@ if (isMainModule) {
           })()
         : undefined;
 
+    // G1 inter-relay coordination context. The registry is shared; role +
+    // outbound link are populated lazily by the RoomAssigned poller (Step 7)
+    // once this relay learns its role + the paired relay's endpoint. The
+    // standby OPENS a WS link to the primary to receive `pipe-producer`
+    // announces; the primary pushes announces over the link the standby opened.
+    //
+    // NOTE: this is the wiring layer (not unit-tested — mirrors the isMainModule
+    // guard). The announce contract + producerId resolution are unit-tested in
+    // inter-relay.test.ts / inter-relay-wiring.test.ts. LIVE two-relay
+    // verification is DEFERRED to the bench (Phase 5.3, held for advisor gate 1).
+    const interRelayRegistry = new InterRelayProducerRegistry();
+    /**
+     * Outbound inter-relay link sink. Backed by the WS socket to the standby
+     * once the live link is accepted (DEFERRED-LIVE, bench Phase 5.3). Until
+     * then it logs + drops (best-effort; the announcer swallows nothing here
+     * because the sink itself is a no-op, not a throw).
+     */
+    const interRelaySender = {
+      send: (data: string): void => {
+        logger.debug({ bytes: data.length }, 'G1: inter-relay announce queued (live link wired at bench)');
+      },
+    };
+    /** Primary-side producer announcer (unit-tested factory). */
+    const pushAnnounce = createInterRelayAnnouncer(interRelaySender);
+    const interRelayContext: InterRelayContext = {
+      // Default to 'primary'; corrected per-room by the RoomAssigned poller.
+      role: 'primary',
+      registry: interRelayRegistry,
+      announceProducer: (roomId, producer) => {
+        pushAnnounce(roomId, producer);
+      },
+    };
+
     const { wss, getRoomCount } = createSignalingServer(
       manager,
       metrics,
       logger,
       turnContext,
+      interRelayContext,
     );
 
     // Step 5: Start metrics HTTP server (default port 4001)
@@ -151,15 +191,55 @@ if (isMainModule) {
         const data = event.parsedJson as Record<string, unknown>;
         const relayIds = data['relay_ids'] as string[] | undefined;
         const relayMode = data['relay_mode'] as number | undefined;
+        const roomId = data['room_id'] as string | undefined;
         if (relayIds && relayIds.includes(myMinerId)) {
+          // G1: determine this relay's role for the room (primary = relay_ids[0],
+          // standby = [1..]; reads .length, never hardcodes 2). Drives the
+          // inter-relay producer-announce direction.
+          let role: 'primary' | 'standby' = 'primary';
+          try {
+            role = determineRole(relayIds, myMinerId);
+          } catch (err) {
+            logger.warn({ err, roomId, relayIds }, 'G1: could not determine relay role for room');
+          }
+          interRelayContext.role = role;
+
+          if (role === 'primary') {
+            // PRIMARY: install the announcer over the inter-relay link to the
+            // standby. The standby OPENS the link (it knows the primary's
+            // endpoint); the primary pushes announces over the accepted socket.
+            //
+            // DEFERRED-LIVE (bench Phase 5.3): the relay-ID -> endpoint URL
+            // resolution (via relay_registry::get_active_relays(), per
+            // CONTEXT D-RO-3) + the accepted-socket bookkeeping are wired at
+            // the live bench. The announcer factory + push contract are
+            // unit-tested (inter-relay.test.ts createInterRelayAnnouncer).
+            logger.info(
+              { roomId, relayMode, role },
+              'G1: relay is PRIMARY for room — announcer installs on standby link (live-wire at bench)',
+            );
+          } else {
+            // STANDBY: open a WS link to the primary's endpoint to receive
+            // `pipe-producer` announces (handled by signaling.ts ->
+            // registry.record). DEFERRED-LIVE: resolve relayIds[0] -> ws URL
+            // then `new WebSocket(primaryUrl)` and feed inbound frames into the
+            // signaling server's pipe-producer handler. The record + resolve
+            // contract is unit-tested (inter-relay-wiring.test.ts).
+            void WebSocket; // referenced; live link opened at bench
+            logger.info(
+              { roomId, relayMode, role },
+              'G1: relay is STANDBY for room — opens inter-relay link to primary (live-wire at bench)',
+            );
+          }
+
           if (relayMode === 1) {
             logger.info(
-              { roomId: data['room_id'], relayMode },
+              { roomId, relayMode },
               'MCU pipeline initialized for room — composite output mode',
             );
           } else {
             logger.info(
-              { roomId: data['room_id'], relayMode },
+              { roomId, relayMode },
               'SFU room assigned — individual stream forwarding',
             );
           }

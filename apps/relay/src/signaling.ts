@@ -22,6 +22,11 @@ import {
   ensureRelayProbe,
 } from './room-handler.js';
 import { McuPipeline } from './mcu-pipeline.js';
+import {
+  type InterRelayProducerRegistry,
+  isPipeProducerAnnounce,
+} from './inter-relay.js';
+import type { RelayRole } from './relay-role-manager.js';
 
 // ── Protocol message types ──────────────────────────────────────────
 
@@ -53,12 +58,31 @@ interface ProduceMessage {
 
 interface ConsumeMessage {
   type: 'consume';
-  producerId: string;
+  /**
+   * Optional. On the PRIMARY a client supplies the producerId it learned via a
+   * `newProducer` notification. On the STANDBY (G1 reconciliation) the client
+   * sends `{ type:'consume', rtpCapabilities }` WITHOUT a producerId and the
+   * standby resolves the piped producer from room context (the inter-relay
+   * announce registry). See dev-fe client-consume contract reconciliation.
+   */
+  producerId?: string;
   rtpCapabilities: msTypes.RtpCapabilities;
 }
 
 interface LeaveMessage {
   type: 'leave';
+}
+
+/**
+ * Inbound inter-relay producer-announce frame (G1). Received by the STANDBY
+ * relay on the same WS server, distinguished from client frames by `type`.
+ * Shape matches PipeProducerAnnounce in inter-relay.ts.
+ */
+interface PipeProducerMessage {
+  type: 'pipe-producer';
+  roomId: string;
+  producerId: string;
+  kind: msTypes.MediaKind;
 }
 
 type SignalingMessage =
@@ -67,7 +91,8 @@ type SignalingMessage =
   | ConnectTransportMessage
   | ProduceMessage
   | ConsumeMessage
-  | LeaveMessage;
+  | LeaveMessage
+  | PipeProducerMessage;
 
 /**
  * S30.C — Optional TURN credential injection. When provided, the signaling
@@ -82,6 +107,30 @@ export interface TurnContext {
   ): Promise<
     Array<{ urls: string | string[]; username?: string; credential?: string }> | null
   >;
+}
+
+/**
+ * G1 inter-relay coordination context. When provided, the signaling server:
+ *  - PRIMARY: after handleProduce, calls `announceProducer(roomId, producer)`
+ *    to push a `pipe-producer` frame to the paired standby.
+ *  - STANDBY: records inbound `pipe-producer` frames into `registry`, and
+ *    resolves a client `consume` that omits producerId from room context.
+ *
+ * Injected by index.ts (the wiring layer) — kept optional + decoupled so the
+ * baseline single-relay signaling path is unchanged (mirrors TurnContext).
+ *
+ * LIVE two-relay verification DEFERRED to bench (Phase 5.3).
+ */
+export interface InterRelayContext {
+  /** This relay's role for the rooms it serves. */
+  role: RelayRole;
+  /** Standby-side registry of producers announced by the primary. */
+  registry: InterRelayProducerRegistry;
+  /**
+   * Primary-side: push a producer announce to the paired standby.
+   * The wiring layer holds the inter-relay WS link to the standby endpoint.
+   */
+  announceProducer(roomId: string, producer: Pick<msTypes.Producer, 'id' | 'kind'>): void;
 }
 
 /** Send a JSON message to a WebSocket. */
@@ -101,6 +150,7 @@ export function createSignalingServer(
   metrics: MetricsTracker,
   logger: Logger,
   turnContext?: TurnContext,
+  interRelay?: InterRelayContext,
 ): { wss: WebSocketServer; getRoomCount: () => number } {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
@@ -184,10 +234,36 @@ export function createSignalingServer(
         break;
       }
 
+      case 'pipe-producer': {
+        handlePipeProducerAnnounce(msg);
+        break;
+      }
+
       default: {
         logger.warn({ type: (msg as { type: string }).type }, 'Unknown signaling message type');
       }
     }
+  }
+
+  /**
+   * G1 STANDBY side — record an inbound inter-relay producer announce.
+   * The primary pushes these so the standby can resolve the real producerId
+   * for its warm pipe + for client consume requests that omit producerId.
+   */
+  function handlePipeProducerAnnounce(msg: PipeProducerMessage): void {
+    if (!interRelay) {
+      logger.debug('Received pipe-producer announce but no InterRelayContext — ignoring');
+      return;
+    }
+    if (!isPipeProducerAnnounce(msg)) {
+      logger.warn({ msg }, 'Malformed pipe-producer announce — ignoring');
+      return;
+    }
+    interRelay.registry.record(msg);
+    logger.info(
+      { roomId: msg.roomId, producerId: msg.producerId, kind: msg.kind },
+      'Inter-relay: recorded announced pipe producer (standby)',
+    );
   }
 
   async function handleJoin(ws: WebSocket, msg: JoinMessage): Promise<void> {
@@ -399,6 +475,17 @@ export function createSignalingServer(
     // Notify all other peers about the new producer (SFU fan-out)
     await notifyNewProducer(room, mapping.peerId, producer, logger);
 
+    // G1 PRIMARY side — announce this producer to the paired standby so it can
+    // resolve the real producerId for its warm pipe + client consume requests.
+    // Only the primary announces (the standby is the consumer of announces).
+    if (interRelay && interRelay.role === 'primary') {
+      interRelay.announceProducer(mapping.roomId, producer);
+      logger.info(
+        { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId },
+        'Inter-relay: announced producer to standby (primary)',
+      );
+    }
+
     logger.info(
       { producerId: producer.id, kind: msg.kind, peerId: mapping.peerId, roomId: mapping.roomId },
       'Producer created',
@@ -413,7 +500,34 @@ export function createSignalingServer(
     const peer = room?.peers.get(mapping.peerId);
     if (!room || !peer) return;
 
-    const consumer = await createConsumer(room, peer, msg.producerId, msg.rtpCapabilities, logger);
+    // G1 client-consume reconciliation. dev-fe's client sends
+    // `{ type:'consume', rtpCapabilities }` to the STANDBY relay WITHOUT a
+    // producerId, expecting the standby to resolve the piped producer from room
+    // context. We resolve from the inter-relay announce registry. On the PRIMARY
+    // (or when the client did supply a producerId) the explicit producerId is used.
+    let producerId = msg.producerId;
+    if (!producerId && interRelay) {
+      const announced = interRelay.registry.resolve(mapping.roomId);
+      if (announced) {
+        producerId = announced.producerId;
+        logger.debug(
+          { roomId: mapping.roomId, producerId, peerId: mapping.peerId },
+          'Inter-relay: resolved piped producer from room context for client consume (standby)',
+        );
+      }
+    }
+
+    if (!producerId) {
+      // No producerId supplied and none announced yet — standby not ready.
+      sendJson(ws, { type: 'error', message: 'No producer available for room yet' });
+      logger.warn(
+        { roomId: mapping.roomId, peerId: mapping.peerId },
+        'Consume request without producerId and no announced producer — standby not ready',
+      );
+      return;
+    }
+
+    const consumer = await createConsumer(room, peer, producerId, msg.rtpCapabilities, logger);
     if (!consumer) {
       sendJson(ws, { type: 'error', message: 'Cannot consume producer' });
       return;
@@ -422,13 +536,13 @@ export function createSignalingServer(
     sendJson(ws, {
       type: 'consumed',
       consumerId: consumer.id,
-      producerId: msg.producerId,
+      producerId,
       kind: consumer.kind,
       rtpParameters: consumer.rtpParameters,
     });
 
     logger.debug(
-      { consumerId: consumer.id, producerId: msg.producerId, peerId: mapping.peerId },
+      { consumerId: consumer.id, producerId, peerId: mapping.peerId },
       'Consumer created for peer',
     );
   }
@@ -454,6 +568,8 @@ export function createSignalingServer(
         room.router.close();
         rooms.delete(roomId);
         metrics.clearRoom(roomId);
+        // G1: drop the inter-relay announce records for this room (standby side).
+        interRelay?.registry.clear(roomId);
         logger.info({ roomId }, 'Room closed (no peers remaining)');
       }
     }

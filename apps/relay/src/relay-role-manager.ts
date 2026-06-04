@@ -102,15 +102,20 @@ export function parsePipePortRange(envValue: string | undefined): PipePortRange 
  *
  * Primary relay: returns null (primary does not pipe to itself).
  *
- * @param topology  - Room topology state (mutated: pipeConsumer set on success).
- * @param router    - The mediasoup Router on the standby relay.
- * @param pipePort  - Local port for the PlainTransport pipe (from PIPE_PORT_RANGE).
+ * @param topology   - Room topology state (mutated: pipeConsumer set on success).
+ * @param router     - The mediasoup Router on the standby relay.
+ * @param pipePort   - Local port for the PlainTransport pipe (from PIPE_PORT_RANGE).
+ * @param producerId - The PRIMARY's real pipe-producer ID, resolved from the
+ *                     inter-relay announce (see inter-relay.ts). When omitted,
+ *                     a clearly-marked `pipe-producer-pending-<roomId>` placeholder
+ *                     is used (no real producer announced yet — G1 fallback).
  * @returns The paused Consumer, or null for primary / on error.
  */
 export async function ensureWarmPipe(
   topology: RoomTopology,
   router: msTypes.Router,
   pipePort: number,
+  producerId?: string,
 ): Promise<msTypes.Consumer | null> {
   // Primary relay does not call pipeToRouter
   if (topology.role === 'primary') {
@@ -133,18 +138,15 @@ export async function ensureWarmPipe(
   } as Parameters<msTypes.Router['createPipeTransport']>[0]);
 
   // Consume from the pipe transport — the producer lives on the primary Router.
-  // NOTE: In a real multi-process setup pipeToRouter() handles both ends; here
-  // we model the standby's Consumer side. The paused consumer carries producers
-  // forwarded from the primary via the pipe — RTCP keepalive only until resume().
-  //
-  // We use the pipe transport's consume() with producerId from the primary.
-  // For the unit-testable module boundary the caller (signaling layer) resolves
-  // the actual producerId; here we create a placeholder that will be replaced
-  // when the primary pipes a real producer (see relay-worker-recovery for the
-  // full rebuild path). The critical contract tested is: consumer.pause() is
-  // called immediately.
+  // G1 wiring: the caller (signaling layer) resolves the PRIMARY's real
+  // producerId from the inter-relay announce registry (inter-relay.ts) and
+  // passes it here. If no producer has been announced yet, we fall back to a
+  // CLEARLY-MARKED `pipe-producer-pending-<roomId>` placeholder — the standby
+  // re-runs ensureWarmPipe once the announce arrives (the topology.pipeConsumer
+  // idempotency guard is reset by the caller in that not-ready path).
+  const resolvedProducerId = producerId ?? `pipe-producer-pending-${topology.roomId}`;
   const consumer = await pipeTransport.consume({
-    producerId: `pipe-producer-${topology.roomId}`,
+    producerId: resolvedProducerId,
   } as Parameters<msTypes.PipeTransport['consume']>[0]);
 
   // REQ-RO-005: pause immediately — RTCP keepalive only, saves ~80% pipe BW.

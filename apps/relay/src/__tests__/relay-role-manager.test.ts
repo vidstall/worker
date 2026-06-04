@@ -181,3 +181,57 @@ describe('ensureWarmPipe — primary role', () => {
     expect(router.createPipeTransport).not.toHaveBeenCalled();
   });
 });
+
+// ── G1 integration wiring: real producerId resolution ─────────────────
+// The standby resolves the PRIMARY's real pipe-producer ID (from the
+// inter-relay announce, see inter-relay.ts) and passes it into ensureWarmPipe,
+// replacing the `pipe-producer-${roomId}` placeholder.
+
+describe('ensureWarmPipe — G1 producerId resolution', () => {
+  let topology: RoomTopology;
+
+  beforeEach(() => {
+    topology = {
+      roomId: 'room-g1',
+      role: 'standby',
+      primaryEndpoint: 'ws://primary:4000',
+      standbyEndpoint: 'ws://standby:4000',
+      pipePort: 40000,
+      pipeConsumer: null,
+    };
+  });
+
+  it('RED-G1: when a real producerId is provided, consume() uses it (not the placeholder)', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL-from-primary');
+
+    expect(pipeTransport.consume).toHaveBeenCalledOnce();
+    const consumeArg = pipeTransport.consume.mock.calls[0]![0] as { producerId: string };
+    expect(consumeArg.producerId).toBe('producer-REAL-from-primary');
+  });
+
+  it('RED-G1: falls back to the typed placeholder when no producerId is provided', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    await ensureWarmPipe(topology, router as any, 40000);
+
+    const consumeArg = pipeTransport.consume.mock.calls[0]![0] as { producerId: string };
+    // Clearly-marked fallback placeholder (no real producer announced yet)
+    expect(consumeArg.producerId).toBe('pipe-producer-pending-room-g1');
+  });
+
+  it('RED-G1: still pauses the consumer when a real producerId is used (REQ-RO-005 preserved)', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL');
+
+    expect(consumer.pause).toHaveBeenCalledOnce();
+  });
+});
