@@ -70,8 +70,22 @@ export type { EventPollerOptions } from './chain/events.js';
 export { waitForRoleAssignment, applyVotedRole } from './chain/role-assignment.js';
 
 // Logger
-export { createLogger } from './logger.js';
-export type { Logger } from './logger.js';
+export { createLogger, buildLoggerOptions } from './logger.js';
+export type { Logger, LoggerEnv } from './logger.js';
+
+// P17 M1 / F63 — cross-daemon trace primitive (x-trace-id chain).
+export {
+  TRACE_HEADER,
+  genTraceId,
+  readTraceId,
+  withTraceHeader,
+  traceChild,
+} from './trace.js';
+export type { IncomingHeaders } from './trace.js';
+
+// P17 M1 / F65 — shared liveness server.
+export { startHealthzServer, healthzBody } from './healthz.js';
+export type { HealthzOptions, HealthzHandle } from './healthz.js';
 
 // Cap-token primitive contract types (F62 W1 Stage 1 + Phase 2.4-retro). Append-only
 // re-exports so daemon consumers (Phase 3.1 cap-token-issuer, Phase 3.2 signaling auth,
