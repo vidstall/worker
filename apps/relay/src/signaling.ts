@@ -24,7 +24,10 @@ import {
 import { McuPipeline } from './mcu-pipeline.js';
 import {
   type InterRelayProducerRegistry,
+  type InterRelaySocketLike,
   isPipeProducerAnnounce,
+  isValidInterRelayToken,
+  INTER_RELAY_SUBPROTOCOL,
 } from './inter-relay.js';
 import type { RelayRole } from './relay-role-manager.js';
 
@@ -131,6 +134,22 @@ export interface InterRelayContext {
    * The wiring layer holds the inter-relay WS link to the standby endpoint.
    */
   announceProducer(roomId: string, producer: Pick<msTypes.Producer, 'id' | 'kind'>): void;
+  /**
+   * G3.2b PRIMARY-side: the server accepted a TAGGED inter-relay peer (the
+   * standby dialing in over the authenticated link). The wiring layer stores it
+   * as the live `interRelayLink.socket` the announce sender transmits over;
+   * `null` is passed when that peer disconnects (single-box detach). Optional —
+   * absent on the in-process bench (which sets the socket directly).
+   */
+  attachPeerSocket?(socket: InterRelaySocketLike | null): void;
+  /**
+   * G3.2b STANDBY-side: fired ONCE on the first peer join for a room this relay
+   * is standby for (room creation). The wiring layer builds the room's
+   * RoomTopology + calls StandbyWarmPipeCoordinator.ensure() so the paused warm
+   * pipe runs in the LIVE signaling path (M1 built ensureWarmPipe but never ran
+   * it in production). Optional.
+   */
+  onStandbyRoomReady?(roomId: string, router: msTypes.Router): void;
 }
 
 /** Send a JSON message to a WebSocket. */
@@ -167,9 +186,46 @@ export function createSignalingServer(
    *  scripts/bench/mediasoup-client-harness.ts. */
   const roomCreationLocks = new Map<string, Promise<void>>();
 
-  const wss = new WebSocketServer({ port, maxPayload: 64 * 1024 });
+  // G3.2b: cross-daemon inter-relay auth. INTER_RELAY_TOKEN (when set) tags the
+  // standby's inbound link; tagged peers are attached as the announce socket and
+  // are the only sockets allowed to inject pipe-producer frames server-side.
+  // Unset (single-host / in-process bench) → the gate is open (unchanged path).
+  const interRelayToken = process.env['INTER_RELAY_TOKEN'] ?? '';
+  const interRelayPeers = new WeakSet<WebSocket>();
+  let attachedInterRelaySocket: WebSocket | null = null;
 
-  wss.on('connection', (ws: WebSocket) => {
+  const wss = new WebSocketServer({
+    port,
+    maxPayload: 64 * 1024,
+    // Select the inter-relay subprotocol when a peer advertises it (a normal
+    // client offers none → handleProtocols is not invoked). Identity signal
+    // alongside the Bearer token; not the auth itself.
+    handleProtocols: (protocols) =>
+      protocols.has(INTER_RELAY_SUBPROTOCOL) ? INTER_RELAY_SUBPROTOCOL : false,
+  });
+
+  wss.on('connection', (ws: WebSocket, req) => {
+    // G3.2b: tag inter-relay peers by their Bearer token (timingSafeEqual). A
+    // client connects with NO Authorization header → untagged → its server-side
+    // pipe-producer frames are dropped at the dispatch gate. We NEVER reject a
+    // client upgrade — the gate is at dispatch, not the handshake.
+    if (
+      interRelayToken !== '' &&
+      isValidInterRelayToken(req.headers['authorization'], interRelayToken)
+    ) {
+      interRelayPeers.add(ws);
+      if (attachedInterRelaySocket !== null) {
+        // Single-box announce socket (per-room keying is the carry-forward): a
+        // second tagged peer DISPLACES the first — announces now flow to the new
+        // socket. Warn so a reconnect flap or an unexpected extra standby is
+        // observable rather than silently re-pointing the announce stream.
+        logger.warn('G3.2b: inter-relay peer re-attached, displacing the prior announce socket');
+      }
+      attachedInterRelaySocket = ws;
+      interRelay?.attachPeerSocket?.(ws);
+      logger.info('G3.2b: inter-relay peer connected + attached (tagged)');
+    }
+
     logger.debug('New WebSocket connection');
 
     ws.on('message', async (data) => {
@@ -190,6 +246,12 @@ export function createSignalingServer(
     });
 
     ws.on('close', () => {
+      // G3.2b: detach the inter-relay announce socket when this tagged peer goes
+      // away (single-box; only if it is still the attached one).
+      if (attachedInterRelaySocket === ws) {
+        attachedInterRelaySocket = null;
+        interRelay?.attachPeerSocket?.(null);
+      }
       handleDisconnect(ws);
     });
 
@@ -235,7 +297,7 @@ export function createSignalingServer(
       }
 
       case 'pipe-producer': {
-        handlePipeProducerAnnounce(msg);
+        handlePipeProducerAnnounce(msg, ws);
         break;
       }
 
@@ -250,9 +312,19 @@ export function createSignalingServer(
    * The primary pushes these so the standby can resolve the real producerId
    * for its warm pipe + for client consume requests that omit producerId.
    */
-  function handlePipeProducerAnnounce(msg: PipeProducerMessage): void {
+  function handlePipeProducerAnnounce(msg: PipeProducerMessage, ws: WebSocket): void {
     if (!interRelay) {
       logger.debug('Received pipe-producer announce but no InterRelayContext — ignoring');
+      return;
+    }
+    // G3.2b dispatch gate: with INTER_RELAY_TOKEN set, only a tagged inter-relay
+    // peer may inject a server-side announce (an unauthed client cannot poison
+    // the standby registry — the original threat). Token unset → gate open.
+    if (interRelayToken !== '' && !interRelayPeers.has(ws)) {
+      logger.warn(
+        { roomId: msg.roomId },
+        'G3.2b: dropping pipe-producer from untagged (non-inter-relay) socket',
+      );
       return;
     }
     if (!isPipeProducerAnnounce(msg)) {
@@ -307,6 +379,16 @@ export function createSignalingServer(
 
           rooms.set(roomId, room);
           logger.info({ roomId, mode: roomMode }, 'Room created');
+
+          // G3.2b: on the first peer join for a room this relay is STANDBY for,
+          // hand the room's router to the wiring layer so it builds the
+          // RoomTopology + opens the paused warm pipe (StandbyWarmPipeCoordinator
+          // .ensure) — running M1's ensureWarmPipe in the LIVE signaling path.
+          // Fired once per room (inside the creation block); the primary never
+          // warm-pipes to itself.
+          if (interRelay?.role === 'standby') {
+            interRelay.onStandbyRoomReady?.(roomId, room.router);
+          }
         }
       } finally {
         release();

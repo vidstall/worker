@@ -32,9 +32,53 @@
  * Requirements: REQ-RO-004 (G1 integration wiring)
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import type { types as msTypes } from 'mediasoup';
 import type { Logger } from '@dvconf/shared';
 import { ensureWarmPipe, type RoomTopology } from './relay-role-manager.js';
+
+// ── Cross-daemon inter-relay link auth (G3.2b) ──────────────────────────
+
+/**
+ * WebSocket subprotocol the standby advertises on the inter-relay upgrade
+ * (`Sec-WebSocket-Protocol`). A label the primary selects via `handleProtocols`
+ * so both ends carry `ws.protocol === INTER_RELAY_SUBPROTOCOL` — a secondary
+ * signal alongside the Bearer token (the token is the actual auth).
+ */
+export const INTER_RELAY_SUBPROTOCOL = 'dvconf-inter-relay.v1';
+
+/**
+ * Validate the `Authorization: Bearer <token>` header presented on an
+ * inter-relay WS upgrade against the configured INTER_RELAY_TOKEN.
+ *
+ * Constant-time on the token CONTENT via `crypto.timingSafeEqual` (the
+ * cp-daemon `checkBearer` precedent uses `===`, which leaks via early-exit —
+ * G3-SUBSPEC pins timingSafeEqual here). A length difference is itself a
+ * mismatch (the token length is not the secret), so we short-circuit before
+ * timingSafeEqual (which throws on unequal-length buffers).
+ *
+ * This only TAGS a peer as inter-relay — it is NEVER used to reject a client
+ * upgrade. A client connects with no Authorization header (returns false →
+ * untagged → its `pipe-producer` frames are dropped at the dispatch gate).
+ * Returns false when no token is configured (empty `expectedToken`): tagging
+ * must never validate against an empty secret (the dispatch gate handles the
+ * "token unset" case separately).
+ */
+export function isValidInterRelayToken(
+  authHeader: string | undefined,
+  expectedToken: string,
+): boolean {
+  if (expectedToken === '') return false;
+  if (typeof authHeader !== 'string') return false;
+  const prefix = 'Bearer ';
+  if (!authHeader.startsWith(prefix)) return false;
+  const presented = authHeader.slice(prefix.length);
+  if (presented.length === 0) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expectedToken, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 // ── Announce contract ──────────────────────────────────────────────────
 
@@ -236,6 +280,56 @@ export class InterRelayProducerRegistry {
   get roomCount(): number {
     return this.byRoom.size;
   }
+}
+
+// ── Standby inbound link handler (G3.2b) ────────────────────────────────
+
+/** Context the standby's inbound inter-relay link handler needs. */
+export interface InboundInterRelayContext {
+  /** Standby-side registry the announced producer is recorded into. */
+  registry: InterRelayProducerRegistry;
+  /**
+   * Optional re-run hook — `StandbyWarmPipeCoordinator.onAnnounce(roomId)`. Fired
+   * AFTER the record so the coordinator re-runs the warm pipe with the now-real
+   * producerId (placeholder cutover). Omitted in pure-registry unit tests.
+   */
+  onAnnounce?: (roomId: string) => void | Promise<void>;
+  logger?: Logger;
+}
+
+/**
+ * G3.2b — the STANDBY's inbound handler for a frame arriving on the inter-relay
+ * WS link it OPENED to the primary (the primary pushes `pipe-producer` announces
+ * down this link). Distinct from the server-side `handlePipeProducerAnnounce` in
+ * signaling.ts (the in-process bench path): this runs on the standby's OUTBOUND
+ * `ws` client socket (wired in inter-relay-link.ts / index.ts).
+ *
+ * Records a valid announce into the registry, then fires `onAnnounce(roomId)` so
+ * the coordinator cuts the warm pipe over to the real producerId. Malformed /
+ * non-announce frames are ignored (no throw — a noisy primary must not crash the
+ * standby). Returns true iff a valid announce was recorded.
+ */
+export async function handleInboundInterRelayFrame(
+  raw: string | Buffer,
+  ctx: InboundInterRelayContext,
+): Promise<boolean> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.toString());
+  } catch {
+    ctx.logger?.debug('G3.2b: inbound inter-relay frame is not JSON — ignoring');
+    return false;
+  }
+  if (!isPipeProducerAnnounce(parsed)) {
+    ctx.logger?.debug(
+      { frameType: (parsed as { type?: unknown })?.type },
+      'G3.2b: inbound inter-relay frame is not a pipe-producer announce — ignoring',
+    );
+    return false;
+  }
+  ctx.registry.record(parsed);
+  if (ctx.onAnnounce) await ctx.onAnnounce(parsed.roomId);
+  return true;
 }
 
 // ── Standby warm-pipe coordinator (BENCH-2 / G1) ────────────────────────

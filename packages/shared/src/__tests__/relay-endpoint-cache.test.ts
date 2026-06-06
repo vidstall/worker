@@ -143,6 +143,41 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
     expect(cache.getAssignedRelays('0xroomE')).toEqual(['0xp', '0xs']);
     expect(cache.getUrl('0xp')).toBe(pUrl);
     expect(cache.getUrl('0xs')).toBe(sUrl);
+    // Default (no opts.modules) polls BOTH modules (symmetric to the filter test).
+    const polled = (client.queryEvents as any).mock.calls.map(
+      (c: any[]) => c[0].query.MoveEventModule.module,
+    );
+    expect(polled).toContain('relay_registry');
+    expect(polled).toContain('room_manager');
+    await stop();
+  });
+
+  it('opts.modules filters the polled modules (G3.2b: relay polls relay_registry only)', async () => {
+    // The relay-side consumer only reads relay-ID→URL (it learns room→relays from
+    // its own room poller), so it subscribes to relay_registry ONLY — dropping the
+    // redundant room_manager poll the G3.2a extraction left in place.
+    const client = makeMockSuiClient({
+      relay_registry: [
+        { type: '0xpkg::relay_registry::RelayRegistered', parsedJson: { miner_id: '0xr', endpoint_url: Array.from(Buffer.from('ws://r.test', 'utf8')) } },
+      ],
+      room_manager: [
+        { type: '0xpkg::room_manager::RoomAssigned', parsedJson: { room_id: '0xroomQ', relay_ids: ['0xr', '0xs'] } },
+      ],
+    });
+    const cache = new InMemoryRelayEndpointCache();
+    const stop = await subscribeRelayEndpoints(client, '0xpkg', cache, mockLogger(), {
+      pollIntervalMs: 999_999,
+      modules: ['relay_registry'],
+    });
+
+    // relay_registry arm populated; room_manager arm NOT polled at all.
+    expect(cache.getUrl('0xr')).toBe('ws://r.test');
+    expect(cache.getAssignedRelays('0xroomQ')).toEqual([]);
+    const polledModules = (client.queryEvents as any).mock.calls.map(
+      (c: any[]) => c[0].query.MoveEventModule.module,
+    );
+    expect(polledModules).toContain('relay_registry');
+    expect(polledModules).not.toContain('room_manager');
     await stop();
   });
 

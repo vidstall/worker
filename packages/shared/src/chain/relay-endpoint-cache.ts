@@ -144,9 +144,19 @@ export async function subscribeRelayEndpoints(
   packageId: string,
   cache: InMemoryRelayEndpointCache,
   logger: Logger,
-  opts?: { pollIntervalMs?: number },
+  opts?: {
+    pollIntervalMs?: number;
+    /**
+     * Which chain modules to poll. Default polls BOTH (signaling needs the
+     * room→relays map too). G3.2b: the relay-side consumer passes
+     * `['relay_registry']` — it only reads relay-ID→URL and learns room→relays
+     * from its own room poller, so the room_manager poll here is redundant.
+     */
+    modules?: Array<'relay_registry' | 'room_manager'>;
+  },
 ): Promise<() => Promise<void>> {
   const intervalMs = opts?.pollIntervalMs ?? 5_000;
+  const modules = opts?.modules ?? ['relay_registry', 'room_manager'];
   let running = true;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> | null = null;
@@ -183,8 +193,7 @@ export async function subscribeRelayEndpoints(
 
   const tick = async (): Promise<void> => {
     try {
-      await pollModule('relay_registry');
-      await pollModule('room_manager');
+      for (const mod of modules) await pollModule(mod);
     } catch (err) {
       logger.warn(
         { module: MODULE, err: String(err) },
