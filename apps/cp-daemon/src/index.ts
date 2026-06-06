@@ -16,6 +16,7 @@ import {
   loadNetworkConfig,
   loadKeypair,
   createLogger,
+  startHealthzServer,
   EventPoller,
 } from '@dvconf/shared';
 import type { Logger } from '@dvconf/shared';
@@ -270,6 +271,13 @@ async function main(): Promise<void> {
     { address, rpcUrl: config.rpcUrl, packageId: config.packageId },
     'CP daemon starting',
   );
+
+  // F65 (DOH-008/009) — always-on, cheap liveness endpoint.
+  const healthz = await startHealthzServer({
+    port: Number(process.env['CP_HEALTHZ_PORT'] ?? 8091),
+    service: 'cp-daemon',
+  });
+  logger.info({ port: healthz.port }, 'healthz listening');
 
   // Auto-register if CP_CAP_ID not in env
   const { cpCapId } = await ensureRegistered(client, signer, config, logger);
@@ -583,6 +591,7 @@ async function main(): Promise<void> {
     roleVotingPoller.stop();
     registrationPoller.stop();
     turnCredentialPoller.stop();
+    void healthz.close();
     logger.info('CP daemon shut down cleanly');
     process.exit(0);
   };

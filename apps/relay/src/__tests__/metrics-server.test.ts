@@ -66,6 +66,24 @@ describe('RO-020 relay /api/probe + /healthz', () => {
     expect((json as { ok: boolean }).ok).toBe(true);
   });
 
+  it('GET /healthz body is extended additively with the standard liveness fields (DOH-009)', async () => {
+    start();
+    const { json } = await getJson(port, '/healthz');
+    const body = json as {
+      ok: boolean;
+      status: string;
+      uptime_seconds: number;
+      pid: number;
+      service: string;
+    };
+    // ok:true retained for RO-020 backward-compat; standard fields added.
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe('alive');
+    expect(typeof body.uptime_seconds).toBe('number');
+    expect(body.pid).toBe(process.pid);
+    expect(body.service).toBe('relay');
+  });
+
   it('GET /api/probe returns 200 + liveness body (standby answered)', async () => {
     start(() => ({ role: 'standby', pipeConsumerAlive: true, rtcpAlive: true }));
     const { status, json } = await getJson(port, '/api/probe');

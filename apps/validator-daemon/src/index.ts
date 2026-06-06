@@ -25,10 +25,11 @@ import {
   generateSessionKeypair,
   EventPoller,
   createLogger,
+  startHealthzServer,
   economicLayerModuleName,
   MIN_PROOFS_FOR_DISTRIBUTION,
 } from '@dvconf/shared';
-import type { NetworkConfig, Logger } from '@dvconf/shared';
+import type { NetworkConfig, Logger, HealthzHandle } from '@dvconf/shared';
 import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvconf/shared';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
@@ -614,12 +615,14 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
 /* istanbul ignore next -- CLI entry point */
 async function main(): Promise<void> {
   let state: DaemonState | null = null;
+  let healthz: HealthzHandle | undefined;
 
   const shutdown = () => {
     if (state) {
       stopDaemon(state);
       state = null;
     }
+    void healthz?.close();
     process.exit(0);
   };
 
@@ -627,6 +630,12 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
 
   try {
+    // F65 (DOH-008/009) — always-on, cheap liveness endpoint.
+    healthz = await startHealthzServer({
+      port: Number(process.env['VALIDATOR_HEALTHZ_PORT'] ?? 8101),
+      service: 'validator-daemon',
+    });
+    logger.info({ port: healthz.port }, 'healthz listening');
     state = await startDaemon();
   } catch (err) {
     logger.error({ err }, 'Validator daemon failed to start');

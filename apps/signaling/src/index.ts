@@ -16,6 +16,7 @@ import {
   loadNetworkConfig,
   loadKeypair,
   createLogger,
+  startHealthzServer,
   SIGNALING_SESSION_REWARD,
   InMemoryRelayEndpointCache,
   subscribeRelayEndpoints,
@@ -372,6 +373,13 @@ if (isMainModule) {
       'Signaling daemon starting',
     );
 
+    // F65 (DOH-008/009) — always-on, cheap liveness endpoint.
+    const healthz = await startHealthzServer({
+      port: Number(process.env['SIGNALING_HEALTHZ_PORT'] ?? 8082),
+      service: 'signaling',
+    });
+    logger.info({ port: healthz.port }, 'healthz listening');
+
     // Step 1: Auto-register on-chain
     const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger);
 
@@ -466,6 +474,7 @@ if (isMainModule) {
       stopHeartbeat();
       closeSignalingProbe();
       closeBenchHttpServer();
+      void healthz.close();
       // Stop the cap-token poller + epoch timer FIRST and AWAIT the unsubscribe,
       // so the in-flight capability_events RPC poll is torn down cleanly before
       // shutdown(wss) calls process.exit(0) on wss.close (the fast path, which

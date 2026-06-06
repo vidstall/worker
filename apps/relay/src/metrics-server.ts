@@ -16,7 +16,7 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import type { Logger } from '@dvconf/shared';
+import { type Logger, healthzBody } from '@dvconf/shared';
 import type { MetricsTracker } from './metrics.js';
 
 /**
@@ -130,8 +130,10 @@ export function startMetricsServer(
       // Route: GET /healthz — heartbeat channel (RO-020 / NG-8).
       // relay-heartbeat.ts (M1) already pings this; the relay never served it.
       if (url === '/healthz') {
+        // ok:true retained for RO-020 backward-compat (relay-heartbeat checks the
+        // status code, not the body); standard liveness fields added (DOH-009).
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
+        res.end(JSON.stringify({ ok: true, ...healthzBody('relay') }));
         return;
       }
 
