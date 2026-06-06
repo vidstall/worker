@@ -21,6 +21,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import type { Logger } from '@dvconf/shared';
+import { readTraceId, traceChild } from '@dvconf/shared';
 import type {
   CredentialResult,
   IssueResult,
@@ -155,6 +156,8 @@ async function handleRequest(
   res: ServerResponse,
   opts: StartTurnRpcOptions,
 ): Promise<void> {
+  // F63 (DOH-003) edge 3 receiver — correlate the relay's x-trace-id to cp's logs.
+  const reqLog = traceChild(opts.logger, readTraceId(req.headers));
   try {
     if (req.url !== '/turn/issue') {
       return send(res, 404, { error: 'not found' });
@@ -182,13 +185,14 @@ async function handleRequest(
     try {
       result = await opts.issuer.issueFor(body);
     } catch (err) {
-      opts.logger.error({ err }, 'TURN RPC: issueFor threw');
+      reqLog.error({ err }, 'TURN RPC: issueFor threw');
       return send(res, 500, { error: 'internal' });
     }
 
+    reqLog.info({ targetMinerId: body.targetMinerId }, 'TURN RPC: credential issued');
     return send(res, 200, serializeResult(result));
   } catch (err) {
-    opts.logger.error({ err }, 'TURN RPC: unhandled error');
+    reqLog.error({ err }, 'TURN RPC: unhandled error');
     send(res, 500, { error: 'internal' });
   }
 }

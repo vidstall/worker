@@ -17,7 +17,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { createLogger } from '@dvconf/shared';
+import pino from 'pino';
+import { createLogger, TRACE_HEADER } from '@dvconf/shared';
 import { MetricsTracker } from '../metrics.js';
 import { startMetricsServer, type ProbeStateProvider } from '../metrics-server.js';
 
@@ -82,6 +83,23 @@ describe('RO-020 relay /api/probe + /healthz', () => {
     expect(typeof body.uptime_seconds).toBe('number');
     expect(body.pid).toBe(process.pid);
     expect(body.service).toBe('relay');
+  });
+
+  it('relay /api/probe logs under the inbound x-trace-id (DOH-003 continuity)', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const capLogger = pino({ level: 'info' }, { write: (s: string) => lines.push(JSON.parse(s)) });
+    process.env['METRICS_PORT'] = '0';
+    const srv = startMetricsServer(
+      new MetricsTracker(),
+      capLogger,
+      () => ({ role: 'standby', pipeConsumerAlive: true, rtcpAlive: true }),
+    );
+    const p = (srv.address() as AddressInfo).port;
+    await fetch(`http://127.0.0.1:${p}/api/probe`, { headers: { [TRACE_HEADER]: 'val-trace-1' } });
+    srv.close();
+
+    const probeLog = lines.find((l) => l['msg'] === 'RO-020 probe served');
+    expect(probeLog?.['trace_id']).toBe('val-trace-1');
   });
 
   it('GET /api/probe returns 200 + liveness body (standby answered)', async () => {

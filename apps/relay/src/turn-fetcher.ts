@@ -30,6 +30,8 @@ export interface FetchTurnOptions {
   targetMinerId: string;
   userId: string;
   ttlSec?: number;
+  /** F63 (DOH-003) edge 3 — propagate this trace id as x-trace-id to cp's /turn/issue. */
+  traceId?: string;
   /** Test seam — inject a fake fetch. Defaults to global fetch. */
   fetchFn?: typeof fetch;
 }
@@ -45,12 +47,15 @@ export async function fetchTurnCredential(
   };
   if (opts.ttlSec !== undefined) body['ttlSec'] = opts.ttlSec;
 
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${opts.token}`,
+    'Content-Type': 'application/json',
+  };
+  if (opts.traceId) headers['x-trace-id'] = opts.traceId;
+
   const res = await fetchImpl(`${opts.cpRpcUrl}/turn/issue`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${opts.token}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(body),
   });
 

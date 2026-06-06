@@ -38,6 +38,20 @@ const baseOpts: Omit<FetchTurnOptions, 'fetchFn'> = {
 };
 
 describe('fetchTurnCredential', () => {
+  it('sends x-trace-id when a traceId is provided (DOH-003 edge 3 → cp /turn/issue)', async () => {
+    const fetchFn = makeFetchOk({
+      username: 'u',
+      password: 'p',
+      expiry: 1,
+      credentialHash: 'h',
+      secretId: 1,
+      txDigest: '0xd',
+    });
+    await fetchTurnCredential({ ...baseOpts, fetchFn, traceId: 'relay-trace-9' });
+    const [, init] = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(init.headers['x-trace-id']).toBe('relay-trace-9');
+  });
+
   it('happy path: POSTs JSON body with bearer header + parses credential response', async () => {
     const expected: TurnCredentialPayload = {
       username: '1700001200:0xpeer-alice',

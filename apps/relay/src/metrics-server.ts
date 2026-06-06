@@ -16,7 +16,7 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import { type Logger, healthzBody } from '@dvconf/shared';
+import { type Logger, healthzBody, readTraceId, traceChild } from '@dvconf/shared';
 import type { MetricsTracker } from './metrics.js';
 
 /**
@@ -126,6 +126,11 @@ export function startMetricsServer(
 
     const url = req.url ?? '/';
 
+    // F63 (DOH-003): honor the inbound x-trace-id (the validator's measurement-cycle
+    // id on the /metrics + /api/probe legs) so the relay's request logs correlate to
+    // the validator cycle and the on-chain proof — this is the demo-path continuity.
+    const reqLog = traceChild(logger, readTraceId(req.headers));
+
     try {
       // Route: GET /healthz — heartbeat channel (RO-020 / NG-8).
       // relay-heartbeat.ts (M1) already pings this; the relay never served it.
@@ -143,6 +148,7 @@ export function startMetricsServer(
       // duration_seconds > 0, an ok:false (or unanswered) probe => duration = 0.
       if (url === '/api/probe') {
         const body = buildProbeResponse(probeState?.(), startedAt);
+        reqLog.info({ url, role: body.role }, 'RO-020 probe served');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(body));
         return;
@@ -160,6 +166,7 @@ export function startMetricsServer(
           return;
         }
 
+        reqLog.debug({ url, roomId }, 'relay metrics served');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(roomMetrics));
         return;
@@ -177,7 +184,7 @@ export function startMetricsServer(
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found' }));
     } catch (err) {
-      logger.error({ err, url }, 'Metrics server error');
+      reqLog.error({ err, url }, 'Metrics server error');
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Internal server error' }));
     }
