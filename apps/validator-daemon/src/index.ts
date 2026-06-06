@@ -33,7 +33,7 @@ import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvco
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { collectMeasurements } from './measurements.js';
-import { fetchRelayMetrics } from './probe.js';
+import { createRelayProbe, type RelayProbeEndpoint } from './probe.js';
 import {
   buildSessionProof,
   dualKeySign,
@@ -58,8 +58,17 @@ export interface ValidatorConfig {
 export interface ActiveRoom {
   /** Escrow object ID for this room (discovered via EscrowCreated). */
   escrowId?: string;
-  /** Relay miner ID assigned to this room (from RoomAssigned event). */
-  relayMinerId?: string;
+  /**
+   * Primary relay miner ID (RoomAssigned.relay_ids[0], relay_role==0).
+   * Always present once the room is assigned.
+   */
+  primaryRelayId?: string;
+  /**
+   * Standby relay miner ID (RoomAssigned.relay_ids[1], relay_role==1).
+   * Undefined when the room was assigned with a single relay (length guard).
+   * RO-019a: the validator probes + submits a per-relay proof for BOTH slots.
+   */
+  standbyRelayId?: string;
 }
 
 /** Internal state for the running daemon. */
@@ -287,24 +296,30 @@ export async function startDaemon(overrides?: {
       }
     }
 
-    // BUG-INT-001: Handle RoomAssigned to populate relayStakeId dynamically
+    // BUG-INT-001: Handle RoomAssigned to populate relay slots dynamically.
+    // RO-019a: read BOTH relay slots (primary + standby) from relay_ids; the
+    // standby id is already in-event (relay_ids[1]) -- guard the length so a
+    // single-relay assignment leaves standbyRelayId undefined.
     if (event.type.endsWith('::RoomAssigned')) {
       const parsed = event.parsedJson as unknown as RoomAssigned;
-      const relayId = parsed.relay_ids?.[0];
+      const relayIds: string[] = parsed.relay_ids ?? [];
+      const primaryRelayId = relayIds[0];
+      const standbyRelayId = relayIds.length > 1 ? relayIds[1] : undefined;
       const validatorIds: string[] = parsed.validator_ids ?? [];
 
       // Phase 18: Only track rooms where we are an assigned validator
-      if (parsed.room_id && relayId && validatorIds.includes(validatorMinerId)) {
+      if (parsed.room_id && primaryRelayId && validatorIds.includes(validatorMinerId)) {
         const room = activeRooms.get(parsed.room_id) ?? {};
-        room.relayMinerId = relayId;
+        room.primaryRelayId = primaryRelayId;
+        room.standbyRelayId = standbyRelayId;
 
         if (!activeRooms.has(parsed.room_id)) {
           activeRooms.set(parsed.room_id, room);
         }
 
         log.info(
-          { roomId: parsed.room_id, relayId },
-          `RoomAssigned -- assigned to room=${parsed.room_id}, relay=${relayId}`,
+          { roomId: parsed.room_id, primaryRelayId, standbyRelayId },
+          `RoomAssigned -- assigned to room=${parsed.room_id}, primary=${primaryRelayId}, standby=${standbyRelayId ?? 'none'}`,
         );
       } else if (parsed.room_id) {
         log.debug(
@@ -402,7 +417,7 @@ async function runMeasurementCycle(
       // Pass-through when BENCH_LATENCY is unset (no allocation in hot path).
       await timedMeasureRoom(
         roomId,
-        () => state.activeRooms.get(roomId)?.relayMinerId ?? null,
+        () => state.activeRooms.get(roomId)?.primaryRelayId ?? null,
         () => measureRoom(state, roomId, validatorMinerId, log),
       );
     } catch (err) {
@@ -412,7 +427,46 @@ async function runMeasurementCycle(
 }
 
 /**
- * Measure a single room: collect metrics, build proof, sign, submit.
+ * Resolve the per-relay probe endpoint from env config.
+ *
+ * Today a single `RELAY_METRICS_URL` (+ optional `RELAY_STUN_HOST`/`_PORT`)
+ * applies to every relay; per-relay multi-host resolution (each standby's own
+ * routable URL) couples to G3 (G3.0/G3.2). Externalized with sane defaults
+ * (no production hardcodes).
+ *
+ * RO-020: for the STANDBY relay, the standby `/api/probe` liveness channel is
+ * wired (`livenessUrl`) so a FAILED/unanswered probe gates the standby proof's
+ * `duration_seconds` to 0. The standby's probe base defaults to the same
+ * `RELAY_METRICS_URL` (single-host bench); `STANDBY_PROBE_URL` overrides it for
+ * a distinct standby host (multi-host = G3). The PRIMARY is never gated.
+ */
+function resolveProbeEndpoint(isStandby: boolean): RelayProbeEndpoint {
+  const stunPortRaw = process.env['RELAY_STUN_PORT'];
+  const metricsBaseUrl = process.env['RELAY_METRICS_URL'] ?? '';
+  const endpoint: RelayProbeEndpoint = {
+    metricsBaseUrl,
+    stunHost: process.env['RELAY_STUN_HOST'] ?? '',
+    stunPort: stunPortRaw ? parseInt(stunPortRaw, 10) : undefined,
+  };
+  if (isStandby) {
+    // Treat an explicitly-empty STANDBY_PROBE_URL like unset, so a standby never
+    // skips the liveness leg — an empty livenessUrl would let it report
+    // duration_seconds>0 from the metrics leg WITHOUT a successful /api/probe,
+    // bending the frozen standby-liveness contract (paid IFF probe-answered).
+    const standbyProbeUrl = process.env['STANDBY_PROBE_URL'];
+    endpoint.livenessUrl =
+      standbyProbeUrl && standbyProbeUrl.length > 0 ? standbyProbeUrl : metricsBaseUrl;
+  }
+  return endpoint;
+}
+
+/**
+ * Measure a single room: per-relay probe + proof submit for EACH assigned relay.
+ *
+ * RO-019a: a room is assigned a primary + (optional) standby relay. The
+ * validator probes both and submits a per-relay SessionProof for each (2
+ * submits/cycle at K=2). The compound dedup key (on-chain RO-023a) lets one
+ * validator attest both relays without aborting E_ALREADY_SUBMITTED=656.
  */
 async function measureRoom(
   state: DaemonState,
@@ -420,10 +474,15 @@ async function measureRoom(
   validatorMinerId: string,
   log: Logger,
 ): Promise<void> {
-  // Resolve relay miner ID from room's on-chain assignment (via RoomAssigned event)
+  // Resolve relay slots from the room's on-chain assignment (via RoomAssigned).
   const room = state.activeRooms.get(roomId);
-  const relayMinerId = room?.relayMinerId;
-  if (!relayMinerId) {
+  // RO-020: track which slot is the standby (relay_role==1) — only the standby
+  // is liveness-gated via /api/probe.
+  const relays: Array<{ relayMinerId: string; isStandby: boolean }> = [];
+  if (room?.primaryRelayId) relays.push({ relayMinerId: room.primaryRelayId, isStandby: false });
+  if (room?.standbyRelayId) relays.push({ relayMinerId: room.standbyRelayId, isStandby: true });
+
+  if (relays.length === 0) {
     log.debug(
       { roomId },
       `No relay assigned to room=${roomId} yet -- skipping measurement`,
@@ -431,26 +490,33 @@ async function measureRoom(
     return;
   }
 
-  const measurement = collectMeasurements(relayMinerId);
-  const epoch = BigInt(Math.floor(Date.now() / 1000));
-
-  // Fetch real unique_peers from relay metrics endpoint
-  let uniquePeers = 0n;
-  const relayMetricsUrl = process.env['RELAY_METRICS_URL'];
-  if (relayMetricsUrl) {
-    try {
-      const relayMetrics = await fetchRelayMetrics(relayMetricsUrl, roomId);
-      if (relayMetrics) {
-        uniquePeers = relayMetrics.uniquePeers;
-        log.debug(
-          { roomId, uniquePeers: uniquePeers.toString() },
-          `Fetched relay metrics: uniquePeers=${uniquePeers}`,
-        );
-      }
-    } catch (err) {
-      log.warn({ err, roomId }, 'Failed to fetch relay metrics, using fallback uniquePeers=0');
-    }
+  for (const { relayMinerId, isStandby } of relays) {
+    await measureRelay(state, roomId, relayMinerId, isStandby, validatorMinerId, log);
   }
+}
+
+/**
+ * Measure a single relay within a room: collect metrics, build proof, sign,
+ * submit. One SessionProof per relay (RO-019a per-relay dual-probe).
+ *
+ * RO-020: when `isStandby`, the probe is liveness-gated via the standby's
+ * `/api/probe` channel — a failed/unanswered probe forces `duration_seconds=0`.
+ */
+async function measureRelay(
+  state: DaemonState,
+  roomId: string,
+  relayMinerId: string,
+  isStandby: boolean,
+  validatorMinerId: string,
+  log: Logger,
+): Promise<void> {
+  // RO-019b: derive the measurement from a REAL probe (STUN RTT + relay
+  // metrics HTTP) instead of the removed random simulation. Per-relay endpoint
+  // is resolved via env (single RELAY_METRICS_URL today; multi-host = G3).
+  // RO-020: the standby additionally carries the /api/probe liveness gate.
+  const probe = createRelayProbe(roomId, () => resolveProbeEndpoint(isStandby));
+  const measurement = await collectMeasurements(relayMinerId, probe);
+  const epoch = BigInt(Math.floor(Date.now() / 1000));
 
   const proof = buildSessionProof(
     roomId,
@@ -461,14 +527,15 @@ async function measureRoom(
     epoch,
   );
 
-  // IC-2: BCS serialize for signing (replaces legacy JSON serialization)
+  // IC-2: BCS serialize for signing (replaces legacy JSON serialization).
+  // OFF-3 reconciled: the SAME real uniquePeers signs and submits (no 0n drift).
   const durationSeconds = measurement.measurementDurationMs / 1000n;
   const bcsMessage = serializeProofBcs(
     proof.roomId,
     proof.relayMinerId,
     measurement.packetsSent,
     measurement.bytesForwarded,
-    uniquePeers,
+    measurement.uniquePeers,
     durationSeconds,
     measurement.avgLatencyMs,
     measurement.packetLossRate,

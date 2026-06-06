@@ -13,6 +13,7 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import {
   buildSessionProof,
   serializeProof,
+  serializeProofBcs,
   dualKeySign,
   type SessionProof,
 } from '../session-proof.js';
@@ -28,6 +29,7 @@ function fixedMeasurement(): MeasurementResult {
     avgLatencyMs: 45n,
     jitterMs: 5n,
     bytesForwarded: 50_000_000n,
+    uniquePeers: 4n,
     measurementDurationMs: 60_000n,
     timestamp: 1700000000000n,
   };
@@ -90,6 +92,37 @@ describe('serializeProof', () => {
 
     // bigint epoch should be serialized as string "100"
     expect(parsed['epoch']).toBe('100');
+  });
+});
+
+describe('serializeProofBcs (RO-017 120-byte BCS invariant)', () => {
+  // RO-017 derives relay_role on-chain (NOT a signed IC-2 field) so the
+  // daemon's signed message MUST stay exactly 120 bytes. Per-relay dual-probe
+  // (RO-019a) submits one proof per relay over this same 120-byte layout.
+  it('produces exactly 120 bytes (32 + 32 + 7*8)', () => {
+    const msg = serializeProofBcs(
+      '0xroom1',
+      '0xrelay1',
+      30_000n, // packets_forwarded
+      50_000_000n, // bytes_transferred
+      4n, // unique_peers
+      60n, // duration_seconds
+      45n, // avg_latency_ms
+      300n, // packet_loss_bps
+      5n, // jitter_ms
+    );
+    expect(msg.length).toBe(120);
+  });
+
+  it('stays 120 bytes for both primary and standby relay ids (dual-probe)', () => {
+    const primary = serializeProofBcs(
+      '0xroom1', '0xprimary', 1n, 1n, 1n, 60n, 1n, 1n, 1n,
+    );
+    const standby = serializeProofBcs(
+      '0xroom1', '0xstandby', 0n, 0n, 0n, 60n, 0n, 0n, 0n,
+    );
+    expect(primary.length).toBe(120);
+    expect(standby.length).toBe(120);
   });
 });
 

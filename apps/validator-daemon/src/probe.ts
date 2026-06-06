@@ -14,6 +14,7 @@ import * as dgram from 'node:dgram';
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
 import { createLogger } from '@dvconf/shared';
+import type { MeasurementProbe, ProbeSample } from './measurements.js';
 
 const logger = createLogger('validator:probe');
 
@@ -323,4 +324,215 @@ export async function fetchRelayMetrics(
       resolve(null);
     });
   });
+}
+
+// ─── Standby liveness probe (RO-020) ────────────────────────────────
+
+/** Parsed result of GET /api/probe (the standby-liveness channel). */
+export interface ProbeLivenessResult {
+  /** Standby liveness verdict — gates the standby proof's duration_seconds. */
+  ok: boolean;
+  /** Relay role reported by the endpoint ('primary' | 'standby' | 'unknown'). */
+  role: string;
+  /** Server-handling RTT in ms (NOT media-plane RTT). */
+  latencyMs: bigint;
+  /** Whether the standby's warm-pipe consumer is open. */
+  pipeConsumerAlive: boolean;
+  /** Whether RTCP keepalive is flowing on the warm pipe. */
+  rtcpAlive: boolean;
+}
+
+/**
+ * Fetch the standby-liveness channel via HTTP GET (RO-020).
+ *
+ * Endpoint: GET http://<host>:<metricsPort>/api/probe
+ *
+ * @param livenessBaseUrl - Base URL of the relay (e.g. "http://standby:4001").
+ * @returns {@link ProbeLivenessResult}, or null when unreachable / non-200 /
+ *          unparseable — a null result is treated as a FAILED (unanswered)
+ *          probe by the caller (duration_seconds gated to 0).
+ */
+export async function fetchProbeLiveness(
+  livenessBaseUrl: string,
+): Promise<ProbeLivenessResult | null> {
+  const url = `${livenessBaseUrl}/api/probe`;
+
+  return new Promise((resolve) => {
+    const req = http.get(url, { timeout: 5000 }, (res) => {
+      if (res.statusCode !== 200) {
+        logger.warn({ url, statusCode: res.statusCode }, 'Probe liveness: unexpected status');
+        resolve(null);
+        res.resume();
+        return;
+      }
+
+      let body = '';
+      res.setEncoding('utf-8');
+      res.on('data', (chunk: string) => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(body) as {
+            ok: boolean;
+            role: string;
+            latency_ms: number;
+            pipe_consumer_alive: boolean;
+            rtcp_alive: boolean;
+          };
+          resolve({
+            ok: Boolean(json.ok),
+            role: json.role ?? 'unknown',
+            latencyMs: BigInt(Math.round(json.latency_ms ?? 0)),
+            pipeConsumerAlive: Boolean(json.pipe_consumer_alive),
+            rtcpAlive: Boolean(json.rtcp_alive),
+          });
+        } catch (parseErr) {
+          logger.error({ err: parseErr, body }, 'Failed to parse probe liveness response');
+          resolve(null);
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      logger.warn({ err, url }, 'Failed to fetch probe liveness');
+      resolve(null);
+    });
+
+    req.on('timeout', () => {
+      logger.warn({ url }, 'Probe liveness request timed out');
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+// ─── Real measurement probe (RO-019b) ───────────────────────────────
+
+/** Per-relay endpoint config for the real measurement probe. */
+export interface RelayProbeEndpoint {
+  /** Relay metrics HTTP base URL (e.g. "http://localhost:4001"); '' to skip. */
+  metricsBaseUrl: string;
+  /** STUN host for latency probing; '' to skip the STUN leg. */
+  stunHost?: string;
+  /** STUN port for latency probing. */
+  stunPort?: number;
+  /**
+   * RO-020: standby /api/probe base URL (e.g. "http://standby:4001"). When set,
+   * the standby's liveness is gated: a FAILED/unanswered probe forces
+   * durationSeconds = 0 so the on-chain standby-liveness gate withholds reward.
+   * Omitted for the primary (the primary is the live media path, not gated).
+   */
+  livenessUrl?: string;
+}
+
+/**
+ * Injectable transports for {@link createRelayProbe}. Production defaults wrap
+ * the real HTTP/STUN primitives; unit tests inject deterministic fakes so the
+ * duration_seconds gating is verifiable without a live server.
+ */
+export interface RelayProbeHooks {
+  /** RO-020 standby-liveness fetch (defaults to {@link fetchProbeLiveness}). */
+  fetchLiveness?: (livenessBaseUrl: string) => Promise<ProbeLivenessResult | null>;
+  /** Relay metrics fetch (defaults to {@link fetchRelayMetrics}, room-bound). */
+  fetchMetrics?: (metricsBaseUrl: string, roomId: string) => Promise<RelayMetricsResult | null>;
+}
+
+/** A zero/failed probe sample (relay unreachable / not configured). */
+function unreachableSample(): ProbeSample {
+  return {
+    avgLatencyMs: 0n,
+    jitterMs: 0n,
+    packetLossBps: 10_000n, // 100% loss => failed probe
+    packetsSent: 0n,
+    packetsReceived: 0n,
+    bytesForwarded: 0n,
+    uniquePeers: 0n,
+    durationSeconds: 0n, // 0 => standby liveness gate reads "did not answer"
+  };
+}
+
+/**
+ * Build a real {@link MeasurementProbe} from the as-built network primitives.
+ *
+ * Composes the relay metrics HTTP fetch (bytes/peers/jitter/duration) with an
+ * optional STUN RTT probe (latency/jitter/loss/sent/received). The per-relay
+ * endpoint is resolved via the injected `resolveEndpoint` (env/config-driven;
+ * production multi-host resolution couples to G3). When the relay is
+ * unreachable, an {@link unreachableSample} is returned so the on-chain
+ * liveness gate reads a failed probe (`durationSeconds == 0`) — never random.
+ *
+ * @param roomId           - Room being measured (metrics are per-room).
+ * @param resolveEndpoint  - Resolves the per-relay probe endpoint.
+ * @param hooks            - Optional injectable transports (test seam).
+ */
+export function createRelayProbe(
+  roomId: string,
+  resolveEndpoint: (relayMinerId: string) => RelayProbeEndpoint,
+  hooks?: RelayProbeHooks,
+): MeasurementProbe {
+  const fetchLiveness = hooks?.fetchLiveness ?? fetchProbeLiveness;
+  const fetchMetrics = hooks?.fetchMetrics ?? fetchRelayMetrics;
+
+  return async (relayMinerId: string): Promise<ProbeSample> => {
+    const endpoint = resolveEndpoint(relayMinerId);
+
+    // RO-020 standby-liveness leg (only when a livenessUrl is configured —
+    // i.e. this is the standby). A FAILED/unanswered probe gates the standby
+    // proof's duration_seconds to 0 so the on-chain liveness gate withholds
+    // reward; a SUCCESSFUL probe (ok:true) lets duration_seconds be > 0.
+    let liveness: ProbeLivenessResult | null = null;
+    let livenessGated = false;
+    if (endpoint.livenessUrl) {
+      liveness = await fetchLiveness(endpoint.livenessUrl);
+      if (!liveness || !liveness.ok) {
+        livenessGated = true;
+        logger.warn(
+          { relayMinerId, roomId, ok: liveness?.ok ?? false },
+          'RO-020: standby liveness probe failed; gating duration_seconds = 0',
+        );
+      }
+    }
+
+    // Latency / loss leg via STUN (optional).
+    let stun: StunProbeResult | null = null;
+    if (endpoint.stunHost && endpoint.stunPort) {
+      try {
+        stun = await stunProbe(endpoint.stunHost, endpoint.stunPort);
+      } catch (err) {
+        logger.warn({ err, relayMinerId }, 'STUN probe failed; falling back to metrics-only');
+      }
+    }
+
+    // Bytes / peers / duration leg via relay metrics HTTP (optional).
+    let metrics: RelayMetricsResult | null = null;
+    if (endpoint.metricsBaseUrl) {
+      metrics = await fetchMetrics(endpoint.metricsBaseUrl, roomId);
+    }
+
+    // When the standby liveness gate fired, force a zero-duration sample so the
+    // standby proof reads "did not answer" — never paid (RO-016 liveness gate).
+    if (livenessGated) {
+      return unreachableSample();
+    }
+
+    if (!stun && !metrics && !liveness) {
+      logger.warn({ relayMinerId, roomId }, 'No reachable probe endpoint; recording failed probe');
+      return unreachableSample();
+    }
+
+    // duration_seconds: prefer the real metrics duration; else a live liveness
+    // probe (ok:true) implies the standby is up (>= 1s); else a STUN-only path.
+    const durationSeconds =
+      metrics?.duration ?? (liveness?.ok ? 1n : stun ? 1n : 0n);
+
+    return {
+      avgLatencyMs: stun?.avgLatencyMs ?? liveness?.latencyMs ?? 0n,
+      jitterMs: stun?.jitterMs ?? metrics?.jitter ?? 0n,
+      packetLossBps: stun?.packetLossBps ?? 0n,
+      packetsSent: stun?.probesSent ?? 0n,
+      packetsReceived: stun?.probesReceived ?? 0n,
+      bytesForwarded: metrics?.bytesForwarded ?? 0n,
+      uniquePeers: metrics?.uniquePeers ?? 0n,
+      durationSeconds,
+    };
+  };
 }

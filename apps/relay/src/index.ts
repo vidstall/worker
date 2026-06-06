@@ -23,7 +23,7 @@ import { startHeartbeat } from './heartbeat.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
 import { createSignalingServer, type TurnContext, type InterRelayContext } from './signaling.js';
 import { MetricsTracker } from './metrics.js';
-import { startMetricsServer } from './metrics-server.js';
+import { startMetricsServer, type ProbeState } from './metrics-server.js';
 import { closeRelayProbe } from './room-handler.js';
 import { deriveCoturnUrl } from './coturn-url.js';
 import { fetchTurnCredential } from './turn-fetcher.js';
@@ -173,8 +173,24 @@ if (isMainModule) {
       interRelayContext,
     );
 
-    // Step 5: Start metrics HTTP server (default port 4001)
-    const metricsServer = startMetricsServer(metrics, logger);
+    // RO-020: standby-liveness state box read by GET /api/probe. `role` is the
+    // live value the RoomAssigned poller (Step 7) sets per room; the pipe/RTCP
+    // liveness flags are set when the standby's warm pipe is established. Like
+    // the rest of the inter-relay wiring (interRelayLink.socket), the live
+    // pipe-consumer hookup is DEFERRED to the bench (G3.2b) — the box defaults
+    // to not-live so an un-wired standby honestly answers ok:false (validator
+    // gates duration_seconds = 0). The provider/response logic is unit-tested
+    // in metrics-server.test.ts.
+    const probeLiveness: ProbeState = {
+      role: 'unknown',
+      pipeConsumerAlive: false,
+      rtcpAlive: false,
+    };
+
+    // Step 5: Start metrics HTTP server (default port 4001).
+    // RO-020: thread the probe-state provider so /api/probe reflects the
+    // standby's current role + warm-pipe liveness.
+    const metricsServer = startMetricsServer(metrics, logger, () => probeLiveness);
 
     // Step 6: Start heartbeat loop (30s default)
     const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
@@ -218,6 +234,8 @@ if (isMainModule) {
             logger.warn({ err, roomId, relayIds }, 'G1: could not determine relay role for room');
           }
           interRelayContext.role = role;
+          // RO-020: reflect the live role on the /api/probe state box.
+          probeLiveness.role = role;
 
           if (role === 'primary') {
             // PRIMARY: install the announcer over the inter-relay link to the

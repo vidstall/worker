@@ -218,13 +218,15 @@ export async function submitSessionProof(
   // Convert measurement duration from ms to seconds
   const durationSeconds = proof.measurement.measurementDurationMs / 1000n;
 
-  // IC-2: BCS serialize proof fields in exact field order
+  // IC-2: BCS serialize proof fields in exact field order.
+  // OFF-3 reconciled: unique_peers is the REAL measured value (was a 0n
+  // placeholder) so the signed message and the submitted PTB agree.
   const bcsMessage = serializeProofBcs(
     proof.roomId,
     proof.relayMinerId,
     proof.measurement.packetsSent,       // packets_forwarded
     proof.measurement.bytesForwarded,    // bytes_transferred
-    0n,                                   // unique_peers (0 placeholder Phase 13)
+    proof.measurement.uniquePeers,       // unique_peers (RO-019b real value)
     durationSeconds,                      // duration_seconds
     proof.measurement.avgLatencyMs,       // avg_latency_ms
     proof.measurement.packetLossRate,     // packet_loss_bps
@@ -256,7 +258,7 @@ export async function submitSessionProof(
       tx.pure.id(proof.relayMinerId),          // relay_miner_id
       tx.pure.u64(proof.measurement.packetsSent),       // packets_forwarded
       tx.pure.u64(proof.measurement.bytesForwarded),    // bytes_transferred
-      tx.pure.u64(0n),                                   // unique_peers (0 placeholder Phase 13)
+      tx.pure.u64(proof.measurement.uniquePeers),        // unique_peers (RO-019b real value)
       tx.pure.u64(durationSeconds),                      // duration_seconds
       tx.pure.u64(proof.measurement.avgLatencyMs),       // avg_latency_ms
       tx.pure.u64(proof.measurement.packetLossRate),     // packet_loss_bps
