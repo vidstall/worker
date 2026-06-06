@@ -17,6 +17,11 @@ export default defineConfig({
       ...configDefaults.exclude,
       '**/cp-daemon/**/__tests__/integration/**',
       '**/apps/relay/**/__tests__/integration/**',
+      // The validator-daemon __tests__/integration/ dir holds the M2 Phase 5
+      // gate-(b) bandwidth bench (real loopback HTTP + UDP STUN responder) —
+      // excluded from the hermetic unit run, gated behind vitest.m2-bench.config.ts
+      // (`pnpm bench:m2`).
+      '**/apps/validator-daemon/**/__tests__/integration/**',
     ],
     globals: false,
     testTimeout: 10_000,
