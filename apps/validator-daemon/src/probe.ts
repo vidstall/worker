@@ -13,7 +13,7 @@
 import * as dgram from 'node:dgram';
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
-import { createLogger } from '@dvconf/shared';
+import { createLogger, withTraceHeader } from '@dvconf/shared';
 import type { MeasurementProbe, ProbeSample } from './measurements.js';
 
 const logger = createLogger('validator:probe');
@@ -254,11 +254,13 @@ function sendSingleProbe(
 export async function fetchRelayMetrics(
   metricsBaseUrl: string,
   roomId: string,
+  traceId?: string,
 ): Promise<RelayMetricsResult | null> {
   const url = `${metricsBaseUrl}/metrics/${roomId}`;
+  const headers = traceId ? withTraceHeader({}, traceId) : undefined;
 
   return new Promise((resolve) => {
-    const req = http.get(url, { timeout: 5000 }, (res) => {
+    const req = http.get(url, { timeout: 5000, headers }, (res) => {
       if (res.statusCode === 404) {
         logger.warn({ url, roomId }, `Relay metrics: room not found (404)`);
         resolve(null);
@@ -354,11 +356,13 @@ export interface ProbeLivenessResult {
  */
 export async function fetchProbeLiveness(
   livenessBaseUrl: string,
+  traceId?: string,
 ): Promise<ProbeLivenessResult | null> {
   const url = `${livenessBaseUrl}/api/probe`;
+  const headers = traceId ? withTraceHeader({}, traceId) : undefined;
 
   return new Promise((resolve) => {
-    const req = http.get(url, { timeout: 5000 }, (res) => {
+    const req = http.get(url, { timeout: 5000, headers }, (res) => {
       if (res.statusCode !== 200) {
         logger.warn({ url, statusCode: res.statusCode }, 'Probe liveness: unexpected status');
         resolve(null);
@@ -431,9 +435,13 @@ export interface RelayProbeEndpoint {
  */
 export interface RelayProbeHooks {
   /** RO-020 standby-liveness fetch (defaults to {@link fetchProbeLiveness}). */
-  fetchLiveness?: (livenessBaseUrl: string) => Promise<ProbeLivenessResult | null>;
+  fetchLiveness?: (livenessBaseUrl: string, traceId?: string) => Promise<ProbeLivenessResult | null>;
   /** Relay metrics fetch (defaults to {@link fetchRelayMetrics}, room-bound). */
-  fetchMetrics?: (metricsBaseUrl: string, roomId: string) => Promise<RelayMetricsResult | null>;
+  fetchMetrics?: (
+    metricsBaseUrl: string,
+    roomId: string,
+    traceId?: string,
+  ) => Promise<RelayMetricsResult | null>;
 }
 
 /** A zero/failed probe sample (relay unreachable / not configured). */
@@ -468,6 +476,7 @@ export function createRelayProbe(
   roomId: string,
   resolveEndpoint: (relayMinerId: string) => RelayProbeEndpoint,
   hooks?: RelayProbeHooks,
+  traceId?: string,
 ): MeasurementProbe {
   const fetchLiveness = hooks?.fetchLiveness ?? fetchProbeLiveness;
   const fetchMetrics = hooks?.fetchMetrics ?? fetchRelayMetrics;
@@ -482,7 +491,7 @@ export function createRelayProbe(
     let liveness: ProbeLivenessResult | null = null;
     let livenessGated = false;
     if (endpoint.livenessUrl) {
-      liveness = await fetchLiveness(endpoint.livenessUrl);
+      liveness = await fetchLiveness(endpoint.livenessUrl, traceId);
       if (!liveness || !liveness.ok) {
         livenessGated = true;
         logger.warn(
@@ -505,7 +514,7 @@ export function createRelayProbe(
     // Bytes / peers / duration leg via relay metrics HTTP (optional).
     let metrics: RelayMetricsResult | null = null;
     if (endpoint.metricsBaseUrl) {
-      metrics = await fetchMetrics(endpoint.metricsBaseUrl, roomId);
+      metrics = await fetchMetrics(endpoint.metricsBaseUrl, roomId, traceId);
     }
 
     // When the standby liveness gate fired, force a zero-duration sample so the

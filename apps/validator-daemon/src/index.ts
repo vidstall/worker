@@ -26,6 +26,8 @@ import {
   EventPoller,
   createLogger,
   startHealthzServer,
+  genTraceId,
+  traceChild,
   economicLayerModuleName,
   MIN_PROOFS_FOR_DISTRIBUTION,
 } from '@dvconf/shared';
@@ -412,6 +414,12 @@ async function runMeasurementCycle(
     roomIds.push(process.env['ROOM_ID'] ?? 'unassigned');
   }
 
+  // F63 (DOH-003): birth one trace id per measurement cycle and bind it to the
+  // cycle logger, so every line — including the on-chain proof-submit log — is
+  // correlated, and thread the id to the relay probe legs (x-trace-id edges 1+2).
+  const traceId = genTraceId();
+  const cycleLog = traceChild(log, traceId);
+
   for (const roomId of roomIds) {
     try {
       // S23.1.A3: wrap measureRoom with `L_validator_check` timer.
@@ -419,10 +427,10 @@ async function runMeasurementCycle(
       await timedMeasureRoom(
         roomId,
         () => state.activeRooms.get(roomId)?.primaryRelayId ?? null,
-        () => measureRoom(state, roomId, validatorMinerId, log),
+        () => measureRoom(state, roomId, validatorMinerId, cycleLog, traceId),
       );
     } catch (err) {
-      log.error({ err, roomId }, `Measurement cycle failed for room=${roomId}`);
+      cycleLog.error({ err, roomId }, `Measurement cycle failed for room=${roomId}`);
     }
   }
 }
@@ -474,6 +482,7 @@ async function measureRoom(
   roomId: string,
   validatorMinerId: string,
   log: Logger,
+  traceId: string,
 ): Promise<void> {
   // Resolve relay slots from the room's on-chain assignment (via RoomAssigned).
   const room = state.activeRooms.get(roomId);
@@ -492,7 +501,7 @@ async function measureRoom(
   }
 
   for (const { relayMinerId, isStandby } of relays) {
-    await measureRelay(state, roomId, relayMinerId, isStandby, validatorMinerId, log);
+    await measureRelay(state, roomId, relayMinerId, isStandby, validatorMinerId, log, traceId);
   }
 }
 
@@ -510,12 +519,13 @@ async function measureRelay(
   isStandby: boolean,
   validatorMinerId: string,
   log: Logger,
+  traceId: string,
 ): Promise<void> {
   // RO-019b: derive the measurement from a REAL probe (STUN RTT + relay
   // metrics HTTP) instead of the removed random simulation. Per-relay endpoint
   // is resolved via env (single RELAY_METRICS_URL today; multi-host = G3).
   // RO-020: the standby additionally carries the /api/probe liveness gate.
-  const probe = createRelayProbe(roomId, () => resolveProbeEndpoint(isStandby));
+  const probe = createRelayProbe(roomId, () => resolveProbeEndpoint(isStandby), undefined, traceId);
   const measurement = await collectMeasurements(relayMinerId, probe);
   const epoch = BigInt(Math.floor(Date.now() / 1000));
 
