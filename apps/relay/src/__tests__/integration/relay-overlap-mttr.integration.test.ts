@@ -248,6 +248,7 @@ async function armRun(): Promise<RunScaffold> {
     standbyEndpoint: 'ws://127.0.0.1:0',
     pipePort: 0,
     pipeConsumer: null,
+    pipeTransport: null,
   };
   const warmPipeConsumer = await ensureWarmPipe(
     topology,
@@ -326,6 +327,10 @@ async function armRun(): Promise<RunScaffold> {
         primarySink.close();
         standbySink.close();
         warmPipeConsumer?.close();
+        // N2 leak fix (G3.1): ensureWarmPipe now retains its internal pipe
+        // transport on topology — close it so it does not accumulate idle on
+        // standbyRouter across the N-iteration loop.
+        topology.pipeTransport?.close();
         pipedProducer.close();
         primaryPipeConsumer.close();
         primaryPipe.close();

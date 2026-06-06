@@ -99,8 +99,11 @@ export async function rebuildFromRegistry(
   // consume(). The new pipe transport connects to the primary's fresh Router
   // and consumes a new placeholder producerId. This avoids the
   // "producer already used" mediasoup error (Stream-1 gotcha #4).
+  // announcedIp externalized via ANNOUNCED_IP (default loopback for
+  // local/bench); mirrors the room-handler.ts WebRTC-transport pattern.
+  const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
   const pipeTransport = await router.createPipeTransport({
-    listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' },
+    listenIp: { ip: '0.0.0.0', announcedIp },
     port: snapshot.pipePort,
     enableRtx: false,
     enableSrtp: false,

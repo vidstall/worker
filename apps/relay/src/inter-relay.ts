@@ -453,8 +453,12 @@ export async function createPrimaryPipeTransport(
   router: msTypes.Router,
   pipePort: number,
 ): Promise<msTypes.PipeTransport> {
+  // announcedIp = deploy-routable address the standby connects back to,
+  // externalized via ANNOUNCED_IP (default loopback for local/bench). Mirrors
+  // the room-handler.ts WebRTC-transport pattern.
+  const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
   return router.createPipeTransport({
-    listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' },
+    listenIp: { ip: '0.0.0.0', announcedIp },
     port: pipePort,
     enableRtx: false,
     enableSrtp: false,

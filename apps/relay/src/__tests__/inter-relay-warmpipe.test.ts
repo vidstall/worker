@@ -84,6 +84,7 @@ function makeStandbyTopology(roomId = 'room-g1'): RoomTopology {
     standbyEndpoint: 'ws://standby:4000',
     pipePort: 40000,
     pipeConsumer: null,
+    pipeTransport: null,
   };
 }
 

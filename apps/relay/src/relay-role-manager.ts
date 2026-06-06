@@ -36,6 +36,14 @@ export interface RoomTopology {
    * non-null = paused Consumer (RTCP keepalive only, REQ-RO-005).
    */
   pipeConsumer: msTypes.Consumer | null;
+  /**
+   * The PipeTransport created on the standby to receive piped media.
+   * null until ensureWarmPipe opens the pipe. RETAINED here so a teardown or a
+   * coordinator not-ready re-run can close it — without this handle the
+   * transport leaks idle on the router (N2) and a re-run on a fixed pipePort
+   * risks EADDRINUSE (N3). G3.1 leak fix.
+   */
+  pipeTransport: msTypes.PipeTransport | null;
 }
 
 export interface PipePortRange {
@@ -127,15 +135,32 @@ export async function ensureWarmPipe(
     return topology.pipeConsumer;
   }
 
+  // N3 leak fix: a prior not-ready run (the StandbyWarmPipeCoordinator re-run)
+  // resets pipeConsumer to null while leaving its PipeTransport bound. Close the
+  // stale transport before rebinding so we neither leak it nor hit EADDRINUSE on
+  // a fixed pipePort.
+  if (topology.pipeTransport !== null) {
+    topology.pipeTransport.close();
+    topology.pipeTransport = null;
+  }
+
   // Create a PipeTransport on the standby router to receive piped media.
   // The primary will connect its end via a paired pipeToRouter call.
-  // listenIp '0.0.0.0' with the dedicated pipe port from PIPE_PORT_RANGE.
+  // listenIp '0.0.0.0' with the dedicated pipe port from PIPE_PORT_RANGE;
+  // announcedIp is the deploy-routable address the primary connects back to,
+  // externalized via ANNOUNCED_IP (default loopback for local/bench). Mirrors
+  // the room-handler.ts WebRTC-transport pattern.
+  const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
   const pipeTransport = await router.createPipeTransport({
-    listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' },
+    listenIp: { ip: '0.0.0.0', announcedIp },
     port: pipePort,
     enableRtx: false,
     enableSrtp: false,
   } as Parameters<msTypes.Router['createPipeTransport']>[0]);
+
+  // N2 leak fix: retain the transport so teardown / a coordinator re-run can
+  // close it (an un-retained transport leaks idle on the router until exit).
+  topology.pipeTransport = pipeTransport;
 
   // Consume from the pipe transport — the producer lives on the primary Router.
   // G1 wiring: the caller (signaling layer) resolves the PRIMARY's real

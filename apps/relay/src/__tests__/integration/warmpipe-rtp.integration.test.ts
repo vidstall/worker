@@ -279,6 +279,7 @@ describe('warm-pipe RTP -- production-faithful (manual cross-PipeTransport pairi
       standbyEndpoint: 'ws://127.0.0.1:0',
       pipePort: 0,
       pipeConsumer: null,
+      pipeTransport: null,
     };
     const warmPipeConsumer = await ensureWarmPipe(
       topology,
