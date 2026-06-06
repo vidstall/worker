@@ -17,6 +17,8 @@ import {
   loadKeypair,
   createLogger,
   startHealthzServer,
+  genTraceId,
+  traceChild,
   SIGNALING_SESSION_REWARD,
   InMemoryRelayEndpointCache,
   subscribeRelayEndpoints,
@@ -152,6 +154,8 @@ export interface CreateServerOpts {
   authHook?: AuthHook;
   /** M1 Phase 3.2 (REQ-RO-008) dual-relay router. Additive — does not bypass auth. */
   dualRelayRouter?: DualRelayRouter;
+  /** F63 (DOH-003) — injectable logger (test seam). Defaults to the module logger. */
+  logger?: Logger;
 }
 
 export function createServer(
@@ -161,6 +165,7 @@ export function createServer(
   const wss = new WebSocketServer({ port, maxPayload: 64 * 1024 });
   const authHook = opts.authHook;
   const dualRelayRouter = opts.dualRelayRouter;
+  const baseLog = opts.logger ?? logger;
 
   wss.on('connection', (ws, req) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
@@ -180,6 +185,12 @@ export function createServer(
     const peerId = randomUUID();
     peerSockets.set(peerId, ws);
 
+    // F63 (DOH-003): one trace id per connection, bound to a connection logger so
+    // every line for this peer — both the auth and no-auth join paths — correlates
+    // under a single id (unifies the previously per-join throwaway ids).
+    const traceId = genTraceId();
+    const connLog = traceChild(baseLog, traceId);
+
     // Send the assigned peer ID to the client
     ws.send(JSON.stringify({ type: 'welcome', peerId }));
 
@@ -188,7 +199,7 @@ export function createServer(
     const probe = ensureSignalingProbe(logger);
     const detachProbe = probe !== null ? probe.attach(ws, peerId) : null;
 
-    logger.info({ peerId, ip }, 'Peer connected');
+    connLog.info({ peerId, ip }, 'Peer connected');
 
     ws.on('message', (data) => {
       // Message rate limit: max MAX_MESSAGES_PER_SECOND per second per connection
@@ -225,7 +236,6 @@ export function createServer(
               signature: msg.signature ?? '',
               nonce: msg.nonce ?? 0,
             };
-            const traceId = randomUUID();
             // We do not block message processing on auth completion — the
             // verifyJoin promise resolves shortly and we close-or-register
             // before subsequent messages can race in (rate-limit pins to
@@ -260,11 +270,11 @@ export function createServer(
           roomManager.join(msg.roomId, ws, peerId);
           // M1 Phase 3.2: no-auth path also advertises relay URLs if router is wired.
           // This preserves the Stage 1-2 dual-relay test coverage path without
-          // requiring a live AuthHook.
+          // requiring a live AuthHook. Uses the connection trace id (DOH-003).
           if (dualRelayRouter !== undefined) {
-            dualRelayRouter.sendRelayAssigned(ws, msg.roomId, randomUUID());
+            dualRelayRouter.sendRelayAssigned(ws, msg.roomId, traceId);
           }
-          logger.info(
+          connLog.info(
             { peerId, roomId: msg.roomId, roomSize: roomManager.getRoomSize(msg.roomId) },
             'Peer joined room',
           );
