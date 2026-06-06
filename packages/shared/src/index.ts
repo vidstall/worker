@@ -113,3 +113,10 @@ export type {
   LatencySource,
   LatencyWriterOptions,
 } from './bench/index.js';
+
+// Relay endpoint cache (REQ-RO-008 / D-RO-3 — relay-ID → WS-URL map + room →
+// ordered relay-IDs, populated from RelayRegistered + RoomAssigned chain events).
+// Extracted from apps/signaling (G3.2a) so the signaling + relay daemons share
+// ONE impl. `DualRelayRouter` (ws-dependent) stays in apps/signaling.
+export { InMemoryRelayEndpointCache, subscribeRelayEndpoints } from './chain/relay-endpoint-cache.js';
+export type { RelayEndpointCache } from './chain/relay-endpoint-cache.js';

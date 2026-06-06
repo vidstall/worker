@@ -17,6 +17,8 @@ import {
   loadKeypair,
   createLogger,
   EventPoller,
+  InMemoryRelayEndpointCache,
+  subscribeRelayEndpoints,
 } from '@dvconf/shared';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
@@ -36,6 +38,7 @@ import {
   type InterRelaySocketLike,
 } from './inter-relay.js';
 import { determineRole } from './relay-role-manager.js';
+import { resolvePrimaryEndpoint } from './relay-endpoint-resolver.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -140,6 +143,25 @@ if (isMainModule) {
      */
     const interRelayLink: { socket: InterRelaySocketLike | null } = { socket: null };
     /**
+     * G3.2a: the STANDBY's resolved PRIMARY endpoint URL — the INTERIM holder for
+     * the value the ROADMAP phrases as `topology.primaryEndpoint`. A standby
+     * `RoomTopology` is not constructed in production yet (it is handed in at the
+     * bench — see `void standbyWarmPipe` above), so the resolved URL is stashed
+     * here for now; G3.2b will feed it into `RoomTopology.primaryEndpoint` (the
+     * field `inter-relay.ts` already consumes) when it builds the live topology.
+     * The RoomAssigned poller (Step 7) resolves `relayIds[0]` → primaryUrl via the
+     * shared endpoint cache and writes it here. `null` until a standby assignment
+     * resolves (or while the primary's endpoint has not yet been observed on chain).
+     * Write-only this lane (no reader until the G3.2b socket open).
+     *
+     * NOTE for G3.2b: this is a single per-DAEMON box (mirrors `interRelayLink`),
+     * not per-room. A relay that is primary for room A AND standby for room B at
+     * once needs per-room keying (Map<roomId, url>) so the live dial does not pick
+     * up a stale primary across role/room transitions — decide that when wiring the
+     * reader.
+     */
+    const standbyLink: { primaryUrl: string | null } = { primaryUrl: null };
+    /**
      * Outbound inter-relay link sink — now a REAL transmitter (was a no-op log
      * stub that never put bytes on the wire). When a standby socket is attached
      * and OPEN, the announce frame is actually sent; otherwise dropped best-effort.
@@ -205,6 +227,22 @@ if (isMainModule) {
       logger,
     );
 
+    // Step 6.5 (G3.2a): relay-side endpoint cache. A standby relay resolves the
+    // PRIMARY relay's WS URL (relayIds[0]) from chain to open the inter-relay
+    // pipe (the live socket open is G3.2b). The shared `subscribeRelayEndpoints`
+    // poller (reused from signaling, now in @dvconf/shared) populates the cache
+    // from `RelayRegistered` events — the relay only needs the relay-ID → URL
+    // arm (it already learns relay_ids from its own room poller below), but the
+    // poller also harmlessly mirrors the room→relays map (idempotent, in-memory
+    // cursor independent of the Step-7 room poller's file cursor).
+    const relayEndpointCache = new InMemoryRelayEndpointCache();
+    const stopRelayEndpoints = await subscribeRelayEndpoints(
+      client,
+      config.packageId,
+      relayEndpointCache,
+      logger,
+    );
+
     // Step 7: Poll room_manager events for MCU room assignments
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
     const myMinerId = signer.toSuiAddress();
@@ -256,20 +294,26 @@ if (isMainModule) {
               'G1: relay is PRIMARY for room — announcer installs on standby link (live-wire at bench)',
             );
           } else {
-            // STANDBY: open a WS link to the primary's endpoint to receive
-            // `pipe-producer` announces (handled by signaling.ts ->
-            // registry.record). DEFERRED-LIVE: resolve relayIds[0] -> ws URL
-            // then `new WebSocket(primaryUrl)` and feed inbound frames into the
-            // signaling server's pipe-producer handler. BENCH-2: on first peer
-            // join the standby calls standbyWarmPipe.ensure(topology, router,
-            // pipePort) (resolves the real producerId, else placeholder) and on
-            // each inbound announce standbyWarmPipe.onAnnounce(roomId) re-runs
-            // the warm pipe with the real id. The record + resolve + re-run
-            // contract is unit-tested (inter-relay-warmpipe.test.ts).
-            void WebSocket; // referenced; live link opened at bench
+            // STANDBY: resolve the primary's WS endpoint so the inter-relay link
+            // can be opened to it. G3.2a (HERE): resolve relayIds[0] -> primaryUrl
+            // from the shared endpoint cache (populated by subscribeRelayEndpoints,
+            // Step 6.5) and stash it for the live socket open. G3.2b (bench/live):
+            // `new WebSocket(primaryUrl)` + feed inbound `pipe-producer` frames
+            // into the signaling server's handler. BENCH-2: on first peer join the
+            // standby calls standbyWarmPipe.ensure(topology, router, pipePort)
+            // (resolves the real producerId, else placeholder) and on each inbound
+            // announce standbyWarmPipe.onAnnounce(roomId) re-runs the warm pipe with
+            // the real id. The record + resolve + re-run contract is unit-tested
+            // (inter-relay-warmpipe.test.ts); resolvePrimaryEndpoint is unit-tested
+            // (relay-endpoint-resolver.test.ts).
+            const primaryUrl = resolvePrimaryEndpoint(relayEndpointCache, relayIds);
+            standbyLink.primaryUrl = primaryUrl; // will be consumed by the G3.2b live socket open
+            void WebSocket; // referenced; live link opened at bench (G3.2b)
             logger.info(
-              { roomId, relayMode, role },
-              'G1: relay is STANDBY for room — opens inter-relay link to primary (live-wire at bench)',
+              { roomId, relayMode, role, primaryUrl, resolved: primaryUrl !== null },
+              primaryUrl !== null
+                ? 'G1: relay is STANDBY for room — resolved primary endpoint (G3.2a); inter-relay link opened at bench (G3.2b)'
+                : 'G1: relay is STANDBY for room — primary endpoint not yet resolvable from cache (chain not yet observed); retries on next assignment',
             );
           }
 
@@ -305,6 +349,7 @@ if (isMainModule) {
     const chainShutdown = () => {
       logger.info('Shutting down relay daemon...');
       stopHeartbeat();
+      void stopRelayEndpoints(); // G3.2a: stop the relay-endpoint cache poller
       closeRelayProbe();
       metricsServer.close();
       manager.close();

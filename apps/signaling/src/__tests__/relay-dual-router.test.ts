@@ -18,15 +18,20 @@
  *   - DualRelayRouter is wired at index.ts (daemon boundary), after verifyJoin.
  *   - rooms.ts is NOT touched (no chain deps inside).
  *   - relay-ID → ws-URL resolved via relayEndpointCache (D-RO-3 cached map).
+ *
+ * NOTE (G3.2a): the `InMemoryRelayEndpointCache` + `subscribeRelayEndpoints`
+ * unit tests were moved to packages/shared/src/__tests__/relay-endpoint-cache.test.ts
+ * (the code now lives in @dvconf/shared). The cross-module e2e below stays here
+ * because it couples the shared subscribe/cache with the ws-dependent DualRelayRouter.
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { DualRelayRouter } from '../relay-dual-router.js';
 import {
-  DualRelayRouter,
   InMemoryRelayEndpointCache,
   subscribeRelayEndpoints,
   type RelayEndpointCache,
-} from '../relay-dual-router.js';
+} from '@dvconf/shared';
 
 // ── Logger stub ──────────────────────────────────────────────────────────────
 
@@ -78,6 +83,32 @@ function makeMockWs() {
     send: vi.fn(),
     close: vi.fn(),
     readyState: 1, // OPEN
+  } as any;
+}
+
+// ── Mock SuiClient (for the cross-module e2e) ────────────────────────────────
+
+/**
+ * Mock SuiClient.queryEvents returning a fixed page per module on the FIRST
+ * poll, then empty. `subscribeRelayEndpoints` primes once (await tick) so a
+ * single poll populates the cache deterministically without timers.
+ */
+function makeMockSuiClient(events: {
+  relay_registry?: any[];
+  room_manager?: any[];
+}) {
+  const served = { relay_registry: false, room_manager: false };
+  return {
+    queryEvents: vi.fn(async ({ query }: any) => {
+      const mod = query.MoveEventModule.module as 'relay_registry' | 'room_manager';
+      if (served[mod]) return { data: [], hasNextPage: false, nextCursor: null };
+      served[mod] = true;
+      return {
+        data: events[mod] ?? [],
+        hasNextPage: false,
+        nextCursor: { txDigest: '0xtx', eventSeq: '1' },
+      };
+    }),
   } as any;
 }
 
@@ -184,21 +215,6 @@ describe('DualRelayRouter — dual-relay URL advertisement (REQ-RO-008)', () => 
   });
 });
 
-// ── Tests: RelayEndpointCache.setUrl (populated from RelayRegistered events) ─
-
-describe('RelayEndpointCache wiring (D-RO-3: in-memory cache)', () => {
-  it('setUrl + getUrl round-trip', () => {
-    const cache = new FakeRelayEndpointCache({});
-    cache.setUrl('0xr1', 'ws://node1.test');
-    expect(cache.getUrl('0xr1')).toBe('ws://node1.test');
-  });
-
-  it('getUrl returns undefined for unknown relay', () => {
-    const cache = new FakeRelayEndpointCache({});
-    expect(cache.getUrl('0xunknown')).toBeUndefined();
-  });
-});
-
 // ── Tests: F62 admission non-regression (structural) ────────────────────────
 
 describe('F62 admission non-regression contract', () => {
@@ -218,70 +234,10 @@ describe('F62 admission non-regression contract', () => {
   });
 });
 
-// ── Tests: subscribeRelayEndpoints — N2 cache population from chain events ────
+// ── Test: shared subscribe/cache ⇄ DualRelayRouter integration (cross-module) ─
 
-/**
- * Mock SuiClient.queryEvents returning a fixed page per module on the FIRST
- * poll, then empty. `subscribeRelayEndpoints` primes once (await tick) so a
- * single poll populates the cache deterministically without timers.
- */
-function makeMockSuiClient(events: {
-  relay_registry?: any[];
-  room_manager?: any[];
-}) {
-  const served = { relay_registry: false, room_manager: false };
-  return {
-    queryEvents: vi.fn(async ({ query }: any) => {
-      const mod = query.MoveEventModule.module as 'relay_registry' | 'room_manager';
-      if (served[mod]) return { data: [], hasNextPage: false, nextCursor: null };
-      served[mod] = true;
-      return {
-        data: events[mod] ?? [],
-        hasNextPage: false,
-        nextCursor: { txDigest: '0xtx', eventSeq: '1' },
-      };
-    }),
-  } as any;
-}
-
-describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => {
-  it('RelayRegistered event → cache.onRelayRegistered (id → ws URL from UTF-8 bytes)', async () => {
-    const url = 'ws://relay-x.test';
-    const urlBytes = Array.from(Buffer.from(url, 'utf8'));
-    const client = makeMockSuiClient({
-      relay_registry: [
-        {
-          type: '0xpkg::relay_registry::RelayRegistered',
-          parsedJson: { miner_id: '0xrelayX', endpoint_url: urlBytes },
-        },
-      ],
-    });
-    const cache = new InMemoryRelayEndpointCache();
-    const stop = await subscribeRelayEndpoints(client, '0xpkg', cache, mockLogger(), {
-      pollIntervalMs: 999_999,
-    });
-    expect(cache.getUrl('0xrelayX')).toBe(url);
-    await stop();
-  });
-
-  it('RoomAssigned event → cache.setRoomRelays (room → [primary, standby])', async () => {
-    const client = makeMockSuiClient({
-      room_manager: [
-        {
-          type: '0xpkg::room_manager::RoomAssigned',
-          parsedJson: { room_id: '0xroomA', relay_ids: ['0xprimary', '0xstandby'] },
-        },
-      ],
-    });
-    const cache = new InMemoryRelayEndpointCache();
-    const stop = await subscribeRelayEndpoints(client, '0xpkg', cache, mockLogger(), {
-      pollIntervalMs: 999_999,
-    });
-    expect(cache.getAssignedRelays('0xroomA')).toEqual(['0xprimary', '0xstandby']);
-    await stop();
-  });
-
-  it('end-to-end: both events primed → sendRelayAssigned now resolves both URLs', async () => {
+describe('subscribeRelayEndpoints ⇄ DualRelayRouter integration (REQ-RO-008)', () => {
+  it('both events primed via shared subscribe → DualRelayRouter resolves both URLs', async () => {
     const pUrl = 'ws://primary.test';
     const sUrl = 'ws://standby.test';
     const client = makeMockSuiClient({
@@ -302,30 +258,6 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
     router.sendRelayAssigned(ws, '0xroomE', 'trace-e2e');
     const sent = JSON.parse((ws.send as ReturnType<typeof vi.fn>).mock.calls[0][0] as string);
     expect(sent).toMatchObject({ type: 'relay-assigned', room_id: '0xroomE', primary_url: pUrl, standby_url: sUrl });
-    await stop();
-  });
-
-  it('stop() is idempotent — safe to call twice', async () => {
-    const client = makeMockSuiClient({});
-    const cache = new InMemoryRelayEndpointCache();
-    const stop = await subscribeRelayEndpoints(client, '0xpkg', cache, mockLogger(), {
-      pollIntervalMs: 999_999,
-    });
-    await stop();
-    await expect(stop()).resolves.toBeUndefined();
-  });
-
-  it('unknown event names are ignored (forward-compat)', async () => {
-    const client = makeMockSuiClient({
-      relay_registry: [
-        { type: '0xpkg::relay_registry::RelayLoadUpdated', parsedJson: { miner_id: '0xr', new_load: '5' } },
-      ],
-    });
-    const cache = new InMemoryRelayEndpointCache();
-    const stop = await subscribeRelayEndpoints(client, '0xpkg', cache, mockLogger(), {
-      pollIntervalMs: 999_999,
-    });
-    expect(cache.getUrl('0xr')).toBeUndefined();
     await stop();
   });
 });

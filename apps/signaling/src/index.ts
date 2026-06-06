@@ -17,6 +17,8 @@ import {
   loadKeypair,
   createLogger,
   SIGNALING_SESSION_REWARD,
+  InMemoryRelayEndpointCache,
+  subscribeRelayEndpoints,
   type Logger,
 } from '@dvconf/shared';
 import { RoomManager, getSessionsRouted } from './rooms.js';
@@ -32,7 +34,7 @@ import {
 } from './bench-endpoint.js';
 import type { AuthHook, JoinAuthMessage } from './auth.js';
 import { startCapTokenAdmission } from './cap-token-admission.js';
-import { DualRelayRouter, InMemoryRelayEndpointCache, subscribeRelayEndpoints } from './relay-dual-router.js';
+import { DualRelayRouter } from './relay-dual-router.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
