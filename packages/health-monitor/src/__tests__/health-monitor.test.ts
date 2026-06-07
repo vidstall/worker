@@ -275,3 +275,97 @@ describe('HealthMonitor — start/stop interval (P6)', () => {
     m.stop();
   });
 });
+
+describe('HealthMonitor — per-level cooldown (P7, DOH-016)', () => {
+  // Cooldown gates on Date.now(); vitest fake timers mock Date so windows are exact.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('suppresses a re-report of the SAME level within the cooldown window', async () => {
+    const { reporter, levels } = recordingReporter();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger(), cooldownMs: 60_000 });
+
+    set({ value: 0, level: 1 });
+    await m.tick(); // report 1
+    set({ value: 0, level: 2 });
+    await m.tick(); // report 2 (escalation, distinct)
+    set({ value: 0, level: 1 });
+    await m.tick(); // back to 1 within the window -> SUPPRESSED
+
+    expect(levels).toEqual([1, 2]);
+    expect(m.level).toBe(1); // the aggregated getter still reflects reality even when the report is suppressed
+  });
+
+  it('lets a DISTINCT not-recently-seen level bypass the window (escalation 1->2, recovery 2->0)', async () => {
+    const { reporter, levels } = recordingReporter();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger(), cooldownMs: 60_000 });
+
+    set({ value: 0, level: 1 });
+    await m.tick(); // 1
+    set({ value: 0, level: 2 });
+    await m.tick(); // 2 escalation — immediate, never delayed
+    await vi.advanceTimersByTimeAsync(1000); // still well within the window
+    set({ value: 0, level: 0 });
+    await m.tick(); // 0 recovery — never seen before -> immediate, never delayed
+
+    expect(levels).toEqual([1, 2, 0]);
+  });
+
+  it('re-reports the same level once the cooldown window elapses (self-heals)', async () => {
+    const { reporter, levels } = recordingReporter();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger(), cooldownMs: 60_000 });
+
+    set({ value: 0, level: 1 });
+    await m.tick(); // report 1 @ t0
+    set({ value: 0, level: 2 });
+    await m.tick(); // report 2
+    set({ value: 0, level: 1 });
+    await m.tick(); // back to 1 @ ~t0 -> suppressed
+    expect(levels).toEqual([1, 2]);
+
+    await vi.advanceTimersByTimeAsync(60_000); // window for level 1 elapses
+    await m.tick(); // aggregated still 1, reportedLevel still 2 -> trigger -> now reports
+    expect(levels).toEqual([1, 2, 1]);
+  });
+
+  it('debounces a tight 1<->0 flap to one report per level per window', async () => {
+    const { reporter, levels } = recordingReporter();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger(), cooldownMs: 60_000 });
+
+    for (let i = 0; i < 6; i++) {
+      set({ value: 0, level: 1 });
+      await m.tick();
+      set({ value: 0, level: 0 });
+      await m.tick();
+    }
+
+    // first up (1) + first down (0) report; every subsequent flap is suppressed in-window
+    expect(levels).toEqual([1, 0]);
+  });
+
+  it('defaults the cooldown window to 60000ms when cooldownMs is omitted', async () => {
+    const { reporter, levels } = recordingReporter();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger() }); // no cooldownMs
+
+    set({ value: 0, level: 1 });
+    await m.tick();
+    set({ value: 0, level: 2 });
+    await m.tick();
+    set({ value: 0, level: 1 });
+    await m.tick(); // within the default 60s -> suppressed
+    expect(levels).toEqual([1, 2]);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    await m.tick();
+    expect(levels).toEqual([1, 2]); // still inside the default window
+
+    await vi.advanceTimersByTimeAsync(1); // exactly 60000ms since the level-1 report
+    await m.tick();
+    expect(levels).toEqual([1, 2, 1]); // boundary is inclusive of re-report (strict < window suppresses)
+  });
+});
