@@ -244,6 +244,31 @@ export interface SecretRotated {
   rotated_at_epoch: string; // u64
 }
 
+// ── Node Health events (node_health module) ─────────────────────────
+/**
+ * P17 M2a — emitted by `dvconf::node_health::{report_node_degradation,
+ * report_cp_degradation}`. A faithful 3-level (0/1/2) self-degradation signal
+ * spanning all four daemon types (validator / relay / cp / signaling). This is
+ * the SINGLE-OWNER TS mirror (M2a-P5): field names + types + ORDER byte-mirror
+ * the FROZEN Move struct (node_health.move:48-54). A daemon decodes this by
+ * Sui-JSON KEY (NOT positional BCS), so a rename/reorder breaks the wire
+ * contract — the Move-side 74-byte BCS layout is pinned by the P4 #[test_only]
+ * foreign-id test.
+ *   node_type: u8 — 1=validator, 2=relay, 3=cp, 4=signaling (constants.move:13-17).
+ *                   `report_node_degradation` derives it from the cap role
+ *                   (unforgeable); `report_cp_degradation` hardcodes 3.
+ *   level:     u8 — 0=healthy, 1=degraded, 2=unhealthy.
+ * Supersedes the relay-only / level-less / test-only `RelayPerformanceDegraded`
+ * (kept compiled but inert + un-perturbed so the frozen forensic mirror holds).
+ */
+export interface NodeDegraded {
+  miner_id: string; // ID (hex) — reporting node's miner id (from the cap)
+  node_type: number; // u8
+  level: number; // u8
+  operator: string; // address (hex), == ctx.sender()
+  epoch: string; // u64
+}
+
 // ── Union type for all events ───────────────────────────────────────
 
 export type DvconfEvent =
@@ -276,4 +301,5 @@ export type DvconfEvent =
   | SessionProofSubmitted
   | RewardsDistributed
   | RelaySlashed
-  | SecretRotated;
+  | SecretRotated
+  | NodeDegraded;

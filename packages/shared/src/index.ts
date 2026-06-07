@@ -38,6 +38,7 @@ export type {
   RewardsDistributed,
   RelaySlashed,
   SecretRotated,
+  NodeDegraded,
   DvconfEvent,
 } from './types/events.js';
 

@@ -15,6 +15,7 @@ import type {
   RoomCreated,
   RoomAssigned,
   RoomClosed,
+  NodeDegraded,
 } from '@dvconf/shared';
 
 /**
@@ -50,6 +51,7 @@ export type KnownPayload =
   | RelayLoadUpdated
   | RelayRTTUpdated
   | RelayPerformanceDegraded
+  | NodeDegraded // P17 M2a-P5 — single-owner mirror imported from @dvconf/shared
   | RoomCreated
   | RoomAssigned
   | RoomClosed;

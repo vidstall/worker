@@ -26,6 +26,8 @@ import type {
   SignalingHeartbeat,
   SignalingLoadUpdated,
   SignalingUnregistered,
+  NodeDegraded,
+  DvconfEvent,
 } from '../types/events.js';
 import { RelayMode, MinerRole, ErrorCodes } from '../types/constants.js';
 import type { NetworkConfig, TxResult, SuiObjectRef } from '../types/chain.js';
@@ -201,6 +203,49 @@ describe('Event types compile and conform to Move structs', () => {
       operator: '0xop1',
     };
     expect(event.operator).toBe('0xop1');
+  });
+});
+
+// ── P17 M2a-P5: NodeDegraded (dvconf::node_health) single-owner wire mirror ──
+// Byte-mirrors the FROZEN 74-byte Move struct (node_health.move:48-54):
+//   { miner_id:ID(32), node_type:u8(1), level:u8(1), operator:address(32), epoch:u64(8) }
+// Decoded off-chain by parsedJson KEY (NOT positional BCS): ID/address/u64 →
+// string, u8 → number (the SecretRotated/RelaySlashed precedent). REQ-DOH-013/015.
+describe('NodeDegraded (dvconf::node_health) — P5 single-owner wire mirror', () => {
+  it('round-trips a Sui parsedJson fixture (node_type/level number; miner_id/operator/epoch string)', () => {
+    // The shape Sui emits for a live dvconf::node_health::NodeDegraded, keyed.
+    const parsed = {
+      miner_id: '0xMINER',
+      node_type: 2, // u8 → number (2 = relay; report_node_degradation derives this from the cap role)
+      level: 1, // u8 → number (1 = degraded)
+      operator: '0xOPERATOR', // address → string, == ctx.sender()
+      epoch: '12345', // u64 → string
+    };
+    const event: NodeDegraded = parsed; // fails tsc if the interface is absent or a field type drifts
+    expect(typeof event.miner_id).toBe('string');
+    expect(typeof event.node_type).toBe('number');
+    expect(typeof event.level).toBe('number');
+    expect(typeof event.operator).toBe('string');
+    expect(typeof event.epoch).toBe('string');
+    // Field ORDER is load-bearing — locks the frozen Move struct order at the mirror.
+    expect(Object.keys(event)).toEqual([
+      'miner_id',
+      'node_type',
+      'level',
+      'operator',
+      'epoch',
+    ]);
+  });
+
+  it('is a member of the DvconfEvent union (cp variant, node_type=3)', () => {
+    const event: DvconfEvent = {
+      miner_id: '0xCP',
+      node_type: 3, // 3 = cp (report_cp_degradation hardcodes role_cp())
+      level: 2, // 2 = unhealthy
+      operator: '0xOP',
+      epoch: '99',
+    };
+    expect((event as NodeDegraded).node_type).toBe(3);
   });
 });
 
