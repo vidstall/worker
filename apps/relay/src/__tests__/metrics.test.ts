@@ -92,4 +92,16 @@ describe('MetricsTracker', () => {
   it('getSessionMetrics returns undefined for unknown session', () => {
     expect(metrics.getSessionMetrics('room-x', 'peer-x')).toBeUndefined();
   });
+
+  // P17 M2a-P11: F61 packet-loss health signal (DOH-014). Non-vacuous — proves the
+  // getter sums per-session packetsLost (and reads 0 with no sessions / no quality feed).
+  it('getGlobalPacketLossBps sums packetsLost across sessions (0 when none)', () => {
+    expect(metrics.getGlobalPacketLossBps()).toBe(0);
+    metrics.trackBytes('room-1', 'peer-a', 1000);
+    metrics.trackBytes('room-1', 'peer-b', 2000);
+    expect(metrics.getGlobalPacketLossBps()).toBe(0); // no quality feed yet
+    metrics.updateQuality('room-1', 'peer-a', 700, 5);
+    metrics.updateQuality('room-1', 'peer-b', 300, 3);
+    expect(metrics.getGlobalPacketLossBps()).toBe(1000);
+  });
 });

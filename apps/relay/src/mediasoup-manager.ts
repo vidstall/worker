@@ -17,6 +17,8 @@ export interface MediasoupManager {
   workers: msTypes.Worker[];
   getNextWorker(): msTypes.Worker;
   createRouter(worker: msTypes.Worker): Promise<msTypes.Router>;
+  /** Cumulative count of mediasoup Worker 'died' events (F61 health signal, DOH-014). */
+  getWorkerDiedCount(): number;
   close(): void;
 }
 
@@ -48,6 +50,9 @@ export async function createMediasoupManager(logger: Logger): Promise<MediasoupM
   logger.info({ numWorkers, rtcMinPort, rtcMaxPort }, 'Creating mediasoup Workers');
 
   const workers: msTypes.Worker[] = [];
+  // F61 health signal (DOH-014): monotonic count of Worker 'died' events (incl.
+  // replacements that also die). Read by the relay HealthMonitor's worker_died reader.
+  let workerDiedCount = 0;
 
   for (let i = 0; i < numWorkers; i++) {
     const worker = await mediasoup.createWorker({
@@ -57,6 +62,7 @@ export async function createMediasoupManager(logger: Logger): Promise<MediasoupM
     });
 
     worker.on('died', (error) => {
+      workerDiedCount++;
       logger.error({ workerId: worker.pid, error }, 'mediasoup Worker died — spawning replacement');
       // Remove dead worker
       const idx = workers.indexOf(worker);
@@ -68,6 +74,7 @@ export async function createMediasoupManager(logger: Logger): Promise<MediasoupM
         .createWorker({ rtcMinPort, rtcMaxPort, logLevel: 'warn' })
         .then((replacement) => {
           replacement.on('died', () => {
+            workerDiedCount++;
             logger.error({ workerId: replacement.pid }, 'Replacement Worker also died');
           });
           workers.push(replacement);
@@ -98,6 +105,10 @@ export async function createMediasoupManager(logger: Logger): Promise<MediasoupM
 
     async createRouter(worker: msTypes.Worker): Promise<msTypes.Router> {
       return worker.createRouter({ mediaCodecs });
+    },
+
+    getWorkerDiedCount(): number {
+      return workerDiedCount;
     },
 
     close(): void {

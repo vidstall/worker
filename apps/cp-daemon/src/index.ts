@@ -9,7 +9,7 @@
 
 import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
-import type { SuiClient } from '@mysten/sui/client';
+import type { SuiClient, SuiEvent } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import {
   createSuiClient,
@@ -19,7 +19,14 @@ import {
   startHealthzServer,
   EventPoller,
 } from '@dvconf/shared';
-import type { Logger } from '@dvconf/shared';
+import type { Logger, NetworkConfig } from '@dvconf/shared';
+import {
+  HealthMonitor,
+  makeChainReporter,
+  readCooldownMs,
+  type ThresholdEnv,
+} from '@dvconf/health-monitor';
+import { buildHealthSignals, type CpHealthDeps } from './health-signals.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createEventHandler } from './event-handler.js';
@@ -260,6 +267,44 @@ function makeDeferredSubmit(submitLogger: Logger): SubmitFn {
   };
 }
 
+/**
+ * P17 M2a-P11 — assemble + start the cp-daemon's F61 HealthMonitor
+ * (DOH-014/016/017/018). Binds the HARD GATE `operator := signer.toSuiAddress()`
+ * (the same signer makeChainReporter signs with → operator == ctx.sender(), so
+ * report_cp_degradation does not abort, E_NOT_OPERATOR node_health.move:118).
+ * variant 'cp' → report_cp_degradation over the ControlPlaneCap (node_type=3
+ * hardcoded on-chain). Exported (not inline) so the wiring is unit-testable.
+ */
+export function startHealthMonitor(args: {
+  client: SuiClient;
+  signer: Ed25519Keypair;
+  config: NetworkConfig;
+  cpCapId: string;
+  deps: CpHealthDeps;
+  logger: Logger;
+  env?: ThresholdEnv;
+}): { monitor: HealthMonitor; stop: () => void } {
+  const { client, signer, config, cpCapId, deps, logger: log, env = process.env } = args;
+  const operator = signer.toSuiAddress();
+  const reporter = makeChainReporter({
+    client,
+    signer,
+    config,
+    capId: cpCapId,
+    operator,
+    variant: 'cp',
+    logger: log,
+  });
+  const monitor = new HealthMonitor({
+    signals: buildHealthSignals(deps, env),
+    reporter,
+    logger: log,
+    cooldownMs: readCooldownMs(env),
+  });
+  monitor.start();
+  return { monitor, stop: () => monitor.stop() };
+}
+
 async function main(): Promise<void> {
   // Load configuration
   const config = loadNetworkConfig();
@@ -442,6 +487,29 @@ async function main(): Promise<void> {
     relayPromotedObserver,
   });
 
+  // ── F61 health signals (DOH-014) ──────────────────────────────────────────
+  // rpc_error_rate: queryEvents failures / attempts, sampled at the bootstrap loop
+  // (the verified in-daemon queryEvents catch — the EventPoller's internal poll is
+  // private to @dvconf/shared, untouched). HONEST CARRY-FORWARD: the bootstrap loop
+  // runs once at startup, so this is a startup-RPC-health gauge; a continuously
+  // refreshed rate would need a net-new periodic probe (deferred, OQ-DOH-3).
+  let rpcErrors = 0;
+  let rpcTotal = 0;
+  const getRpcErrorRate = (): number => (rpcTotal === 0 ? 0 : rpcErrors / rpcTotal);
+  // event_lag: now - newest handled event timestamp (continuously updated by the
+  // tracked handler below). Primes 0 (= healthy) until the first event is seen.
+  let newestEventTsMs = 0;
+  const getEventLagMs = (): number =>
+    newestEventTsMs === 0 ? 0 : Math.max(0, Date.now() - newestEventTsMs);
+  // Additive wrapper: stamp the newest event ts then delegate to the real handler
+  // (event-handler.ts + its RelaySlashed arm untouched). Used by the bootstrap
+  // replay + all pollers below.
+  const trackedHandler = async (ev: SuiEvent): Promise<void> => {
+    const ts = ev.timestampMs ? Number(ev.timestampMs) : 0;
+    if (ts > newestEventTsMs) newestEventTsMs = ts;
+    await handler(ev);
+  };
+
   // Bootstrap: replay historical relay/signaling/validator events so state maps are populated
   // before real-time polling starts (prevents race where relay registers before CP poller runs)
   for (const mod of ['relay_registry', 'signaling_registry', 'validator_registry', 'registration'] as const) {
@@ -450,11 +518,14 @@ async function main(): Promise<void> {
         query: { MoveEventModule: { package: config.packageId, module: mod } },
         limit: 100,
       });
+      rpcTotal++; // F61 rpc_error_rate: a successful queryEvents attempt (DOH-014)
       for (const ev of events.data) {
-        await handler(ev);
+        await trackedHandler(ev);
       }
       logger.info({ module: mod, count: events.data.length }, 'Bootstrap: replayed historical events');
     } catch (err) {
+      rpcErrors++; // F61 rpc_error_rate: a failed queryEvents attempt (DOH-014)
+      rpcTotal++;
       logger.warn({ module: mod, err }, 'Bootstrap: failed to query historical events');
     }
   }
@@ -552,18 +623,30 @@ async function main(): Promise<void> {
     logger: logger.child({ poller: 'turn_credential' }),
   });
 
-  // Start all pollers
+  // Start all pollers (trackedHandler stamps the event-lag gauge then delegates)
   await Promise.all([
-    relayPoller.start(handler),
-    cpPoller.start(handler),
-    roomPoller.start(handler),
-    signalingPoller.start(handler),
-    economicPoller.start(handler),
-    validatorPoller.start(handler),
-    roleVotingPoller.start(handler),
-    registrationPoller.start(handler),
-    turnCredentialPoller.start(handler),
+    relayPoller.start(trackedHandler),
+    cpPoller.start(trackedHandler),
+    roomPoller.start(trackedHandler),
+    signalingPoller.start(trackedHandler),
+    economicPoller.start(trackedHandler),
+    validatorPoller.start(trackedHandler),
+    roleVotingPoller.start(trackedHandler),
+    registrationPoller.start(trackedHandler),
+    turnCredentialPoller.start(trackedHandler),
   ]);
+
+  // DOH-014/016/017/018: start the F61 self-degradation HealthMonitor (variant 'cp').
+  // Additive loop alongside the heartbeat + 9 pollers; getters close over the rpc
+  // + event-lag counters declared above. RO-020 healthz + event-handler untouched.
+  const { stop: stopHealthMonitor } = startHealthMonitor({
+    client,
+    signer,
+    config,
+    cpCapId,
+    logger,
+    deps: { getRpcErrorRate, getEventLagMs },
+  });
 
   logger.info(
     { heartbeatIntervalMs, pollIntervalMs, roleVotingIntervalMs, turnRotationIntervalMs },
@@ -573,6 +656,7 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = (): void => {
     logger.info('Shutting down CP daemon...');
+    stopHealthMonitor(); // DOH-018: stop self-degradation submits before teardown
     stopHeartbeat();
     stopRoleVoting();
     stopRevoteWatcher();

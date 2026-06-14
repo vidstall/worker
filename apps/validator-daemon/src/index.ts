@@ -33,6 +33,13 @@ import {
 } from '@dvconf/shared';
 import type { NetworkConfig, Logger, HealthzHandle } from '@dvconf/shared';
 import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvconf/shared';
+import {
+  HealthMonitor,
+  makeChainReporter,
+  readCooldownMs,
+  type ThresholdEnv,
+} from '@dvconf/health-monitor';
+import { buildHealthSignals, type ValidatorHealthDeps } from './health-signals.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { collectMeasurements } from './measurements.js';
@@ -48,6 +55,9 @@ import { waitForProofs, triggerDistribution } from './reward-trigger.js';
 import { timedMeasureRoom, closeValidatorProbe } from './latency-probe.js';
 
 const logger = createLogger('validator-daemon');
+
+/** F61 rolling-RTT window size (DOH-014): average of the latest N reachable RTTs. */
+const RTT_WINDOW = 10;
 
 /** Configuration for the measurement loop. */
 export interface ValidatorConfig {
@@ -90,7 +100,57 @@ export interface DaemonState {
   activeRooms: Map<string, ActiveRoom>;
   /** Stop function returned by startHeartbeat (F40). */
   heartbeatStop: (() => void) | null;
+  /**
+   * F61 health signals (DOH-014). `rttSamplesMs` = a bounded rolling window of the
+   * latest reachable-cycle RTTs (probe avgLatencyMs); `consecutiveUnreachable` =
+   * count of back-to-back unreachable measureRelay results (reset on any reachable).
+   * Both prime to 0 / [] (= healthy) until the first measurement cycle.
+   */
+  rttSamplesMs: number[];
+  consecutiveUnreachable: number;
+  /** Stop function for the F61 HealthMonitor (DOH-018). */
+  healthMonitorStop: (() => void) | null;
   running: boolean;
+}
+
+/**
+ * P17 M2a-P11 — assemble + start the validator daemon's F61 HealthMonitor
+ * (DOH-014/016/017/018). Binds the HARD GATE `operator := signer.toSuiAddress()`
+ * using the MAIN wallet (`signer` here MUST be `mainKeypair` — the operator that
+ * owns the MinerCap; the session key signs proofs, not operator-gated calls). The
+ * same signer makeChainReporter signs with → operator == ctx.sender(), so
+ * report_node_degradation does not abort (E_NOT_OPERATOR, node_health.move:81).
+ * variant 'miner' (node_type=1 validator, derived on-chain). Exported so the wiring
+ * is unit-testable.
+ */
+export function startHealthMonitor(args: {
+  client: SuiClient;
+  signer: Ed25519Keypair;
+  config: NetworkConfig;
+  validatorCapId: string;
+  deps: ValidatorHealthDeps;
+  logger: Logger;
+  env?: ThresholdEnv;
+}): { monitor: HealthMonitor; stop: () => void } {
+  const { client, signer, config, validatorCapId, deps, logger: log, env = process.env } = args;
+  const operator = signer.toSuiAddress();
+  const reporter = makeChainReporter({
+    client,
+    signer,
+    config,
+    capId: validatorCapId,
+    operator,
+    variant: 'miner',
+    logger: log,
+  });
+  const monitor = new HealthMonitor({
+    signals: buildHealthSignals(deps, env),
+    reporter,
+    logger: log,
+    cooldownMs: readCooldownMs(env),
+  });
+  monitor.start();
+  return { monitor, stop: () => monitor.stop() };
 }
 
 /**
@@ -170,6 +230,9 @@ export async function startDaemon(overrides?: {
     escrowMap,
     activeRooms,
     heartbeatStop: null,
+    rttSamplesMs: [],
+    consecutiveUnreachable: 0,
+    healthMonitorStop: null,
     running: true,
   };
 
@@ -184,6 +247,25 @@ export async function startDaemon(overrides?: {
     heartbeatIntervalMs,
     log,
   );
+
+  // DOH-014/016/017/018: start the F61 self-degradation HealthMonitor. Signed by the
+  // MAIN wallet (operator that owns the MinerCap — NOT the session key). Additive loop
+  // alongside the heartbeat + measurement cycle; getters read the rolling-RTT window +
+  // consecutive-unreachable counter on `state` (updated per measureRelay).
+  state.healthMonitorStop = startHealthMonitor({
+    client,
+    signer: mainKeypair,
+    config,
+    validatorCapId,
+    logger: log,
+    deps: {
+      getRttMs: () =>
+        state.rttSamplesMs.length === 0
+          ? 0
+          : state.rttSamplesMs.reduce((a, b) => a + b, 0) / state.rttSamplesMs.length,
+      getConsecutiveUnreachable: () => state.consecutiveUnreachable,
+    },
+  }).stop;
 
   // Read measurement config from env
   const measurementIntervalMs = parseInt(process.env['MEASUREMENT_INTERVAL_MS'] ?? '60000', 10);
@@ -527,6 +609,20 @@ async function measureRelay(
   // RO-020: the standby additionally carries the /api/probe liveness gate.
   const probe = createRelayProbe(roomId, () => resolveProbeEndpoint(isStandby), undefined, traceId);
   const measurement = await collectMeasurements(relayMinerId, probe);
+
+  // F61 health signals (DOH-014): a reachable cycle (unreachableSample =>
+  // measurementDurationMs 0n) resets the consecutive-unreachable counter and folds
+  // its RTT into the bounded rolling window; an unreachable cycle bumps the counter
+  // (RTT NOT recorded — avgLatencyMs is 0n on an unreachable sample and would poison
+  // the rolling mean toward healthy while the unreachable signal rises).
+  if (measurement.measurementDurationMs > 0n) {
+    state.consecutiveUnreachable = 0;
+    state.rttSamplesMs.push(Number(measurement.avgLatencyMs));
+    if (state.rttSamplesMs.length > RTT_WINDOW) state.rttSamplesMs.shift();
+  } else {
+    state.consecutiveUnreachable += 1;
+  }
+
   const epoch = BigInt(Math.floor(Date.now() / 1000));
 
   const proof = buildSessionProof(
@@ -586,6 +682,14 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
 
   // Close latency-probe writer (S23.1.A3, no-op when BENCH_LATENCY unset)
   closeValidatorProbe();
+
+  // DOH-018: stop the F61 self-degradation monitor first so no degraded report
+  // fires mid-shutdown.
+  if (state.healthMonitorStop) {
+    state.healthMonitorStop();
+    state.healthMonitorStop = null;
+    l.info('Health monitor stopped');
+  }
 
   if (state.heartbeatStop) {
     state.heartbeatStop();

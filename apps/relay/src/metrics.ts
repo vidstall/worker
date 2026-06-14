@@ -104,6 +104,25 @@ export class MetricsTracker {
     return this.sessions.size;
   }
 
+  /**
+   * Global packet-loss gauge (F61 health signal, DOH-014): sum of per-session
+   * `packetsLost` across active sessions; 0 when there are no sessions.
+   *
+   * HONEST CARRY-FORWARD (DESIGN §2.2 / OQ-DOH-3): `updateQuality` has no
+   * production caller today (per-session `packetsLost` stays 0), so this reads 0
+   * in production = fail-safe healthy. A live mediasoup `getStats()` loss-ratio
+   * feed (true basis points) is the deferred Phase-2 bench wiring; the threshold
+   * (`RELAY_*_PACKET_LOSS`) is a placeholder. The getter is non-vacuous (a wired
+   * `updateQuality` surfaces real loss) and additive (no existing caller changes).
+   */
+  getGlobalPacketLossBps(): number {
+    let total = 0;
+    for (const session of this.sessions.values()) {
+      total += session.packetsLost;
+    }
+    return total;
+  }
+
   clearSession(roomId: string, peerId: string): void {
     this.sessions.delete(this.key(roomId, peerId));
   }

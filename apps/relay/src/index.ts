@@ -19,7 +19,18 @@ import {
   EventPoller,
   InMemoryRelayEndpointCache,
   subscribeRelayEndpoints,
+  type NetworkConfig,
+  type Logger,
 } from '@dvconf/shared';
+import type { SuiClient } from '@mysten/sui/client';
+import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import {
+  HealthMonitor,
+  makeChainReporter,
+  readCooldownMs,
+  type ThresholdEnv,
+} from '@dvconf/health-monitor';
+import { buildHealthSignals, type RelayHealthDeps } from './health-signals.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
@@ -47,6 +58,46 @@ const WS_PORT = parseInt(process.env['WS_PORT'] ?? '4000', 10);
 /** G3.2b: Bearer token the standby presents on the inter-relay link (and the
  *  primary's signaling server validates). Undefined → single-host / unauthed. */
 const INTER_RELAY_TOKEN = process.env['INTER_RELAY_TOKEN'];
+
+/**
+ * P17 M2a-P11 — assemble + start the relay's F61 HealthMonitor (DOH-014/016/017/018).
+ *
+ * Single seam that binds the HARD GATE: `operator := signer.toSuiAddress()` — the
+ * SAME `signer` makeChainReporter signs the tx with — so `operator == ctx.sender()`
+ * holds and `report_node_degradation` does not abort (E_NOT_OPERATOR,
+ * node_health.move:81). variant 'miner' (relay holds a MinerCap; node_type=2 is
+ * derived on-chain from the cap role). Returns a `stop` for the shutdown teardown.
+ * Exported (not inline) so the wiring is unit-testable (health-monitor-wiring.test.ts).
+ */
+export function startHealthMonitor(args: {
+  client: SuiClient;
+  signer: Ed25519Keypair;
+  config: NetworkConfig;
+  minerCapId: string;
+  deps: RelayHealthDeps;
+  logger: Logger;
+  env?: ThresholdEnv;
+}): { monitor: HealthMonitor; stop: () => void } {
+  const { client, signer, config, minerCapId, deps, logger, env = process.env } = args;
+  const operator = signer.toSuiAddress();
+  const reporter = makeChainReporter({
+    client,
+    signer,
+    config,
+    capId: minerCapId,
+    operator,
+    variant: 'miner',
+    logger,
+  });
+  const monitor = new HealthMonitor({
+    signals: buildHealthSignals(deps, env),
+    reporter,
+    logger,
+    cooldownMs: readCooldownMs(env),
+  });
+  monitor.start();
+  return { monitor, stop: () => monitor.stop() };
+}
 
 // Only start the server when run directly (not imported in tests)
 const isMainModule =
@@ -296,6 +347,30 @@ if (isMainModule) {
       logger,
     );
 
+    // Step 6.4 (DOH-014/016/017/018): start the F61 self-degradation HealthMonitor.
+    // A SECOND chain-submitting loop alongside the heartbeat (additive — heartbeat,
+    // /api/probe + metricsServer untouched). The deps bag wires the live signal
+    // sources: per-worker getResourceUsage() CPU delta (MAX, async), the MetricsTracker
+    // global packet-loss aggregate, and the MediasoupManager worker-died counter.
+    const { stop: stopHealthMonitor } = startHealthMonitor({
+      client,
+      signer,
+      config,
+      minerCapId,
+      logger,
+      deps: {
+        getWorkerResourceUsages: () =>
+          Promise.all(
+            manager.workers.map(async (w) => {
+              const ru = await w.getResourceUsage();
+              return { pid: w.pid, ru_utime: ru.ru_utime, ru_stime: ru.ru_stime };
+            }),
+          ),
+        getPacketLossBps: () => metrics.getGlobalPacketLossBps(),
+        getWorkerDiedCount: () => manager.getWorkerDiedCount(),
+      },
+    });
+
     // Step 6.5 (G3.2a/b): relay-side endpoint cache. A standby relay resolves the
     // PRIMARY relay's WS URL (relayIds[0]) from chain to open the live inter-relay
     // link (G3.2b openStandbyLink). The shared `subscribeRelayEndpoints` poller
@@ -421,6 +496,7 @@ if (isMainModule) {
     // Graceful shutdown with worker cleanup
     const chainShutdown = () => {
       logger.info('Shutting down relay daemon...');
+      stopHealthMonitor(); // DOH-018: stop self-degradation submits before teardown
       standbyLinkManager.shutdown(); // G3.2b: close the link + suppress reconnect
       stopHeartbeat();
       void stopRelayEndpoints(); // G3.2a: stop the relay-endpoint cache poller

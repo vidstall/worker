@@ -23,7 +23,15 @@ import {
   InMemoryRelayEndpointCache,
   subscribeRelayEndpoints,
   type Logger,
+  type NetworkConfig,
 } from '@dvconf/shared';
+import {
+  HealthMonitor,
+  makeChainReporter,
+  readCooldownMs,
+  type ThresholdEnv,
+} from '@dvconf/health-monitor';
+import { buildHealthSignals, type SignalingHealthDeps } from './health-signals.js';
 import { RoomManager, getSessionsRouted } from './rooms.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
@@ -127,6 +135,24 @@ type SignalingMessage =
 /** Map peerId -> WebSocket for targeted message delivery. */
 const peerSockets = new Map<string, WebSocket>();
 
+// ── F61 health signals (DOH-014) ────────────────────────────────────
+/** Cumulative WS error events (ws.on('error')). */
+let wsErrorCount = 0;
+/** Cumulative accepted connections — the error-rate denominator. */
+let totalConnections = 0;
+/** WS error rate = errors / total connections; 0 before the first connection. */
+function getWsErrorRate(): number {
+  return totalConnections === 0 ? 0 : wsErrorCount / totalConnections;
+}
+/** MAX `ws.bufferedAmount` across live peer sockets (queue-depth gauge), in bytes. */
+function getMaxBufferedAmount(): number {
+  let max = 0;
+  for (const sock of peerSockets.values()) {
+    if (sock.bufferedAmount > max) max = sock.bufferedAmount;
+  }
+  return max;
+}
+
 // ── Rate limiting ───────────────────────────────────────────────────
 
 const MAX_CONNECTIONS_PER_IP = 10;
@@ -184,6 +210,7 @@ export function createServer(
 
     const peerId = randomUUID();
     peerSockets.set(peerId, ws);
+    totalConnections++; // F61 ws_error_rate denominator (DOH-014)
 
     // F63 (DOH-003): one trace id per connection, bound to a connection logger so
     // every line for this peer — both the auth and no-auth join paths — correlates
@@ -339,6 +366,7 @@ export function createServer(
     });
 
     ws.on('error', (err) => {
+      wsErrorCount++; // F61 ws_error_rate numerator (DOH-014)
       logger.error({ peerId, err }, 'WebSocket error');
     });
   });
@@ -360,6 +388,46 @@ function shutdown(wss: WebSocketServer) {
   });
   // Force exit after 5s if graceful close hangs
   setTimeout(() => process.exit(1), 5000);
+}
+
+/**
+ * P17 M2a-P11 — assemble + start the signaling daemon's F61 HealthMonitor
+ * (DOH-014/016/017/018). Binds the HARD GATE `operator := signer.toSuiAddress()`
+ * (the same signer makeChainReporter signs with → operator == ctx.sender(), so
+ * report_node_degradation does not abort, E_NOT_OPERATOR node_health.move:81).
+ * variant 'miner' (signaling holds a MinerCap, role=Signaling → node_type 4 derived
+ * on-chain). Exported (not inline) so the wiring is unit-testable.
+ */
+export function startHealthMonitor(args: {
+  // DAEMON-02: derive the chain types from the @dvconf/shared helpers (no direct
+  // `@mysten/sui` import in this core file — see signaling.test.ts compliance gate).
+  client: ReturnType<typeof createSuiClient>;
+  signer: ReturnType<typeof loadKeypair>;
+  config: NetworkConfig;
+  minerCapId: string;
+  deps: SignalingHealthDeps;
+  logger: Logger;
+  env?: ThresholdEnv;
+}): { monitor: HealthMonitor; stop: () => void } {
+  const { client, signer, config, minerCapId, deps, logger: log, env = process.env } = args;
+  const operator = signer.toSuiAddress();
+  const reporter = makeChainReporter({
+    client,
+    signer,
+    config,
+    capId: minerCapId,
+    operator,
+    variant: 'miner',
+    logger: log,
+  });
+  const monitor = new HealthMonitor({
+    signals: buildHealthSignals(deps, env),
+    reporter,
+    logger: log,
+    cooldownMs: readCooldownMs(env),
+  });
+  monitor.start();
+  return { monitor, stop: () => monitor.stop() };
 }
 
 // Only start the server when run directly (not imported in tests)
@@ -441,6 +509,18 @@ if (isMainModule) {
       'Signaling daemon started — chain-aware mode',
     );
 
+    // Step 3.5 (DOH-014/016/017/018): start the F61 self-degradation HealthMonitor.
+    // Additive second chain-submitting loop (heartbeat, healthz, F62 authHook untouched).
+    // Signals read the module-scoped WS error counters + the live peerSockets bufferedAmount.
+    const { stop: stopHealthMonitor } = startHealthMonitor({
+      client,
+      signer,
+      config,
+      minerCapId,
+      logger,
+      deps: { getWsErrorRate, getMaxBufferedAmount },
+    });
+
     // S23.2.C2: optional /bench/event HTTP receiver for external clients
     // (Node mediasoup-client harness + future browser RTCStats collector).
     // Off-by-default — only listens when BENCH_LATENCY=1.
@@ -480,6 +560,7 @@ if (isMainModule) {
     // Graceful shutdown with heartbeat cleanup
     const chainShutdown = async () => {
       logger.info('Shutting down signaling daemon...');
+      stopHealthMonitor(); // DOH-018: stop self-degradation submits before teardown
       clearInterval(rewardLogHandle);
       stopHeartbeat();
       closeSignalingProbe();
