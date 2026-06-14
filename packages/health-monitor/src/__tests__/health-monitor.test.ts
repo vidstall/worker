@@ -369,3 +369,106 @@ describe('HealthMonitor — per-level cooldown (P7, DOH-016)', () => {
     expect(levels).toEqual([1, 2, 1]); // boundary is inclusive of re-report (strict < window suppresses)
   });
 });
+
+describe('HealthMonitor — isPaused gate (P9, DOH-015/016)', () => {
+  // D-DOH-M2-HM-5: when the network is paused the monitor STILL computes + logs the
+  // level transition but SKIPS the chain submit (the on-chain `!is_paused` assert,
+  // E_PAUSED=672, is the authoritative backstop — submitting would only waste retries
+  // against a guaranteed abort). Pause is honored OFF-chain; level state stays live so
+  // the current level reports correctly on un-pause.
+
+  it('paused: computes + logs the level transition but SKIPS the chain submit', async () => {
+    const { reporter, levels } = recordingReporter();
+    const logger = mockLogger();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger, isPaused: () => true });
+
+    set({ value: 0, level: 2 });
+    await m.tick();
+
+    expect(m.level).toBe(2); // level is STILL computed — the getter reflects reality
+    expect(reporter.report).not.toHaveBeenCalled(); // chain submit skipped while paused
+    expect(levels).toEqual([]);
+    // the transition is still LOGGED, tagged skipped:'paused'
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ from: 0, to: 2, skipped: 'paused' }),
+      expect.any(String),
+    );
+  });
+
+  it('un-pause: the change deferred during pause reports exactly once', async () => {
+    const { reporter, levels } = recordingReporter();
+    let paused = true;
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger(), isPaused: () => paused });
+
+    set({ value: 0, level: 1 });
+    await m.tick(); // paused -> skip; reportedLevel left at 0 so the change is still pending
+    expect(levels).toEqual([]);
+
+    paused = false;
+    await m.tick(); // level still 1, reportedLevel stale (0) -> the deferred change now fires
+    expect(levels).toEqual([1]);
+    expect(m.level).toBe(1);
+  });
+
+  it('defaults to never-paused: omitting isPaused reports changes (non-regression)', async () => {
+    const { reporter, levels } = recordingReporter();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger() }); // no isPaused
+
+    set({ value: 0, level: 2 });
+    await m.tick();
+
+    expect(levels).toEqual([2]); // default () => false -> submit proceeds, P6/P7 behavior unchanged
+  });
+
+  it('paused: reports nothing across repeated changing ticks; the getter tracks the latest level', async () => {
+    const { reporter, levels } = recordingReporter();
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({ signals: [signal], reporter, logger: mockLogger(), isPaused: () => true });
+
+    set({ value: 0, level: 1 });
+    await m.tick();
+    set({ value: 0, level: 2 });
+    await m.tick();
+    set({ value: 0, level: 1 });
+    await m.tick();
+
+    expect(reporter.report).not.toHaveBeenCalled();
+    expect(levels).toEqual([]);
+    expect(m.level).toBe(1); // worst-wins getter reflects the latest aggregate even while paused
+  });
+
+  it('pause gate precedes cooldown: a paused recovery (a distinct level) is still skipped, then reports on un-pause', async () => {
+    const { reporter, levels } = recordingReporter();
+    let paused = false;
+    const { signal, set } = controllableSignal();
+    const m = new HealthMonitor({
+      signals: [signal],
+      reporter,
+      logger: mockLogger(),
+      cooldownMs: 60_000,
+      isPaused: () => paused,
+    });
+
+    set({ value: 0, level: 1 });
+    await m.tick(); // report 1
+    set({ value: 0, level: 2 });
+    await m.tick(); // report 2
+    expect(levels).toEqual([1, 2]);
+
+    // pause, then recover to level 0 — a DISTINCT not-recently-seen level the cooldown
+    // would NOT suppress, so ONLY the pause gate can prevent this submit.
+    paused = true;
+    set({ value: 0, level: 0 });
+    await m.tick();
+    expect(reporter.report).toHaveBeenCalledTimes(2); // still 2 — pause-skipped, NOT cooldown-suppressed
+    expect(levels).toEqual([1, 2]);
+
+    // un-pause; the recovery now submits
+    paused = false;
+    await m.tick();
+    expect(levels).toEqual([1, 2, 0]);
+  });
+});

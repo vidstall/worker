@@ -9,12 +9,14 @@
  *
  * P6 scope = the scaffold + the level state machine (worst-wins, fail-open,
  * report-on-change, start/stop/tick). P7 layers the per-level cooldown on top
- * (this file + thresholds.ts). The chain PTB reporter (P8) and the `isPaused`
- * gate (P9) follow. No chain, no daemon deps here.
+ * (this file + thresholds.ts). P8 supplies the chain PTB reporter (report.ts).
+ * P9 wires the optional `isPaused` gate (skip the submit while the network is
+ * paused). No chain, no daemon deps here — the reporter is INJECTED.
  *
  * Design: DESIGN.md D-DOH-M2-HM-1 (generic class; daemons supply readers) +
  * D-DOH-M2-HM-2 (level = worst-wins MAX; reader error = fail-OPEN level 0 + WARN) +
- * D-DOH-M2-HM-3 (per-level cooldown; a distinct level bypasses).
+ * D-DOH-M2-HM-3 (per-level cooldown; a distinct level bypasses) +
+ * D-DOH-M2-HM-5 (paused => compute + log but skip the chain submit).
  */
 
 import type { Logger } from '@dvconf/shared';
@@ -64,6 +66,18 @@ export interface HealthMonitorOptions {
    * (escalation / recovery is never delayed). See D-DOH-M2-HM-3.
    */
   cooldownMs?: number;
+  /**
+   * Pause predicate (D-DOH-M2-HM-5). The daemon supplies one that reads its
+   * cached `network_registry::is_paused()` poll. When it returns `true` the
+   * monitor STILL computes + logs the level transition but SKIPS the chain
+   * submit — the on-chain `!is_paused` assert (E_PAUSED 672) is the
+   * authoritative backstop, so submitting while paused only wastes retries
+   * against a guaranteed abort. Default `() => false` (never paused) keeps a
+   * registry-less unit test or a daemon without a pause handle working
+   * unchanged. Level state stays live, so the current level reports correctly
+   * on un-pause.
+   */
+  isPaused?: () => boolean;
 }
 
 const DEFAULT_INTERVAL_MS = 10_000;
@@ -84,6 +98,8 @@ export class HealthMonitor {
   private readonly logger: Logger;
   private readonly intervalMs: number;
   private readonly cooldownMs: number;
+  /** Pause predicate (D-DOH-M2-HM-5); default never-paused. */
+  private readonly isPaused: () => boolean;
 
   /** Current aggregated (worst-wins) level — updated every tick. */
   private aggregatedLevel: HealthLevel = 0;
@@ -103,6 +119,7 @@ export class HealthMonitor {
     this.logger = opts.logger;
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.cooldownMs = opts.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+    this.isPaused = opts.isPaused ?? (() => false);
   }
 
   /** The current aggregated level (worst-wins across all signals). */
@@ -138,6 +155,10 @@ export class HealthMonitor {
    * not-recently-seen level — every monotone escalation 1→2 / recovery 2→0 —
    * always reports. On a suppressed change `reportedLevel` is left unchanged, so
    * the trigger re-fires each tick and self-heals once the window elapses.
+   *
+   * While `isPaused()` is true the change is logged but the submit is skipped
+   * (D-DOH-M2-HM-5) — `reportedLevel` is likewise left unchanged so the deferred
+   * change reports on un-pause.
    */
   async tick(): Promise<void> {
     const previous = this.reportedLevel;
@@ -146,6 +167,20 @@ export class HealthMonitor {
     this.aggregatedLevel = aggregated;
 
     if (aggregated === previous) return; // steady — nothing to report
+
+    // Pause gate (D-DOH-M2-HM-5): off-chain, honor the network pause so we never
+    // submit against the guaranteed-abort entry (the on-chain `!is_paused` assert
+    // is the backstop). STILL log the transition; leave `reportedLevel` and the
+    // cooldown map UNTOUCHED so the change re-fires (and reports) once unpaused.
+    // Checked BEFORE the cooldown debounce — when paused we submit nothing, so the
+    // cooldown bookkeeping is irrelevant and the transition must log regardless.
+    if (this.isPaused()) {
+      this.logger.info(
+        { from: previous, to: aggregated, skipped: 'paused' },
+        'node health level changed; chain submit skipped (network paused)',
+      );
+      return;
+    }
 
     const lastAt = this.lastReportAtByLevel.get(aggregated);
     const now = Date.now();
