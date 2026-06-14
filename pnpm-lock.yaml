@@ -144,6 +144,12 @@ importers:
         specifier: ^22.0.0
         version: 22.19.13
 
+  packages/chain-event-listener:
+    dependencies:
+      '@dvconf/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   packages/health-monitor:
     dependencies:
       '@dvconf/shared':
