@@ -41,6 +41,9 @@ importers:
 
   apps/cp-daemon:
     dependencies:
+      '@dvconf/health-monitor':
+        specifier: workspace:*
+        version: link:../../packages/health-monitor
       '@dvconf/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -62,6 +65,9 @@ importers:
 
   apps/relay:
     dependencies:
+      '@dvconf/health-monitor':
+        specifier: workspace:*
+        version: link:../../packages/health-monitor
       '@dvconf/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -96,6 +102,9 @@ importers:
 
   apps/signaling:
     dependencies:
+      '@dvconf/health-monitor':
+        specifier: workspace:*
+        version: link:../../packages/health-monitor
       '@dvconf/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -115,6 +124,9 @@ importers:
 
   apps/validator-daemon:
     dependencies:
+      '@dvconf/health-monitor':
+        specifier: workspace:*
+        version: link:../../packages/health-monitor
       '@dvconf/shared':
         specifier: workspace:*
         version: link:../../packages/shared
