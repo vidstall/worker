@@ -388,7 +388,7 @@ describe('W5 M1 P9 — scaled bandwidth bench (REAL mediasoup, REQ-MCS-006)', ()
           (FORCE_OPTIMIZED_HIGH ? '  [RED HOOK: BENCH_FORCE_OPTIMIZED_HIGH=1]' : ''),
       );
 
-      // -- sidecar JSON (dated; no self-clobber) --------------------------------
+      // -- sidecar JSON (dated; green-only write, see guard below) --------------
       const sidecar = {
         req: 'REQ-MCS-006',
         phase: 'W5 M1 P9',
@@ -445,28 +445,35 @@ describe('W5 M1 P9 — scaled bandwidth bench (REAL mediasoup, REQ-MCS-006)', ()
       );
 
       // write the combined sidecar (N=12 gate + N=25 demo) now that both ran.
-      writeFileSync(
-        sidecarPath,
-        JSON.stringify(
-          {
-            ...sidecar,
-            n25Demo: {
-              n: demo.n,
-              pageSize: demo.pageSize,
-              baselineBytes: demo.baselineBytes,
-              optimizedBytes: demo.optimizedBytes,
-              ratio: Number(demo.ratio.toFixed(4)),
-              windowMs: demo.windowMs,
-              settleMs: demo.settleMs,
+      // SELF-CLOBBER GUARD (relay-overlap N1 lesson): a RED-hook run
+      // (BENCH_FORCE_OPTIMIZED_HIGH=1) deliberately produces a FAILING ratio; it
+      // must NOT overwrite the authoritative GREEN gate sidecar at the same dated
+      // path. The RED run still logs to console + the .evidence/tdd RED log for the
+      // causality proof, but the committed sidecar always holds the green numbers.
+      if (!FORCE_OPTIMIZED_HIGH) {
+        writeFileSync(
+          sidecarPath,
+          JSON.stringify(
+            {
+              ...sidecar,
+              n25Demo: {
+                n: demo.n,
+                pageSize: demo.pageSize,
+                baselineBytes: demo.baselineBytes,
+                optimizedBytes: demo.optimizedBytes,
+                ratio: Number(demo.ratio.toFixed(4)),
+                windowMs: demo.windowMs,
+                settleMs: demo.settleMs,
+              },
             },
-          },
-          null,
-          2,
-        ),
-        'utf8',
-      );
-      // eslint-disable-next-line no-console
-      console.log(`[bench] sidecar -> ${sidecarPath}`);
+            null,
+            2,
+          ),
+          'utf8',
+        );
+        // eslint-disable-next-line no-console
+        console.log(`[bench] sidecar -> ${sidecarPath}`);
+      }
 
       // THE HARD-GATE (REQ-MCS-006): >=3x aggregate byte reduction at N=12.
       expect(r.ratio).toBeGreaterThanOrEqual(3.0);
