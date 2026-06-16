@@ -24,3 +24,6 @@ export type {
   ShutdownArms,
   ShutdownReason,
 } from './self-shutdown-watcher.js';
+
+export { runGracefulShutdown, readGracefulShutdownConfig } from './graceful-shutdown.js';
+export type { GracefulShutdownPlan, GracefulShutdownConfig } from './graceful-shutdown.js';
