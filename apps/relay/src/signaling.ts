@@ -77,6 +77,25 @@ interface LeaveMessage {
 }
 
 /**
+ * W5 M1 (REQ-MCS-002) — client requests the relay apply a per-consumer simulcast
+ * layer preference. `setPreferredLayers` is a SERVER-SIDE mediasoup call
+ * (CONTRACTS.md C0): the client NEVER calls it, it only sends this request and
+ * the relay looks up the stored Consumer by `consumerId` and applies it.
+ */
+interface SetConsumerLayersMessage {
+  type: 'setConsumerLayers';
+  /** mediasoup Consumer.id, as returned to the client in the `consumed` reply. */
+  consumerId: string;
+  /** Spatial layer 0|1|2 (CONTRACTS.md C1: 0=low/thumbnail, 2=high/active-speaker). */
+  spatialLayer: number;
+  /**
+   * Temporal layer 0|1|2 (VP8 L1T3). Optional-semantics: omit → relay keeps the
+   * current temporal layer (passes only { spatialLayer } to setPreferredLayers).
+   */
+  temporalLayer?: number;
+}
+
+/**
  * Inbound inter-relay producer-announce frame (G1). Received by the STANDBY
  * relay on the same WS server, distinguished from client frames by `type`.
  * Shape matches PipeProducerAnnounce in inter-relay.ts.
@@ -94,6 +113,7 @@ type SignalingMessage =
   | ConnectTransportMessage
   | ProduceMessage
   | ConsumeMessage
+  | SetConsumerLayersMessage
   | LeaveMessage
   | PipeProducerMessage;
 
@@ -321,6 +341,11 @@ export function createSignalingServer(
 
       case 'pipe-producer': {
         handlePipeProducerAnnounce(msg, ws);
+        break;
+      }
+
+      case 'setConsumerLayers': {
+        await handleSetConsumerLayers(ws, msg);
         break;
       }
 
@@ -649,6 +674,56 @@ export function createSignalingServer(
     logger.debug(
       { consumerId: consumer.id, producerId, peerId: mapping.peerId },
       'Consumer created for peer',
+    );
+  }
+
+  /**
+   * W5 M1 (REQ-MCS-002) — apply a client-requested simulcast layer preference.
+   *
+   * `consumer.setPreferredLayers(...)` is a SERVER-SIDE mediasoup call
+   * (CONTRACTS.md C0): the client only *requests* it over the wire; the relay
+   * looks up the stored Consumer on the peer (`peer.consumers`, pushed in
+   * createConsumer at room-handler.ts:189) by `consumerId` and applies it.
+   *
+   * Omit-semantics (C2.1): when `temporalLayer` is absent the relay passes only
+   * `{ spatialLayer }`, keeping the consumer's current temporal layer. An unknown
+   * `consumerId` is logged and ignored — it must not throw / crash the WS loop.
+   */
+  async function handleSetConsumerLayers(
+    ws: WebSocket,
+    msg: SetConsumerLayersMessage,
+  ): Promise<void> {
+    const mapping = wsToRoom.get(ws);
+    if (!mapping) return;
+
+    const room = rooms.get(mapping.roomId);
+    const peer = room?.peers.get(mapping.peerId);
+    if (!room || !peer) return;
+
+    const consumer = peer.consumers.find((c) => c.id === msg.consumerId);
+    if (!consumer) {
+      logger.warn(
+        { consumerId: msg.consumerId, peerId: mapping.peerId, roomId: mapping.roomId },
+        'setConsumerLayers for unknown consumerId — ignoring',
+      );
+      return;
+    }
+
+    const preferredLayers =
+      msg.temporalLayer === undefined
+        ? { spatialLayer: msg.spatialLayer }
+        : { spatialLayer: msg.spatialLayer, temporalLayer: msg.temporalLayer };
+
+    await consumer.setPreferredLayers(preferredLayers);
+
+    logger.debug(
+      {
+        consumerId: msg.consumerId,
+        peerId: mapping.peerId,
+        spatialLayer: msg.spatialLayer,
+        temporalLayer: msg.temporalLayer,
+      },
+      'Applied setPreferredLayers for consumer',
     );
   }
 
