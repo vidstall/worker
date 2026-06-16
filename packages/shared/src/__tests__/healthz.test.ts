@@ -17,13 +17,18 @@ afterEach(async () => {
   handle = undefined;
 });
 
-function get(port: number, path: string): Promise<{ status: number; body: string }> {
+function get(
+  port: number,
+  path: string,
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     http
       .get({ host: '127.0.0.1', port, path }, (res) => {
         let body = '';
         res.on('data', (c) => (body += c));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body, headers: res.headers }),
+        );
       })
       .on('error', reject);
   });
@@ -54,5 +59,49 @@ describe('startHealthzServer', () => {
     await handle.close();
     handle = undefined;
     await expect(get(port, '/healthz')).rejects.toThrow();
+  });
+});
+
+describe('P17 M2b-P7 — CORS + isLive capability (DOH-027/029)', () => {
+  it('DOH-029: /healthz 200 carries access-control-allow-origin: * (browser viz fetch)', async () => {
+    handle = await startHealthzServer({ port: 0, service: 'cp-daemon' });
+    const { status, headers } = await get(handle.port, '/healthz');
+    expect(status).toBe(200);
+    expect(headers['access-control-allow-origin']).toBe('*');
+  });
+
+  it('DOH-029: the 404 path also carries the CORS header (shared header object)', async () => {
+    handle = await startHealthzServer({ port: 0, service: 'cp-daemon' });
+    const { status, headers } = await get(handle.port, '/nope');
+    expect(status).toBe(404);
+    expect(headers['access-control-allow-origin']).toBe('*');
+  });
+
+  it('DOH-027: isLive()===false ⇒ 503 + {status:not_ready}, body still the 4 keys', async () => {
+    handle = await startHealthzServer({ port: 0, service: 'validator-daemon', isLive: () => false });
+    const { status, body, headers } = await get(handle.port, '/healthz');
+    expect(status).toBe(503);
+    expect(headers['access-control-allow-origin']).toBe('*');
+    const json = JSON.parse(body);
+    expect(json.status).toBe('not_ready');
+    // Body stays exactly the 4 keys (status overridden, no new keys).
+    expect(Object.keys(json).sort()).toEqual(['pid', 'service', 'status', 'uptime_seconds']);
+    expect(json.service).toBe('validator-daemon');
+    expect(typeof json.uptime_seconds).toBe('number');
+    expect(json.pid).toBe(process.pid);
+  });
+
+  it('DOH-027: isLive()===true ⇒ 200 + {status:alive} (capability on, healthy)', async () => {
+    handle = await startHealthzServer({ port: 0, service: 'signaling', isLive: () => true });
+    const { status, body } = await get(handle.port, '/healthz');
+    expect(status).toBe(200);
+    expect(JSON.parse(body).status).toBe('alive');
+  });
+
+  it('default (no isLive) keeps 200 alive — capability is opt-in (P8-P10 wires it)', async () => {
+    handle = await startHealthzServer({ port: 0, service: 'cp-daemon' });
+    const { status, body } = await get(handle.port, '/healthz');
+    expect(status).toBe(200);
+    expect(JSON.parse(body).status).toBe('alive');
   });
 });

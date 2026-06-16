@@ -20,6 +20,18 @@ import { type Logger, healthzBody, readTraceId, traceChild } from '@dvconf/share
 import type { MetricsTracker } from './metrics.js';
 
 /**
+ * Shared response headers (P17 M2b-P7, DOH-029). `access-control-allow-origin: *`
+ * lets the browser dashboard's `useDaemonHealthz` hook fetch the relay's /healthz
+ * cross-origin (parallel to the shared healthz.ts edit). CORS ONLY — the relay's
+ * /healthz stays always-2xx (F1 = Option A; its standby polls it via
+ * relay-heartbeat.ts:82 2xx-range, so no isLive-503 is wired here).
+ */
+const JSON_HEADERS = {
+  'Content-Type': 'application/json',
+  'Access-Control-Allow-Origin': '*',
+} as const;
+
+/**
  * Snapshot of this relay's standby-liveness state for a /api/probe response.
  *
  * Resolved lazily on each probe so it always reflects current topology (the
@@ -119,7 +131,7 @@ export function startMetricsServer(
 
     // Only allow GET requests
     if (req.method !== 'GET') {
-      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.writeHead(405, JSON_HEADERS);
       res.end(JSON.stringify({ error: 'Method not allowed' }));
       return;
     }
@@ -137,7 +149,7 @@ export function startMetricsServer(
       if (url === '/healthz') {
         // ok:true retained for RO-020 backward-compat (relay-heartbeat checks the
         // status code, not the body); standard liveness fields added (DOH-009).
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, JSON_HEADERS);
         res.end(JSON.stringify({ ok: true, ...healthzBody('relay') }));
         return;
       }
@@ -149,7 +161,7 @@ export function startMetricsServer(
       if (url === '/api/probe') {
         const body = buildProbeResponse(probeState?.(), startedAt);
         reqLog.info({ url, role: body.role }, 'RO-020 probe served');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, JSON_HEADERS);
         res.end(JSON.stringify(body));
         return;
       }
@@ -161,13 +173,13 @@ export function startMetricsServer(
         const roomMetrics = metrics.getRoomMetrics(roomId);
 
         if (!roomMetrics) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.writeHead(404, JSON_HEADERS);
           res.end(JSON.stringify({ error: 'Room not found' }));
           return;
         }
 
         reqLog.debug({ url, roomId }, 'relay metrics served');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, JSON_HEADERS);
         res.end(JSON.stringify(roomMetrics));
         return;
       }
@@ -175,17 +187,17 @@ export function startMetricsServer(
       // Route: GET /metrics
       if (url === '/metrics') {
         const globalMetrics = metrics.getGlobalMetrics();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, JSON_HEADERS);
         res.end(JSON.stringify(globalMetrics));
         return;
       }
 
       // 404 for unknown routes
-      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.writeHead(404, JSON_HEADERS);
       res.end(JSON.stringify({ error: 'Not found' }));
     } catch (err) {
       reqLog.error({ err, url }, 'Metrics server error');
-      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.writeHead(500, JSON_HEADERS);
       res.end(JSON.stringify({ error: 'Internal server error' }));
     }
   });

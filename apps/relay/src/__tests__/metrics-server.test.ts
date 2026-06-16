@@ -160,4 +160,29 @@ describe('RO-020 relay /api/probe + /healthz', () => {
     expect(status).toBe(200);
     expect(json).toHaveProperty('totalBytesForwarded');
   });
+
+  // P17 M2b-P7 (DOH-029) — CORS so the browser viz hook can fetch relay /healthz.
+  // F1 = Option A: relay /healthz stays ALWAYS 2xx (its standby polls it via
+  // relay-heartbeat.ts:82 2xx-range) — P7 adds the CORS header ONLY, no isLive-503.
+  it('DOH-029: relay /healthz carries access-control-allow-origin: * (CORS)', async () => {
+    start();
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('F1 Option A: relay /healthz stays 2xx (heartbeat-safe; no isLive-503)', async () => {
+    start();
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+    // RO-020 invariant: relay-heartbeat checks the 2xx RANGE (>=200 && <300).
+    expect(res.status).toBeGreaterThanOrEqual(200);
+    expect(res.status).toBeLessThan(300);
+  });
+
+  it('DOH-029: relay /api/probe also carries the CORS header (shared header object)', async () => {
+    start(() => ({ role: 'standby', pipeConsumerAlive: true, rtcpAlive: true }));
+    const res = await fetch(`http://127.0.0.1:${port}/api/probe`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+  });
 });
