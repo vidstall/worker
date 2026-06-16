@@ -12,6 +12,7 @@
   "dependencies": {
     "@dvconf/shared": "workspace:*",
     "@dvconf/health-monitor": "workspace:*",
+    "@dvconf/chain-event-listener": "workspace:*",
     "@mysten/sui": "^1.45.2",
     "mediasoup": "^3.14.0",
     "ws": "^8.16.0",

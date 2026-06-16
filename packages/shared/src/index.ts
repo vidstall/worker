@@ -69,6 +69,8 @@ export { executeWithRetry, extractCreatedObjectByType } from './chain/tx.js';
 export { EventPoller } from './chain/events.js';
 export type { EventPollerOptions } from './chain/events.js';
 export { waitForRoleAssignment, applyVotedRole } from './chain/role-assignment.js';
+// P17 M2b-P8 (DOH-021) — on-chain reads for the F60 reactive-shutdown wiring.
+export { readIsPaused, readCapMinerId } from './chain/network-registry.js';
 
 // Logger
 export { createLogger, buildLoggerOptions } from './logger.js';
