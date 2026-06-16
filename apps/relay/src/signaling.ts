@@ -199,6 +199,19 @@ export function createSignalingServer(
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
 
+  // W5 M1 P5 (REQ-MCS-003): AudioLevelObserver tunables — PLACEHOLDER defaults
+  // pending the P5/P9 tune (CONTRACTS.md C4). No hardcodes (feedback_no_hardcodes):
+  // both are env knobs. interval ms ~800; threshold dBov ~−60; maxEntries fixed 1
+  // (dominant speaker only) per C2.4.
+  const audioObserverIntervalMs = parseInt(
+    process.env['RELAY_AUDIO_LEVEL_INTERVAL_MS'] ?? '800',
+    10,
+  );
+  const audioObserverThresholdDb = parseInt(
+    process.env['RELAY_AUDIO_LEVEL_THRESHOLD_DB'] ?? '-60',
+    10,
+  );
+
   const rooms = new Map<string, RoomState>();
   /** Track which room each WebSocket belongs to for cleanup. */
   const wsToRoom = new Map<WebSocket, { roomId: string; peerId: string }>();
@@ -428,6 +441,14 @@ export function createSignalingServer(
           rooms.set(roomId, room);
           logger.info({ roomId, mode: roomMode }, 'Room created');
 
+          // W5 M1 P5 (REQ-MCS-003): attach one AudioLevelObserver per router.
+          // maxEntries:1 → only the dominant speaker. On `volumes` the relay maps
+          // the dominant producerId → peerId and BROADCASTS `activeSpeaker` to all
+          // room peers (it only REPORTS — the client reacts with setConsumerLayers,
+          // CONTRACTS.md C0/C2.4). Best-effort: a creation failure must not break
+          // room setup, so the observer stays optional and every use is guarded.
+          await attachAudioLevelObserver(room);
+
           // G3.2b: on the first peer join for a room this relay is STANDBY for,
           // hand the room's router to the wiring layer so it builds the
           // RoomTopology + opens the paused warm pipe (StandbyWarmPipeCoordinator
@@ -597,6 +618,30 @@ export function createSignalingServer(
 
     peer.producers.push(producer);
 
+    // W5 M1 P5 (REQ-MCS-003): register AUDIO producers with the room's
+    // AudioLevelObserver so it can surface the dominant speaker. Guarded on the
+    // observer existing (undefined when attach failed / MCU). mediasoup auto-
+    // detaches a producer from the observer when the producer closes (removePeer
+    // → producer.close()), so no explicit removeProducer is required here; we
+    // defensively removeProducer on the close event regardless.
+    if (msg.kind === 'audio' && room.audioLevelObserver) {
+      try {
+        await room.audioLevelObserver.addProducer({ producerId: producer.id });
+        producer.on('@close', () => {
+          room.audioLevelObserver
+            ?.removeProducer({ producerId: producer.id })
+            .catch(() => {
+              /* observer/producer already gone — auto-detached; ignore */
+            });
+        });
+      } catch (err) {
+        logger.warn(
+          { roomId: mapping.roomId, producerId: producer.id, err: (err as Error).message },
+          'AudioLevelObserver.addProducer failed — speaker detection skips this producer',
+        );
+      }
+    }
+
     sendJson(ws, {
       type: 'produced',
       producerId: producer.id,
@@ -725,6 +770,73 @@ export function createSignalingServer(
       },
       'Applied setPreferredLayers for consumer',
     );
+  }
+
+  /**
+   * W5 M1 P5 (REQ-MCS-003): create one AudioLevelObserver for the room's router
+   * and wire its `volumes` event to an `activeSpeaker` broadcast. maxEntries:1 →
+   * only the dominant speaker is reported. Best-effort: any failure is logged and
+   * leaves `room.audioLevelObserver` undefined (the produce-side addProducer + the
+   * broadcast are both guarded on its presence).
+   */
+  async function attachAudioLevelObserver(room: RoomState): Promise<void> {
+    try {
+      const observer = await room.router.createAudioLevelObserver({
+        maxEntries: 1,
+        threshold: audioObserverThresholdDb,
+        interval: audioObserverIntervalMs,
+      });
+      room.audioLevelObserver = observer;
+
+      observer.on('volumes', (volumes) => {
+        const dominant = volumes[0];
+        if (!dominant) return;
+        const dominantProducerId = dominant.producer.id;
+
+        // Map producerId → peerId via the room's peer→producers structure.
+        let speakerPeerId: string | undefined;
+        for (const [peerId, peer] of room.peers) {
+          if (peer.producers.some((p) => p.id === dominantProducerId)) {
+            speakerPeerId = peerId;
+            break;
+          }
+        }
+        if (!speakerPeerId) {
+          logger.debug(
+            { roomId: room.roomId, producerId: dominantProducerId },
+            'activeSpeaker: dominant producerId not mapped to a peer — skipping broadcast',
+          );
+          return;
+        }
+
+        // Broadcast to ALL peers in the room (existing fan-out idiom).
+        for (const [, peer] of room.peers) {
+          sendJson(peer.ws, { type: 'activeSpeaker', peerId: speakerPeerId });
+        }
+        logger.debug(
+          { roomId: room.roomId, peerId: speakerPeerId },
+          'activeSpeaker broadcast',
+        );
+      });
+
+      observer.on('silence', () => {
+        logger.debug({ roomId: room.roomId }, 'activeSpeaker: room silent');
+      });
+
+      logger.info(
+        {
+          roomId: room.roomId,
+          intervalMs: audioObserverIntervalMs,
+          thresholdDb: audioObserverThresholdDb,
+        },
+        'AudioLevelObserver attached',
+      );
+    } catch (err) {
+      logger.warn(
+        { roomId: room.roomId, err: (err as Error).message },
+        'AudioLevelObserver attach failed — active-speaker disabled for this room',
+      );
+    }
   }
 
   async function handleDisconnect(ws: WebSocket): Promise<void> {

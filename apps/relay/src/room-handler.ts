@@ -23,6 +23,13 @@ export interface RoomState {
   mode: 'sfu' | 'mcu';
   peers: Map<string, PeerState>;
   mcuPipeline?: McuPipeline;
+  /**
+   * W5 M1 P5 (REQ-MCS-003): one AudioLevelObserver per router, attached at room
+   * creation. Its `volumes` event yields the dominant audio producerId, which the
+   * relay maps → peerId and broadcasts as `activeSpeaker`. Optional: undefined in
+   * MCU rooms / when observer creation is unavailable (guarded everywhere).
+   */
+  audioLevelObserver?: msTypes.AudioLevelObserver;
 }
 
 export interface PeerState {
