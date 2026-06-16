@@ -73,6 +73,7 @@ function mockTransport(id: string, produceKind: 'audio' | 'video') {
       setPreferredLayers: vi.fn(),
       close: vi.fn(),
     }),
+    setMaxIncomingBitrate: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
   };
 }

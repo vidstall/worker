@@ -56,6 +56,7 @@ function mockTransport(id: string) {
       lastConsumer = mockConsumer('consumer-1');
       return lastConsumer;
     }),
+    setMaxIncomingBitrate: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
   };
 }

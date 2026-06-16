@@ -235,6 +235,18 @@ export function createSignalingServer(
     10,
   );
 
+  // W5 M1 P7 (REQ-MCS-005): server-side BWE backstop — cap per recv transport so
+  // a client cannot request high simulcast layers for every tile and blow its
+  // downlink. Applied on recvTransport only (NOT the send transport). Value is a
+  // PLACEHOLDER pending the P9 bench (CONTRACTS.md C4); ~4 Mbps is a reasonable
+  // starting floor for a 9-tile gallery at 720p speaker + 360p/180p thumbnails.
+  // Set to 0 to disable the cap (opt-out; e.g. bench runs that intentionally
+  // push max bitrate). Parsed once at server start; no hardcodes (feedback_no_hardcodes).
+  const maxIncomingBitrate = parseInt(
+    process.env['RELAY_MAX_INCOMING_BITRATE'] ?? '4000000',
+    10,
+  );
+
   const rooms = new Map<string, RoomState>();
   /** Track which room each WebSocket belongs to for cleanup. */
   const wsToRoom = new Map<WebSocket, { roomId: string; peerId: string }>();
@@ -560,6 +572,16 @@ export function createSignalingServer(
       peer.sendTransport = transport;
     } else {
       peer.recvTransport = transport;
+      // W5 M1 P7 (REQ-MCS-005): apply the BWE backstop cap on the receive transport
+      // ONLY (the consuming side). Server-internal — not a wire message (CONTRACTS.md C0).
+      // Guard: skip when cap is 0 (opt-out) or NaN (invalid env value).
+      if (maxIncomingBitrate > 0) {
+        await transport.setMaxIncomingBitrate(maxIncomingBitrate);
+        logger.debug(
+          { transportId: transport.id, maxIncomingBitrate, peerId: mapping.peerId },
+          'recv transport BWE backstop cap applied',
+        );
+      }
     }
 
     // S23.1.A1: start a latency-probe sampler on this transport when

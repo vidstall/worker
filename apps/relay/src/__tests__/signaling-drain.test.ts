@@ -28,7 +28,7 @@ function mockRouter() {
     rtpCapabilities: { codecs: [], headerExtensions: [] },
     createWebRtcTransport: vi.fn().mockResolvedValue({
       id: 't', iceParameters: {}, iceCandidates: [], dtlsParameters: {},
-      connect: vi.fn(), produce: vi.fn(), consume: vi.fn(), close: vi.fn(),
+      connect: vi.fn(), produce: vi.fn(), consume: vi.fn(), setMaxIncomingBitrate: vi.fn().mockResolvedValue(undefined), close: vi.fn(),
     }),
     canConsume: vi.fn().mockReturnValue(true),
     close: vi.fn(),

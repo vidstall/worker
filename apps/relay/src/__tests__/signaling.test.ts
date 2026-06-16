@@ -25,6 +25,7 @@ function mockTransport(id: string) {
     connect: vi.fn().mockResolvedValue(undefined),
     produce: vi.fn().mockResolvedValue({ id: 'producer-1', kind: 'audio', close: vi.fn() }),
     consume: vi.fn().mockResolvedValue({ id: 'consumer-1', kind: 'audio', rtpParameters: {}, close: vi.fn() }),
+    setMaxIncomingBitrate: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
   };
 }
