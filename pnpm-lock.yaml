@@ -41,6 +41,9 @@ importers:
 
   apps/cp-daemon:
     dependencies:
+      '@dvconf/chain-event-listener':
+        specifier: workspace:*
+        version: link:../../packages/chain-event-listener
       '@dvconf/health-monitor':
         specifier: workspace:*
         version: link:../../packages/health-monitor

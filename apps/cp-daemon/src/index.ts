@@ -18,8 +18,18 @@ import {
   createLogger,
   startHealthzServer,
   EventPoller,
+  readIsPaused,
 } from '@dvconf/shared';
 import type { Logger, NetworkConfig } from '@dvconf/shared';
+import {
+  ChainEventListener,
+  SelfShutdownWatcher,
+  runGracefulShutdown,
+  readGracefulShutdownConfig,
+  type GracefulShutdownPlan,
+  type GracefulShutdownConfig,
+  type ShutdownReason,
+} from '@dvconf/chain-event-listener';
 import {
   HealthMonitor,
   makeChainReporter,
@@ -305,6 +315,123 @@ export function startHealthMonitor(args: {
   return { monitor, stop: () => monitor.stop() };
 }
 
+// ── P17 M2b-P10 (DOH-021/023/024): F60 graceful shutdown ──────────────────────
+
+/**
+ * The cp-daemon's teardown closures, injected into {@link buildCpShutdownPlan}.
+ * The cp-daemon is poller-only (no WS accept, nothing to drain) → `setAccepting`
+ * and `drain` are NO-OPs; the substance is the ordered reactive → liveness-LAST
+ * groups over the heartbeat + role-voting + the two watchers + the TURN/cap-token
+ * issuers + the 9 EventPollers.
+ */
+export interface CpShutdownDeps {
+  logger: Logger;
+  /** (3) reactive — the M2a HealthMonitor chain-submit loop (C-A: stops HERE). */
+  stopHealthMonitor: () => void;
+  /** (3) reactive — the SelfShutdownWatcher pause poll. */
+  stopWatcher: () => void;
+  /** (3) reactive — the SelfShutdownWatcher's ChainEventListener (pause-arm only). */
+  stopChainListener: () => Promise<void>;
+  /** (3) reactive — the VOTE-06 role-voting loop. */
+  stopRoleVoting: () => void;
+  /** (3) reactive — the F47 re-vote watcher. */
+  stopRevoteWatcher: () => void;
+  /** (3) reactive — the RO-009 relay-heartbeat (Layer C) watcher. */
+  stopRelayHeartbeatWatcher: () => void;
+  /** (3) reactive — the TURN issuer rotation loop. */
+  stopTurnIssuer: () => void;
+  /** (3) reactive — the F62 cap-token issuer epoch refresher. */
+  stopCapTokenIssuer: () => void;
+  /** (3) reactive — the optional TURN RPC HTTP server (null when TURN_RPC_TOKEN unset). */
+  stopTurnRpc?: () => void;
+  /** (3) reactive — the 9 control-plane EventPollers. */
+  stopPollers: () => void;
+  /** (4) LAST — heartbeat (C-B: moved here so the chain sees the daemon live). */
+  stopHeartbeat: () => void;
+  /** (4) LAST — the /healthz liveness server. */
+  closeHealthz: () => Promise<void>;
+  exit: (code: number) => never;
+  config: GracefulShutdownConfig;
+}
+
+/**
+ * Assemble the cp-daemon's ordered graceful-shutdown plan, encoding the two
+ * cross-cutting composition rules:
+ *   C-A — the M2a HealthMonitor is a chain-SUBMITTING reactive loop → it stops
+ *         FIRST in `stopReactive` (with the watcher + ChainEventListener + the
+ *         role-voting / re-vote / relay-heartbeat watchers + the TURN/cap-token
+ *         issuers + the 9 pollers), NOT before the drain.
+ *   C-B — heartbeat-stop moves to the LAST group (with /healthz) so the chain sees
+ *         the cp LIVE through teardown (D-DOH-M2-F60-3 split-brain fix).
+ * `setAccepting` + `drain` are NO-OPs (cp is poller-only). Exported (not inline) so
+ * the order is unit-testable (graceful-shutdown-wiring.test.ts).
+ */
+export function buildCpShutdownPlan(
+  reason: string,
+  deps: CpShutdownDeps,
+): GracefulShutdownPlan {
+  return {
+    reason,
+    logger: deps.logger,
+    setAccepting: () => {}, // NO-OP — cp has no connection accept
+    drain: async () => {}, // NO-OP — poller-only, nothing in-flight
+    stopReactive: async () => {
+      deps.stopHealthMonitor(); // C-A
+      deps.stopWatcher();
+      await deps.stopChainListener();
+      deps.stopRoleVoting();
+      deps.stopRevoteWatcher();
+      deps.stopRelayHeartbeatWatcher();
+      deps.stopTurnIssuer();
+      deps.stopCapTokenIssuer();
+      deps.stopTurnRpc?.();
+      deps.stopPollers();
+    },
+    stopHeartbeatAndHealthz: async () => {
+      deps.stopHeartbeat(); // C-B → LAST
+      await deps.closeHealthz();
+    },
+    exit: deps.exit,
+    drainTimeoutMs: deps.config.drainTimeoutMs,
+    forceKillTimeoutMs: deps.config.forceKillTimeoutMs,
+  };
+}
+
+/**
+ * Assemble + start the cp-daemon's F60 SelfShutdownWatcher.
+ *
+ * The cp-daemon is NOT slashable (D-F60-4) and CP self-degradation is out of scope
+ * (CP failover deferred to advisor gate 5) → arms = { paused } ONLY: it subscribes
+ * NEITHER economic_layer NOR node_health, so only the `is_paused()` poll is armed.
+ * Because both id-filtered arms are off, `ownMinerId` is unused → we pass `''` and
+ * SKIP the {@link readCapMinerId} RPC (unlike validator/signaling, which arm
+ * `degraded` and need the self-filter id). The `paused` arm reads
+ * `network_registry::is_paused` via {@link readIsPaused} (devInspect, fail-open).
+ * The existing cp event-handler `RelaySlashed` arm (the TURN kill-switch for OTHER
+ * relays) is UNTOUCHED — distinct from this self-targeted terminal trigger.
+ * Exported so the arms + skipped-RPC wiring is unit-testable.
+ */
+export async function startCpSelfShutdownWatcher(args: {
+  client: SuiClient;
+  config: NetworkConfig;
+  cpCapId: string;
+  listener: ChainEventListener;
+  onSelfShutdown: (reason: ShutdownReason) => void;
+  logger: Logger;
+}): Promise<{ watcher: SelfShutdownWatcher; stop: () => void }> {
+  const { client, config, listener, onSelfShutdown, logger: log } = args;
+  const watcher = new SelfShutdownWatcher({
+    listener,
+    ownMinerId: '', // unused — both id-filtered arms (slash/degraded) are off
+    arms: { slash: false, degraded: false, paused: true },
+    onSelfShutdown,
+    logger: log,
+    isPaused: () => readIsPaused(client, config.packageId, config.networkRegistryId, log),
+  });
+  await watcher.start();
+  return { watcher, stop: () => watcher.stop() };
+}
+
 async function main(): Promise<void> {
   // Load configuration
   const config = loadNetworkConfig();
@@ -317,10 +444,25 @@ async function main(): Promise<void> {
     'CP daemon starting',
   );
 
+  // P17 M2b-P10 (DOH-019/027): the ChainEventListener backing the F60
+  // SelfShutdownWatcher (pause arm only — NO subscribes) + the /healthz isLive
+  // gate. HONEST CARRY-FORWARD: cp's 9 EventPollers are NOT routed through this
+  // listener and the watcher's degraded arm is OFF → this listener has ZERO
+  // subscribers → isDegraded() is always false → cp /healthz stays 200 in
+  // practice (the isLive capability is wired but currently VACUOUS for cp). cp
+  // /healthz is NOT peer-polled, so a 503 would be safe anyway (F1=Option A).
+  const listener = new ChainEventListener({
+    client,
+    packageId: config.packageId,
+    logger: logger.child({ component: 'self-shutdown-listener' }),
+  });
+  const gracefulCfg = readGracefulShutdownConfig();
+
   // F65 (DOH-008/009) — always-on, cheap liveness endpoint.
   const healthz = await startHealthzServer({
     port: Number(process.env['CP_HEALTHZ_PORT'] ?? 8091),
     service: 'cp-daemon',
+    isLive: () => !listener.isDegraded(),
   });
   logger.info({ port: healthz.port }, 'healthz listening');
 
@@ -653,35 +795,62 @@ async function main(): Promise<void> {
     `CP daemon started — heartbeat every ${heartbeatIntervalMs}ms, polling events every ${pollIntervalMs}ms, role voting every ${roleVotingIntervalMs}ms, TURN secret rotating every ${turnRotationIntervalMs}ms`,
   );
 
-  // Graceful shutdown
-  const shutdown = (): void => {
-    logger.info('Shutting down CP daemon...');
-    stopHealthMonitor(); // DOH-018: stop self-degradation submits before teardown
-    stopHeartbeat();
-    stopRoleVoting();
-    stopRevoteWatcher();
-    stopRelayHeartbeatWatcher();
-    stopTurnIssuer();
-    stopCapTokenIssuer();
-    if (stopTurnRpc) {
-      void stopTurnRpc();
-    }
-    relayPoller.stop();
-    cpPoller.stop();
-    roomPoller.stop();
-    signalingPoller.stop();
-    economicPoller.stop();
-    validatorPoller.stop();
-    roleVotingPoller.stop();
-    registrationPoller.stop();
-    turnCredentialPoller.stop();
-    void healthz.close();
-    logger.info('CP daemon shut down cleanly');
-    process.exit(0);
+  // ── P17 M2b-P10 (DOH-021/023/024): F60 graceful shutdown ──────────────────
+  // Funnel SIGTERM/SIGINT AND the SelfShutdownWatcher trigger through ONE ordered
+  // runGracefulShutdown — replaces the blind exit(0) with the 30s-drain (a NO-OP
+  // for cp: poller-only, nothing in-flight) / 60s-force-kill (NET-NEW; cp had
+  // none) sequence + C-A (HealthMonitor → reactive, stops FIRST there) + C-B
+  // (heartbeat/healthz → LAST, the D-DOH-M2-F60-3 split-brain fix).
+  let stopSelfShutdownWatcher: () => void = () => {};
+
+  const runCpShutdown = (reason: string): void => {
+    void runGracefulShutdown(
+      buildCpShutdownPlan(reason, {
+        logger,
+        stopHealthMonitor, // C-A: DOH-018 — stop self-degradation submits in reactive
+        stopWatcher: () => stopSelfShutdownWatcher(),
+        stopChainListener: () => listener.stop(),
+        stopRoleVoting,
+        stopRevoteWatcher,
+        stopRelayHeartbeatWatcher,
+        stopTurnIssuer,
+        stopCapTokenIssuer,
+        stopTurnRpc: stopTurnRpc ? () => void stopTurnRpc() : undefined,
+        stopPollers: () => {
+          relayPoller.stop();
+          cpPoller.stop();
+          roomPoller.stop();
+          signalingPoller.stop();
+          economicPoller.stop();
+          validatorPoller.stop();
+          roleVotingPoller.stop();
+          registrationPoller.stop();
+          turnCredentialPoller.stop();
+        },
+        stopHeartbeat, // C-B → LAST
+        closeHealthz: () => healthz.close(),
+        exit: (code) => process.exit(code),
+        config: gracefulCfg,
+      }),
+    );
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  // cp is NOT slashable (D-F60-4) + CP self-degradation is out of scope → arms
+  // { paused } ONLY (subscribes NEITHER economic_layer NOR node_health).
+  ({ stop: stopSelfShutdownWatcher } = await startCpSelfShutdownWatcher({
+    client,
+    config,
+    cpCapId,
+    listener,
+    onSelfShutdown: (reason) => {
+      logger.error({ reason }, 'self-shutdown triggered — initiating graceful shutdown');
+      runCpShutdown(reason);
+    },
+    logger,
+  }));
+
+  process.on('SIGTERM', () => runCpShutdown('SIGTERM'));
+  process.on('SIGINT', () => runCpShutdown('SIGINT'));
 }
 
 // Only run the daemon when executed as the entrypoint (`node index.js` / `tsx
