@@ -30,9 +30,20 @@ import {
   traceChild,
   economicLayerModuleName,
   MIN_PROOFS_FOR_DISTRIBUTION,
+  readIsPaused,
+  readCapMinerId,
 } from '@dvconf/shared';
 import type { NetworkConfig, Logger, HealthzHandle } from '@dvconf/shared';
 import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvconf/shared';
+import {
+  ChainEventListener,
+  SelfShutdownWatcher,
+  runGracefulShutdown,
+  readGracefulShutdownConfig,
+  type GracefulShutdownPlan,
+  type GracefulShutdownConfig,
+  type ShutdownReason,
+} from '@dvconf/chain-event-listener';
 import {
   HealthMonitor,
   makeChainReporter,
@@ -111,6 +122,12 @@ export interface DaemonState {
   /** Stop function for the F61 HealthMonitor (DOH-018). */
   healthMonitorStop: (() => void) | null;
   running: boolean;
+  /**
+   * P17 M2b-P9 (DOH-022): the currently-running measurement cycle promise (or null
+   * when idle). The graceful-shutdown drain awaits it so an in-flight per-relay
+   * proof submit completes before teardown (no cancel) — bounded by the 30s drain.
+   */
+  inFlightMeasurement: Promise<void> | null;
 }
 
 /**
@@ -234,6 +251,7 @@ export async function startDaemon(overrides?: {
     consecutiveUnreachable: 0,
     healthMonitorStop: null,
     running: true,
+    inFlightMeasurement: null,
   };
 
   // F40: Start periodic liveness heartbeat (signed by main wallet -- operator check on-chain).
@@ -273,14 +291,23 @@ export async function startDaemon(overrides?: {
   const validatorMinerId = mainAddress;
   const pollIntervalMs = 10_000;
 
+  // P17 M2b-P9 (DOH-022): track the in-flight cycle so the graceful-shutdown drain
+  // can await it (no cancel). The `.finally` clears the handle once the cycle settles.
+  const runCycle = (): void => {
+    state.inFlightMeasurement = runMeasurementCycle(state, validatorMinerId, log).finally(() => {
+      state.inFlightMeasurement = null;
+    });
+    void state.inFlightMeasurement;
+  };
+
   // Start periodic measurement loop -- cycles through all active rooms
   state.measurementTimer = setInterval(() => {
     if (!state.running) return;
-    void runMeasurementCycle(state, validatorMinerId, log);
+    runCycle();
   }, measurementIntervalMs);
 
   // Run one cycle immediately
-  void runMeasurementCycle(state, validatorMinerId, log);
+  runCycle();
 
   // Start event poller for validator_registry events
   const eventPoller = new EventPoller({
@@ -724,33 +751,217 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
   l.info('Validator daemon shut down');
 }
 
+// ── P17 M2b-P9 (DOH-021/022/023/024): F60 graceful shutdown ──────────
+
+/**
+ * The validator daemon's teardown closures, injected into
+ * {@link buildValidatorShutdownPlan}. Unifies the old `stopDaemon` + `main().shutdown`
+ * into the ordered drain → reactive → liveness-LAST groups.
+ */
+export interface ValidatorShutdownDeps {
+  logger: Logger;
+  /** (1) Flip `state.running=false` so no NEW measurement cycle starts. */
+  setRunning: (running: boolean) => void;
+  /** (2) drain — await the in-flight measurement cycle (no cancel, DOH-022). */
+  drainMeasurement: () => Promise<void>;
+  /** (3) reactive — the M2a HealthMonitor chain-submit loop (C-A: stops HERE). */
+  stopHealthMonitor: () => void;
+  /** (3) reactive — the SelfShutdownWatcher pause poll. */
+  stopWatcher: () => void;
+  /** (3) reactive — the SelfShutdownWatcher's ChainEventListener pollers. */
+  stopChainListener: () => Promise<void>;
+  /** (3) reactive — the periodic measurement interval. */
+  stopMeasurementTimer: () => void;
+  /** (3) reactive — the validator_registry / economic_layer / room_manager pollers. */
+  stopPollers: () => void;
+  /** (3) reactive — the optional bench latency probe. */
+  stopProbe: () => void;
+  /** (4) LAST — heartbeat (C-B: moved here so the chain sees the daemon live). */
+  stopHeartbeat: () => void;
+  /** (4) LAST — the /healthz liveness server. */
+  closeHealthz: () => Promise<void>;
+  exit: (code: number) => never;
+  config: GracefulShutdownConfig;
+}
+
+/**
+ * Assemble the validator daemon's ordered graceful-shutdown plan, encoding the
+ * two cross-cutting composition rules:
+ *   C-A — the M2a HealthMonitor is a chain-SUBMITTING reactive loop → it stops in
+ *         `stopReactive` (with the watcher + ChainEventListener + the measurement
+ *         timer + the 3 event pollers), NOT first.
+ *   C-B — heartbeat-stop moves to the LAST group (with /healthz) so the chain sees
+ *         the validator LIVE through the whole drain (D-DOH-M2-F60-3 split-brain fix).
+ * The drain awaits the in-flight measurement cycle (no cancel), bounded by 30s.
+ * Exported (not inline) so the order is unit-testable (graceful-shutdown-wiring.test.ts).
+ */
+export function buildValidatorShutdownPlan(
+  reason: string,
+  deps: ValidatorShutdownDeps,
+): GracefulShutdownPlan {
+  return {
+    reason,
+    logger: deps.logger,
+    setAccepting: deps.setRunning,
+    drain: async () => {
+      await deps.drainMeasurement();
+    },
+    stopReactive: async () => {
+      deps.stopHealthMonitor(); // C-A
+      deps.stopWatcher();
+      await deps.stopChainListener();
+      deps.stopMeasurementTimer();
+      deps.stopPollers();
+      deps.stopProbe();
+    },
+    stopHeartbeatAndHealthz: async () => {
+      deps.stopHeartbeat(); // C-B → LAST
+      await deps.closeHealthz();
+    },
+    exit: deps.exit,
+    drainTimeoutMs: deps.config.drainTimeoutMs,
+    forceKillTimeoutMs: deps.config.forceKillTimeoutMs,
+  };
+}
+
+/**
+ * Assemble + start the validator daemon's F60 SelfShutdownWatcher.
+ *
+ * The validator is REPORT-ONLY on slash (not slashable) → arms = { degraded, paused }
+ * (NO `slash` ⇒ it never subscribes economic_layer). `ownMinerId` = the cap's
+ * `miner_id` FIELD (the ID carried by `NodeDegraded.miner_id`), read off-chain via
+ * {@link readCapMinerId} — NOT the cap OBJECT id. The `paused` arm reads
+ * `network_registry::is_paused` via {@link readIsPaused} (devInspect, fail-open).
+ * Exported so the arms + self-filter id + isPaused wiring is unit-testable.
+ */
+export async function startValidatorSelfShutdownWatcher(args: {
+  client: SuiClient;
+  config: NetworkConfig;
+  validatorCapId: string;
+  listener: ChainEventListener;
+  onSelfShutdown: (reason: ShutdownReason) => void;
+  logger: Logger;
+}): Promise<{ watcher: SelfShutdownWatcher; stop: () => void }> {
+  const { client, config, validatorCapId, listener, onSelfShutdown, logger: log } = args;
+  const ownMinerId = await readCapMinerId(client, validatorCapId, log);
+  if (ownMinerId === null) {
+    log.warn(
+      { validatorCapId },
+      'startValidatorSelfShutdownWatcher: could not resolve own miner_id — degraded self-filter will not match (paused arm stays active)',
+    );
+  }
+  const watcher = new SelfShutdownWatcher({
+    listener,
+    ownMinerId: ownMinerId ?? '',
+    arms: { slash: false, degraded: true, paused: true },
+    onSelfShutdown,
+    logger: log,
+    isPaused: () => readIsPaused(client, config.packageId, config.networkRegistryId, log),
+  });
+  await watcher.start();
+  return { watcher, stop: () => watcher.stop() };
+}
+
 // -- Main entry point --
 
 /* istanbul ignore next -- CLI entry point */
 async function main(): Promise<void> {
   let state: DaemonState | null = null;
   let healthz: HealthzHandle | undefined;
+  let chainListener: ChainEventListener | undefined;
+  let selfShutdownWatcher: SelfShutdownWatcher | undefined;
+  const gracefulCfg = readGracefulShutdownConfig();
 
-  const shutdown = () => {
-    if (state) {
-      stopDaemon(state);
-      state = null;
+  // ── P17 M2b-P9 (DOH-021/022/023/024): unify the old stopDaemon + main().shutdown
+  // into ONE ordered runGracefulShutdown — the SelfShutdownWatcher trigger AND a
+  // SIGTERM/SIGINT funnel through it. Replaces the blind exit(0) with the 30s-drain
+  // / 60s-force-kill sequence + C-A (HealthMonitor → reactive) + C-B
+  // (heartbeat/healthz → LAST). Force-kill is NET-NEW for the validator (had none).
+  const runValidatorShutdown = (reason: string): void => {
+    if (state === null) {
+      // Crashed/triggered before startDaemon resolved — just close healthz + exit.
+      void healthz?.close();
+      process.exit(0);
     }
-    void healthz?.close();
-    process.exit(0);
+    const s = state;
+    void runGracefulShutdown(
+      buildValidatorShutdownPlan(reason, {
+        logger,
+        setRunning: (running) => {
+          s.running = running;
+        },
+        // DOH-022: await the in-flight measurement cycle (no cancel); null when idle.
+        drainMeasurement: () => s.inFlightMeasurement ?? Promise.resolve(),
+        stopHealthMonitor: () => {
+          s.healthMonitorStop?.(); // C-A
+          s.healthMonitorStop = null;
+        },
+        stopWatcher: () => selfShutdownWatcher?.stop(),
+        stopChainListener: () => chainListener?.stop() ?? Promise.resolve(),
+        stopMeasurementTimer: () => {
+          if (s.measurementTimer) {
+            clearInterval(s.measurementTimer);
+            s.measurementTimer = null;
+          }
+        },
+        stopPollers: () => {
+          s.eventPoller?.stop();
+          s.escrowPoller?.stop();
+          s.roomPoller?.stop();
+          s.eventPoller = s.escrowPoller = s.roomPoller = null;
+        },
+        stopProbe: closeValidatorProbe,
+        stopHeartbeat: () => {
+          s.heartbeatStop?.(); // C-B → LAST
+          s.heartbeatStop = null;
+        },
+        closeHealthz: () => healthz?.close() ?? Promise.resolve(),
+        exit: (code) => process.exit(code),
+        config: gracefulCfg,
+      }),
+    );
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => runValidatorShutdown('SIGTERM'));
+  process.on('SIGINT', () => runValidatorShutdown('SIGINT'));
 
   try {
-    // F65 (DOH-008/009) — always-on, cheap liveness endpoint.
+    const config = loadNetworkConfig();
+    const client = createSuiClient(config.rpcUrl);
+
+    // P17 M2b-P9 (DOH-019/027): the ChainEventListener backing the F60
+    // SelfShutdownWatcher (node_health subscribe) + the /healthz isLive gate.
+    const listener = new ChainEventListener({
+      client,
+      packageId: config.packageId,
+      logger: logger.child({ component: 'self-shutdown-listener' }),
+    });
+    chainListener = listener;
+
+    // F65 (DOH-008/009) — always-on, cheap liveness endpoint. P17 M2b-P9 (DOH-027):
+    // isLive 503s while the chain listener is replay-degraded — SAFE because the
+    // validator /healthz is NOT peer-polled (unlike the relay's, F1=Option A).
     healthz = await startHealthzServer({
       port: Number(process.env['VALIDATOR_HEALTHZ_PORT'] ?? 8101),
       service: 'validator-daemon',
+      isLive: () => !listener.isDegraded(),
     });
     logger.info({ port: healthz.port }, 'healthz listening');
-    state = await startDaemon();
+
+    state = await startDaemon({ client, config });
+
+    // Validator is report-only on slash → arms { degraded, paused } (no slash).
+    ({ watcher: selfShutdownWatcher } = await startValidatorSelfShutdownWatcher({
+      client,
+      config,
+      validatorCapId: state.validatorCapId,
+      listener,
+      onSelfShutdown: (reason) => {
+        logger.error({ reason }, 'self-shutdown triggered — initiating graceful shutdown');
+        runValidatorShutdown(reason);
+      },
+      logger,
+    }));
   } catch (err) {
     logger.error({ err }, 'Validator daemon failed to start');
     process.exit(1);
