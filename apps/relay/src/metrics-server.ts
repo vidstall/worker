@@ -16,6 +16,8 @@
  */
 
 import { createServer, type Server } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { type Logger, healthzBody, readTraceId, traceChild } from '@dvconf/shared';
 import type { MetricsTracker } from './metrics.js';
 
@@ -84,6 +86,43 @@ export interface ProbeResponse {
   rtcp_alive: boolean;
 }
 
+// ── /metrics Bearer-token auth (REQ-MCS-007) ─────────────────────────────
+//
+// Design: env-gated + OPEN-when-METRICS_AUTH_TOKEN-unset (backward-compat).
+// When token is SET: require `Authorization: Bearer <token>` on /metrics and
+// /metrics/:roomId. Constant-time comparison mirrors the G3.2b inter-relay
+// auth pattern (timingSafeEqual, NOT ===) to avoid timing side-channels.
+// /healthz and /api/probe are ALWAYS open (RO-020 invariant).
+//
+// wss/TLS termination is a Traefik deployment concern (DA-6) — not here.
+
+/**
+ * Validate the `Authorization: Bearer <token>` header against the configured
+ * METRICS_AUTH_TOKEN. Returns true (open) when `expectedToken` is empty —
+ * the gate is OPEN-when-unset for backward-compatibility (validator path
+ * `fetchRelayMetrics` calls /metrics/:roomId without auth when no token
+ * is configured; setting the token opts-in to enforcement).
+ *
+ * Mirrors `isValidInterRelayToken` from inter-relay.ts (G3.2b pattern):
+ * constant-time on content via `timingSafeEqual`; length-mismatch short-
+ * circuits before the call (timingSafeEqual throws on unequal-length buffers
+ * and the token length is not secret).
+ */
+function isMetricsAuthorized(req: IncomingMessage, expectedToken: string): boolean {
+  // OPEN-when-unset: if no token configured, all callers are admitted.
+  if (expectedToken === '') return true;
+  const authHeader = req.headers['authorization'];
+  if (typeof authHeader !== 'string') return false;
+  const prefix = 'Bearer ';
+  if (!authHeader.startsWith(prefix)) return false;
+  const presented = authHeader.slice(prefix.length);
+  if (presented.length === 0) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expectedToken, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 /**
  * Compute the {@link ProbeResponse} from the resolved probe state.
  *
@@ -124,6 +163,10 @@ export function startMetricsServer(
   probeState?: ProbeStateProvider,
 ): Server {
   const port = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
+
+  // REQ-MCS-007: Read once at startup so the gate is consistent for this
+  // server lifetime. Empty string = token unset = OPEN (backward-compat).
+  const metricsAuthToken = process.env['METRICS_AUTH_TOKEN'] ?? '';
 
   const server = createServer((req, res) => {
     // Capture request-arrival time for the /api/probe server-handling RTT.
@@ -169,6 +212,14 @@ export function startMetricsServer(
       // Route: GET /metrics/:roomId
       const roomMatch = url.match(/^\/metrics\/([a-fA-F0-9x]+)$/);
       if (roomMatch) {
+        // REQ-MCS-007: Bearer auth gate (OPEN when METRICS_AUTH_TOKEN unset).
+        if (!isMetricsAuthorized(req, metricsAuthToken)) {
+          reqLog.warn({ url }, 'relay metrics: unauthorized (401)');
+          res.writeHead(401, JSON_HEADERS);
+          res.end(JSON.stringify({ error: 'Unauthorized' }));
+          return;
+        }
+
         const roomId = roomMatch[1]!;
         const roomMetrics = metrics.getRoomMetrics(roomId);
 
@@ -186,6 +237,14 @@ export function startMetricsServer(
 
       // Route: GET /metrics
       if (url === '/metrics') {
+        // REQ-MCS-007: Bearer auth gate (OPEN when METRICS_AUTH_TOKEN unset).
+        if (!isMetricsAuthorized(req, metricsAuthToken)) {
+          reqLog.warn({ url }, 'relay metrics: unauthorized (401)');
+          res.writeHead(401, JSON_HEADERS);
+          res.end(JSON.stringify({ error: 'Unauthorized' }));
+          return;
+        }
+
         const globalMetrics = metrics.getGlobalMetrics();
         res.writeHead(200, JSON_HEADERS);
         res.end(JSON.stringify(globalMetrics));

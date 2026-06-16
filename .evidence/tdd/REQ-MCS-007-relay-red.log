@@ -1,0 +1,165 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/relay[39m
+
+{"level":30,"time":1781611277133,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277154,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277164,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277169,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277173,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277178,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277191,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277197,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277202,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277207,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277213,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277218,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277222,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277226,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277227,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"88f45012-054e-478b-9bb5-075b3f9c48a9","url":"/api/probe","role":"unknown","msg":"RO-020 probe served"}
+{"level":30,"time":1781611277231,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1781611277232,"pid":22628,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"3b71d20e-0656-4d11-bc48-e30b3b75bb23","url":"/api/probe","role":"unknown","msg":"RO-020 probe served"}
+ [31m❯[39m src/__tests__/metrics-server-auth.test.ts [2m([22m[2m15 tests[22m[2m | [22m[31m6 failed[39m[2m)[22m[32m 124[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken UNSET: GET /metrics returns 200 (open, backward-compat)[32m 42[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken UNSET: GET /metrics/:roomId returns 200 (open, validator fetchRelayMetrics path)[32m 10[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken UNSET: GET /metrics/:roomId with Bearer still returns 200 (token ignored when unset)[32m 5[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + correct Bearer: GET /metrics returns 200[32m 5[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + correct Bearer: GET /metrics/:roomId returns 200[32m 5[2mms[22m[39m
+[31m   [31m×[31m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + no Authorization header: GET /metrics returns 401[39m[32m 12[2mms[22m[39m
+[31m     → expected 200 to be 401 // Object.is equality[39m
+[31m   [31m×[31m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + no Authorization header: GET /metrics/:roomId returns 401[39m[32m 6[2mms[22m[39m
+[31m     → expected 200 to be 401 // Object.is equality[39m
+[31m   [31m×[31m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + wrong Bearer value: GET /metrics returns 401 (timingSafeEqual rejects)[39m[32m 6[2mms[22m[39m
+[31m     → expected 200 to be 401 // Object.is equality[39m
+[31m   [31m×[31m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + wrong Bearer (same length): GET /metrics returns 401 (content-check, not length-only)[39m[32m 5[2mms[22m[39m
+[31m     → expected 200 to be 401 // Object.is equality[39m
+[31m   [31m×[31m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + Bearer prefix missing (just token value): GET /metrics returns 401[39m[32m 6[2mms[22m[39m
+[31m     → expected 200 to be 401 // Object.is equality[39m
+[31m   [31m×[31m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22m401 response carries JSON_HEADERS (Access-Control-Allow-Origin: *)[39m[32m 5[2mms[22m[39m
+[31m     → expected 200 to be 401 // Object.is equality[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET: GET /healthz stays 200 (always open, RO-020)[32m 4[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET: GET /healthz stays 200 even without Authorization header[32m 4[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET: GET /api/probe stays 200 (always open, RO-020 standby polling)[32m 5[2mms[22m[39m
+   [32m✓[39m REQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET: GET /api/probe stays 200 without Authorization header[32m 4[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 6 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/metrics-server-auth.test.ts[2m > [22mREQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + no Authorization header: GET /metrics returns 401
+[31m[1mAssertionError[22m: expected 200 to be 401 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 401[39m
+[31m+ 200[39m
+
+[36m [2m❯[22m src/__tests__/metrics-server-auth.test.ts:[2m127:20[22m[39m
+    [90m125| [39m    [34mstart[39m()[33m;[39m
+    [90m126| [39m    [35mconst[39m { status[33m,[39m json } [33m=[39m [35mawait[39m [34mgetJson[39m(port[33m,[39m [32m'/metrics'[39m)[33m;[39m
+    [90m127| [39m    [34mexpect[39m(status)[33m.[39m[34mtoBe[39m([34m401[39m)[33m;[39m
+    [90m   | [39m                   [31m^[39m
+    [90m128| [39m    [34mexpect[39m((json [35mas[39m { error[33m:[39m string })[33m.[39merror)[33m.[39m[34mtoMatch[39m([36m/unauthorized/i[39m)[33m;[39m
+    [90m129| [39m  })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/metrics-server-auth.test.ts[2m > [22mREQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + no Authorization header: GET /metrics/:roomId returns 401
+[31m[1mAssertionError[22m: expected 200 to be 401 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 401[39m
+[31m+ 200[39m
+
+[36m [2m❯[22m src/__tests__/metrics-server-auth.test.ts:[2m137:20[22m[39m
+    [90m135| [39m    [34mstart[39m(tracker)[33m;[39m
+    [90m136| [39m    [35mconst[39m { status } [33m=[39m [35mawait[39m [34mgetJson[39m(port[33m,[39m [32m'/metrics/0xABCDEF'[39m)[33m;[39m
+    [90m137| [39m    [34mexpect[39m(status)[33m.[39m[34mtoBe[39m([34m401[39m)[33m;[39m
+    [90m   | [39m                   [31m^[39m
+    [90m138| [39m  })[33m;[39m
+    [90m139| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/metrics-server-auth.test.ts[2m > [22mREQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + wrong Bearer value: GET /metrics returns 401 (timingSafeEqual rejects)
+[31m[1mAssertionError[22m: expected 200 to be 401 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 401[39m
+[31m+ 200[39m
+
+[36m [2m❯[22m src/__tests__/metrics-server-auth.test.ts:[2m146:20[22m[39m
+    [90m144| [39m      authorization[33m:[39m [32m'Bearer wrong-token-value'[39m[33m,[39m
+    [90m145| [39m    })[33m;[39m
+    [90m146| [39m    [34mexpect[39m(status)[33m.[39m[34mtoBe[39m([34m401[39m)[33m;[39m
+    [90m   | [39m                   [31m^[39m
+    [90m147| [39m  })[33m;[39m
+    [90m148| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/metrics-server-auth.test.ts[2m > [22mREQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + wrong Bearer (same length): GET /metrics returns 401 (content-check, not length-only)
+[31m[1mAssertionError[22m: expected 200 to be 401 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 401[39m
+[31m+ 200[39m
+
+[36m [2m❯[22m src/__tests__/metrics-server-auth.test.ts:[2m157:20[22m[39m
+    [90m155| [39m      authorization[33m:[39m [32m`Bearer [39m[36m${[39msameLength[36m}[39m[32m`[39m[33m,[39m
+    [90m156| [39m    })[33m;[39m
+    [90m157| [39m    [34mexpect[39m(status)[33m.[39m[34mtoBe[39m([34m401[39m)[33m;[39m
+    [90m   | [39m                   [31m^[39m
+    [90m158| [39m  })[33m;[39m
+    [90m159| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/metrics-server-auth.test.ts[2m > [22mREQ-MCS-007 — /metrics Bearer auth gate[2m > [22mtoken SET + Bearer prefix missing (just token value): GET /metrics returns 401
+[31m[1mAssertionError[22m: expected 200 to be 401 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 401[39m
+[31m+ 200[39m
+
+[36m [2m❯[22m src/__tests__/metrics-server-auth.test.ts:[2m166:20[22m[39m
+    [90m164| [39m      authorization[33m:[39m [33mTEST_TOKEN[39m[33m,[39m
+    [90m165| [39m    })[33m;[39m
+    [90m166| [39m    [34mexpect[39m(status)[33m.[39m[34mtoBe[39m([34m401[39m)[33m;[39m
+    [90m   | [39m                   [31m^[39m
+    [90m167| [39m  })[33m;[39m
+    [90m168| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/metrics-server-auth.test.ts[2m > [22mREQ-MCS-007 — /metrics Bearer auth gate[2m > [22m401 response carries JSON_HEADERS (Access-Control-Allow-Origin: *)
+[31m[1mAssertionError[22m: expected 200 to be 401 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 401[39m
+[31m+ 200[39m
+
+[36m [2m❯[22m src/__tests__/metrics-server-auth.test.ts:[2m173:24[22m[39m
+    [90m171| [39m    [34mstart[39m()[33m;[39m
+    [90m172| [39m    [35mconst[39m res [33m=[39m [35mawait[39m [34mfetch[39m([32m`http://127.0.0.1:[39m[36m${[39mport[36m}[39m[32m/metrics`[39m)[33m;[39m
+    [90m173| [39m    [34mexpect[39m(res[33m.[39mstatus)[33m.[39m[34mtoBe[39m([34m401[39m)[33m;[39m
+    [90m   | [39m                       [31m^[39m
+    [90m174| [39m    [34mexpect[39m(res[33m.[39mheaders[33m.[39m[35mget[39m([32m'access-control-allow-origin'[39m))[33m.[39m[34mtoBe[39m([32m'*'[39m)[33m;[39m
+    [90m175| [39m    expect(res.headers.get('content-type')).toMatch(/application\/json…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m6 failed[39m[22m[2m | [22m[1m[32m9 passed[39m[22m[90m (15)[39m
+[2m   Start at [22m 19:01:16
+[2m   Duration [22m 1.14s[2m (transform 165ms, setup 0ms, collect 575ms, tests 124ms, environment 0ms, prepare 170ms)[22m
+
