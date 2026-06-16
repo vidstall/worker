@@ -15,6 +15,7 @@
  */
 
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SuiEvent } from '@mysten/sui/client';
 
@@ -157,5 +158,239 @@ describe('ChainEventListener — subscribe + per-module cursor (P1, DOH-019)', (
     await listener.stop(); // idempotent — must not throw, must not double-stop the same poller
     expect(pollerInstances[0].stop).toHaveBeenCalledTimes(1);
     expect(pollerInstances[1].stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── P3 (DOH-026/027/028) additive helpers ──────────────────────────────────
+// The P1 `fakeEvent` carries only `id`; the replay/live watermark also needs
+// `timestampMs` (string | null per the Sui SDK). `mockTipClient` stubs the one
+// descending-tip queryEvents the listener issues at subscribe() to seed the
+// watermark (events[0] = the newest = the tip). Bare `client:{}` stays the
+// fail-open case (the P1 invariant at baseOpts line ~66).
+const fakeEventAt = (id: string, tsMs: number | null): SuiEvent =>
+  ({
+    id: { txDigest: id, eventSeq: '0' },
+    timestampMs: tsMs === null ? null : String(tsMs),
+  }) as unknown as SuiEvent;
+
+function mockTipClient(events: SuiEvent[]) {
+  return {
+    queryEvents: vi.fn(async () => ({ data: events, hasNextPage: false })),
+  } as any;
+}
+
+const txId = (e: { id: any }): string => e.id.txDigest;
+
+describe('ChainEventListener — replay wiring (P3, DOH-026/027/028)', () => {
+  beforeEach(() => {
+    pollerInstances.length = 0;
+  });
+
+  it('RED-1: tags replayed while eventTs<tipTs, latches live at first eventTs>=tipTs (DOH-026)', async () => {
+    const listener = new ChainEventListener(
+      baseOpts({ dataDir: '/tmp/x', client: mockTipClient([fakeEventAt('tip', 100)]) }),
+    );
+    const seen: boolean[] = [];
+    const handler: ListenerHandler = vi.fn(async (_e, meta) => {
+      seen.push(meta.replayed);
+    });
+    await listener.subscribe('node_health', handler, { pollingIntervalMs: 1000 });
+    const h = pollerInstances[0].handler!;
+
+    await h(fakeEventAt('e1', 50)); // 50 < 100  -> replayed
+    await h(fakeEventAt('e2', 99)); // 99 < 100  -> replayed
+    await h(fakeEventAt('e3', 100)); // 100 >= 100 (strict <) -> live boundary
+    await h(fakeEventAt('e4', 40)); // lower ts but live is LATCHED
+
+    expect(seen).toEqual([true, true, false, false]);
+    expect(listener.isDegraded()).toBe(false);
+  });
+
+  it('RED-2: fail-open tip-read (throws / empty / bare {}) -> replayed always false, subscribe resolves (DOH-026, P1 non-reg)', async () => {
+    // (a) bare client:{} — the P1 invariant
+    const l1 = new ChainEventListener(baseOpts({ dataDir: '/tmp/x' }));
+    const s1: boolean[] = [];
+    await l1.subscribe('node_health', vi.fn(async (_e, m) => { s1.push(m.replayed); }), { pollingIntervalMs: 1000 });
+    await pollerInstances[0].handler!(fakeEventAt('e1', 1));
+    expect(s1).toEqual([false]);
+    expect(l1.isDegraded()).toBe(false);
+
+    // (b) queryEvents rejects
+    const throwing = { queryEvents: vi.fn(async () => { throw new Error('rpc down'); }) } as any;
+    const l2 = new ChainEventListener(baseOpts({ dataDir: '/tmp/x', client: throwing }));
+    const s2: boolean[] = [];
+    await l2.subscribe('node_health', vi.fn(async (_e, m) => { s2.push(m.replayed); }), { pollingIntervalMs: 1000 });
+    await pollerInstances[1].handler!(fakeEventAt('e2', 1));
+    expect(s2).toEqual([false]);
+
+    // (c) empty tip page
+    const l3 = new ChainEventListener(baseOpts({ dataDir: '/tmp/x', client: mockTipClient([]) }));
+    const s3: boolean[] = [];
+    await l3.subscribe('node_health', vi.fn(async (_e, m) => { s3.push(m.replayed); }), { pollingIntervalMs: 1000 });
+    await pollerInstances[2].handler!(fakeEventAt('e3', 1));
+    expect(s3).toEqual([false]);
+  });
+
+  it('RED-3: null-timestamp backlog forces live (no Number(null)===0 wedge), never trips degraded (DOH-026)', async () => {
+    // maxEvents=2: a naive null->0 design keeps these "replayed" forever and would
+    // exhaust the cap on the 3rd event -> false HALT. null->live backstop prevents it.
+    const listener = new ChainEventListener(
+      baseOpts({ dataDir: '/tmp/x', client: mockTipClient([fakeEventAt('tip', 100)]), replayMaxEvents: 2 }),
+    );
+    const seen: boolean[] = [];
+    const handler: ListenerHandler = vi.fn(async (_e, m) => { seen.push(m.replayed); });
+    await listener.subscribe('node_health', handler, { pollingIntervalMs: 1000 });
+    const h = pollerInstances[0].handler!;
+
+    await h(fakeEventAt('e1', null));
+    await h(fakeEventAt('e2', null));
+    await h(fakeEventAt('e3', null));
+
+    expect(seen).toEqual([false, false, false]); // forced live, never tagged replayed
+    expect(listener.isDegraded()).toBe(false); // cap never reached
+  });
+
+  it('RED-4: throttles DURING replay only; live events never acquire()/tick() (DOH-027)', async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = new ChainEventListener(
+        baseOpts({
+          dataDir: '/tmp/x',
+          client: mockTipClient([fakeEventAt('tip', 10_000)]),
+          replayRateLimitHz: 1, // 1 token / 1000ms; bucket capacity 1
+          replayMaxEvents: 1000,
+        }),
+      );
+      const seen: boolean[] = [];
+      const handler: ListenerHandler = vi.fn(async (_e, m) => { seen.push(m.replayed); });
+      await listener.subscribe('node_health', handler, { pollingIntervalMs: 1000 });
+      const h = pollerInstances[0].handler!;
+
+      await h(fakeEventAt('e1', 1)); // replay; drains the single initial token instantly
+      expect(seen).toEqual([true]);
+
+      // e2 replay: bucket empty -> parks ~1000ms
+      let r2 = false;
+      const p2 = h(fakeEventAt('e2', 2)).then(() => { r2 = true; });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(r2).toBe(false); // still throttled
+      await vi.advanceTimersByTimeAsync(1);
+      await p2;
+      expect(r2).toBe(true);
+      expect(seen).toEqual([true, true]);
+
+      // a LIVE event must resolve WITHOUT any timer advance (no throttle path)
+      let r3 = false;
+      const p3 = h(fakeEventAt('e3', 10_000)).then(() => { r3 = true; });
+      await p3;
+      expect(r3).toBe(true);
+      expect(seen).toEqual([true, true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15000);
+
+  it('RED-5: HALT default — cap-exceeded stops delivery, stops the poller, latches degraded (bounded-loss) (DOH-027)', async () => {
+    const listener = new ChainEventListener(
+      baseOpts({
+        dataDir: '/tmp/x',
+        client: mockTipClient([fakeEventAt('tip', 10_000)]),
+        replayRateLimitHz: 1000, // high so acquire never parks (no fake timers needed)
+        replayMaxEvents: 2,
+      }),
+    );
+    const seen: string[] = [];
+    const handler: ListenerHandler = vi.fn(async (e) => { seen.push(txId(e)); });
+    await listener.subscribe('node_health', handler, { pollingIntervalMs: 1000 });
+    const h = pollerInstances[0].handler!;
+
+    await h(fakeEventAt('e1', 1)); // replay delivered (tick 1)
+    await h(fakeEventAt('e2', 2)); // replay delivered (tick 2 == maxEvents)
+    await h(fakeEventAt('e3', 3)); // tick 3 -> false -> HALT (NOT delivered)
+    expect(seen).toEqual(['e1', 'e2']);
+    expect(listener.isDegraded()).toBe(true);
+    expect(pollerInstances[0].stop).toHaveBeenCalledTimes(1);
+
+    // bounded-loss: further in-flight replay events are dropped at the wrapper
+    await h(fakeEventAt('e4', 4));
+    await h(fakeEventAt('e5', 5));
+    expect(seen).toEqual(['e1', 'e2']);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('RED-6: DRAIN-FAST opt-in — cap-exceeded goes live, keeps delivering, NOT degraded (DOH-027/028)', async () => {
+    const listener = new ChainEventListener(
+      baseOpts({
+        dataDir: '/tmp/x',
+        client: mockTipClient([fakeEventAt('tip', 10_000)]),
+        replayRateLimitHz: 1000,
+        replayMaxEvents: 2,
+      }),
+    );
+    const seen: { id: string; replayed: boolean }[] = [];
+    const handler: ListenerHandler = vi.fn(async (e, m) => { seen.push({ id: txId(e), replayed: m.replayed }); });
+    await listener.subscribe('node_health', handler, { pollingIntervalMs: 1000, dropBacklogOnCapExceeded: true });
+    const h = pollerInstances[0].handler!;
+
+    await h(fakeEventAt('e1', 1)); // replay delivered
+    await h(fakeEventAt('e2', 2)); // replay delivered (tick 2)
+    await h(fakeEventAt('e3', 3)); // tick 3 false -> DRAIN-FAST: goLive + still deliver (tagged replayed)
+    await h(fakeEventAt('e4', 4)); // now live-latched -> delivered live
+
+    expect(seen.map((s) => s.id)).toEqual(['e1', 'e2', 'e3', 'e4']);
+    expect(seen[0].replayed).toBe(true);
+    expect(seen[1].replayed).toBe(true);
+    expect(seen[2].replayed).toBe(true); // the cap-tripping event still delivered, tagged replayed
+    expect(seen[3].replayed).toBe(false); // subsequent events live
+    expect(listener.isDegraded()).toBe(false);
+    expect(pollerInstances[0].stop).not.toHaveBeenCalled();
+  });
+
+  it('RED-7: isDegraded() is a listener-level OR-latch across modules (DOH-027)', async () => {
+    const listener = new ChainEventListener(
+      baseOpts({
+        dataDir: '/tmp/x',
+        client: mockTipClient([fakeEventAt('tip', 10_000)]),
+        replayRateLimitHz: 1000,
+        replayMaxEvents: 1,
+      }),
+    );
+    await listener.subscribe('node_health', vi.fn(async () => {}), { pollingIntervalMs: 1000 });
+    await listener.subscribe('economic_layer', vi.fn(async () => {}), { pollingIntervalMs: 1000 });
+    expect(pollerInstances).toHaveLength(2);
+
+    const hHealth = pollerInstances[0].handler!;
+    await hHealth(fakeEventAt('a', 1)); // tick 1 (== maxEvents) delivered
+    await hHealth(fakeEventAt('b', 2)); // tick 2 -> false -> HALT module 0
+    expect(listener.isDegraded()).toBe(true); // listener-level latch tripped by ONE module
+    expect(pollerInstances[0].stop).toHaveBeenCalledTimes(1);
+
+    // module 1's poller is independent and untouched
+    expect(pollerInstances[1].stop).not.toHaveBeenCalled();
+  });
+
+  it('RED-8: no dedup — identical event delivered replayed/live/duplicate; F49 idempotency documented (DOH-028)', async () => {
+    const listener = new ChainEventListener(
+      baseOpts({ dataDir: '/tmp/x', client: mockTipClient([fakeEventAt('tip', 100)]) }),
+    );
+    const seen: { id: string; replayed: boolean }[] = [];
+    const handler: ListenerHandler = vi.fn(async (e, m) => { seen.push({ id: txId(e), replayed: m.replayed }); });
+    await listener.subscribe('node_health', handler, { pollingIntervalMs: 1000 });
+    const h = pollerInstances[0].handler!;
+
+    await h(fakeEventAt('dup', 50)); // replayed (50 < 100)
+    await h(fakeEventAt('dup', 50)); // SAME event re-delivered -> still delivered (no dedup)
+    await h(fakeEventAt('dup', 150)); // live (>= 100), same txDigest -> delivered
+
+    expect(seen).toEqual([
+      { id: 'dup', replayed: true },
+      { id: 'dup', replayed: true },
+      { id: 'dup', replayed: false },
+    ]);
+
+    // DOH-028 documentation obligation: the listener docs cite the F49 idempotent-rebuild baseline.
+    const src = readFileSync(new URL('../listener.ts', import.meta.url), 'utf-8');
+    expect(src).toMatch(/F49/);
+    expect(src).toMatch(/idempoten/i);
   });
 });
