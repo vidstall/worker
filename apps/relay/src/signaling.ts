@@ -96,6 +96,27 @@ interface SetConsumerLayersMessage {
 }
 
 /**
+ * W5 M1 P6 (REQ-MCS-004) — client requests the relay pause a consumer to stop
+ * forwarding RTP for an off-page tile. Server effect: paused consumer forwards
+ * RTCP only (~0 media bytes). CONTRACTS.md C2.2.
+ */
+interface PauseConsumerMessage {
+  type: 'pauseConsumer';
+  /** mediasoup Consumer.id for the off-page consumer to stop paying for. */
+  consumerId: string;
+}
+
+/**
+ * W5 M1 P6 (REQ-MCS-004) — client requests the relay resume a consumer to
+ * restart RTP for a tile entering the visible set. CONTRACTS.md C2.3.
+ */
+interface ResumeConsumerMessage {
+  type: 'resumeConsumer';
+  /** mediasoup Consumer.id for the on-page consumer to resume. */
+  consumerId: string;
+}
+
+/**
  * Inbound inter-relay producer-announce frame (G1). Received by the STANDBY
  * relay on the same WS server, distinguished from client frames by `type`.
  * Shape matches PipeProducerAnnounce in inter-relay.ts.
@@ -114,6 +135,8 @@ type SignalingMessage =
   | ProduceMessage
   | ConsumeMessage
   | SetConsumerLayersMessage
+  | PauseConsumerMessage
+  | ResumeConsumerMessage
   | LeaveMessage
   | PipeProducerMessage;
 
@@ -359,6 +382,16 @@ export function createSignalingServer(
 
       case 'setConsumerLayers': {
         await handleSetConsumerLayers(ws, msg);
+        break;
+      }
+
+      case 'pauseConsumer': {
+        await handlePauseConsumer(ws, msg);
+        break;
+      }
+
+      case 'resumeConsumer': {
+        await handleResumeConsumer(ws, msg);
         break;
       }
 
@@ -769,6 +802,66 @@ export function createSignalingServer(
         temporalLayer: msg.temporalLayer,
       },
       'Applied setPreferredLayers for consumer',
+    );
+  }
+
+  /**
+   * W5 M1 P6 (REQ-MCS-004): pause a consumer so the peer's off-page tile
+   * forwards RTCP only (~0 media bytes). Unknown consumerId → warn + ignore
+   * (mirrors setConsumerLayers unknown-id handling). CONTRACTS.md C2.2.
+   */
+  async function handlePauseConsumer(ws: WebSocket, msg: PauseConsumerMessage): Promise<void> {
+    const mapping = wsToRoom.get(ws);
+    if (!mapping) return;
+
+    const room = rooms.get(mapping.roomId);
+    const peer = room?.peers.get(mapping.peerId);
+    if (!room || !peer) return;
+
+    const consumer = peer.consumers.find((c) => c.id === msg.consumerId);
+    if (!consumer) {
+      logger.warn(
+        { consumerId: msg.consumerId, peerId: mapping.peerId, roomId: mapping.roomId },
+        'pauseConsumer for unknown consumerId — ignoring',
+      );
+      return;
+    }
+
+    await consumer.pause();
+
+    logger.debug(
+      { consumerId: msg.consumerId, peerId: mapping.peerId },
+      'Paused consumer (off-page tile)',
+    );
+  }
+
+  /**
+   * W5 M1 P6 (REQ-MCS-004): resume a consumer so the peer's on-page tile
+   * restarts RTP. Unknown consumerId → warn + ignore (mirrors setConsumerLayers
+   * unknown-id handling). CONTRACTS.md C2.3.
+   */
+  async function handleResumeConsumer(ws: WebSocket, msg: ResumeConsumerMessage): Promise<void> {
+    const mapping = wsToRoom.get(ws);
+    if (!mapping) return;
+
+    const room = rooms.get(mapping.roomId);
+    const peer = room?.peers.get(mapping.peerId);
+    if (!room || !peer) return;
+
+    const consumer = peer.consumers.find((c) => c.id === msg.consumerId);
+    if (!consumer) {
+      logger.warn(
+        { consumerId: msg.consumerId, peerId: mapping.peerId, roomId: mapping.roomId },
+        'resumeConsumer for unknown consumerId — ignoring',
+      );
+      return;
+    }
+
+    await consumer.resume();
+
+    logger.debug(
+      { consumerId: msg.consumerId, peerId: mapping.peerId },
+      'Resumed consumer (on-page tile)',
     );
   }
 
