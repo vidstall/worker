@@ -17,3 +17,10 @@ export type {
 
 export { ReplayGovernor, readReplayGovernorConfig } from './replay-governor.js';
 export type { ReplayGovernorConfig } from './replay-governor.js';
+
+export { SelfShutdownWatcher } from './self-shutdown-watcher.js';
+export type {
+  SelfShutdownWatcherOptions,
+  ShutdownArms,
+  ShutdownReason,
+} from './self-shutdown-watcher.js';
