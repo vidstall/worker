@@ -170,7 +170,12 @@ export function createSignalingServer(
   logger: Logger,
   turnContext?: TurnContext,
   interRelay?: InterRelayContext,
-): { wss: WebSocketServer; getRoomCount: () => number } {
+): {
+  wss: WebSocketServer;
+  getRoomCount: () => number;
+  setAccepting: (accepting: boolean) => void;
+  closeRooms: () => void;
+} {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
 
@@ -185,6 +190,11 @@ export function createSignalingServer(
    *  for CI-18; replaces the 250 ms inter-join delay workaround in
    *  scripts/bench/mediasoup-client-harness.ts. */
   const roomCreationLocks = new Map<string, Promise<void>>();
+
+  // F60 graceful shutdown (DOH-021): while draining we stop accepting NEW client
+  // upgrades (setAccepting(false)). Inter-relay standby peers stay exempt so the
+  // G3.2b warm-pipe link is not severed. Default true → normal operation unchanged.
+  let accepting = true;
 
   // G3.2b: cross-daemon inter-relay auth. INTER_RELAY_TOKEN (when set) tags the
   // standby's inbound link; tagged peers are attached as the announce socket and
@@ -205,14 +215,27 @@ export function createSignalingServer(
   });
 
   wss.on('connection', (ws: WebSocket, req) => {
-    // G3.2b: tag inter-relay peers by their Bearer token (timingSafeEqual). A
-    // client connects with NO Authorization header → untagged → its server-side
-    // pipe-producer frames are dropped at the dispatch gate. We NEVER reject a
-    // client upgrade — the gate is at dispatch, not the handshake.
-    if (
+    // G3.2b: identify inter-relay peers by their Bearer token (timingSafeEqual).
+    // Computed once and reused for both the F60 stop-accept gate and the tagging
+    // below. A client connects with NO Authorization header → untagged.
+    const isInterRelay =
       interRelayToken !== '' &&
-      isValidInterRelayToken(req.headers['authorization'], interRelayToken)
-    ) {
+      isValidInterRelayToken(req.headers['authorization'], interRelayToken);
+
+    // F60 stop-accept (DOH-021): once draining, refuse NEW client upgrades with
+    // 1001 (going-away). Inter-relay peers are EXEMPT — closing a standby dial-in
+    // would sever the G3.2b warm-pipe announce link (relay-overlap failover).
+    // In normal operation (accepting === true) no client is ever rejected — the
+    // client gate stays at dispatch, not the handshake.
+    if (!accepting && !isInterRelay) {
+      ws.close(1001);
+      return;
+    }
+
+    // G3.2b: tag inter-relay peers → attach as the announce socket. Untagged
+    // clients fall through; their server-side pipe-producer frames are dropped at
+    // the dispatch gate.
+    if (isInterRelay) {
       interRelayPeers.add(ws);
       if (attachedInterRelaySocket !== null) {
         // Single-box announce socket (per-room keying is the carry-forward): a
@@ -660,8 +683,31 @@ export function createSignalingServer(
     logger.info({ roomId, peerId }, 'Peer disconnected from relay');
   }
 
+  /**
+   * F60 (DOH-021): flip the stop-accept gate. `setAccepting(false)` makes the
+   * connection handler refuse NEW non-inter-relay upgrades (1001). Synchronous;
+   * P8 calls it first in the graceful-shutdown sequence (runGracefulShutdown).
+   */
+  function setAccepting(next: boolean): void {
+    accepting = next;
+  }
+
+  /**
+   * F60 (DOH-021): force-close the remaining CLIENT peer sockets. Iterates
+   * `wsToRoom.keys()` (only peers that have joined a room; inter-relay peers
+   * never `join` → auto-exempt) and closes each with 1001. The existing
+   * `ws.on('close')` → `handleDisconnect` does the room teardown — no double-free.
+   */
+  function closeRooms(): void {
+    for (const ws of wsToRoom.keys()) {
+      ws.close(1001);
+    }
+  }
+
   return {
     wss,
     getRoomCount: () => rooms.size,
+    setAccepting,
+    closeRooms,
   };
 }
