@@ -67,6 +67,18 @@ interface JoinMessage {
    */
   signature?: string;
   nonce?: number;
+  /**
+   * W5 M2 P6 (REQ-MCS-013, CONTRACTS.md §5 `RoomModeProperty`) — the HOST (first
+   * joiner) declares whether the room runs the SFrame E2EE transform. Stored on
+   * the per-room `RoomConfig` (NOT on-chain, D-M2-2); LATER joiners INHERIT the
+   * host-set value and CANNOT flip it (the field is read only when the room is
+   * first created). Absent ⇒ `false` (legacy / M1 rooms unchanged — opt-in, like
+   * `roomPassword`). The relay only PROPAGATES this as a room property
+   * (signaling/client-asserted, NOT tamper-evident, D-M2-2); it does not gate
+   * media on it. Crypto-claim discipline (D-M2-8): E2EE here is the per-room
+   * SFrame state — NOT a relay/validator "cannot decrypt" guarantee.
+   */
+  e2ee?: boolean;
 }
 
 interface CreateTransportMessage {
@@ -272,6 +284,36 @@ function sendJson(ws: WebSocket, msg: Record<string, unknown>): void {
  */
 interface RoomConfig {
   passwordHash: string;
+  /**
+   * W5 M2 P6 (REQ-MCS-013, CONTRACTS.md §5): the per-room E2EE flag declared by
+   * the FIRST joiner (host) at create-time. Later joiners INHERIT it (read-only
+   * after create). `true` ⇒ the SFrame transform is active for the room. NOT
+   * on-chain (D-M2-2) — signaling/client-asserted, not tamper-evident.
+   */
+  e2ee: boolean;
+}
+
+/**
+ * W5 M2 P6 (REQ-MCS-013, CONTRACTS.md §5 `RoomModeProperty`): the E2EE room-mode
+ * state propagated to clients over signaling. `mode` is the E2EE state-machine
+ * value — DISTINCT from the relay forwarding `room.mode` ('sfu'|'mcu'). Mapping:
+ * an SFU room maps to 'SFU-E2EE'; an MCU room maps to 'MCU-floor' (the
+ * graceful-degradation floor, D-M2-6 — the SFU-E2EE→MCU-floor consent gate is P7).
+ *
+ * ⚠️ HONESTY INVARIANT (D-M2-8): an MCU relay server-MIXES (decode → re-encode)
+ * media, which structurally breaks SFrame content-E2EE — an MCU room is content-
+ * blind to the participant by the RELAY, it is NOT end-to-end encrypted. So we
+ * FORCE `e2ee:false` under MCU regardless of the host's request, keeping the
+ * asserted property honest (the client badge keys on this flag). Matches
+ * CONTRACTS.md §5 field-for-field.
+ */
+function deriveRoomMode(
+  forwardingMode: 'sfu' | 'mcu',
+  e2ee: boolean,
+): { e2ee: boolean; mode: 'SFU-E2EE' | 'MCU-floor' } {
+  // MCU server-mixing is incompatible with SFrame E2EE → e2ee:false (honest).
+  if (forwardingMode === 'mcu') return { e2ee: false, mode: 'MCU-floor' };
+  return { e2ee, mode: 'SFU-E2EE' };
 }
 
 /**
@@ -647,8 +689,18 @@ export function createSignalingServer(
             logger.warn({ roomId, peerId }, 'Admission rejected: host did not supply a room password');
             return; // released in finally
           }
-          roomConfigs.set(roomId, { passwordHash: hashRoomPassword(msg.roomPassword) });
-          logger.info({ roomId, peerId }, 'Room password SET by first joiner (host)');
+          // W5 M2 P6 (REQ-MCS-013): the host also declares the room's E2EE flag
+          // here (first-joiner-sets-it, mirrors the password). `msg.e2ee` is the
+          // host's explicit opt-in; absent ⇒ false. Later joiners inherit this
+          // (the config is read, never re-written, below).
+          roomConfigs.set(roomId, {
+            passwordHash: hashRoomPassword(msg.roomPassword),
+            e2ee: msg.e2ee === true,
+          });
+          logger.info(
+            { roomId, peerId, e2ee: msg.e2ee === true },
+            'Room password + E2EE mode SET by first joiner (host)',
+          );
         } else {
           // Later joiner: must match the host-set passwordHash.
           if (hashRoomPassword(msg.roomPassword) !== config.passwordHash) {
@@ -735,6 +787,19 @@ export function createSignalingServer(
       rtpCapabilities: room.router.rtpCapabilities,
       mode: room.mode,
     });
+
+    // W5 M2 P6 (REQ-MCS-013, CONTRACTS.md §5 `RoomModeProperty`; FROZEN P6 wire
+    // contract): propagate the per-room E2EE mode to the joining ws on successful
+    // admission. `e2ee` is the host-set room flag (legacy rooms have no config ⇒
+    // false; a later joiner reads the host's value here, never its own — it
+    // CANNOT flip it). `mode` is the E2EE state-machine value derived from the
+    // relay forwarding mode (DISTINCT from `room.mode` 'sfu'|'mcu'). Asserted,
+    // not tamper-evident (D-M2-2); the client mirrors it into RoomMode state +
+    // renders the E2EE badge (P6 dev-fe). NEVER logs the password or any key.
+    const e2ee = roomConfigs.get(roomId)?.e2ee ?? false;
+    const roomMode = deriveRoomMode(room.mode, e2ee);
+    sendJson(ws, { type: 'roomMode', roomId, roomMode });
+    logger.info({ roomId, peerId, e2ee, mode: roomMode.mode }, 'Sent roomMode to joiner');
 
     // Notify newly joined peer about existing producers in the room
     for (const [existingPeerId, existingPeer] of room.peers) {
