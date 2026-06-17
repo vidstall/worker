@@ -1123,6 +1123,13 @@ export function createSignalingServer(
    * Omit-semantics (C2.1): when `temporalLayer` is absent the relay passes only
    * `{ spatialLayer }`, keeping the consumer's current temporal layer. An unknown
    * `consumerId` is logged and ignored — it must not throw / crash the WS loop.
+   *
+   * W5 M2 P5 — RELAY BLIND-FORWARD INVARIANT (REQ-MCS-011): layer-select coexists
+   * with E2EE. SFrame keeps layer + KID metadata in the CLEARTEXT RTP/SFrame
+   * header (RFC 9605 §4.4.3, CONTRACTS.md §2), so this server-side
+   * `setPreferredLayers` switches simulcast spatial layers over CIPHERTEXT
+   * payloads WITHOUT decoding them — the relay reads only the header. No payload
+   * decode/decrypt path exists here (proven by the relay-blind invariant test).
    */
   async function handleSetConsumerLayers(
     ws: WebSocket,

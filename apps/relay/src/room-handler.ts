@@ -196,6 +196,27 @@ export async function createConsumer(
     return null;
   }
 
+  // ── W5 M2 P5 — RELAY BLIND-FORWARD INVARIANT (REQ-MCS-011) ──────────────────
+  // This `recvTransport.consume(...)` is the SFU forward path. When the room is
+  // E2EE (SFrame, RFC 9605), the producer's RTP payload is `cleartext SFrame
+  // header (Config byte | KID | CTR — CONTRACTS.md §2) || ciphertext || auth tag`.
+  // The relay forwards that payload BYTE-FOR-BYTE: mediasoup rewrites only RTP
+  // *header* fields (SSRC/seq/ts) for routing, NEVER the payload body. It reads
+  // ONLY the cleartext RTP/SFrame header for routing + M1 simulcast layer-select
+  // (`setPreferredLayers`, REQ-MCS-002 — RFC 9605 §4.4.3 keeps layer + KID
+  // metadata key-independent), and MUST NOT decode/decrypt the payload. There is
+  // structurally NO decode path here: mediasoup has no SFrame/insertable-streams
+  // support, so the ciphertext is opaque to it. Enforced by the invariant test
+  // `__tests__/integration/relay-blind-forward.integration.test.ts`.
+  // SCOPE — SFU PATH ONLY: this invariant is the SFU forward path (`room.mode ===
+  // 'sfu'`). MCU mode intentionally DOES decode/composite VP8 via ffmpeg
+  // (`mcu-pipeline.ts`) — that is content-agnostic mixing by design and OUT of
+  // REQ-MCS-011 scope (an E2EE room never enters MCU mode without an explicit
+  // user opt-out of E2EE — P7 consent gate, D-M2-6). "No decode path" is a
+  // claim about THIS SFU forward, not the relay binary as a whole.
+  // SCOPE (D-M2-8): the relay's blindness is STRUCTURAL (no decode path); the
+  // validator-blindness in M2 is ECONOMIC/OPERATIONAL (it holds the key). This is
+  // NOT a cryptographic "relay/validator cannot decrypt" claim (Path C → M3).
   const consumer = await consumerPeer.recvTransport.consume({
     producerId: targetProducerId,
     rtpCapabilities,
