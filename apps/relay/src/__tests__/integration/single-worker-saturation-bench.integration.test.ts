@@ -49,7 +49,11 @@
  * This bench finds the ONE-WORKER forwarding ceiling; it is NOT a production
  * capacity number. It is exploratory (logs a curve), NOT a hard pass/fail gate.
  *
- * Run: pnpm exec vitest run --config vitest.relay-integration.config.ts \
+ * EXPLORATORY + SLOW + non-reproducible -> SKIPPED unless SAT_BENCH=1, so the
+ * default relay-integration suite never runs (and never hangs on) it.
+ *
+ * Run: SAT_BENCH=1 [SAT_RAMP=10,20,30] pnpm exec vitest run \
+ *        --config vitest.relay-integration.config.ts \
  *        apps/relay/src/__tests__/integration/single-worker-saturation-bench.integration.test.ts
  */
 
@@ -72,16 +76,20 @@ const PAGE_SIZE = 9; // LOCKED M1 default: 1 speaker + 8 thumbnails per viewer
 /** Per-packet simulcast ladder bytes [low, mid, high] (mirrors the P9 gate ~1:7:18). */
 const LADDER_BYTES = [60, 400, 1100] as const;
 
-// ── Ramp + windows. Override the ramp via SAT_RAMP="25,50,100,200,400". ───────
-const RAMP: number[] = (process.env['SAT_RAMP'] ?? '25,50,100,200,400')
+// Run ONLY when explicitly enabled (default suite skips this slow exploratory bench).
+const RUN_SATURATION = process.env['SAT_BENCH'] === '1';
+
+// ── Ramp + windows. Default is a SMALL bounded ramp that always completes; deep
+// curves are opt-in via SAT_RAMP="10,25,50,100,200" (mind the over-capacity stall). ─
+const RAMP: number[] = (process.env['SAT_RAMP'] ?? '10,20,30')
   .split(',')
   .map((s) => parseInt(s.trim(), 10))
   .filter((n) => Number.isFinite(n) && n > 0);
 // Settle clears the creation burst + simulcast layer-switch transient; a LONG
 // window averages out single-box setInterval timer jitter (the dominant noise —
 // injectionHealth swung 0.79-1.35 at a 1.5s window). Env-tunable.
-const SETTLE_MS = parseInt(process.env['SAT_SETTLE_MS'] ?? '4000', 10);
-const WINDOW_MS = parseInt(process.env['SAT_WINDOW_MS'] ?? '6000', 10);
+const SETTLE_MS = parseInt(process.env['SAT_SETTLE_MS'] ?? '2500', 10);
+const WINDOW_MS = parseInt(process.env['SAT_WINDOW_MS'] ?? '4000', 10);
 const HEALTH_SAMPLE_VIEWERS = 5; // sample first K viewers for per-consumer health
 
 // ── RTP/RTCP builders (verbatim semantics from the P9 gate's makeVp8Rtp) ──────
@@ -385,7 +393,8 @@ function knee(
 }
 
 describe('W5 M1 — single-worker forwarding-ceiling bench (REAL mediasoup, advisor-gate-2)', () => {
-  it(
+  // Skipped unless SAT_BENCH=1 — slow, exploratory, non-reproducible on a dev box.
+  (RUN_SATURATION ? it : it.skip)(
     'ramps viewers per page-9 grid and locates the one-worker CPU/delivery knee',
     async () => {
       // OPTIMIZED first (the M1 mechanism), then BASELINE (no-select contrast).
