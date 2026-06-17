@@ -1,0 +1,83 @@
+{
+  "bench": "single-worker-forwarding-ceiling",
+  "phase": "W5 M1 advisor-gate-2 follow-up",
+  "mediasoupVersion": "3.19.17",
+  "numWorkers": 1,
+  "pageSize": 9,
+  "windowMs": 4000,
+  "settleMs": 2500,
+  "ramp": [
+    10,
+    20,
+    30
+  ],
+  "optimizedCurve": [
+    {
+      "m": 10,
+      "forwardPaths": 90,
+      "cpuCores": 0.293,
+      "ruMaxRssMb": 26.1,
+      "perViewerThroughput": 297484,
+      "deliveryHealth": 1,
+      "injectionHealth": 1
+    },
+    {
+      "m": 20,
+      "forwardPaths": 180,
+      "cpuCores": 0.5,
+      "ruMaxRssMb": 41.3,
+      "perViewerThroughput": 298637,
+      "deliveryHealth": 1,
+      "injectionHealth": 1.06
+    },
+    {
+      "m": 30,
+      "forwardPaths": 270,
+      "cpuCores": 30.922,
+      "ruMaxRssMb": 471,
+      "perViewerThroughput": 5414899,
+      "deliveryHealth": 18.2,
+      "injectionHealth": 1.24
+    }
+  ],
+  "baselineCurve": [
+    {
+      "m": 10,
+      "forwardPaths": 90,
+      "cpuCores": 0.312,
+      "ruMaxRssMb": 492.3,
+      "perViewerThroughput": 316320,
+      "deliveryHealth": 1,
+      "injectionHealth": 1
+    },
+    {
+      "m": 20,
+      "forwardPaths": 180,
+      "cpuCores": 0.641,
+      "ruMaxRssMb": 492.3,
+      "perViewerThroughput": 328800,
+      "deliveryHealth": 1.04,
+      "injectionHealth": 1.04
+    },
+    {
+      "m": 30,
+      "forwardPaths": 270,
+      "cpuCores": 11.438,
+      "ruMaxRssMb": 492.3,
+      "perViewerThroughput": 2274355,
+      "deliveryHealth": 7.19,
+      "injectionHealth": 1.1
+    }
+  ],
+  "optimizedKnee": {
+    "m": 30,
+    "reason": "cpuCores=30.922 >= 1 core",
+    "bound": "worker-cpu"
+  },
+  "baselineKnee": {
+    "m": 30,
+    "reason": "cpuCores=11.438 >= 1 core",
+    "bound": "worker-cpu"
+  },
+  "honest_note": "ONE mediasoup Worker (==one core) forwarding ceiling. DirectTransport SKIPS SRTP -> measured CPU is OPTIMISTIC, real WebRTC ceiling is LOWER. Single box, synthetic RTP, no WAN/jitter. Multi-worker/multi-node cascade (DA-5) NOT built; extrapolating past one worker is a documented assumption, not a measurement. Exploratory curve, not a pass/fail gate."
+}
