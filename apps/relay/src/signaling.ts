@@ -7,6 +7,7 @@
  * Requirements: RELAY-05
  */
 
+import { createHash } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { types as msTypes } from 'mediasoup';
 import type { Logger } from '@dvconf/shared';
@@ -39,6 +40,33 @@ interface JoinMessage {
   peerId: string;
   /** Room mode: 'sfu' (default) or 'mcu'. First joiner sets the mode. */
   mode?: 'sfu' | 'mcu';
+  /**
+   * W5 M2 P1.0 (REQ-MCS-012, CONTEXT D-M2-18) — Zoom-style ADMISSION password.
+   * Carried in cleartext over the (TLS) WS; the relay hashes it and checks it
+   * online (first-joiner-sets-it, §below). DISTINCT from the mediasoup ICE
+   * `iceParameters.password` (DTLS/ICE credential) — this is the room-join
+   * secret, NOT a media-transport credential. Wire field name `roomPassword`
+   * (shared verbatim with the client `buildJoinMessage`) — deliberately NOT
+   * `password`, to avoid the ICE `iceParameters.password` collision.
+   */
+  roomPassword?: string;
+  /**
+   * W5 M2 P1.0 (REQ-MCS-013) — the joiner's in-browser ed25519 SESSION public
+   * key, base64 (decodes to exactly 32 bytes). Recorded in the room roster as
+   * `{ peerId → sessionPubkey }`; the coordinator later seals K_room to it
+   * (P1/P3). PUBLIC key only — safe to log/announce. A malformed (non-32-byte)
+   * key FAILS admission loud (no silent placeholder).
+   */
+  peerPubkey?: string;
+  /**
+   * W5 M2 P1.0 (decision #2) — proof-of-possession signature over the join, and
+   * its nonce. The client signs these (auth.ts byte-shape); for M2 the relay
+   * does NOT verify them (admission gate = the password, D-M2-8) — they ride the
+   * wire UNVERIFIED, reserved for the M3 on-chain-bind hardening. Carried so the
+   * wire contract is stable now and verification is purely additive in M3.
+   */
+  signature?: string;
+  nonce?: number;
 }
 
 interface CreateTransportMessage {
@@ -202,6 +230,58 @@ function sendJson(ws: WebSocket, msg: Record<string, unknown>): void {
   }
 }
 
+// ── W5 M2 P1.0 (REQ-MCS-012/013) — Zoom-style admission helpers ─────────
+
+/**
+ * Per-room ADMISSION config (NOT on-chain; D-M2-2). Co-located with `rooms`.
+ * `passwordHash` is SHA-256(password) base64 — set by the FIRST joiner
+ * (first-joiner-sets-it host model, decision #3) and matched by every later
+ * joiner. NEVER stores the plaintext password.
+ */
+interface RoomConfig {
+  passwordHash: string;
+}
+
+/**
+ * Hash the admission room-password. Reuses the SAME approach as the shipped TURN
+ * credential verifier — SHA-256 → base64 (cp-daemon `turn-issuer.ts:94-96`
+ * `hashCredentialPassword`); relay is a separate app so the small helper is
+ * replicated locally rather than imported. NOT a new/invented hash. The plain
+ * password is NEVER logged or stored (only this digest is kept).
+ */
+function hashRoomPassword(password: string): string {
+  return createHash('sha256').update(password).digest('base64');
+}
+
+/**
+ * Validate + return the joiner's base64 ed25519 SESSION pubkey, or `null` if it
+ * is malformed (non-base64 / not exactly 32 bytes). Mirrors the cap-token-issuer
+ * length-check (`cap-token-issuer.ts:251-264`) — the relay is a separate app so
+ * the small check is replicated locally (no cross-app import). A `null` return
+ * means admission must FAIL LOUD (no silent placeholder key).
+ */
+function validateSessionPubkey(pubkeyB64: string | undefined): string | null {
+  if (typeof pubkeyB64 !== 'string' || pubkeyB64.length === 0) return null;
+  // Buffer.from(base64) is lenient (drops invalid chars), so a non-base64 input
+  // typically surfaces as a wrong-length decode rather than a throw.
+  const decoded = Buffer.from(pubkeyB64, 'base64');
+  if (decoded.length !== 32) return null;
+  return pubkeyB64;
+}
+
+/**
+ * Per-roomId wrong-password attempt tracker — Zoom-equivalent brute-force
+ * defense. Counts failed admission attempts within a sliding window; once the
+ * threshold is hit, further attempts for that room are refused with a
+ * rate-limit error (not a plain wrong-password error) until the window lapses.
+ * A correct password (admission) resets the room's counter. Cleared when the
+ * room empties (so a reused roomId starts fresh).
+ */
+interface AttemptRecord {
+  count: number;
+  windowStart: number;
+}
+
 /**
  * Create the mediasoup signaling WebSocket server.
  *
@@ -247,7 +327,31 @@ export function createSignalingServer(
     10,
   );
 
+  // W5 M2 P1.0 (REQ-MCS-012): Zoom-equivalent brute-force defense knobs. Max
+  // wrong-password attempts per roomId within the sliding window; once exceeded,
+  // admission for that room is refused with a rate-limit error until the window
+  // lapses. Env-tunable (no hardcodes, feedback_no_hardcodes); placeholders.
+  const passwordMaxAttempts = parseInt(
+    process.env['RELAY_PASSWORD_MAX_ATTEMPTS'] ?? '10',
+    10,
+  );
+  const passwordWindowMs = parseInt(
+    process.env['RELAY_PASSWORD_WINDOW_MS'] ?? '60000',
+    10,
+  );
+
   const rooms = new Map<string, RoomState>();
+  /**
+   * W5 M2 P1.0 (REQ-MCS-012, D-M2-18): per-room ADMISSION config (passwordHash),
+   * co-located with `rooms`. Set by the first joiner (host); checked online for
+   * every later joiner. NOT on-chain (D-M2-2). Cleaned when the room empties.
+   */
+  const roomConfigs = new Map<string, RoomConfig>();
+  /**
+   * W5 M2 P1.0 (REQ-MCS-012): per-roomId wrong-password attempt counters for the
+   * brute-force rate-limiter. Cleaned when the room empties.
+   */
+  const passwordAttempts = new Map<string, AttemptRecord>();
   /** Track which room each WebSocket belongs to for cleanup. */
   const wsToRoom = new Map<WebSocket, { roomId: string; peerId: string }>();
   /** Per-room async lock for the "get or create" critical section in
@@ -447,73 +551,135 @@ export function createSignalingServer(
   async function handleJoin(ws: WebSocket, msg: JoinMessage): Promise<void> {
     const { roomId, peerId } = msg;
 
-    // CI-18 real fix: serialize room creation per-room. If another join is
-    // already in flight for this roomId, await its completion before reading
-    // rooms.get(roomId). Without this, parallel joins each create their own
-    // Router and end up in separate rooms.
+    // CI-18 real fix: serialize the ENTIRE admission critical section per-room.
+    // If another join is already in flight for this roomId, await its completion
+    // before reading rooms/roomConfigs. W5 M2 P1.0 (REQ-MCS-012): this same lock
+    // makes "first-joiner-sets-the-password" race-safe — two peers arriving in
+    // the same Node tick can't both observe "no passwordHash" and both become
+    // host (mirrors the original CI-18 router-orphan race).
     const pending = roomCreationLocks.get(roomId);
     if (pending) await pending;
 
-    let room = rooms.get(roomId);
-    if (!room) {
-      let release!: () => void;
-      const creation = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      roomCreationLocks.set(roomId, creation);
-      try {
-        // Re-check inside the lock — a concurrent waiter that completed
-        // between our await above and our set here may have already created
-        // the room.
-        room = rooms.get(roomId);
-        if (!room) {
-          const roomMode = msg.mode ?? relayMode;
-          const worker = manager.getNextWorker();
-          const router = await manager.createRouter(worker);
-          room = {
-            roomId,
-            router,
-            mode: roomMode,
-            peers: new Map(),
-          };
+    let release!: () => void;
+    const creation = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    roomCreationLocks.set(roomId, creation);
 
-          // Initialize MCU pipeline for MCU rooms
-          if (roomMode === 'mcu') {
-            room.mcuPipeline = new McuPipeline(router, logger);
-            logger.info({ roomId }, 'MCU pipeline initialized for room');
-          }
-
-          rooms.set(roomId, room);
-          logger.info({ roomId, mode: roomMode }, 'Room created');
-
-          // W5 M1 P5 (REQ-MCS-003): attach one AudioLevelObserver per router.
-          // maxEntries:1 → only the dominant speaker. On `volumes` the relay maps
-          // the dominant producerId → peerId and BROADCASTS `activeSpeaker` to all
-          // room peers (it only REPORTS — the client reacts with setConsumerLayers,
-          // CONTRACTS.md C0/C2.4). Best-effort: a creation failure must not break
-          // room setup, so the observer stays optional and every use is guarded.
-          await attachAudioLevelObserver(room);
-
-          // G3.2b: on the first peer join for a room this relay is STANDBY for,
-          // hand the room's router to the wiring layer so it builds the
-          // RoomTopology + opens the paused warm pipe (StandbyWarmPipeCoordinator
-          // .ensure) — running M1's ensureWarmPipe in the LIVE signaling path.
-          // Fired once per room (inside the creation block); the primary never
-          // warm-pipes to itself.
-          if (interRelay?.role === 'standby') {
-            interRelay.onStandbyRoomReady?.(roomId, room.router);
-          }
+    let room: RoomState;
+    let sessionPubkey: string | undefined;
+    try {
+      // ── W5 M2 P1.0 (REQ-MCS-012/013): Zoom-style admission gate (BEFORE any
+      //    room/router is created). Reject loud + early on a bad pubkey, missing
+      //    or wrong password. ──
+      //
+      // OPT-IN by design (backward-compatible, LOW blast): the gate engages ONLY
+      // when the join carries an admission `password`. A join with NO `password`
+      // is the legacy / M1 path (no E2EE admission) and is admitted exactly as
+      // before — so the entire M1 signaling/bench suite is untouched. E2EE rooms
+      // opt in by sending the room-password (and their session pubkey).
+      if (typeof msg.roomPassword === 'string') {
+        // 1) Validate the in-browser ed25519 session pubkey (32-byte base64).
+        //    A malformed key FAILS admission loud (no silent placeholder, D-M2-18).
+        const validPubkey = validateSessionPubkey(msg.peerPubkey);
+        if (validPubkey === null) {
+          sendJson(ws, { type: 'error', message: 'Invalid or missing session pubkey' });
+          logger.warn(
+            { roomId, peerId },
+            'Admission rejected: session pubkey missing or not a 32-byte ed25519 key',
+          );
+          return; // released in finally
         }
-      } finally {
-        release();
-        roomCreationLocks.delete(roomId);
+
+        // 2) Rate-limiter (Zoom-equivalent brute-force defense): refuse further
+        //    admission attempts for a room that has exceeded the wrong-password
+        //    threshold within the sliding window, BEFORE checking the password.
+        if (isRateLimited(roomId)) {
+          sendJson(ws, { type: 'error', message: 'Too many attempts — rate limited' });
+          logger.warn({ roomId, peerId }, 'Admission rejected: room rate-limited (brute-force defense)');
+          return; // released in finally
+        }
+
+        // 3) First-joiner-sets-it password gate (host model, decision #3). The
+        //    plaintext password is NEVER logged or stored — only its hash.
+        const config = roomConfigs.get(roomId);
+        if (!config) {
+          // First joiner = host: SET the room password from hash(password).
+          if (msg.roomPassword.length === 0) {
+            sendJson(ws, { type: 'error', message: 'Room password required' });
+            logger.warn({ roomId, peerId }, 'Admission rejected: host did not supply a room password');
+            return; // released in finally
+          }
+          roomConfigs.set(roomId, { passwordHash: hashRoomPassword(msg.roomPassword) });
+          logger.info({ roomId, peerId }, 'Room password SET by first joiner (host)');
+        } else {
+          // Later joiner: must match the host-set passwordHash.
+          if (hashRoomPassword(msg.roomPassword) !== config.passwordHash) {
+            recordFailedAttempt(roomId);
+            sendJson(ws, { type: 'error', message: 'Incorrect room password' });
+            logger.warn({ roomId, peerId }, 'Admission rejected: incorrect room password');
+            return; // released in finally — NO router/room/transport created
+          }
+          // Correct password → reset the brute-force counter for this room.
+          passwordAttempts.delete(roomId);
+        }
+        sessionPubkey = validPubkey;
       }
+
+      // ── Admission passed (or legacy path). Get-or-create the room. ──
+      const existing = rooms.get(roomId);
+      if (existing) {
+        room = existing;
+      } else {
+        const roomMode = msg.mode ?? relayMode;
+        const worker = manager.getNextWorker();
+        const router = await manager.createRouter(worker);
+        room = {
+          roomId,
+          router,
+          mode: roomMode,
+          peers: new Map(),
+        };
+
+        // Initialize MCU pipeline for MCU rooms
+        if (roomMode === 'mcu') {
+          room.mcuPipeline = new McuPipeline(router, logger);
+          logger.info({ roomId }, 'MCU pipeline initialized for room');
+        }
+
+        rooms.set(roomId, room);
+        logger.info({ roomId, mode: roomMode }, 'Room created');
+
+        // W5 M1 P5 (REQ-MCS-003): attach one AudioLevelObserver per router.
+        // maxEntries:1 → only the dominant speaker. On `volumes` the relay maps
+        // the dominant producerId → peerId and BROADCASTS `activeSpeaker` to all
+        // room peers (it only REPORTS — the client reacts with setConsumerLayers,
+        // CONTRACTS.md C0/C2.4). Best-effort: a creation failure must not break
+        // room setup, so the observer stays optional and every use is guarded.
+        await attachAudioLevelObserver(room);
+
+        // G3.2b: on the first peer join for a room this relay is STANDBY for,
+        // hand the room's router to the wiring layer so it builds the
+        // RoomTopology + opens the paused warm pipe (StandbyWarmPipeCoordinator
+        // .ensure) — running M1's ensureWarmPipe in the LIVE signaling path.
+        // Fired once per room (inside the creation block); the primary never
+        // warm-pipes to itself.
+        if (interRelay?.role === 'standby') {
+          interRelay.onStandbyRoomReady?.(roomId, room.router);
+        }
+      }
+    } finally {
+      release();
+      roomCreationLocks.delete(roomId);
     }
 
-    // Create peer state
+    // Create peer state. W5 M2 P1.0 (REQ-MCS-013): record the validated session
+    // pubkey on the peer → the in-memory `{ peerId → sessionPubkey }` roster the
+    // coordinator later seals K_room to (P1/P3).
     const peer: PeerState = {
       peerId,
       ws,
+      sessionPubkey,
       sendTransport: null,
       recvTransport: null,
       producers: [],
@@ -546,10 +712,67 @@ export function createSignalingServer(
       }
     }
 
+    // W5 M2 P1.0 (REQ-MCS-013): roster sync over signaling (reuses the per-room
+    // peer-iteration idiom). Session pubkeys are PUBLIC keys — safe to send/log.
+    // Only the E2EE/admission path captures a sessionPubkey; legacy joins skip
+    // this entirely (no `rosterPeer` frames → M1 wire unchanged).
+    //  (a) announce the NEW peer's sessionPubkey to every EXISTING peer, and
+    //  (b) send each existing member's sessionPubkey to the new joiner,
+    // so the coordinator (P3) can seal K_room to the full `{peerId→pubkey}` set.
+    if (sessionPubkey !== undefined) {
+      for (const [existingPeerId, existingPeer] of room.peers) {
+        if (existingPeerId === peerId) continue;
+        // (a) tell the existing peer about the new joiner.
+        sendJson(existingPeer.ws, {
+          type: 'rosterPeer',
+          peerId,
+          sessionPubkey,
+        });
+        // (b) tell the new joiner about this existing peer (if it has a pubkey).
+        if (existingPeer.sessionPubkey !== undefined) {
+          sendJson(ws, {
+            type: 'rosterPeer',
+            peerId: existingPeerId,
+            sessionPubkey: existingPeer.sessionPubkey,
+          });
+        }
+      }
+    }
+
     logger.info(
       { roomId, peerId, peerCount: room.peers.size },
       'Peer joined room',
     );
+  }
+
+  /**
+   * W5 M2 P1.0 (REQ-MCS-012): is this room currently locked out for too many
+   * wrong-password attempts within the sliding window? A lapsed window resets
+   * the counter implicitly (the record is treated as fresh on the next failure).
+   */
+  function isRateLimited(roomId: string): boolean {
+    const rec = passwordAttempts.get(roomId);
+    if (!rec) return false;
+    if (Date.now() - rec.windowStart >= passwordWindowMs) {
+      // Window lapsed — clear so the next attempt starts a fresh window.
+      passwordAttempts.delete(roomId);
+      return false;
+    }
+    return rec.count >= passwordMaxAttempts;
+  }
+
+  /**
+   * W5 M2 P1.0 (REQ-MCS-012): record a wrong-password attempt against a room,
+   * starting (or rolling) the sliding window. NEVER logs the attempted password.
+   */
+  function recordFailedAttempt(roomId: string): void {
+    const now = Date.now();
+    const rec = passwordAttempts.get(roomId);
+    if (!rec || now - rec.windowStart >= passwordWindowMs) {
+      passwordAttempts.set(roomId, { count: 1, windowStart: now });
+      return;
+    }
+    rec.count += 1;
   }
 
   async function handleCreateTransport(ws: WebSocket, msg: CreateTransportMessage): Promise<void> {
@@ -977,6 +1200,12 @@ export function createSignalingServer(
         metrics.clearRoom(roomId);
         // G1: drop the inter-relay announce records for this room (standby side).
         interRelay?.registry.clear(roomId);
+        // W5 M2 P1.0 (REQ-MCS-012): drop the room ADMISSION config + rate-limiter
+        // so a reused roomId starts fresh (first-joiner-sets-it again). The
+        // per-peer sessionPubkey roster is already gone (removePeer dropped the
+        // PeerState).
+        roomConfigs.delete(roomId);
+        passwordAttempts.delete(roomId);
         logger.info({ roomId }, 'Room closed (no peers remaining)');
       }
     }

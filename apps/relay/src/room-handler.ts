@@ -35,6 +35,15 @@ export interface RoomState {
 export interface PeerState {
   peerId: string;
   ws: WebSocket;
+  /**
+   * W5 M2 P1.0 (REQ-MCS-013): the peer's in-browser ed25519 SESSION public key
+   * (base64, 32-byte), captured at admission. This Map of `{ peerId →
+   * sessionPubkey }` (across `room.peers`) IS the roster the coordinator seals
+   * K_room to (P1/P3). Dropped automatically when the peer leaves (removePeer
+   * deletes the PeerState) → the roster shrinks (rekey trigger for P3). PUBLIC
+   * key only — never key material.
+   */
+  sessionPubkey?: string;
   sendTransport: msTypes.WebRtcTransport | null;
   recvTransport: msTypes.WebRtcTransport | null;
   producers: msTypes.Producer[];
