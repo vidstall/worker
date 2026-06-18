@@ -35,6 +35,18 @@ const VP8_PAYLOAD_TYPE = 101;
 const VP8_CLOCK_RATE = 90000;
 
 /**
+ * W5 M2 P7 (REQ-MCS-015) — the named error the relay throws when something tries
+ * to feed an E2EE room's stream into the MCU mixer. Used both as the `Error.name`
+ * and the thrown-message prefix, so callers / tests can assert on it without
+ * string-matching prose. The relay refuses STRUCTURALLY — MCU server-mixing
+ * (decode → re-encode, `recompose`) breaks SFrame content-E2EE, so an E2EE room
+ * must NEVER reach the mixer (D-M2-6: an E2EE room never auto-degrades to MCU;
+ * D-M2-8: this is a STRUCTURAL refusal, NOT a cryptographic "cannot decrypt"
+ * claim — M2 has no crypto validator-exclusion, Path C → M3).
+ */
+export const E_MCU_REFUSED_E2EE = 'E_MCU_REFUSED_E2EE';
+
+/**
  * Determine grid layout based on stream count.
  * 1:    1x1
  * 2:    2x1
@@ -85,10 +97,21 @@ export class McuPipeline {
   private nextRtpPort: number;
   /** Track whether SFU fallback is active due to ffmpeg crash. */
   private _sfuFallback = false;
+  /**
+   * W5 M2 P7 (REQ-MCS-015) — whether this pipeline's room is E2EE. This is NOT
+   * new tracked state: it is the SAME per-room `RoomConfig.e2ee` flag the host
+   * sets at admission (`signaling.ts` `roomConfigs.get(roomId)?.e2ee`), captured
+   * as a construction-time fact (the flag is immutable after room create — later
+   * joiners inherit it, REQ-MCS-013). When `true`, `addStream` STRUCTURALLY
+   * refuses to feed the mixer (the relay-side guarantee backing the client's
+   * never-auto-degrade consent gate). Defaults `false` for legacy/M1 call sites.
+   */
+  private readonly e2ee: boolean;
 
-  constructor(router: msTypes.Router, logger: Logger) {
+  constructor(router: msTypes.Router, logger: Logger, e2ee = false) {
     this.router = router;
     this.logger = logger;
+    this.e2ee = e2ee;
     // Start assigning RTP ports from a high range to avoid conflicts with mediasoup's range
     this.nextRtpPort = parseInt(process.env['MCU_RTP_BASE_PORT'] ?? '20000', 10);
   }
@@ -114,6 +137,29 @@ export class McuPipeline {
    */
   async addStream(peerId: string, producer: msTypes.Producer): Promise<void> {
     if (this.closing) return;
+
+    // ── W5 M2 P7 — STRUCTURAL MCU-REFUSAL FOR E2EE ROOMS (REQ-MCS-015) ─────────
+    // This is the ffmpeg-compositing mixer ingest. MCU server-mixing decodes →
+    // re-encodes media, which breaks SFrame content-E2EE. So if this room is E2EE
+    // (`RoomConfig.e2ee === true`), REFUSE to mix — throw a named error BEFORE any
+    // transport/consumer is created, so MCU can never silently engage behind the
+    // user's back. P6's `deriveRoomMode` already forces `e2ee:false` at the wire;
+    // THIS guard is the defense-in-depth enforcement (an E2EE room should never
+    // reach the mixer in the first place — only an explicit user opt-out of E2EE
+    // moves a room to MCU, P7 client consent gate, D-M2-6). HONESTY (D-M2-8): a
+    // STRUCTURAL refusal to engage the mixer — NOT a cryptographic "relay cannot
+    // decrypt" claim (M2 has no crypto validator-exclusion; Path C → M3). The warn
+    // logs only peerId/producerId — NEVER key material, room-password, or bundles.
+    if (this.e2ee) {
+      this.logger.warn(
+        { peerId, producerId: producer.id, reason: E_MCU_REFUSED_E2EE },
+        'MCU: REFUSED to mix an E2EE room — server-mixing breaks SFrame content-E2EE (REQ-MCS-015)',
+      );
+      throw Object.assign(
+        new Error(`${E_MCU_REFUSED_E2EE}: refusing to MCU-mix an E2EE room`),
+        { name: E_MCU_REFUSED_E2EE },
+      );
+    }
 
     if (this.inputStreams.has(peerId)) {
       this.logger.warn({ peerId }, 'MCU: stream already exists for peer, skipping');

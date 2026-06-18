@@ -730,10 +730,19 @@ export function createSignalingServer(
           peers: new Map(),
         };
 
-        // Initialize MCU pipeline for MCU rooms
+        // Initialize MCU pipeline for MCU rooms. W5 M2 P7 (REQ-MCS-015): pass the
+        // host-set per-room E2EE flag (the SAME `roomConfigs` flag P6 reads at
+        // line ~799 — set by the first joiner above, immutable after create) so
+        // the pipeline STRUCTURALLY refuses to mix if this room is E2EE. Belt-and-
+        // braces: `deriveRoomMode` already forces `e2ee:false` under MCU at the
+        // wire, so `e2ee:true && roomMode==='mcu'` should never co-occur — this
+        // guard makes that impossible to violate silently (defense-in-depth,
+        // D-M2-6). NOTE: in M2 an MCU room is opened only by an explicit non-E2EE
+        // host (or the P7 client opt-out-of-E2EE), so this is normally `false`.
         if (roomMode === 'mcu') {
-          room.mcuPipeline = new McuPipeline(router, logger);
-          logger.info({ roomId }, 'MCU pipeline initialized for room');
+          const roomE2ee = roomConfigs.get(roomId)?.e2ee ?? false;
+          room.mcuPipeline = new McuPipeline(router, logger, roomE2ee);
+          logger.info({ roomId, e2ee: roomE2ee }, 'MCU pipeline initialized for room');
         }
 
         rooms.set(roomId, room);
