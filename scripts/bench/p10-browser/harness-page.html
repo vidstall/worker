@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>P10 Step-2 harness — real-browser relay-blind SFrame capture</title>
+  </head>
+  <body>
+    <h1>P10 Step-2 harness</h1>
+    <p>Headless Chrome → real WebRTC → in-process mediasoup relay → relay-internal tap.</p>
+    <p>
+      Bundled real mediasoup-client + the SHIPPED client SFrame crypto
+      (sframe-transform / key-manager / session-keypair). Served from
+      http://127.0.0.1 so getUserMedia + insertable streams have a secure context.
+    </p>
+    <script src="/bundle.js"></script>
+  </body>
+</html>
