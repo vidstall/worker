@@ -9,13 +9,14 @@
  * FAKE 6-byte SFrame header, config 0x00). We do NOT re-prove P5's result here.
  *
  * P10's HONEST DELTA over P5 (and the ONLY new claim this file makes):
- *   The opaque body forwarded through the relay is now a REAL P2/P3 SFrame
- *   CIPHERTEXT — produced by the SHIPPED client crypto:
+ *   The opaque body forwarded through the relay is now a REAL P2/P3 (M3 Lane B
+ *   partial-SFrame) CIPHERTEXT — produced by the SHIPPED client crypto:
  *     real ed25519 session keypair (session-keypair.ts)
  *       → real libsodium sealed-box K_room distribution (e2ee-spike.ts)
  *       → real per-sender K_content HKDF (KeyManager, key-manager.ts, D-M2-21)
- *       → real AES-GCM `encryptFrame` with the REAL 13-byte cleartext header
- *         [config:1 | kid:u32-BE | ctr:u64-BE] (sframe-transform.ts).
+ *       → real AES-GCM `encryptFrame` over the REAL partial-SFrame layout
+ *         [ cleartext codec prefix (codecOffset) | ciphertext||tag | 14-byte TRAILER:
+ *           config:1 | kid:u32-BE | ctr:u64-BE | codecOffset:u8 ] (sframe-transform.ts).
  *   That real ciphertext stays opaque + byte-identical through the in-process
  *   relay forward, and — the load-bearing contrast — a NON-E2EE (cleartext)
  *   payload forwarded over the SAME relay path comes out DECODABLE WITHOUT ANY
@@ -32,8 +33,8 @@
  *   (a) BYTE-IDENTITY of the REAL ciphertext through the forward: every forwarded
  *       media packet's SFrame body byte-matches the exact `encryptFrame` output we
  *       sent (the relay rewrote only RTP/VP8 HEADER bytes for routing).
- *   (b) REAL 13-byte header OBSERVED on the wire: config byte 0x01 + readSframeHeader
- *       recovers the exact {kid, ctr} for each forwarded body.
+ *   (b) REAL 14-byte TRAILER OBSERVED on the wire: config byte 0x01 + readSframeTrailer
+ *       (parsed FROM THE END) recovers the exact {kid, ctr} for each forwarded body.
  *   (c) DECODABLE WITH the key: `decryptFrame(forwardedBody, keyLookup)` (the REAL
  *       per-sender keyLookup) recovers the EXACT original plaintext.
  *   (d) NON-VACUOUS (no key / wrong key): `decryptFrame` with a null lookup AND with
@@ -52,8 +53,8 @@
  *   the byte-identity comparison → the body no longer matches a sent ciphertext →
  *   the byte-identity assert FAILS (mirrors P5's BLIND_FORCE_TAMPER). It ALSO
  *   exercises the AEAD-integrity path explicitly: we locate the tampered body by
- *   header-only (KID match, skipping the b64-map gate) and assert `decryptFrame`
- *   on the tampered bytes REJECTS — so a mutated ciphertext is both non-identical
+ *   its trailer-config (skipping the b64-map gate, which the tampered body no longer
+ *   matches) and assert `decryptFrame` on the tampered bytes REJECTS — so a mutated ciphertext is both non-identical
  *   AND undecryptable.
  *
  * ── Honesty bounds (DA-2/DA-3/DA-8, D-M2-7/8 — keep the P5 block) ──────────────
@@ -65,10 +66,10 @@
  * opaque to it). This is **NOT a crypto audit** and is **NEVER** a cryptographic
  * "relay/validator CANNOT decrypt" claim — in M2 the validator HOLDS the key and
  * blindness is ECONOMIC/OPERATIONAL; cryptographic validator-exclusion is Path C →
- * M3 (D-M2-7/8). What this proves is the STRUCTURAL floor: real P2/P3 ciphertext
- * (real 13-byte header + real AES-GCM + real per-sender K_content) survives the
- * relay forward opaque + byte-identical, decryptable ONLY with the key, against a
- * cleartext negative control that needs no key.
+ * M3 (D-M2-7/8). What this proves is the STRUCTURAL floor: real P2/P3 (M3 Lane B
+ * partial-SFrame) ciphertext (real 14-byte trailer + real AES-GCM + real per-sender
+ * K_content) survives the relay forward opaque + byte-identical, decryptable ONLY with
+ * the key, against a cleartext negative control that needs no key.
  *
  * Requirements touched: REQ-MCS-014 (relay-blind real-SFrame hermetic floor).
  *
@@ -88,8 +89,9 @@ import type { types as msTypes } from 'mediasoup';
 import {
   encryptFrame,
   decryptFrame,
-  readSframeHeader,
-  SFRAME_HEADER_LEN,
+  readSframeTrailer,
+  SFRAME_TRAILER_LEN,
+  codecOffsetForFrameType,
   type KeyLookup,
 } from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
 import {
@@ -105,19 +107,22 @@ const mediaCodecs: msTypes.RtpCodecCapability[] = [
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000, preferredPayloadType: VP8_PT },
 ];
 
-// REAL SFrame layout (sframe-transform.ts): the cleartext header's first byte is
-// CONFIG_BYTE 0x01 (NOT P5's fake 0x00). We scan for 0x01 then match KID — the
-// real 13-byte header is [config:1 | kid:u32-BE | ctr:u64-BE].
+// REAL partial-SFrame layout (sframe-transform.ts, M3 Lane B): the cleartext metadata
+// is now a 14-byte TRAILER at the END whose first byte is CONFIG_BYTE 0x01 (NOT P5's
+// fake 0x00, and NOT a front header). The trailer is
+// [config:1 | kid:u32-BE | ctr:u64-BE | codecOffset:u8], parsed key-free FROM THE END by
+// readSframeTrailer. The body is located by the AUTHORITATIVE sent-ciphertext b64 match
+// (mediasoup rewrites RTP/VP8 HEADER bytes for routing, never the SFrame body).
 const SFRAME_CONFIG_BYTE = 0x01;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ── RED hook ──────────────────────────────────────────────────────────────────
-// P10_FORCE_TAMPER=1 flips the LAST body byte of each forwarded SFrame packet
-// before the byte-identity comparison: the body no longer matches a sent
-// ciphertext (byteIdentical < mediaPackets) AND, located header-only, the tampered
-// bytes fail AEAD decrypt. With the flag UNSET this is a no-op, so GREEN is the
-// real forwarded bytes. Mirrors P5's BLIND_FORCE_TAMPER.
+// P10_FORCE_TAMPER=1 flips a CIPHERTEXT-BODY byte of each forwarded SFrame packet
+// before the byte-identity comparison: the body no longer matches a sent ciphertext
+// (byteIdentical < mediaPackets) AND, located by the trailer-config (b64-map gate
+// skipped), the tampered bytes fail AEAD decrypt. With the flag UNSET this is a no-op,
+// so GREEN is the real forwarded bytes. Mirrors P5's BLIND_FORCE_TAMPER.
 const FORCE_TAMPER = process.env['P10_FORCE_TAMPER'] === '1';
 
 /** Minimal RTCP Sender Report (PT=200) — VERBATIM from P5 / the M1 bench. Required
@@ -345,14 +350,16 @@ async function forwardBodies(
 }
 
 /**
- * Locate the REAL SFrame body in a FORWARDED VP8 RTP packet by SCANNING for the
- * real header signature: CONFIG_BYTE 0x01 immediately followed by our KID (u32-BE),
- * then confirming the trailing body is byte-identical to one of `sentBodiesB64`
- * (rules out a coincidental 0x01,KID byte sequence in the VP8 header region).
+ * Locate the REAL partial-SFrame body in a FORWARDED VP8 RTP packet by SCANNING for the
+ * candidate body start (offsets 12..64) and matching the AUTHORITATIVE sent-ciphertext
+ * b64 set: `cand = pkt.subarray(off)`, and if `sentBodiesB64.has(cand.toString('base64'))`
+ * the body is found. The M3 Lane B config byte 0x01 now lives in the TRAILER at the END,
+ * so there is no front 0x01+KID signature to scan; the b64 byte-identity match IS the
+ * authoritative locator. We then parse the trailer FROM THE END for {kid, ctr}.
  *
  * Why scan, not a fixed offset (same lesson as P5): mediasoup legitimately rewrites
  * RTP/VP8 HEADER bytes for routing (extension, descriptor) — that is the cleartext
- * metadata routing the blind-forward invariant PERMITS. It NEVER rewrites the body.
+ * metadata routing the blind-forward invariant PERMITS. It NEVER rewrites the SFrame body.
  *
  * Returns {bodyOffset, kid, ctr} when the trailing body matched a sent body; else null.
  */
@@ -361,29 +368,40 @@ function locateForwardedSframe(
   kid: number,
   sentBodiesB64: Set<string>,
 ): { bodyOffset: number; kid: number; ctr: number } | null {
-  const scanEnd = Math.min(pkt.length - (SFRAME_HEADER_LEN + 1), 64);
+  const scanEnd = Math.min(pkt.length - SFRAME_TRAILER_LEN, 64);
   for (let off = 12; off < scanEnd; off++) {
-    if (pkt[off] === SFRAME_CONFIG_BYTE && pkt.readUInt32BE(off + 1) === (kid >>> 0)) {
-      const body = pkt.subarray(off).toString('base64');
-      if (sentBodiesB64.has(body)) {
-        const hdr = readSframeHeader(pkt.subarray(off));
-        return { bodyOffset: off, kid: hdr.kid, ctr: hdr.ctr };
-      }
+    const cand = pkt.subarray(off);
+    if (cand.length < SFRAME_TRAILER_LEN + 16) break; // too short to hold body + trailer
+    if (sentBodiesB64.has(cand.toString('base64'))) {
+      const trailer = readSframeTrailer(cand);
+      void kid; // kid is asserted by the caller against trailer.kid
+      return { bodyOffset: off, kid: trailer.kid, ctr: trailer.ctr };
     }
   }
   return null;
 }
 
 /**
- * HEADER-ONLY locator (RED-hook aid): find the SFrame body by the 0x01+KID
- * signature WITHOUT the b64-map gate. Used only to locate a TAMPERED body (which by
- * definition no longer matches the sent map) so we can assert it fails AEAD decrypt.
+ * TRAILER-ONLY locator (RED-hook aid): find the partial-SFrame body WITHOUT the b64-map
+ * gate by scanning for a candidate body start whose TRAILER (parsed FROM THE END by
+ * readSframeTrailer) carries config 0x01 + our KID. Used only to locate a TAMPERED body
+ * (which by definition no longer matches the sent map) so we can assert it fails AEAD
+ * decrypt. The RED hook flips a CIPHERTEXT-body byte (not the trailer), so the trailer
+ * config + KID survive and remain locatable here.
  */
 function locateSframeHeaderOnly(pkt: Buffer, kid: number): number | null {
-  const scanEnd = Math.min(pkt.length - (SFRAME_HEADER_LEN + 1), 64);
+  const scanEnd = Math.min(pkt.length - SFRAME_TRAILER_LEN, 64);
   for (let off = 12; off < scanEnd; off++) {
-    if (pkt[off] === SFRAME_CONFIG_BYTE && pkt.readUInt32BE(off + 1) === (kid >>> 0)) {
-      return off;
+    const cand = pkt.subarray(off);
+    if (cand.length < SFRAME_TRAILER_LEN + 16) break;
+    // The trailer's config byte sits at (cand.length - SFRAME_TRAILER_LEN). Only attempt a
+    // trailer parse when that byte is 0x01, then confirm the KID matches.
+    if (cand[cand.length - SFRAME_TRAILER_LEN] !== SFRAME_CONFIG_BYTE) continue;
+    try {
+      const trailer = readSframeTrailer(cand);
+      if (trailer.kid === (kid >>> 0)) return off;
+    } catch {
+      /* not a trailer at this offset; keep scanning */
     }
   }
   return null;
@@ -397,26 +415,33 @@ describe('W5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup +
       const { senderId, kid, encryptKey, keyLookup } = await realKeying();
 
       // Known plaintexts of varying length → varying real ciphertext lengths
-      // (header13 + |plaintext| + 16 GCM tag), so a coincidental match is implausible.
+      // (|plaintext| + 16 GCM tag + 14-byte trailer = |plaintext| + 30, independent of
+      // codecOffset), so a coincidental match is implausible.
       const plaintexts = [
         new TextEncoder().encode('P10 relay-blind: known plaintext frame ONE — alpha'),
         new TextEncoder().encode('frame TWO bravo'),
         new TextEncoder().encode('the third known plaintext frame — charlie charlie charlie charlie'),
       ];
 
-      // REAL encryptFrame: real 13-byte header [config 0x01 | kid:u32 | ctr:u64] +
-      // real AES-GCM under the real per-sender K_content. NOTHING is reimplemented.
+      // REAL encryptFrame (M3 Lane B partial-SFrame): cleartext codec prefix (codecOffset
+      // bytes) + real AES-GCM body + 14-byte trailer [config 0x01 | kid:u32 | ctr:u64 |
+      // codecOffset:u8] under the real per-sender K_content. We model the synthetic
+      // plaintext as a KEYFRAME (codecOffset = codecOffsetForFrameType('key', |pt|), clamped
+      // to the plaintext length). NOTHING is reimplemented.
       const sframes: Uint8Array[] = [];
       const ctrToPlain = new Map<number, Uint8Array>();
       for (let i = 0; i < plaintexts.length; i++) {
-        const sframe = await encryptFrame(plaintexts[i]!, { kid, ctr: i }, encryptKey);
-        // PROVE the real layout up front: config byte 0x01, length = 13 + |pt| + 16,
-        // and readSframeHeader recovers the exact {kid, ctr}.
-        expect(sframe[0]).toBe(SFRAME_CONFIG_BYTE);
-        expect(sframe.length).toBe(SFRAME_HEADER_LEN + plaintexts[i]!.length + 16);
-        const parsed = readSframeHeader(sframe);
+        const codecOffset = codecOffsetForFrameType('key', plaintexts[i]!.length);
+        const sframe = await encryptFrame(plaintexts[i]!, { kid, ctr: i }, encryptKey, codecOffset);
+        // PROVE the real layout up front: the cleartext prefix is the first codecOffset
+        // bytes of the plaintext, the trailing config byte (at len-14) is 0x01, length =
+        // |pt| + 16 + 14 (= |pt| + 30), and readSframeTrailer recovers the exact {kid, ctr}.
+        expect(sframe[sframe.length - SFRAME_TRAILER_LEN]).toBe(SFRAME_CONFIG_BYTE);
+        expect(sframe.length).toBe(plaintexts[i]!.length + 16 + SFRAME_TRAILER_LEN);
+        const parsed = readSframeTrailer(sframe);
         expect(parsed.kid).toBe(kid);
         expect(parsed.ctr).toBe(i);
+        expect(parsed.codecOffset).toBe(codecOffset);
         sframes.push(sframe);
         ctrToPlain.set(i, plaintexts[i]!);
       }
@@ -432,25 +457,30 @@ describe('W5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup +
 
       let mediaPackets = 0; // forwarded packets large enough to carry our smallest body
       let byteIdentical = 0; // …whose SFrame body byte-matches a sent real ciphertext
-      let realHeaderObserved = 0; // …with the real 13-byte header (config 0x01 + KID)
+      let realHeaderObserved = 0; // …with the real 14-byte trailer (config 0x01 + KID)
       let decryptedOk = 0; // …that decrypt WITH K_content to an EXACT original plaintext
       let tamperedUndecryptable = 0; // RED-hook: tampered bodies that FAIL AEAD decrypt
 
-      const minBody = SFRAME_HEADER_LEN + 1 + 16; // header + >=1 byte ct + GCM tag
+      const minBody = 1 + 16 + SFRAME_TRAILER_LEN; // >=1 byte ct + GCM tag + 14-byte trailer
       for (const pkt of forwarded) {
         if (pkt.length < 12 + 4 + 3 + minBody) continue; // skip RTX/padding artifacts
         mediaPackets++;
 
         // RED hook (P10_FORCE_TAMPER=1): a NON-blind relay that mutated the body in
-        // transit — flip the last byte so it can no longer byte-match a sent body
-        // (byteIdentical < mediaPackets) AND fails AEAD decrypt.
-        if (FORCE_TAMPER) pkt[pkt.length - 1] = (pkt[pkt.length - 1]! ^ 0xff) & 0xff;
+        // transit — flip the LAST CIPHERTEXT-body byte (the one immediately before the
+        // 14-byte trailer) so the body can no longer byte-match a sent body
+        // (byteIdentical < mediaPackets) AND fails AEAD decrypt, while the trailer
+        // (config 0x01 + KID) stays intact so the trailer-only locator can still find it.
+        if (FORCE_TAMPER) {
+          const ti = pkt.length - SFRAME_TRAILER_LEN - 1; // last byte of ciphertext||tag
+          if (ti >= 0) pkt[ti] = (pkt[ti]! ^ 0xff) & 0xff;
+        }
 
         const found = locateForwardedSframe(pkt, kid, sentBodiesB64);
         if (!found) {
-          // Under the RED hook the tampered body won't match the map — locate it
-          // header-only and PROVE the mutated ciphertext fails AEAD decrypt (the
-          // integrity-failure path, complementing the byte-identity failure).
+          // Under the RED hook the tampered body won't match the map — locate it by the
+          // intact trailer (config 0x01 + KID at the END) and PROVE the mutated ciphertext
+          // fails AEAD decrypt (the integrity-failure path, complementing byte-identity).
           if (FORCE_TAMPER) {
             const off = locateSframeHeaderOnly(pkt, kid);
             if (off !== null) {
@@ -464,7 +494,8 @@ describe('W5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup +
         // (a) byte-identity: the relay rewrote only RTP/VP8 HEADER bytes, never the
         // SFrame body — the REAL ciphertext is forwarded verbatim.
         byteIdentical++;
-        // (b) real 13-byte header observed on the wire (config 0x01 + KID survived).
+        // (b) real 14-byte trailer observed on the wire (config 0x01 + KID survived,
+        // parsed FROM THE END by readSframeTrailer in locateForwardedSframe).
         expect(found.kid).toBe(kid);
         realHeaderObserved++;
 
@@ -492,7 +523,7 @@ describe('W5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup +
       // a sent ciphertext — STRUCTURAL blind forward (relay has no decode/mutate path).
       // RED: P10_FORCE_TAMPER flips a body byte → byteIdentical < mediaPackets → FAIL.
       expect(byteIdentical).toBe(mediaPackets);
-      // (b) …and on every one, the REAL 13-byte cleartext header survived unchanged.
+      // (b) …and on every one, the REAL 14-byte cleartext trailer survived unchanged.
       expect(realHeaderObserved).toBe(byteIdentical);
       // (c) …and every one decrypted WITH K_content to its EXACT original plaintext.
       expect(decryptedOk).toBe(byteIdentical);

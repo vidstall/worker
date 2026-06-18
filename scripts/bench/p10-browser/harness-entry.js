@@ -10,12 +10,16 @@
  *   insertable-streams pipe and runs each encoded VP8 frame through the SHIPPED client
  *   `encryptFrame` (the exact function the production `makeEncryptTransform` /
  *   `attachSenderTransform` calls — we own the pipe only to CAPTURE ciphertext samples),
- *   so every frame carries a REAL SFrame ciphertext:
+ *   so every frame carries a REAL partial-SFrame ciphertext:
  *     real ed25519 session keypair (session-keypair.ts)
  *       → real libsodium sealed-box K_room (e2ee-spike.ts, via KeyManager)
  *       → real per-sender K_content HKDF (key-manager.ts, D-M2-21)
- *       → real AES-GCM `encryptFrame` + real 13-byte header
- *         [config 0x01 | kid:u32-BE | ctr:u64-BE] (sframe-transform.ts).
+ *       → real AES-GCM `encryptFrame` over the partial-SFrame layout (sframe-transform.ts):
+ *         [ cleartext VP8 codec prefix (codecOffset bytes) | AES-GCM(body)=ciphertext||tag
+ *           | 14-byte TRAILER: config 0x01 | kid:u32-BE | ctr:u64-BE | codecOffset:u8 ].
+ *   The cleartext VP8 keyframe markers stay at the FRONT (offset 0), so the SFU's
+ *   keyframe-select gate can advance and FORWARD the E2EE stream (M3 Lane B fix for the
+ *   P10 Finding-B keyframe stall) — the metadata moved to a trailer at the END.
  *   NOTHING here reimplements SFrame/AES-GCM/keying — the ciphertext is the PRODUCTION
  *   client stack's, byte-identical to `attachSenderTransform`'s output, bundled by
  *   esbuild into this page (the same cross-repo modules Step-1 imports).
@@ -46,7 +50,7 @@ import { Device } from 'mediasoup-client';
 // production attach path; this harness owns the insertable-streams pipe directly so
 // it can CAPTURE ciphertext samples, but calls the SAME shipped `encryptFrame` the
 // shipped `makeEncryptTransform` calls — the emitted ciphertext is byte-identical.
-import { encryptFrame } from '../../../../dvconf-client/src/lib/webrtc/sframe-transform.ts';
+import { encryptFrame, codecOffsetForFrameType } from '../../../../dvconf-client/src/lib/webrtc/sframe-transform.ts';
 import { KeyManager } from '../../../../dvconf-client/src/lib/crypto/key-manager.ts';
 import { createSessionKeypair } from '../../../../dvconf-client/src/lib/crypto/session-keypair.ts';
 
@@ -246,7 +250,8 @@ async function run(opts) {
     // `encryptFrame` and (b) capture ciphertext samples. createEncodedStreams can only
     // be called ONCE per sender, so the harness owns it (instead of attachSenderTransform)
     // — the encrypt is byte-identical (same `encryptFrame`, same per-sender K_content,
-    // same 13-byte header). We assert the shipped shim WOULD take the same branch.
+    // same partial-SFrame layout: cleartext VP8 prefix at front + 14-byte trailer at the
+    // end). We assert the shipped shim WOULD take the same branch.
     const detectedApi = (typeof sender.createEncodedStreams === 'function') ? 'createEncodedStreams' : 'unsupported';
     if (detectedApi !== 'createEncodedStreams') {
       throw new Error('insertable streams (createEncodedStreams) unavailable on this sender — cannot SFrame-encrypt');
@@ -256,8 +261,13 @@ async function run(opts) {
     const { readable, writable } = sender.createEncodedStreams();
     const sframeStream = new TransformStream({
       async transform(frame, controller) {
-        // REAL shipped encrypt — same call `makeEncryptTransform` makes.
-        const sframe = await encryptFrame(new Uint8Array(frame.data), { kid: keying.kid, ctr: ctr++ }, keying.kContent);
+        // REAL shipped encrypt — same call `makeEncryptTransform` makes. The frame is an
+        // RTCEncodedVideoFrame; its .type ('key'|'delta') drives how many cleartext VP8
+        // codec-prefix bytes to keep at the FRONT so the SFU keyframe gate can read the
+        // VP8 markers and FORWARD the E2EE stream (M3 Lane B partial-SFrame).
+        const frameBytes = new Uint8Array(frame.data);
+        const codecOffset = codecOffsetForFrameType(frame.type, frameBytes.length);
+        const sframe = await encryptFrame(frameBytes, { kid: keying.kid, ctr: ctr++ }, keying.kContent, codecOffset);
         if (cipherSamples.length < 5) {
           // capture the on-wire SFrame ciphertext as hex (what the relay receives,
           // verbatim, over loopback). Hex so it survives the page→Node JSON boundary.

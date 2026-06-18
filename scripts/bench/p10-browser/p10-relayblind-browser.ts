@@ -4,14 +4,17 @@
  * THE HONEST DELTA over P5 (structural blind-forward) and Step-1 (hermetic
  * real-SFrame floor): this drives a REAL headless Chrome with FAKE media into an
  * E2EE room over PRODUCTION WebRTC (WebRtcTransport, real ICE/DTLS on localhost),
- * with the producer's VP8 frames SFrame-encrypted by the SHIPPED CLIENT CRYPTO
- * (real per-sender K_content), and proves TWO relay-internal facts at a relay-internal
- * tap: (1) the relay RECEIVES the SFrame ciphertext but cannot read it AND cannot even
- * FORWARD it (full-frame SFrame hides the VP8 keyframe the SFU needs → forwarding
- * stalls) — STRUCTURAL relay-blindness; (2) the captured ciphertext carries the real
- * config-0x01 + 13-byte header and FAILS AES-GCM decrypt WITHOUT K_content. Against a
- * NON-E2EE control room over the SAME tap path, the relay forwards cleartext VP8
- * recovered with NO key. The contrast is the proof.
+ * with the producer's VP8 frames partial-SFrame-encrypted by the SHIPPED CLIENT CRYPTO
+ * (real per-sender K_content), and proves the M3 Lane B DUAL relay-blind invariant at a
+ * relay-internal tap: (A) the SFU now FORWARDS the E2EE stream (forwarded > 0) — the
+ * partial-SFrame keeps the cleartext VP8 keyframe markers at the FRONT, so the SFU's
+ * keyframe-select gate advances (the P10 Finding-B full-frame keyframe stall is fixed);
+ * AND (B) the forwarded BODY is STILL content-opaque — every forwarded SFrame body FAILS
+ * AES-GCM decrypt WITHOUT K_content (decryptFrame(body, ()=>null) REJECTS), and the
+ * captured ciphertext carries the real config-0x01 + 14-byte TRAILER. Against a NON-E2EE
+ * control room over the SAME tap path, the relay forwards cleartext VP8 recovered with NO
+ * key. The contrast: BOTH rooms forward, but the E2EE forwarded body is GCM-opaque while
+ * the control body is readable VP8. The contrast is the proof.
  *
  * WHY AN IN-PROCESS RELAY + A RELAY-INTERNAL TAP (settled in recon):
  *   A real browser sends over a WebRtcTransport, which emits NO packet-level event,
@@ -26,12 +29,13 @@
  *
  * HONESTY BOUNDS (DA-2/DA-3/DA-8, D-M2-7/8 — carry from Step-1 / ROADMAP HARD-GATE):
  *   - Relay-blindness here is STRUCTURAL (mediasoup has no SFrame/decode path; the
- *     payload is opaque to it — here it cannot even forward the encrypted stream) +
- *     the M2 validator-blindness is ECONOMIC/OPERATIONAL (the validator HOLDS the key).
- *     This is NEVER a cryptographic "relay/validator CANNOT decrypt" claim — that is
+ *     partial-SFrame body is opaque to it — it FORWARDS the stream but never decrypts the
+ *     body) + the M2 validator-blindness is ECONOMIC/OPERATIONAL (the validator HOLDS the
+ *     key). This is NEVER a cryptographic "relay/validator CANNOT decrypt" claim — that is
  *     Path C → M3 (D-M2-7/8).
- *   - "Undecodable" is proven by STRUCTURE (real config 0x01 + 13-byte header present)
- *     + AES-GCM decrypt FAILURE WITHOUT the key — NOT by a known-plaintext attack.
+ *   - "Undecodable" is proven by STRUCTURE (real config 0x01 + 14-byte trailer present)
+ *     + AES-GCM decrypt FAILURE WITHOUT the key (on the sender-boundary sample AND the
+ *     forwarded tap body) — NOT by a known-plaintext attack.
  *   - Platform disclosed: headless Chromium on Windows, FAKE media, LOOPBACK ICE —
  *     NOT WAN glass-to-glass. The negative control is load-bearing.
  *   - The crypto is the PRODUCTION CLIENT stack's, bundled verbatim — the harness owns
@@ -64,15 +68,15 @@ import { build as esbuild } from 'esbuild';
 import { chromium, type Browser } from 'playwright';
 import {
   decryptFrame,
-  readSframeHeader,
-  SFRAME_HEADER_LEN,
+  readSframeTrailer,
+  SFRAME_TRAILER_LEN,
 } from '../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DAEMONS_ROOT = path.resolve(HERE, '../../..');
 const VP8_PT = 101;
-/** REAL SFrame config byte (sframe-transform.ts CONFIG_BYTE), NOT P5's fake 0x00. */
-const SFRAME_CONFIG_BYTE = 0x01;
+// The cleartext config byte 0x01 now lives in the SFrame TRAILER at the END;
+// `readSframeTrailer` validates it key-free, so the driver no longer scans sframe[0].
 
 const mediaCodecs: msTypes.RtpCodecCapability[] = [
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000, preferredPayloadType: VP8_PT },
@@ -99,10 +103,17 @@ interface RoomAnalysis {
   /** relay-side INBOUND RTP packets the relay RECEIVED from the browser. */
   relayReceivedPackets: number;
   /** E2EE: real SFrame ciphertext samples (captured at the sender boundary == the bytes
-   *  the relay receives over loopback) carrying a config-0x01 + 13-byte header. */
+   *  the relay receives over loopback) carrying a config-0x01 + 14-byte trailer. */
   sframeHeaderObserved: number;
   /** E2EE: …whose AES-GCM body FAILS to decrypt with NO key (the relay-blind point). */
   undecodableWithoutKey: number;
+  /** E2EE: forwarded tap packets in which we could LOCATE a whole captured SFrame body
+   *  (only single-RTP-packet frames; large frames fragment across MTU so they don't match). */
+  forwardedSframeMatched: number;
+  /** E2EE: …of those LOCATED forwarded bodies, the ones that FAIL decrypt with NO key —
+   *  invariant (B) where measurable: a located forwarded body stays content-opaque. Per-packet
+   *  byte-identity of forwarded ciphertext is the HERMETIC Step-1 (relay-blind-realsframe). */
+  forwardedUndecodableWithoutKey: number;
   /** non-E2EE: forwarded packets whose body decoded to readable VP8 with NO key. */
   cleartextRecovered: number;
   /** first payload for the side-by-side hex sample. */
@@ -174,11 +185,12 @@ async function standUpRelay(bundleJs: string, room: CaptureRoom): Promise<{
   async function attachTap(producer: msTypes.Producer): Promise<void> {
     const tapTransport = await router.createDirectTransport();
     // pipe:true → a `pipe`-type consumer that forwards EVERY RTP packet of the producer
-    // WITHOUT the simulcast keyframe-selection gate (a plain consumer waits for a
-    // detectable keyframe before forwarding — and SFrame, which encrypts the whole VP8
-    // frame, HIDES the keyframe from the SFU, so a plain consumer stalls forever on the
-    // E2EE stream; that stall is itself a structural relay-blindness finding, see the
-    // verdict). The pipe consumer forwards cleartext VP8 verbatim in the control room.
+    // WITHOUT the simulcast keyframe-selection gate. With the M3 Lane B PARTIAL-SFrame the
+    // cleartext VP8 keyframe markers stay at the FRONT, so even a plain (gated) consumer
+    // would now detect the keyframe and forward — forwarded > 0 over pipe:true confirms
+    // the upstream producer keyframe stall (P10 Finding B) is RESOLVED. The relay forwards
+    // the E2EE body opaquely (it never decrypts it) and forwards cleartext VP8 verbatim in
+    // the control room — identical mechanics, the body content is what differs.
     const tapConsumer = await tapTransport.consume({
       producerId: producer.id,
       rtpCapabilities: router.rtpCapabilities,
@@ -329,17 +341,24 @@ async function driveRoom(
 }
 
 /**
- * Analyse the E2EE room. TWO relay-internal facts, both load-bearing:
- *   (1) STRUCTURAL relay-blindness — the relay RECEIVES the SFrame ciphertext
- *       (relayReceivedPackets > 0) but FORWARDS NONE of it (forwarded == 0): a real
- *       mediasoup SFU cannot forward an SFrame stream because SFrame encrypts the whole
- *       VP8 frame, hiding the keyframe the SFU needs to begin forwarding (the SFU sent
- *       PLIs and never got a detectable keyframe). The relay is so blind it cannot even
- *       relay the bytes.
- *   (2) The ACTUAL SFrame ciphertext the relay receives (captured at the sender boundary
- *       in the page — byte-identical to what the relay holds over loopback) carries the
- *       REAL config-0x01 + 13-byte header AND FAILS AES-GCM decrypt WITHOUT the key. We
- *       prove "undecodable" with the SHIPPED `decryptFrame` + a null key lookup.
+ * Analyse the E2EE room. The M3 Lane B DUAL relay-blind invariant, both legs load-bearing:
+ *   (A) the SFU now FORWARDS the E2EE stream (forwarded > 0): the PARTIAL-SFrame keeps the
+ *       cleartext VP8 keyframe markers at the FRONT, so the SFU keyframe-select gate
+ *       advances (the full-frame P10 Finding-B stall is FIXED). The relay RECEIVES the
+ *       ciphertext (relayReceivedPackets > 0) AND forwards it.
+ *   (B) the content is STILL opaque without the key. The PRIMARY opacity proof is on the
+ *       page-captured sender-boundary ciphertext — the EXACT whole-frame bytes the relay
+ *       receives over loopback: each carries the REAL config-0x01 + 14-byte TRAILER (parsed
+ *       FROM THE END by `readSframeTrailer`) AND FAILS AES-GCM decrypt WITHOUT the key
+ *       (undecodableWithoutKey === sframeHeaderObserved). We ALSO walk the actual forwarded
+ *       tap packets and, for any whole SFrame body we can LOCATE (only single-RTP-packet
+ *       frames — large frames fragment across MTU so they never whole-match), assert the
+ *       SHIPPED `decryptFrame(body, ()=>null)` REJECTS (forwardedUndecodableWithoutKey ===
+ *       forwardedSframeMatched, vacuously true when fragmentation locates none). Per-packet
+ *       byte-identity of FORWARDED ciphertext is the HERMETIC Step-1's job
+ *       (relay-blind-realsframe.integration.test.ts, byteIdentical===mediaPackets), where a
+ *       finite single-packet body set makes it deterministic.
+ *   We prove "undecodable" with the SHIPPED `decryptFrame` + a null key lookup.
  */
 async function analyseE2EE(room: CaptureRoom, pageRun: Record<string, unknown>): Promise<RoomAnalysis> {
   const a: RoomAnalysis = {
@@ -348,6 +367,8 @@ async function analyseE2EE(room: CaptureRoom, pageRun: Record<string, unknown>):
     relayReceivedPackets: room.relayReceivedSnapshot,
     sframeHeaderObserved: 0,
     undecodableWithoutKey: 0,
+    forwardedSframeMatched: 0,
+    forwardedUndecodableWithoutKey: 0,
     cleartextRecovered: 0,
     samplePayloadHex: null,
     sampleHeader: null,
@@ -355,25 +376,29 @@ async function analyseE2EE(room: CaptureRoom, pageRun: Record<string, unknown>):
   };
 
   // The page captured the first few REAL SFrame ciphertexts (hex) it sent to the relay.
+  // These are byte-identical to what the relay holds over loopback (sender boundary).
   const samplesHex = (pageRun['cipherSamples'] as string[] | undefined) ?? [];
+  // The exact sent SFrame bodies (b64) — authoritatively locate the SFrame body inside a
+  // forwarded tap packet (mediasoup rewrites RTP/VP8 HEADER bytes, never the SFrame body).
+  const sentBodiesB64 = new Set<string>();
   for (const hex of samplesHex) {
     const sframe = Buffer.from(hex, 'hex');
-    if (sframe.length < SFRAME_HEADER_LEN + 16) continue;
-    // (a) real config 0x01 + 13-byte header parses key-free (RFC 9605 §4.4.3).
-    if (sframe[0] !== SFRAME_CONFIG_BYTE) continue;
-    let hdr: { kid: number; ctr: number };
+    if (sframe.length < SFRAME_TRAILER_LEN + 16) continue;
+    // (B-1) real config 0x01 + 14-byte TRAILER parses key-free FROM THE END (M3 Lane B).
+    let trailer: { kid: number; ctr: number; codecOffset: number };
     try {
-      hdr = readSframeHeader(sframe);
+      trailer = readSframeTrailer(sframe);
     } catch {
       continue;
     }
     a.sframeHeaderObserved++;
+    sentBodiesB64.add(sframe.toString('base64'));
     if (a.sampleHeader === null) {
-      a.sampleHeader = { kid: hdr.kid, ctr: hdr.ctr };
+      a.sampleHeader = { kid: trailer.kid, ctr: trailer.ctr };
       a.samplePayloadHex = sframe.subarray(0, Math.min(40, sframe.length)).toString('hex');
     }
-    // (b) THE RELAY-BLIND POINT: a keyless reader cannot recover the frame — the SHIPPED
-    // `decryptFrame` with a null key lookup REJECTS (AES-GCM auth failure).
+    // (B-2) THE RELAY-BLIND POINT (sender-boundary sample): a keyless reader cannot recover
+    // the frame — the SHIPPED `decryptFrame` with a null key lookup REJECTS (AES-GCM auth).
     let decoded = false;
     try {
       await decryptFrame(Uint8Array.prototype.slice.call(sframe), () => null);
@@ -383,9 +408,37 @@ async function analyseE2EE(room: CaptureRoom, pageRun: Record<string, unknown>):
     }
     if (!decoded) a.undecodableWithoutKey++;
   }
-  // mediaPackets here = the count of forwarded packets at the tap (expected 0 — the
-  // structural stall). The relay-blindness is the (received > 0, forwarded == 0) gap.
-  a.mediaPackets = room.packets.length;
+
+  // (A) + (B-3): walk the ACTUAL forwarded tap packets. Count media packets, and for each
+  // one that carries one of our sent SFrame bodies, assert the FORWARDED body is still
+  // GCM-opaque (decryptFrame with a null key REJECTS). This is the headline: the SFU
+  // FORWARDED the E2EE stream, yet each forwarded body remains content-opaque.
+  const minMedia = 12 + 4 + 10;
+  for (const pkt of room.packets) {
+    if (pkt.length < minMedia) continue;
+    a.mediaPackets++;
+    // Locate the SFrame body by the AUTHORITATIVE sent-body match (mediasoup never rewrites
+    // the body), then confirm it is content-opaque without the key.
+    const scanEnd = Math.min(pkt.length - SFRAME_TRAILER_LEN, 64);
+    for (let off = 12; off < scanEnd; off++) {
+      const cand = pkt.subarray(off);
+      if (cand.length < SFRAME_TRAILER_LEN + 16) break;
+      if (sentBodiesB64.has(cand.toString('base64'))) {
+        // LOCATED a whole captured SFrame body in this forwarded packet (only happens for
+        // single-RTP-packet frames; large frames fragment across MTU and never whole-match).
+        a.forwardedSframeMatched++;
+        let forwardedDecoded = false;
+        try {
+          await decryptFrame(Uint8Array.prototype.slice.call(cand), () => null);
+          forwardedDecoded = true; // readable with no key — must NOT happen.
+        } catch {
+          forwardedDecoded = false; // expected: forwarded body opaque without the key.
+        }
+        if (!forwardedDecoded) a.forwardedUndecodableWithoutKey++;
+        break;
+      }
+    }
+  }
   return a;
 }
 
@@ -403,6 +456,8 @@ async function analyseControl(room: CaptureRoom): Promise<RoomAnalysis> {
     relayReceivedPackets: room.relayReceivedSnapshot,
     sframeHeaderObserved: 0,
     undecodableWithoutKey: 0,
+    forwardedSframeMatched: 0,
+    forwardedUndecodableWithoutKey: 0,
     cleartextRecovered: 0,
     samplePayloadHex: null,
     sampleCleartext: null,
@@ -480,21 +535,22 @@ function writeArtifact(v: HarnessVerdict, browserVersion: string): string {
 - Transport: REAL WebRTC (WebRtcTransport, real ICE/DTLS) over LOOPBACK (127.0.0.1) — NOT WAN glass-to-glass.
 - Relay: in-process mediasoup ${(mediasoup as unknown as { version?: string }).version ?? '3.19.x'} worker/router owned by the harness (so it can attach the relay-internal tap).
 - Tap: relay-internal \`pipe\`-type DirectTransport consumer on the browser's producer (post-SRTP-decrypt forwarded payload — the warmpipe-rtp / P5 pattern). \`pipe:true\` forwards every RTP packet WITHOUT the simulcast keyframe-selection gate. This is the ONLY place the relay-blind difference is observable; a wire pcap is SRTP-encrypted in BOTH rooms.
-- Crypto: SHIPPED client stack, bundled verbatim — real ed25519 session keypair → libsodium sealed-box K_room → per-sender K_content HKDF (D-M2-21) → AES-GCM \`encryptFrame\` (real 13-byte header [config 0x01 | kid:u32-BE | ctr:u64-BE]). NOTHING reimplemented; the harness owns the createEncodedStreams insertable-streams pipe and calls the SHIPPED \`encryptFrame\` (the exact function the production \`makeEncryptTransform\`/\`attachSenderTransform\` calls). The emitted ciphertext is byte-identical to production.
+- Crypto: SHIPPED client stack, bundled verbatim — real ed25519 session keypair → libsodium sealed-box K_room → per-sender K_content HKDF (D-M2-21) → AES-GCM \`encryptFrame\` over the M3 Lane B PARTIAL-SFrame layout [ cleartext VP8 codec prefix (codecOffset) | ciphertext||tag | 14-byte trailer: config 0x01 | kid:u32-BE | ctr:u64-BE | codecOffset:u8 ]. NOTHING reimplemented; the harness owns the createEncodedStreams insertable-streams pipe and calls the SHIPPED \`encryptFrame\` (the exact function the production \`makeEncryptTransform\`/\`attachSenderTransform\` calls). The emitted ciphertext is byte-identical to production.
 - OS: Windows 11.
 
 ## Repo HEADs
 - dvconf-daemons: \`${daemonsHead}\` (quangdm_main)
 - dvconf-client: \`${clientHead}\` (master)
 
-## E2EE room — the relay CANNOT read AND cannot even forward the SFrame stream
+## E2EE room — the SFU FORWARDS the stream, yet the forwarded body is content-opaque (M3 Lane B dual invariant)
 - browser run: ok=${v.e2eeRun['ok']}, producerId=${String(v.e2eeRun['producerId']).slice(0, 12)}…, transformApi=${v.e2eeRun['transformApi']}, kid=${v.e2eeRun['kid']}, outbound bytesSent=${v.e2eeRun['outboundBytesSent']}, ICE=${v.e2eeRun['connectionState']}
 - **relay RECEIVED (inbound RTP from the browser): ${e.relayReceivedPackets} packets** — the SFrame ciphertext reached the relay over real WebRTC.
-- **relay FORWARDED at the tap: ${e.forwarded} packets** — STRUCTURAL relay-blindness: a real mediasoup SFU cannot forward the stream because the SHIPPED full-frame SFrame encrypts the VP8 keyframe markers the SFU needs to begin forwarding (it sent PLIs and never got a detectable keyframe). The relay is so blind to the payload it cannot relay it.
-- SFrame ciphertext samples captured (the exact bytes the relay receives over loopback): ${e.sframeHeaderObserved}, each with the REAL config 0x01 + 13-byte header.
-- **AES-GCM decrypt WITHOUT the key → REJECTED (undecodable): ${e.undecodableWithoutKey} / ${e.sframeHeaderObserved}**
+- **(A) relay FORWARDED at the tap: ${e.forwarded} packets (mediaPackets=${e.mediaPackets})** — the M3 Lane B partial-SFrame keeps the cleartext VP8 keyframe markers at the FRONT, so the SFU's keyframe-select gate advances and forwards the E2EE stream (the P10 Finding-B full-frame keyframe stall is FIXED).
+- **(B) content opaque WITHOUT the key.** Sender-boundary wire SFrames rejected keyless decrypt: ${e.undecodableWithoutKey} / ${e.sframeHeaderObserved} (the EXACT bytes the relay receives). Of the forwarded tap packets, ${e.forwardedSframeMatched} carried a whole single-RTP-packet SFrame body and all ${e.forwardedUndecodableWithoutKey} were GCM-opaque without the key (large frames fragment across MTU; per-packet byte-identity of forwarded ciphertext is the hermetic Step-1 \`relay-blind-realsframe\` gate).
+- SFrame ciphertext samples captured (the exact bytes the relay receives over loopback): ${e.sframeHeaderObserved}, each with the REAL config 0x01 + 14-byte trailer.
+- **AES-GCM decrypt WITHOUT the key → REJECTED (sender-boundary samples): ${e.undecodableWithoutKey} / ${e.sframeHeaderObserved}**
 - sample SFrame ciphertext (first 40 bytes, hex): \`${e.samplePayloadHex ?? '(none)'}\`
-- sample recovered cleartext header (key-free parse): ${e.sampleHeader ? `kid=${e.sampleHeader.kid} ctr=${e.sampleHeader.ctr}` : '(none)'}
+- sample recovered cleartext trailer (key-free parse): ${e.sampleHeader ? `kid=${e.sampleHeader.kid} ctr=${e.sampleHeader.ctr}` : '(none)'}
 - decode-WITHOUT-key attempt: **FAILED (GCM auth failure)** — exactly as required.
 
 ## NON-E2EE control room — forwarded payload IS cleartext VP8 (decodable, no key)
@@ -509,22 +565,22 @@ function writeArtifact(v: HarnessVerdict, browserVersion: string): string {
 | | E2EE room | non-E2EE control |
 |---|---|---|
 | relay RECEIVES | ${e.relayReceivedPackets} pkts (SFrame ciphertext) | ${c.relayReceivedPackets} pkts (cleartext VP8) |
-| relay FORWARDS at tap | ${e.forwarded} pkts (keyframe hidden → stall) | ${c.forwarded} pkts (verbatim) |
-| SFrame header (cleartext) | config 0x01 present | absent |
-| decode WITHOUT key | **FAILS** (AES-GCM auth) | **SUCCEEDS** (raw VP8) |
+| relay FORWARDS at tap | ${e.forwarded} pkts (partial-SFrame keyframe markers pass the gate) | ${c.forwarded} pkts (verbatim) |
+| SFrame trailer (cleartext) | config 0x01 present | absent |
+| forwarded body decode WITHOUT key | **FAILS** (AES-GCM auth) | **SUCCEEDS** (raw VP8) |
 | meaning to a keyless reader | none | full frame |
 
-Both rooms use the IDENTICAL relay + tap path. In the control room the relay reads the
-cleartext VP8 and forwards it (any keyless reader recovers the frame); in the E2EE room
-the relay receives the SFrame ciphertext, cannot read it (undecodable without K_content),
-and cannot even forward it (SFrame hides the keyframe the SFU needs). E2EE is what makes
-the bytes meaningless to a keyless reader.
+Both rooms use the IDENTICAL relay + tap path and BOTH forward. In the control room the
+relay reads the cleartext VP8 and forwards it (any keyless reader recovers the frame); in
+the E2EE room the SFU forwards the partial-SFrame stream (the cleartext VP8 keyframe
+markers at the front pass the keyframe gate) but the forwarded body is undecodable without
+K_content. E2EE is what makes the forwarded bytes meaningless to a keyless reader.
 
 ## Honesty bounds (DA-2/DA-3/DA-8, D-M2-7/8)
-- Relay-blindness = **STRUCTURAL** (mediasoup has no decode path; here it cannot even forward the encrypted stream); M2 validator-blindness = **ECONOMIC/OPERATIONAL** (the validator HOLDS the key). This is **NOT** a cryptographic "relay/validator CANNOT decrypt" claim — that is Path C → M3.
-- "Undecodable" is proven by structure (real config 0x01 + 13-byte header present) + AES-GCM decrypt FAILURE without the key, NOT by a known-plaintext attack. The negative control is load-bearing.
-- The E2EE SFrame ciphertext sample is captured at the sender's insertable-stream boundary (the exact bytes the relay receives over loopback — no application-layer re-encryption); the relay-internal RECEIVED-but-not-FORWARDED counts come from the relay's own mediasoup producer/consumer stats.
-- Platform is FAKE media + LOOPBACK ICE on one host — NOT WAN glass-to-glass. The delta over Step-1 (the hermetic synthetic-source floor) is the **real-browser SFrame-over-VP8 leg under production WebRTC** (real getUserMedia → real \`createEncodedStreams\` insertable-streams SFrame → WebRtcTransport, real ICE/DTLS → real mediasoup relay). A NEW finding surfaced ONLY by this real leg: **the shipped full-frame SFrame breaks the SFU's keyframe detection, so the relay cannot forward an E2EE stream as-is** (a real interop constraint Step-1's hand-built VP8 headers could not show).
+- Relay-blindness = **STRUCTURAL** (mediasoup has no decode path; it forwards the partial-SFrame body opaquely, never decrypting it); M2 validator-blindness = **ECONOMIC/OPERATIONAL** (the validator HOLDS the key). This is **NOT** a cryptographic "relay/validator CANNOT decrypt" claim — that is Path C → M3.
+- "Undecodable" is proven by structure (real config 0x01 + 14-byte trailer present) + AES-GCM decrypt FAILURE without the key on BOTH the sender-boundary sample AND the forwarded tap body, NOT by a known-plaintext attack. The negative control is load-bearing.
+- The E2EE SFrame ciphertext sample is captured at the sender's insertable-stream boundary (the exact bytes the relay receives over loopback — no application-layer re-encryption); the relay-internal RECEIVED + FORWARDED counts come from the relay's own mediasoup producer/consumer stats. The PRIMARY content-opacity proof is these whole-frame sender-boundary samples; forwarded-body opacity is additionally checked on any whole SFrame body locatable in a SINGLE forwarded tap packet (large frames fragment across MTU). Per-packet BYTE-IDENTITY of the forwarded ciphertext is the HERMETIC Step-1 (\`relay-blind-realsframe.integration.test.ts\`, byteIdentical===mediaPackets), not re-measured here.
+- Platform is FAKE media + LOOPBACK ICE on one host — NOT WAN glass-to-glass. The delta over Step-1 (the hermetic synthetic-source floor) is the **real-browser partial-SFrame-over-VP8 leg under production WebRTC** (real getUserMedia → real \`createEncodedStreams\` insertable-streams partial-SFrame → WebRtcTransport, real ICE/DTLS → real mediasoup relay). The M3 Lane B partial-SFrame RESOLVES the P10 Finding-B full-frame keyframe stall: keeping the cleartext VP8 keyframe markers at the front lets the SFU forward the E2EE stream while the body stays content-opaque.
 - DUAL-API caveat (NOT a production edit): Chromium 149 exposes both \`createEncodedStreams\` and the standard \`RTCRtpScriptTransform\`; the shipped shim PREFERS the standard API (an M3 worker scaffold that no-ops without a worker — and production supplies none, so production also relies on the createEncodedStreams branch). The harness masks the standard API on its own page and drives the createEncodedStreams branch with the SHIPPED \`encryptFrame\`.
 
 ## Reasons
@@ -571,7 +627,7 @@ async function main(): Promise<void> {
   controlRelay.close();
 
   log('───────────────────────────────────────────────');
-  log(`E2EE: relayReceived=${e2ee.relayReceivedPackets} forwarded=${e2ee.forwarded} sframeSamples=${e2ee.sframeHeaderObserved} undecodableWithoutKey=${e2ee.undecodableWithoutKey}`);
+  log(`E2EE: relayReceived=${e2ee.relayReceivedPackets} forwarded=${e2ee.forwarded} mediaPackets=${e2ee.mediaPackets} sframeSamples=${e2ee.sframeHeaderObserved} undecodableWithoutKey=${e2ee.undecodableWithoutKey} forwardedSframeMatched=${e2ee.forwardedSframeMatched} forwardedUndecodableWithoutKey=${e2ee.forwardedUndecodableWithoutKey}`);
   log(`CTRL: relayReceived=${control.relayReceivedPackets} forwarded=${control.forwarded} cleartextRecovered=${control.cleartextRecovered}`);
   log('───────────────────────────────────────────────');
 
@@ -582,13 +638,22 @@ async function main(): Promise<void> {
   if (!e2eeOk) reasons.push(`E2EE browser run failed: ${String(e2eeRun['error'] ?? 'unknown')}`);
   if (!ctrlOk) reasons.push(`control browser run failed: ${String(controlRun['error'] ?? 'unknown')}`);
   if (e2eeRun['transformApi'] !== 'createEncodedStreams') reasons.push(`E2EE SFrame transform did not attach (api=${String(e2eeRun['transformApi'])})`);
-  if (e2ee.sframeHeaderObserved === 0) reasons.push('E2EE: no real SFrame ciphertext sample captured (config 0x01 + 13-byte header)');
+  if (e2ee.sframeHeaderObserved === 0) reasons.push('E2EE: no real SFrame ciphertext sample captured (config 0x01 + 14-byte trailer)');
   if (e2ee.undecodableWithoutKey !== e2ee.sframeHeaderObserved || e2ee.sframeHeaderObserved === 0) {
     reasons.push(`E2EE: not all SFrame samples undecodable-without-key (${e2ee.undecodableWithoutKey}/${e2ee.sframeHeaderObserved})`);
   }
-  // STRUCTURAL relay-blindness: the relay RECEIVED the ciphertext but FORWARDED NONE.
+  // (A) M3 Lane B: the SFU now FORWARDS the E2EE stream (partial-SFrame keyframe markers
+  // pass the SFU gate). The relay RECEIVED the ciphertext AND forwarded it.
   if (e2ee.relayReceivedPackets === 0) reasons.push('E2EE: relay received NO RTP (browser→relay leg failed)');
-  if (e2ee.forwarded !== 0) reasons.push(`E2EE: relay UNEXPECTEDLY forwarded ${e2ee.forwarded} packets (SFrame stream should stall the SFU keyframe gate)`);
+  if (e2ee.forwarded === 0) reasons.push('E2EE: relay forwarded NO RTP — partial-SFrame keyframe markers should now pass the SFU gate');
+  // (B) content opacity: the PRIMARY proof is the sender-boundary whole-frame samples
+  // (gated above: undecodableWithoutKey === sframeHeaderObserved). For the forwarded tap, any
+  // whole SFrame body we can LOCATE (only single-RTP-packet frames; large frames fragment
+  // across MTU) must also be opaque — per-packet byte-identity of forwarded ciphertext is the
+  // hermetic Step-1 (relay-blind-realsframe). Fail only if a LOCATED forwarded body decoded.
+  if (e2ee.forwardedUndecodableWithoutKey !== e2ee.forwardedSframeMatched) {
+    reasons.push(`E2EE: a located forwarded SFrame body decoded WITHOUT the key (${e2ee.forwardedUndecodableWithoutKey}/${e2ee.forwardedSframeMatched} located forwarded bodies opaque)`);
+  }
   // Negative control: the relay forwarded cleartext VP8, recovered with no key.
   if (control.cleartextRecovered === 0) reasons.push('control: NO cleartext VP8 recovered without a key (negative control failed)');
 
@@ -597,14 +662,19 @@ async function main(): Promise<void> {
     ctrlOk &&
     e2eeRun['transformApi'] === 'createEncodedStreams' &&
     e2ee.sframeHeaderObserved > 0 &&
+    // (B) content opacity: the wire SFrames (sender-boundary == the exact bytes the relay
+    // receives) FAIL keyless decrypt; any LOCATED forwarded body is opaque too (fragmentation
+    // may locate none — per-packet byte-identity is the hermetic Step-1 relay-blind-realsframe).
     e2ee.undecodableWithoutKey === e2ee.sframeHeaderObserved &&
+    e2ee.forwardedUndecodableWithoutKey === e2ee.forwardedSframeMatched &&
     e2ee.relayReceivedPackets > 0 &&
-    e2ee.forwarded === 0 &&
+    // (A) the SFU FORWARDS the E2EE stream (partial-SFrame keyframe markers pass the gate).
+    e2ee.forwarded > 0 &&
     control.cleartextRecovered > 0 &&
     control.forwarded > 0;
 
   if (pass) {
-    reasons.push('PASS — real-browser SFrame ciphertext is relay-blind: the relay RECEIVES the ciphertext but cannot forward it (SFrame hides the keyframe), and the ciphertext is undecodable without K_content; the non-E2EE control forwards cleartext VP8 readable with no key over the SAME tap path.');
+    reasons.push('PASS — real-browser partial-SFrame is relay-blind under the M3 Lane B DUAL invariant: (A) the SFU now FORWARDS the E2EE stream (cleartext VP8 keyframe markers at the front pass the SFU keyframe-select gate) AND (B) the content stays opaque without K_content — every captured wire SFrame (sender-boundary == the exact bytes the relay receives) FAILS AES-GCM decrypt with no key, and every forwarded SFrame body we could locate is opaque too (per-packet byte-identity of forwarded ciphertext is the hermetic Step-1 relay-blind-realsframe gate). The non-E2EE control forwards cleartext VP8 readable with no key over the SAME tap path: both rooms forward, but the E2EE content is meaningless to a keyless reader.');
   }
 
   const verdict: HarnessVerdict = { pass, reasons, e2eeRun, controlRun, e2ee, control };
