@@ -11,12 +11,20 @@ import { defineConfig } from 'vitest/config';
  * mock-based (no localnet) and deliberately NOT matched here — it stays in the
  * unit run.
  *
+ * The validator-daemon canary-slash E2E (Phase 4.1, REQ-CFA-006/007/008) is a
+ * localnet-booting test too — matched by the PRECISE `canary-*` glob below so it
+ * does NOT pull in the sibling `dual-probe-bw-delta.integration.test.ts` (a
+ * loopback-HTTP/UDP bench gated behind `pnpm bench:m2`, not a localnet test).
+ *
  * Single localnet at a time: forks pool, single fork, no file parallelism, long
  * timeouts to cover `sui start` + publish.
  */
 export default defineConfig({
   test: {
-    include: ['**/cp-daemon/**/__tests__/integration/**/*.integration.test.ts'],
+    include: [
+      '**/cp-daemon/**/__tests__/integration/**/*.integration.test.ts',
+      '**/apps/validator-daemon/**/__tests__/integration/canary-*.integration.test.ts',
+    ],
     globals: false,
     testTimeout: 300_000,
     hookTimeout: 300_000,
