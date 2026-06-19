@@ -1,0 +1,17 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon[39m
+
+{"level":30,"time":1781875345527,"pid":35428,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781875345533,"pid":35428,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781875345546,"pid":35428,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781875345551,"pid":35428,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781875345558,"pid":35428,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":true,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781875345573,"pid":35428,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781875345578,"pid":35428,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":true,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+ [32m✓[39m src/canary/__tests__/proof.test.ts [2m([22m[2m12 tests[22m[2m)[22m[32m 131[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m12 passed[39m[22m[90m (12)[39m
+[2m   Start at [22m 20:22:24
+[2m   Duration [22m 1.22s[2m (transform 168ms, setup 0ms, collect 609ms, tests 131ms, environment 0ms, prepare 148ms)[22m
+
