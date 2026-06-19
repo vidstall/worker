@@ -1,0 +1,55 @@
+Canary Forwarding-Audit Wave (the validate-node Wave, D-M2-20) — M1 SHIP GATE
+MAIN guard #9 live re-runs. Date: 2026-06-19.
+
+PURPOSE
+  The Phase 8.1 SHIP gate runs independent READ-ONLY auditors (static; they re-verify shipped
+  source + committed evidence, they do NOT execute port-bound suites). Per the Wave discipline
+  ("Main re-runs the suite/bench itself — never trust a subagent's pass count"), MAIN re-ran the
+  HERMETIC, non-port-bound suites itself in clean processes. The port-bound trio + the localnet
+  E2E are cited from their fresh committed evidence (see CITED block).
+
+HEADs at gate time (verified live, git log -1):
+  dvconf-daemons   quangdm_main  ff0d3b0
+  dvconf-contracts main          970d656
+  dvconf-client    master        e51f255
+  root             master        d014b5b (pre-SOT-propagation)
+
+MAIN RE-RAN (this session, clean processes)
+  [1] validator-daemon canary UNIT suite (keying/publisher/proof/cell)
+        pnpm exec vitest run src/canary/__tests__/   (cwd apps/validator-daemon)
+        => Test Files 4 passed (4); Tests 32 passed (32).  EXIT 0
+        (publisher.test green log shows verifier byteIdentical=6==mediaPackets=6, divergences=0)
+  [2] relay isolation guard (REQ-CFA-010 config topology)
+        pnpm exec vitest run src/__tests__/canary-isolation.config.test.ts  (cwd apps/relay)
+        => 13 passed (13).  EXIT 0
+  [3] client CanaryAuditPanel (REQ-CFA-011)
+        pnpm exec vitest run src/components/dashboard/__tests__/CanaryAuditPanel.test.tsx  (cwd dvconf-client)
+        => 13 passed (13).  EXIT 0
+  [4] Move FULL suite (REQ-CFA-006 entry + negative tests + non-regression)
+        sui move test  (cwd dvconf-contracts)
+        => Test result: OK. Total tests: 361; passed: 361; failed: 0.  EXIT 0
+        NOTE (transient, on record): the FIRST attempt aborted because the sui client active env
+        was a DANGLING ephemeral pointer (canary-e2e-1781879759142, left by this Wave's own
+        Phase-4.1 localnet fixture; that localnet is down). A concurrent session's live localnet
+        (chain 04eb23ef) also mismatches Move.toml's declared `local = 8f16e176`, and the newer
+        Sui CLI makes that env-resolution fatal for `sui move test`. This is an INFRASTRUCTURE
+        condition, NOT a code regression: sources/audit/ + tests/audit/ are BYTE-IDENTICAL to the
+        committed green (git diff 970d656 HEAD -- sources/audit/ tests/audit/ = EMPTY; no commits
+        to sources/tests/Move.toml since 970d656). The clean 361/361 above was obtained by running
+        with an ISOLATED throwaway SUI_CONFIG_DIR (no active env => env resolution skipped); real
+        sui client config was not mutated by that run. (active-env was repaired off the dangling
+        pointer to `local`, a declared env — a benign net-improvement.)
+
+CITED (fresh committed evidence — port-bound; not re-run here to avoid colliding with the
+       concurrent live localnet / to honor the port-bound no-concurrent-boot discipline)
+  M1 bandwidth-scale-bench  ratio = 5.81 @ N=12 (gate >=3.0)        ] re-run THIS session at
+  M2 relay-blind-realsframe byteIdentical = 59 == mediaPackets = 59 ] Phase 7.1 (daemons ff0d3b0),
+  MTTR relay-overlap-mttr   N=30 P95 = 65.0 / P99 = 67.0 (<=100/200)] log REQ-CFA-010-nonregression-2026-06-19.log
+  canary-forward.integration (REQ-CFA-003/009) 2/2 under vitest.canary.config.ts (Phase 7.1)
+  canary-slash-e2e localnet  (REQ-CFA-006/007/008) committed green Phase 4.1 (daemons 121d4bd):
+        bond 300M -> 270M; CanaryDivergenceSlashed fired; honest run no slash; tamper-R2-only
+        slashes only R2; negative arms abort 686/687. Localnet boot ~1-in-3 flaky on Windows;
+        logic deterministic on a successful boot.
+
+VERDICT (MAIN guard #9): all hermetic suites GREEN; Move 361/361; cited port-bound evidence fresh
+and non-regressed. No code regression. The transient Move env condition is on record (infra only).
