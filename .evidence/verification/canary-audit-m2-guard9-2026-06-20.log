@@ -1,0 +1,34 @@
+=== Canary forwarding-audit Wave (validate-node, D-M2-20) — M2 MAIN guard #9 — 2026-06-20 ===
+HEADs: dvconf-daemons 7ece10f (quangdm_main) | dvconf-client 3274245 (master) | dvconf-contracts 970d656 (main, UNCHANGED)
+Discipline: MAIN re-runs the hermetic suites itself; localnet/mediasoup/bench/ports NOT booted (held by a concurrent session).
+
+--- dvconf-daemons: canary unit + wiring non-regression ---
+$ npx vitest run apps/validator-daemon/src/canary apps/validator-daemon/src/__tests__/index.test.ts apps/validator-daemon/src/__tests__/graceful-shutdown-wiring.test.ts --config vitest.config.ts
+ Test Files  9 passed (9)
+      Tests  69 passed (69)
+  Breakdown: canary unit 50 (M1 baseline 32 [cell 9 / proof 12 / keying 6 / publisher 5]
+             + cell-salt 5 + validator-discovery 7 + coverage-server 6)
+             + index.test 12 + graceful-shutdown-wiring 7  (the latter two = pre-existing
+             non-regression, NOT M2 wiring coverage — see gate partial P-M2-1).
+
+--- dvconf-client: panel + hook + typecheck ---
+$ npx vitest run CanaryAuditPanel useCanaryCoverage
+ Test Files  2 passed (2)
+      Tests  25 passed (25)   (CanaryAuditPanel 16 + useCanaryCoverage 9)
+$ npx tsc --noEmit
+ TSC_EXIT=0  (clean)
+
+--- INV-B (relay forward path untouched) ---
+$ git -C dvconf-daemons diff --name-only 7ece10f~1 7ece10f -- apps/relay/
+ (empty)  => 0 relay files changed in the M2 commit
+
+--- Move byte-identity (no canary-Move change this milestone) ---
+$ git -C dvconf-contracts status --short -- sources/ tests/
+ (empty)  ; HEAD 970d656  => 361/361 carries by byte-identity (M1 gate)
+
+--- no raw console.* in new prod ---
+ grep console. in cell.ts / validator-discovery.ts / coverage-server.ts / index.ts (daemon)
+ + useCanaryCoverage.ts / canaryAudit.ts / CanaryAuditPanel.tsx (client)
+ => only matches are comments documenting the createLogger rule; zero actual console.* calls.
+
+RESULT: guard #9 GREEN. daemons 69/69 · client 25/25 · client tsc 0 · INV-B empty · Move untouched.
