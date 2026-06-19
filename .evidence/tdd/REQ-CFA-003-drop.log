@@ -1,0 +1,51 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:57.814Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:57.817Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:57.817Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:57.818Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:57.818Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:57.819Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:58.810Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:58.812Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:58.814Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:58.816Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:58.818Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m{"timestamp":"2026-06-19T13:03:58.819Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781874238822,"pid":20576,"hostname":"Quang","name":"canary/verifier","canaryKid":7,"mediaPackets":48,"byteIdentical":48,"divergences":1,"msg":"canary forwarding verified"}
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer
+[22m[39m[CFA-009 drop] forwarded=48 mediaPackets=48 byteIdentical=48 divergences=1 dropCtr=2
+
+ [32m✓[39m apps/relay/src/__tests__/integration/canary-forward.integration.test.ts [2m([22m[2m2 tests[22m[2m | [22m[33m1 skipped[39m[2m)[22m[33m 1133[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22mRED DROP TOOTH: a dropped canary seq (one body never sent) ⇒ a DROP divergence (observedHash MISSING) via the LOCAL expected-ctr gap, not the relay trailer [33m 1016[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[2m | [22m[33m1 skipped[39m[90m (2)[39m
+[2m   Start at [22m 20:03:56
+[2m   Duration [22m 2.57s[2m (transform 189ms, setup 0ms, collect 1.13s, tests 1.13s, environment 0ms, prepare 102ms)[22m
+

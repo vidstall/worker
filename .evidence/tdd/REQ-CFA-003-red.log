@@ -1,0 +1,27 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Suites 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m [ apps/relay/src/__tests__/integration/canary-forward.integration.test.ts ][22m
+[31m[1mError[22m: Cannot find module '../../../../validator-daemon/src/canary/verifier.js' imported from 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/canary-forward.integration.test.ts'[39m
+[36m [2m❯[22m apps/relay/src/__tests__/integration/canary-forward.integration.test.ts:[2m42:1[22m[39m
+    [90m 40| [39m} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transfor…
+    [90m 41| [39m[90m// The audit modules under test (validator-daemon canary plane).[39m
+    [90m 42| [39m[35mimport[39m {
+    [90m   | [39m[31m^[39m
+    [90m 43| [39m  verifyForwardedCanary[33m,[39m
+    [90m 44| [39m  recomputeCanaryFrame[33m,[39m
+
+[31m[1mCaused by: Error[22m: Failed to load url ../../../../validator-daemon/src/canary/verifier.js (resolved id: ../../../../validator-daemon/src/canary/verifier.js) in C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/canary-forward.integration.test.ts. Does the file exist?[39m
+[90m [2m❯[22m loadAndTransform node_modules/.pnpm/vite@7.3.1_@types+node@22.19.13_tsx@4.21.0/node_modules/vite/dist/node/chunks/config.js:[2m22663:33[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [2mno tests[22m
+[2m   Start at [22m 20:00:40
+[2m   Duration [22m 553ms[2m (transform 75ms, setup 0ms, collect 0ms, tests 0ms, environment 0ms, prepare 100ms)[22m
+

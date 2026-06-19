@@ -1,0 +1,51 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:42.328Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:42.330Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:42.331Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:42.331Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:42.332Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:42.332Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:43.315Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:43.316Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:43.318Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:43.320Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:43.321Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T13:03:43.323Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781874223325,"pid":6336,"hostname":"Quang","name":"canary/verifier","canaryKid":7,"mediaPackets":57,"byteIdentical":0,"divergences":6,"msg":"canary forwarding verified"}
+[90mstdout[2m | apps/relay/src/__tests__/integration/canary-forward.integration.test.ts[2m > [22m[2mREQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22m[2mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m[CFA-003 positive] forwarded=57 mediaPackets=57 byteIdentical=0 divergences=6  [RED HOOK: P10_FORCE_TAMPER=1]
+
+ [32m✓[39m apps/relay/src/__tests__/integration/canary-forward.integration.test.ts [2m([22m[2m2 tests[22m[2m | [22m[33m1 skipped[39m[2m)[22m[33m 1122[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-CFA-003/009 INV-A — hermetic canary forward leg (REAL mediasoup + receiver-side equality)[2m > [22mPOSITIVE: a content-blind relay forwards canary frames BIT-EXACT — verifier (cellSecret-only, local ctr) ⇒ byteIdentical==mediaPackets, 0 divergences [33m 1005[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[2m | [22m[33m1 skipped[39m[90m (2)[39m
+[2m   Start at [22m 20:03:40
+[2m   Duration [22m 2.53s[2m (transform 192ms, setup 0ms, collect 1.13s, tests 1.12s, environment 0ms, prepare 101ms)[22m
+
