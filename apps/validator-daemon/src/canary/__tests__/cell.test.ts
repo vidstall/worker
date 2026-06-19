@@ -34,6 +34,15 @@ import {
 // ── Fixtures ─────────────────────────────────────────────────────────────────────
 const RELAYS = ['relay-A', 'relay-B', 'relay-C'];
 
+/**
+ * REQ-CFA-022 / D-CFA-19 — a deterministic validator-held assignment secret threaded
+ * into every assignCells call (it is now a REQUIRED, non-empty input). These coverage /
+ * dedup / rotation invariants are secret-independent (they hold for ANY fixed secret); the
+ * secret's covertness effect (different secret ⇒ different covered set) is pinned
+ * separately in cell-salt.test.ts.
+ */
+const SECRET = new Uint8Array(16).fill(0xab);
+
 /** N distinct validators, each with one session wallet (miner_id !== sessionWallet). */
 const distinctValidators = (n: number): CanaryValidator[] =>
   Array.from({ length: n }, (_, i) => ({
@@ -52,7 +61,7 @@ describe('REQ-CFA-004 assignCells — >=2 distinct validator_miner_id coverage p
 
   it('(a) every relay gets a cell of >= 2 DISTINCT validator_miner_id (co-homed pub+consumer)', () => {
     const validators = distinctValidators(4);
-    const cells = assignCells({ relays: RELAYS, validators });
+    const cells = assignCells({ relays: RELAYS, validators, assignmentSecret: SECRET });
 
     expect(cells.map((c) => c.relayId).sort()).toEqual([...RELAYS].sort());
     for (const cell of cells) {
@@ -72,7 +81,7 @@ describe('REQ-CFA-004 assignCells — >=2 distinct validator_miner_id coverage p
       { minerId: 'miner-X', sessionWallet: '0xwallet-A' },
       { minerId: 'miner-X', sessionWallet: '0xwallet-B' }, // rotated wallet, same miner
     ];
-    const cells = assignCells({ relays: ['relay-solo'], validators: sybil });
+    const cells = assignCells({ relays: ['relay-solo'], validators: sybil, assignmentSecret: SECRET });
 
     const cell = cells.find((c) => c.relayId === 'relay-solo')!;
     // Counted by miner_id: only ONE distinct attester exists, so the floor is NOT met.
@@ -85,7 +94,7 @@ describe('REQ-CFA-004 assignCells — >=2 distinct validator_miner_id coverage p
 
   it('(b) two DISTINCT miner_ids DO satisfy the floor (positive control for the sybil case)', () => {
     const validators = distinctValidators(2);
-    const cells = assignCells({ relays: ['relay-solo'], validators });
+    const cells = assignCells({ relays: ['relay-solo'], validators, assignmentSecret: SECRET });
     const cell = cells.find((c) => c.relayId === 'relay-solo')!;
     expect(distinctMinerIds(cell)).toBe(2);
     expect(cell.covered).toBe(true);
@@ -93,8 +102,8 @@ describe('REQ-CFA-004 assignCells — >=2 distinct validator_miner_id coverage p
 
   it('(c) assignment is DETERMINISTIC — same (relays, validators, round) ⇒ identical cells', () => {
     const validators = distinctValidators(5);
-    const a = assignCells({ relays: RELAYS, validators, round: 3 });
-    const b = assignCells({ relays: RELAYS, validators, round: 3 });
+    const a = assignCells({ relays: RELAYS, validators, round: 3, assignmentSecret: SECRET });
+    const b = assignCells({ relays: RELAYS, validators, round: 3, assignmentSecret: SECRET });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
 
@@ -104,7 +113,7 @@ describe('REQ-CFA-004 assignCells — >=2 distinct validator_miner_id coverage p
     const fingerprints = new Set<string>();
 
     for (const round of rounds) {
-      const cells = assignCells({ relays: RELAYS, validators, round });
+      const cells = assignCells({ relays: RELAYS, validators, round, assignmentSecret: SECRET });
       // Coverage floor holds EVERY round.
       for (const cell of cells) {
         expect(distinctMinerIds(cell)).toBeGreaterThanOrEqual(MIN_DISTINCT_CANARY_VALIDATORS);
@@ -125,18 +134,18 @@ describe('REQ-CFA-004 assignCells — >=2 distinct validator_miner_id coverage p
 
   it('(c) rotation is a pure function of round — re-deriving any past round reproduces it (no central coordinator)', () => {
     const validators = distinctValidators(6);
-    const round2First = assignCells({ relays: RELAYS, validators, round: 2 });
+    const round2First = assignCells({ relays: RELAYS, validators, round: 2, assignmentSecret: SECRET });
     // ...derive other rounds in between...
-    assignCells({ relays: RELAYS, validators, round: 7 });
-    assignCells({ relays: RELAYS, validators, round: 99 });
-    const round2Again = assignCells({ relays: RELAYS, validators, round: 2 });
+    assignCells({ relays: RELAYS, validators, round: 7, assignmentSecret: SECRET });
+    assignCells({ relays: RELAYS, validators, round: 99, assignmentSecret: SECRET });
+    const round2Again = assignCells({ relays: RELAYS, validators, round: 2, assignmentSecret: SECRET });
     expect(JSON.stringify(round2Again)).toBe(JSON.stringify(round2First));
   });
 
   it('(d) marks a relay UNCOVERED (does not crash) when the validator pool is too thin for the floor', () => {
     // Only ONE distinct validator across the whole pool ⇒ no relay can reach >=2.
     const validators = distinctValidators(1);
-    const cells = assignCells({ relays: RELAYS, validators });
+    const cells = assignCells({ relays: RELAYS, validators, assignmentSecret: SECRET });
     for (const cell of cells) {
       expect(cell.covered).toBe(false);
       expect(distinctMinerIds(cell)).toBeLessThan(MIN_DISTINCT_CANARY_VALIDATORS);
@@ -144,7 +153,7 @@ describe('REQ-CFA-004 assignCells — >=2 distinct validator_miner_id coverage p
   });
 
   it('(d) empty inputs yield no cells (additive-safe: never throws)', () => {
-    expect(assignCells({ relays: [], validators: distinctValidators(4) })).toEqual([]);
-    expect(() => assignCells({ relays: RELAYS, validators: [] })).not.toThrow();
+    expect(assignCells({ relays: [], validators: distinctValidators(4), assignmentSecret: SECRET })).toEqual([]);
+    expect(() => assignCells({ relays: RELAYS, validators: [], assignmentSecret: SECRET })).not.toThrow();
   });
 });

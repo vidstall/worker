@@ -22,13 +22,22 @@
  * off-chain to mirror the chain.
  *
  * DETERMINISM (no central coordinator): assignment is a PURE function of
- * (relays, validators, round) via a stable SHA-256 score over (round, relayId, minerId).
- * Two daemons computing the same inputs derive the same cells, and any past round can be
- * re-derived. ROTATION = bumping `round`: it reshuffles which validators home on which
- * relay (so audit pressure is spread, not pinned to one pair) while the >=2-distinct
- * coverage floor holds EVERY round (the top-N pick is always taken from the deduped,
- * distinct-by-miner_id pool, so it never drops a relay below the floor when the pool
- * can support it).
+ * (relays, validators, round, assignmentSecret) via a stable SHA-256 score over
+ * (round, relayId, minerId, assignmentSecret). Two daemons that share the SAME secret
+ * derive the same cells, and any past round can be re-derived. ROTATION = bumping `round`:
+ * it reshuffles which validators home on which relay (so audit pressure is spread, not
+ * pinned to one pair) while the >=2-distinct coverage floor holds EVERY round (the top-N
+ * pick is always taken from the deduped, distinct-by-miner_id pool, so it never drops a
+ * relay below the floor when the pool can support it).
+ *
+ * COVERTNESS (REQ-CFA-022 / D-CFA-19): the score preimage folds a VALIDATOR-HELD
+ * `assignmentSecret` the relay never holds. Even with ALL public inputs (the active
+ * validator/relay set from get_active_validators, the round cadence), a relay CANNOT
+ * recompute (predict) its own coverage -> it cannot selectively forward-honestly-when-
+ * covered (closes the M2-review W-M2-10 recomputability hole). The secret is distributed
+ * over the SAME covert Wallet-B channel that carries cellSecret/K_canary (D-CFA-10);
+ * all validators hold it (they must agree on the assignment). It is REQUIRED — there is
+ * NO public-input fallback that would re-open the hole — and it NEVER crosses the wire.
  *
  * ADDITIVE-SAFE: pure, allocation-only, throws on nothing operational (empty inputs →
  * empty / uncovered cells). It is started from index.ts behind a guard so a cell-loop
@@ -78,6 +87,38 @@ export interface CellAssignment {
   covered: boolean;
 }
 
+/**
+ * Domain separator for {@link deriveAssignmentSecret}. Folded into the digest so the
+ * derived assignment-salt is cryptographically DISTINCT from any other use of the same
+ * out-of-band canary `cellSecret` (e.g. the AES-GCM K_canary the keying module derives) —
+ * the SAME domain-separation discipline as keying.ts's CANARY_SENDER_ID.
+ */
+const ASSIGNMENT_SECRET_DOMAIN = 'dvconf-canary/assignment-salt/v1';
+
+/**
+ * REQ-CFA-022 / D-CFA-19 — derive the validator-held `assignmentSecret` (the salt folded
+ * into the {@link assignCells} score) DETERMINISTICALLY from the out-of-band covert canary
+ * `cellSecret` (the SAME secret material distributed over the Wallet-B channel that the
+ * keying module — keying.ts:37 — consumes as the OOB factor; D-CFA-10 trust model).
+ *
+ * It is domain-separated (so it is NOT the encryption key) and deterministic, so every
+ * validator that holds the same `cellSecret` derives the SAME assignment secret and they
+ * agree on the assignment — while a relay (no `cellSecret`) cannot derive it.
+ *
+ * Throws on an absent/empty `cellSecret` (the salt is REQUIRED — there is no public-input
+ * fallback that would re-open the W-M2-10 recomputability hole). NEVER logs the secret.
+ */
+export function deriveAssignmentSecret(cellSecret: Uint8Array): Uint8Array {
+  if (!(cellSecret instanceof Uint8Array) || cellSecret.length === 0) {
+    throw new Error(`${MOD}: deriveAssignmentSecret requires a non-empty cellSecret (REQ-CFA-022)`);
+  }
+  return createHash('sha256')
+    .update(ASSIGNMENT_SECRET_DOMAIN)
+    .update('\x1f')
+    .update(cellSecret) // raw OOB bytes — NEVER stringified / logged / wired
+    .digest();
+}
+
 export interface AssignCellsInput {
   /** Relay miner ids to cover (one cell each). */
   relays: string[];
@@ -85,18 +126,33 @@ export interface AssignCellsInput {
   validators: CanaryValidator[];
   /** Rotation round (default 0). Bumping it deterministically reshuffles the assignment. */
   round?: number;
+  /**
+   * REQ-CFA-022 / D-CFA-19 — the VALIDATOR-HELD assignment secret folded into the score
+   * preimage so a relay (which never holds it) cannot recompute/predict its own coverage.
+   * REQUIRED + non-empty (an absent/empty secret throws — there is no public-input
+   * fallback that would re-open the recomputability hole). Distributed over the covert
+   * Wallet-B channel (same trust model as cellSecret/K_canary). NEVER crosses the wire.
+   */
+  assignmentSecret: Uint8Array;
 }
 
 /**
- * Stable, deterministic score for (round, relayId, minerId): the first 8 bytes of
- * SHA-256(round‖relayId‖minerId) as a BigInt. Pure — identical inputs always yield the
- * identical score, so the sort (and thus the assignment) is reproducible by any daemon and
- * for any past round. Folding `round` into the digest is what makes a round bump reshuffle
- * the ordering (rotation) without any shared state.
+ * Stable, deterministic score for (round, relayId, minerId, assignmentSecret): the first
+ * 8 bytes of SHA-256(round‖relayId‖minerId‖assignmentSecret) as a BigInt. Pure —
+ * identical inputs (incl. the SAME secret) always yield the identical score, so the sort
+ * (and thus the assignment) is reproducible by any validator that holds the secret and for
+ * any past round. Folding `round` into the digest is what makes a round bump reshuffle the
+ * ordering (rotation) without any shared state.
+ *
+ * REQ-CFA-022 / D-CFA-19: `assignmentSecret` is appended to the preimage as raw bytes
+ * (kept SEPARATE from the public string fields by the \x1f delimiter, so a relay cannot
+ * substitute a public value to mimic it). A relay that does not hold the secret derives a
+ * DIFFERENT score ordering -> cannot reproduce/predict the assignment.
  */
-function score(round: number, relayId: string, minerId: string): bigint {
+function score(round: number, relayId: string, minerId: string, assignmentSecret: Uint8Array): bigint {
   const h = createHash('sha256')
-    .update(`${round}\x1f${relayId}\x1f${minerId}`)
+    .update(`${round}\x1f${relayId}\x1f${minerId}\x1f`)
+    .update(assignmentSecret) // raw secret bytes — NEVER stringified / logged / wired
     .digest();
   let v = 0n;
   for (let i = 0; i < 8; i++) v = (v << 8n) | BigInt(h[i]!);
@@ -128,20 +184,31 @@ function dedupByMinerId(validators: CanaryValidator[]): CanaryValidator[] {
  * an under-supplied relay yields an honest under-covered cell rather than a faked one
  * (we NEVER pad with a duplicate miner_id to fake distinctness — RO-023c parity).
  *
- * PURE: deterministic in (relays, validators, round); no I/O, never throws on operational
- * inputs. Rotation = a different `round` ⇒ a deterministically different homing that still
- * holds the coverage floor every round when the pool can support it.
+ * PURE: deterministic in (relays, validators, round, assignmentSecret); no I/O. Rotation =
+ * a different `round` ⇒ a deterministically different homing that still holds the coverage
+ * floor every round when the pool can support it.
+ *
+ * THROWS (REQ-CFA-022 / D-CFA-19) when `assignmentSecret` is absent/empty — the secret is
+ * REQUIRED and there is NO public-input fallback (a fallback would re-open the W-M2-10
+ * recomputability hole). Operational empties (no relays / no validators) still yield an
+ * empty / under-covered result, never a throw.
  */
 export function assignCells(input: AssignCellsInput): CellAssignment[] {
   const round = input.round ?? 0;
+  const assignmentSecret = input.assignmentSecret;
+  if (!(assignmentSecret instanceof Uint8Array) || assignmentSecret.length === 0) {
+    // Covertness invariant: a missing/empty secret would collapse the score back to the
+    // public-only preimage a relay can recompute — refuse rather than silently weaken.
+    throw new Error(`${MOD}: assignCells requires a non-empty assignmentSecret (REQ-CFA-022)`);
+  }
   // Distinct-by-miner_id pool — counted by stable identity, NEVER by session wallet.
   const pool = dedupByMinerId(input.validators);
 
   return input.relays.map((relayId) => {
-    // Deterministic ordering for THIS relay+round: ascending stable score.
+    // Deterministic ordering for THIS relay+round: ascending stable (salted) score.
     const ranked = [...pool].sort((a, b) => {
-      const sa = score(round, relayId, a.minerId);
-      const sb = score(round, relayId, b.minerId);
+      const sa = score(round, relayId, a.minerId, assignmentSecret);
+      const sb = score(round, relayId, b.minerId, assignmentSecret);
       if (sa < sb) return -1;
       if (sa > sb) return 1;
       // Score tie (astronomically unlikely): break by stable identity for determinism.
@@ -200,13 +267,18 @@ export interface CanaryCellLoopHandle {
  * ADDITIVE + CRASH-SAFE: each tick is wrapped so a fault NEVER escapes the loop (and the
  * caller in index.ts wraps the whole start in a guard). Mirrors the startHeartbeat /
  * startHealthMonitor `start(...) => stop()` shape. The first round (0) runs immediately.
+ *
+ * REQ-CFA-022 / D-CFA-19: `assignmentSecret` (validator-held, REQUIRED, non-empty) is
+ * threaded into every {@link assignCells} call so a relay cannot recompute coverage. It
+ * lives only in this closure — NEVER logged and NEVER placed on a snapshot/wire surface.
  */
 export function startCanaryCellLoop(args: {
   deps: CanaryCellLoopDeps;
   intervalMs: number;
+  assignmentSecret: Uint8Array;
   logger?: Logger;
 }): CanaryCellLoopHandle {
-  const { deps, intervalMs } = args;
+  const { deps, intervalMs, assignmentSecret } = args;
   const log = args.logger ?? createLogger(MOD);
   let round = 0;
   let snapshot: CellRoundSnapshot | null = null;
@@ -215,7 +287,7 @@ export function startCanaryCellLoop(args: {
     try {
       const relays = deps.getRelays();
       const validators = deps.getValidators();
-      const cells = assignCells({ relays, validators, round });
+      const cells = assignCells({ relays, validators, round, assignmentSecret });
       snapshot = { round, cells };
       const covered = cells.filter((c) => c.covered).length;
       log.info(

@@ -66,9 +66,12 @@ import { waitForProofs, triggerDistribution } from './reward-trigger.js';
 import { timedMeasureRoom, closeValidatorProbe } from './latency-probe.js';
 import {
   startCanaryCellLoop,
+  deriveAssignmentSecret,
   type CanaryValidator,
   type CanaryCellLoopHandle,
 } from './canary/cell.js';
+import { discoverActiveValidatorMinerIds } from './canary/validator-discovery.js';
+import { startCoverageServer, type CoverageStateProvider } from './canary/coverage-server.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -133,6 +136,20 @@ export interface DaemonState {
    * covert-publish / verify loops (Task 5.2+).
    */
   canaryCellLoop: CanaryCellLoopHandle | null;
+  /**
+   * M2 chunk 2 (REQ-CFA-019/020): the latest live-discovered active-validator miner_ids
+   * (Wallet-A ids from validator_registry::get_active_validators), refreshed each canary
+   * round and UNIONed with the self-entry inside the cell loop's getValidators. Undefined
+   * until the first discovery refresh resolves (crash-safe: a failed refresh leaves the
+   * last good cache, and the union always re-adds the self-entry → never below self-only).
+   */
+  discoveredValidatorMinerIds?: string[];
+  /**
+   * M2 chunk 1 (REQ-CFA-013/015): the off-chain coverage feed HTTP server handle (loopback,
+   * port VALIDATOR_CANARY_COVERAGE_PORT). Null if it failed to start (guarded). Closed in
+   * the LAST shutdown group next to the healthz close.
+   */
+  coverageServer: import('node:http').Server | null;
   running: boolean;
   /**
    * P17 M2b-P9 (DOH-022): the currently-running measurement cycle promise (or null
@@ -263,6 +280,8 @@ export async function startDaemon(overrides?: {
     consecutiveUnreachable: 0,
     healthMonitorStop: null,
     canaryCellLoop: null,
+    discoveredValidatorMinerIds: undefined,
+    coverageServer: null,
     running: true,
     inFlightMeasurement: null,
   };
@@ -304,18 +323,41 @@ export async function startDaemon(overrides?: {
   const validatorMinerId = mainAddress;
   const pollIntervalMs = 10_000;
 
-  // REQ-CFA-004 (Task 5.1): start the additive deterministic canary cell-rotation loop.
+  // REQ-CFA-004 (Task 5.1) + M2 chunks 1-3: start the additive deterministic canary
+  // cell-rotation loop AND the off-chain coverage feed.
   // ADDITIVE + CRASH-SAFE — wrapped so a fault here can NEVER abort the daemon startup
-  // (mirrors how startHeartbeat / startHealthMonitor are additive side-loops). Relays to
-  // cover are the daemon's known active relays (primary + standby per active room); the
-  // validator pool seeds with THIS daemon's own miner_id (the wider get_active_validators
-  // discovery + the per-cell covert pub/verify wiring are Task 5.2+). assignCells dedups by
-  // miner_id, so a relay reaches the >=2-distinct floor only once the pool widens.
+  // (mirrors how startHeartbeat / startHealthMonitor are additive side-loops).
+  //
+  // M2 chunk 3 (REQ-CFA-022 / D-CFA-19): the loop folds a VALIDATOR-HELD assignmentSecret
+  // into the assignCells score so a relay cannot recompute its coverage. It is derived
+  // (domain-separated) from the out-of-band covert canary cellSecret (CANARY_CELL_SECRET,
+  // hex), the same secret material distributed over the Wallet-B channel (D-CFA-10). If the
+  // secret is absent/invalid, deriveAssignmentSecret throws INSIDE this try → the loop does
+  // NOT start (logged) rather than running an UNSALTED, relay-recomputable assignment.
+  //
+  // M2 chunk 2 (REQ-CFA-019/020): the validator pool UNIONs live discovered miner_ids (a
+  // read-only devInspect of validator_registry::get_active_validators) with the local
+  // self-entry, refreshed each round via the existing CANARY_CELL_INTERVAL_MS rotation (no
+  // new timer) — crash-safe to self-only on a devInspect failure. assignCells dedups by
+  // miner_id, so a relay reaches the >=2-distinct floor once >=2 distinct validators exist.
   try {
     const cellIntervalMs = parseInt(process.env['CANARY_CELL_INTERVAL_MS'] ?? '300000', 10);
+    const cellSecretHex = process.env['CANARY_CELL_SECRET'] ?? '';
+    const cellSecret = Buffer.from(cellSecretHex, 'hex');
+    if (cellSecret.length === 0) {
+      // No secret → no salted assignment is possible. Fail SAFE (loop off) rather than run
+      // an unsalted, relay-recomputable assignment. This throw is caught below.
+      throw new Error(
+        'CANARY_CELL_SECRET unset/empty — canary cell loop requires a salt (REQ-CFA-022); loop not started',
+      );
+    }
+    const assignmentSecret = deriveAssignmentSecret(new Uint8Array(cellSecret));
+
+    const cellLog = log.child({ component: 'canary-cell' });
     state.canaryCellLoop = startCanaryCellLoop({
       intervalMs: cellIntervalMs,
-      logger: log.child({ component: 'canary-cell' }),
+      assignmentSecret,
+      logger: cellLog,
       deps: {
         getRelays: () => {
           const relays = new Set<string>();
@@ -325,15 +367,40 @@ export async function startDaemon(overrides?: {
           }
           return [...relays];
         },
-        // Seed the pool with our own stable miner_id; the duplicate-collapsing dedup makes
-        // widening the pool (Task 5.2+) safe against a Wallet-B self-coverage sybil.
-        getValidators: (): CanaryValidator[] => [
-          { minerId: validatorMinerId, sessionWallet: sessionAddress },
-        ],
+        // M2 chunk 2: UNION the live discovered validator set (Wallet-A miner_ids; no
+        // session wallet) with THIS daemon's own self-entry, so the daemon never loses its
+        // own coverage if discovery returns empty/errors. The duplicate-collapsing dedup in
+        // assignCells makes the widened pool safe against a Wallet-B self-coverage sybil.
+        getValidators: (): CanaryValidator[] => {
+          const self: CanaryValidator = { minerId: validatorMinerId, sessionWallet: sessionAddress };
+          // Discovery is async; the loop is sync. We refresh a cached snapshot every round
+          // (fire-and-forget) and read the latest cache here — crash-safe to self-only.
+          const discovered = state.discoveredValidatorMinerIds ?? [];
+          const union = new Map<string, CanaryValidator>();
+          union.set(self.minerId, self);
+          for (const minerId of discovered) {
+            if (!union.has(minerId)) union.set(minerId, { minerId, sessionWallet: '' });
+          }
+          // Kick off a refresh for the NEXT round (no new timer — rides this round's tick).
+          void refreshDiscoveredValidators(state, cellLog);
+          return [...union.values()];
+        },
       },
     });
+
+    // M2 chunk 1 (REQ-CFA-013/014/015): start the off-chain coverage feed over the EXISTING
+    // cell-loop snapshot. Loopback-bound + restricted CORS (D-CFA-18); reporterMinerId is
+    // the Wallet-A validatorMinerId (NEVER sessionAddress). Same crash-safe try as the loop.
+    const coverageProvider: CoverageStateProvider = () => state.canaryCellLoop?.latest() ?? null;
+    const coveragePort = parseInt(process.env['VALIDATOR_CANARY_COVERAGE_PORT'] ?? '8102', 10);
+    state.coverageServer = startCoverageServer({
+      port: coveragePort,
+      provider: coverageProvider,
+      reporterMinerId: validatorMinerId, // Wallet-A (mainAddress) — NOT sessionAddress
+      logger: log.child({ component: 'canary-coverage' }),
+    });
   } catch (err) {
-    log.error({ err }, 'canary cell loop failed to start (daemon continues)');
+    log.error({ err }, 'canary cell loop / coverage feed failed to start (daemon continues)');
   }
 
   // P17 M2b-P9 (DOH-022): track the in-flight cycle so the graceful-shutdown drain
@@ -488,6 +555,40 @@ export async function startDaemon(overrides?: {
   });
 
   return state;
+}
+
+/**
+ * M2 chunk 2 (REQ-CFA-019/020): refresh the cached live-discovered active-validator
+ * miner_ids via a read-only devInspect of validator_registry::get_active_validators.
+ *
+ * Fire-and-forget per canary round (called from the cell loop's getValidators) — no new
+ * timer. CRASH-SAFE: a devInspect failure is swallowed by discoverActiveValidatorMinerIds
+ * (returns []), and we only OVERWRITE the cache with a non-empty result, so a transient RPC
+ * flake leaves the last good set in place; an empty result (genuinely no peers) is reflected
+ * as [] so the union degrades to self-only. The self-entry is always re-added by the union,
+ * so the daemon never drops below self-coverage. Re-entrancy is bounded by a single in-flight
+ * guard so a slow RPC cannot stack refreshes across rounds.
+ */
+let discoveryRefreshInFlight = false;
+async function refreshDiscoveredValidators(state: DaemonState, log: Logger): Promise<void> {
+  if (discoveryRefreshInFlight) return;
+  discoveryRefreshInFlight = true;
+  try {
+    const ids = await discoverActiveValidatorMinerIds(state.client, state.config, log);
+    if (ids.length > 0) {
+      state.discoveredValidatorMinerIds = ids;
+    } else if (state.discoveredValidatorMinerIds === undefined) {
+      // First-ever refresh returned empty (no peers yet) — record [] so the union is
+      // self-only rather than staying `undefined` forever.
+      state.discoveredValidatorMinerIds = [];
+    }
+  } catch (err) {
+    // Defense-in-depth: the discovery reader is already crash-safe, but never let a refresh
+    // reject escape into the cell loop.
+    log.warn({ err }, 'canary validator discovery refresh failed (keeping last good set)');
+  } finally {
+    discoveryRefreshInFlight = false;
+  }
 }
 
 /**
@@ -770,6 +871,13 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
     l.info('Canary cell loop stopped');
   }
 
+  // M2 chunk 1 (REQ-CFA-015): close the off-chain coverage feed server.
+  if (state.coverageServer) {
+    state.coverageServer.close();
+    state.coverageServer = null;
+    l.info('Canary coverage server stopped');
+  }
+
   if (state.heartbeatStop) {
     state.heartbeatStop();
     state.heartbeatStop = null;
@@ -971,7 +1079,15 @@ async function main(): Promise<void> {
           s.heartbeatStop?.(); // C-B → LAST
           s.heartbeatStop = null;
         },
-        closeHealthz: () => healthz?.close() ?? Promise.resolve(),
+        closeHealthz: async () => {
+          // M2 chunk 1 (REQ-CFA-015): close the off-chain coverage feed in the LAST group
+          // next to /healthz (both are loopback HTTP servers torn down after the drain).
+          if (s.coverageServer) {
+            s.coverageServer.close();
+            s.coverageServer = null;
+          }
+          await (healthz?.close() ?? Promise.resolve());
+        },
         exit: (code) => process.exit(code),
         config: gracefulCfg,
       }),

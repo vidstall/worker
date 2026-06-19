@@ -1,0 +1,177 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+ [32m✓[39m apps/validator-daemon/src/canary/__tests__/coverage-server.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 11[2mms[22m[39m
+ [32m✓[39m apps/validator-daemon/src/canary/__tests__/cell.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 44[2mms[22m[39m
+ [32m✓[39m apps/validator-daemon/src/canary/__tests__/cell-salt.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 42[2mms[22m[39m
+{"level":40,"time":1781894797673,"pid":34952,"hostname":"Quang","name":"test/validator-discovery","target":"0x0000000000000000000000000000000000000000000000000000000000000099::validator_registry::get_active_validators","err":"MoveAbort(...)","msg":"validator discovery devInspect error — falling back to self-only"}
+{"level":40,"time":1781894797676,"pid":34952,"hostname":"Quang","name":"test/validator-discovery","target":"0x0000000000000000000000000000000000000000000000000000000000000099::validator_registry::get_active_validators","msg":"validator discovery devInspect returned no values — falling back to self-only"}
+{"level":40,"time":1781894797677,"pid":34952,"hostname":"Quang","name":"test/validator-discovery","target":"0x0000000000000000000000000000000000000000000000000000000000000099::validator_registry::get_active_validators","err":{"type":"Error","message":"RPC unreachable","stack":"Error: RPC unreachable\n    at Object.devInspectTransactionBlock (C:\\Thesis\\dvconf\\dvconf-daemons\\apps\\validator-daemon\\src\\canary\\__tests__\\validator-discovery.test.ts:78:13)\n    at discoverActiveValidatorMinerIds (C:\\Thesis\\dvconf\\dvconf-daemons\\apps\\validator-daemon\\src\\canary\\validator-discovery.ts:82:29)\n    at C:\\Thesis\\dvconf\\dvconf-daemons\\apps\\validator-daemon\\src\\canary\\__tests__\\validator-discovery.test.ts:130:23\n    at file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/.pnpm/@vitest+runner@3.2.4/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:95:5)"},"msg":"validator discovery failed — falling back to self-only"}
+ [32m✓[39m apps/validator-daemon/src/canary/__tests__/validator-discovery.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 35[2mms[22m[39m
+{"level":30,"time":1781894797779,"pid":2696,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781894797795,"pid":2696,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781894797821,"pid":2696,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781894797831,"pid":2696,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781894797842,"pid":2696,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":true,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+{"level":30,"time":1781894797870,"pid":2696,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":false,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/keying.test.ts[2m > [22m[2mREQ-CFA-001 deriveCanaryKey — PathC salt-mix equivalence[2m > [22m[2m(a) deriveCanaryKey returns an AES-GCM CryptoKey usable by encryptFrame
+[22m[39m{"timestamp":"2026-06-19T18:46:37.874Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":42,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+{"level":30,"time":1781894797882,"pid":2696,"hostname":"Quang","name":"canary/proof","roomId":"0x1111111111111111111111111111111111111111111111111111111111111111","relayMinerId":"0x2222222222222222222222222222222222222222222222222222222222222222","canaryId":7,"frameSeq":42,"drop":true,"attesters":2,"msg":"canary proof-of-divergence built (Wallet-B only)"}
+ [32m✓[39m apps/validator-daemon/src/canary/__tests__/proof.test.ts [2m([22m[2m12 tests[22m[2m)[22m[32m 273[2mms[22m[39m
+ [32m✓[39m apps/validator-daemon/src/canary/__tests__/keying.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 52[2mms[22m[39m
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.366Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.383Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.394Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.399Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.412Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.422Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.430Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.437Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.444Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.454Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.460Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) produced frames EQUAL the verifier-recomputed expected set (DRY, no re-implementation)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.495Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) every produced frame carries the real partial-SFrame layout (config 0x01 trailer, fixed length, kid+ctr)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.517Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) every produced frame carries the real partial-SFrame layout (config 0x01 trailer, fixed length, kid+ctr)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.529Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) every produced frame carries the real partial-SFrame layout (config 0x01 trailer, fixed length, kid+ctr)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.535Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) every produced frame carries the real partial-SFrame layout (config 0x01 trailer, fixed length, kid+ctr)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.545Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) every produced frame carries the real partial-SFrame layout (config 0x01 trailer, fixed length, kid+ctr)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.555Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) every produced frame carries the real partial-SFrame layout (config 0x01 trailer, fixed length, kid+ctr)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.560Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.578Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.584Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.593Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.597Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.600Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.604Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.610Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.614Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.620Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.622Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.623Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.produce — DRY byte-equality with the verifier[2m > [22m[2m(a) SELF-FORWARD: publisher output fed to verifyForwardedCanary ⇒ byteIdentical==mediaPackets, 0 divergences
+[22m[39m{"timestamp":"2026-06-19T18:46:39.625Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781894799628,"pid":33092,"hostname":"Quang","name":"canary/verifier","canaryKid":7,"mediaPackets":6,"byteIdentical":6,"divergences":0,"msg":"canary forwarding verified"}
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) joins via the NO-PASSWORD path (no roster broadcast) and emits every produced frame
+[22m[39m{"timestamp":"2026-06-19T18:46:39.638Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) joins via the NO-PASSWORD path (no roster broadcast) and emits every produced frame
+[22m[39m{"timestamp":"2026-06-19T18:46:39.641Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) joins via the NO-PASSWORD path (no roster broadcast) and emits every produced frame
+[22m[39m{"timestamp":"2026-06-19T18:46:39.643Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) joins via the NO-PASSWORD path (no roster broadcast) and emits every produced frame
+[22m[39m{"timestamp":"2026-06-19T18:46:39.646Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) joins via the NO-PASSWORD path (no roster broadcast) and emits every produced frame
+[22m[39m{"timestamp":"2026-06-19T18:46:39.649Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) joins via the NO-PASSWORD path (no roster broadcast) and emits every produced frame
+[22m[39m{"timestamp":"2026-06-19T18:46:39.652Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781894799652,"pid":33092,"hostname":"Quang","name":"canary/publisher","relayHomeId":"relay-home-7","canaryKid":7,"frames":6,"msg":"covert canary stream published (no-password join, no roster broadcast)"}
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.658Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.659Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.661Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.663Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.665Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.668Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781894799668,"pid":33092,"hostname":"Quang","name":"canary/publisher","relayHomeId":"relay-home-7","canaryKid":7,"frames":6,"msg":"covert canary stream published (no-password join, no roster broadcast)"}
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.671Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.672Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.673Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.675Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.680Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | apps/validator-daemon/src/canary/__tests__/publisher.test.ts[2m > [22m[2mREQ-CFA-002 CanaryPublisher.publish — covert no-password join + media-plane emission[2m > [22m[2m(b) the emitted frames verify clean against the verifier (publish ≡ produce on the wire)
+[22m[39m{"timestamp":"2026-06-19T18:46:39.682Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":7,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781894799682,"pid":33092,"hostname":"Quang","name":"canary/verifier","canaryKid":7,"mediaPackets":6,"byteIdentical":6,"divergences":0,"msg":"canary forwarding verified"}
+ [32m✓[39m apps/validator-daemon/src/canary/__tests__/publisher.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 371[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m7 passed[39m[22m[90m (7)[39m
+[2m      Tests [22m [1m[32m50 passed[39m[22m[90m (50)[39m
+[2m   Start at [22m 01:46:34
+[2m   Duration [22m 4.89s[2m (transform 1.28s, setup 0ms, collect 14.37s, tests 827ms, environment 3ms, prepare 2.99s)[22m
+
