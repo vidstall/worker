@@ -64,6 +64,11 @@ import {
 } from './session-proof.js';
 import { waitForProofs, triggerDistribution } from './reward-trigger.js';
 import { timedMeasureRoom, closeValidatorProbe } from './latency-probe.js';
+import {
+  startCanaryCellLoop,
+  type CanaryValidator,
+  type CanaryCellLoopHandle,
+} from './canary/cell.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -121,6 +126,13 @@ export interface DaemonState {
   consecutiveUnreachable: number;
   /** Stop function for the F61 HealthMonitor (DOH-018). */
   healthMonitorStop: (() => void) | null;
+  /**
+   * REQ-CFA-004 (Task 5.1): the additive deterministic canary cell-rotation loop handle
+   * (per-relay >=2-distinct-miner_id coverage). Null if the loop failed to start — its
+   * start is guarded so a fault cannot crash the daemon. `latest()` feeds the downstream
+   * covert-publish / verify loops (Task 5.2+).
+   */
+  canaryCellLoop: CanaryCellLoopHandle | null;
   running: boolean;
   /**
    * P17 M2b-P9 (DOH-022): the currently-running measurement cycle promise (or null
@@ -250,6 +262,7 @@ export async function startDaemon(overrides?: {
     rttSamplesMs: [],
     consecutiveUnreachable: 0,
     healthMonitorStop: null,
+    canaryCellLoop: null,
     running: true,
     inFlightMeasurement: null,
   };
@@ -290,6 +303,38 @@ export async function startDaemon(overrides?: {
   // Miner ID = object::id_from_address(sender) on-chain, which equals the wallet address
   const validatorMinerId = mainAddress;
   const pollIntervalMs = 10_000;
+
+  // REQ-CFA-004 (Task 5.1): start the additive deterministic canary cell-rotation loop.
+  // ADDITIVE + CRASH-SAFE — wrapped so a fault here can NEVER abort the daemon startup
+  // (mirrors how startHeartbeat / startHealthMonitor are additive side-loops). Relays to
+  // cover are the daemon's known active relays (primary + standby per active room); the
+  // validator pool seeds with THIS daemon's own miner_id (the wider get_active_validators
+  // discovery + the per-cell covert pub/verify wiring are Task 5.2+). assignCells dedups by
+  // miner_id, so a relay reaches the >=2-distinct floor only once the pool widens.
+  try {
+    const cellIntervalMs = parseInt(process.env['CANARY_CELL_INTERVAL_MS'] ?? '300000', 10);
+    state.canaryCellLoop = startCanaryCellLoop({
+      intervalMs: cellIntervalMs,
+      logger: log.child({ component: 'canary-cell' }),
+      deps: {
+        getRelays: () => {
+          const relays = new Set<string>();
+          for (const room of state.activeRooms.values()) {
+            if (room.primaryRelayId) relays.add(room.primaryRelayId);
+            if (room.standbyRelayId) relays.add(room.standbyRelayId);
+          }
+          return [...relays];
+        },
+        // Seed the pool with our own stable miner_id; the duplicate-collapsing dedup makes
+        // widening the pool (Task 5.2+) safe against a Wallet-B self-coverage sybil.
+        getValidators: (): CanaryValidator[] => [
+          { minerId: validatorMinerId, sessionWallet: sessionAddress },
+        ],
+      },
+    });
+  } catch (err) {
+    log.error({ err }, 'canary cell loop failed to start (daemon continues)');
+  }
 
   // P17 M2b-P9 (DOH-022): track the in-flight cycle so the graceful-shutdown drain
   // can await it (no cancel). The `.finally` clears the handle once the cycle settles.
@@ -718,6 +763,13 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
     l.info('Health monitor stopped');
   }
 
+  // REQ-CFA-004 (Task 5.1): stop the additive canary cell-rotation loop.
+  if (state.canaryCellLoop) {
+    state.canaryCellLoop.stop();
+    state.canaryCellLoop = null;
+    l.info('Canary cell loop stopped');
+  }
+
   if (state.heartbeatStop) {
     state.heartbeatStop();
     state.heartbeatStop = null;
@@ -909,6 +961,10 @@ async function main(): Promise<void> {
           s.escrowPoller?.stop();
           s.roomPoller?.stop();
           s.eventPoller = s.escrowPoller = s.roomPoller = null;
+          // REQ-CFA-004 (Task 5.1): the additive canary cell loop is a reactive side-loop
+          // → stop it alongside the pollers (not in the liveness-LAST group).
+          s.canaryCellLoop?.stop();
+          s.canaryCellLoop = null;
         },
         stopProbe: closeValidatorProbe,
         stopHeartbeat: () => {
