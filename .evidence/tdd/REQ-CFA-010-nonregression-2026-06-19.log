@@ -1,0 +1,39 @@
+REQ-CFA-010 / REQ-CFA-012 — Phase 7.1 NON-REGRESSION re-run (MAIN guard #9)
+Canary forwarding-audit Wave (validate-node Wave, D-M2-20). Date: 2026-06-19.
+
+CONTEXT
+  Phase 7.1 isolates the canary integration suite into vitest.canary.config.ts and
+  excludes canary-* from vitest.relay-integration.config.ts. This log records MAIN's
+  own (guard #9) re-run of the three heavy non-regression benches in CLEAN, SERIAL
+  processes (real mediasoup; port-bound so never concurrent), proving the canary Wave
+  did NOT regress M1 / M2 / MTTR. All run via:
+    pnpm exec vitest run --config vitest.relay-integration.config.ts <bench-file>
+
+ISOLATION (guard #9 Part A)
+  - apps/relay/src/__tests__/canary-isolation.config.test.ts ........ 13/13 PASS (hermetic)
+  - canary-forward.integration.test.ts under vitest.canary.config.ts .. 2/2 PASS
+      POSITIVE byteIdentical==mediaPackets (49/49, 0 divergences); RED drop-tooth fires.
+
+NON-REGRESSION (guard #9 Part B — 3 heavy benches, serial)
+  M1  bandwidth-scale-bench  (REQ-MCS-006)  ratio = 5.81 at N=12 (page-size 9)   GATE >=3.0   PASS
+        baseline(all :2)=719952B  optimized(1x:2 + 8x:0 + 3 paused)=123952B
+        (N=25 demo ratio=11.78)                                                  M1_EXIT=0
+  M2  relay-blind-realsframe (REQ-MCS-014)  forwarded=59 mediaPackets=59          GATE byteIdentical==mediaPackets   PASS
+        byteIdentical=59 realHeaderObserved=59 decryptedOk=59 tamperedUndecryptable=0
+        negative-control: 58 cleartext recovered (3 distinct plaintexts)         M2_EXIT=0
+  MTTR relay-overlap-mttr    (REQ-RO)        N=30  P50=62.0  P95=65.0  P99=67.0   GATE P95<=100 / P99<=200   PASS
+        mean=62.3  min/max=60.0/67.0  failed runs=0  (RTP_TIMEOUT_MS=50 floor)   MTTR_EXIT=0
+
+REQ-CFA-012 (content-blind / INV-B) — relay PRODUCTION forward path UNCHANGED
+  Forward symbol: apps/relay/src/room-handler.ts createConsumer (recvTransport.consume
+  :220-224, guarded by the W5 M2 P5 RELAY BLIND-FORWARD INVARIANT). NOTE: the PLAN's
+  "room-handler.ts does not exist" is wrong — it exists (last touched by 32ad32b, NOT a
+  canary commit).
+  Per-commit git show --stat <sha> -- apps/relay/ across the 6 canary daemons commits
+  (a4804ea, 743c23f, 7575bbf, 05c1bc9, 121d4bd, 977651b): ONLY 743c23f touches apps/relay/
+  — adding exactly ONE TEST file (canary-forward.integration.test.ts, +358). All others
+  empty. Combined range diff a4804ea~1..977651b -- apps/relay/ excluding __tests__ = EMPTY.
+  => the entire canary Wave's apps/relay/ footprint is test-only; createConsumer untouched.
+
+VERDICT: REQ-CFA-010 (isolation + non-regression) PASS; REQ-CFA-012 (content-blind) PASS.
+Raw bench output: tasks/bmlmb0xmv.output (this session).

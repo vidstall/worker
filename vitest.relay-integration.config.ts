@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, configDefaults } from 'vitest/config';
 
 /**
  * Relay integration test config -- REAL-mediasoup-worker tests only.
@@ -11,10 +11,22 @@ import { defineConfig } from 'vitest/config';
  *
  * Forks pool, single fork, no file parallelism, longer timeouts to cover worker
  * spawn + RTP settling.
+ *
+ * REQ-CFA-010 (canary isolation): the broad `integration/**` include below ALSO
+ * matches the canary forward-leg test (`canary-forward.integration.test.ts`).
+ * That canary suite is now isolated into its OWN run (vitest.canary.config.ts) so
+ * it does not co-run with the 3 heavy relay-overlap benches here. We therefore
+ * EXCLUDE the `canary-*` integration tests from this heavy-bench config; the
+ * benches (bandwidth-scale / relay-blind-realsframe / relay-overlap-mttr /
+ * relay-overlap-m2-bench) stay included and unchanged.
  */
 export default defineConfig({
   test: {
     include: ['**/apps/relay/**/__tests__/integration/**/*.integration.test.ts'],
+    exclude: [
+      ...configDefaults.exclude,
+      '**/apps/relay/**/__tests__/integration/canary-*.integration.test.ts',
+    ],
     globals: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,
