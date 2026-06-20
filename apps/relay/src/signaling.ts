@@ -302,6 +302,16 @@ export interface InterRelayContext {
    * coordinator can plug in without re-touching the context type.
    */
   onPrimaryProducer?(roomId: string, router: msTypes.Router, producer: msTypes.Producer): void;
+  /**
+   * F1 (REQ-RO-009) — empty-room teardown. The wiring layer releases BOTH the
+   * standby + primary pipe ports back to the allocator and drops the coordinator
+   * state, so a reused roomId starts fresh and the [min..max] port range does not
+   * leak. Routed through the context (mirrors registry.clear) so signaling.ts stays
+   * decoupled from the allocator/coordinator handles. Optional — absent on the
+   * in-process bench (which builds an InterRelayContext without it), exactly as
+   * attachPeerSocket? / onStandbyRoomReady? are guarded.
+   */
+  releaseRoom?(roomId: string): void;
 }
 
 /** Send a JSON message to a WebSocket. */
@@ -1493,6 +1503,9 @@ export function createSignalingServer(
         metrics.clearRoom(roomId);
         // G1: drop the inter-relay announce records for this room (standby side).
         interRelay?.registry.clear(roomId);
+        // F1 (REQ-RO-009): release this room's pipe ports + coordinator state so a
+        // reused roomId starts fresh and the [min..max] range does not leak.
+        interRelay?.releaseRoom?.(roomId);
         // W5 M2 P1.0 (REQ-MCS-012): drop the room ADMISSION config + rate-limiter
         // so a reused roomId starts fresh (first-joiner-sets-it again). The
         // per-peer sessionPubkey roster is already gone (removePeer dropped the

@@ -56,11 +56,20 @@ import {
   createInterRelayAnnouncer,
   createWsInterRelaySender,
   StandbyWarmPipeCoordinator,
+  PrimaryPipeCoordinator,
   handleInboundInterRelayFrame,
+  buildPipeConnectFrame,
   type InterRelaySocketLike,
+  type PipeConnectParams,
 } from './inter-relay.js';
 import { openInterRelayLink, createStandbyLinkManager } from './inter-relay-link.js';
-import { determineRole, parsePipePortRange, type RoomTopology } from './relay-role-manager.js';
+import {
+  determineRole,
+  parsePipePortRange,
+  createPipePortAllocator,
+  createPipeLivenessObserver,
+  type RoomTopology,
+} from './relay-role-manager.js';
 import { resolvePrimaryEndpoint } from './relay-endpoint-resolver.js';
 
 const logger = createLogger('relay-daemon');
@@ -373,6 +382,13 @@ if (isMainModule) {
     // pipe port for the single-room demo; multi-room port allocation + per-room link
     // keying are the documented carry-forward (single-box interRelayLink/standbyLink).
     const pipePortRange = parsePipePortRange(process.env['PIPE_PORT_RANGE']);
+    // F1 (REQ-RO-009): per-(room, role) PIPE_PORT allocator over [min..max].
+    // Idempotent per key (preserves the N3 re-run invariant); released on room
+    // close. Replaces the single hardcoded pipePortRange.min (EADDRINUSE for >1
+    // room). Keyed `${roomId}` (standby) + `${roomId}:primary` (primary) so a
+    // same-host primary+standby pair never collide. Mesh carry-forward (§12): the
+    // key generalizes to per-(roomId, peerRelayId) additively.
+    const pipePortAllocator = createPipePortAllocator(pipePortRange);
     const reconnectMs = parseInt(process.env['INTER_RELAY_RECONNECT_MS'] ?? '3000', 10);
 
     // The standby's outbound link lifecycle (dedup + reconnect) lives in the
@@ -389,6 +405,13 @@ if (isMainModule) {
               onAnnounce: (roomId) => {
                 void standbyWarmPipe.onAnnounce(roomId);
               },
+              // F1 (REQ-RO-003/008): the primary's DOWN pipe-connect reply.
+              // Feed its {ip,port} into the standby's already-bound PipeTransport
+              // so the link is connect()'d BEFORE the announce arrives (the
+              // coordinator drains pending producers once both ends connect).
+              onConnectParams: (roomId, params) => {
+                void standbyWarmPipe.onPrimaryConnectParams(roomId, params);
+              },
               logger,
             }),
           logger,
@@ -399,6 +422,21 @@ if (isMainModule) {
 
     /** Primary-side producer announcer (unit-tested factory). */
     const pushAnnounce = createInterRelayAnnouncer(interRelaySender);
+    // F1 (REQ-RO-001/002/008): the PRIMARY half driver. Mints + connects the
+    // primary PipeTransport, pipes the room's real producer onto it, and announces
+    // the PIPED consumer id (NOT producer.id) via pushAnnounce. Holds per-room
+    // {pipeTransport|null, connected, pendingProducers[], standbyParams|null} and
+    // drains pendingProducers once the standby's connect params arrive — tolerates
+    // either arrival order (producer-first or params-first). All logic is in the
+    // factory; index.ts only injects the announcer + port allocator + the
+    // standby->primary param sender (the link's new send() path).
+    const primaryPipe = new PrimaryPipeCoordinator({
+      announcer: pushAnnounce,
+      portAllocator: pipePortAllocator,
+      paramSender: (roomId, params) =>
+        interRelaySender.send(JSON.stringify(buildPipeConnectFrame(roomId, params))),  // CONSISTENCY-FIX HIGH#5: C contract is (roomId, params); serialize the DOWN reply frame onto the live link (buildPipeConnectFrame imported in this file)
+      logger,
+    });
     const interRelayContext: InterRelayContext = {
       // Default to 'primary'; corrected per-room by the RoomAssigned poller.
       role: 'primary',
@@ -411,31 +449,62 @@ if (isMainModule) {
       attachPeerSocket: (socket) => {
         interRelayLink.socket = socket;
       },
+      // F1 (REQ-RO-001/002/008) PRIMARY: a real producer was created for a room
+      // this relay is primary for. Hand it to the coordinator, which mints+connects
+      // the primary pipe (port from the allocator, key `${roomId}:primary`), pipes
+      // the producer, and announces the PIPED consumer id. Drains immediately if
+      // the standby's connect params already arrived, else queues (pending).
+      onPrimaryProducer: (roomId, router, producer) => {
+        void primaryPipe.onProducer(roomId, router, producer);
+      },
+      // F1 (REQ-RO-003/008): the standby's UP pipe-connect frame, delivered through
+      // the SAME interRelayPeers token gate as pipe-producer announces. PRIMARY
+      // feeds it to the coordinator, which binds + connect()s the primary pipe to
+      // these params, then replies DOWN with its own tuple (paramSender) and drains
+      // any pending producers.
+      onConnectParams: (roomId, params) => {
+        void primaryPipe.onStandbyConnectParams(roomId, params);
+      },
       // G3.2b STANDBY: on the first peer join for a standby room, build the room's
-      // topology + open the paused warm pipe in the LIVE signaling path (M1 built
-      // ensureWarmPipe but never ran it in production). The cutover to the real
-      // producerId happens when the primary's announce arrives over the link
-      // (standbyWarmPipe.onAnnounce). NOTE: the PipeTransport connect-param
-      // exchange that carries RTP across hosts is the bench's manual pairing
-      // (warmpipe-rtp.integration.test.ts) — BENCH-3 scope; this wires the
-      // producerId-announce coordination + paused lifecycle, not WAN RTP.
+      // topology + open the paused warm pipe in the LIVE signaling path. F1: the
+      // pipe port is now ALLOCATED per room (REQ-RO-009) instead of the single
+      // hardcoded min, and the standby announces its bound {ip,port} UP to the
+      // primary over the link's new send() path so both ends connect() before RTP.
       onStandbyRoomReady: (roomId, router) => {
+        const pipePort = pipePortAllocator.allocate(roomId);
         const topology: RoomTopology = {
           roomId,
           role: 'standby',
           primaryEndpoint: standbyLink.primaryUrl ?? '',
           standbyEndpoint: endpointUrl,
-          // TODO(multi-room): single fixed port → EADDRINUSE if this daemon is
-          // standby for >1 room at once; allocate from [min..max] per the per-room
-          // carry-forward. Single-room K=2 demo scope holds today (ensure()'s
-          // .catch below degrades a bind failure to a logged error, not a crash).
-          pipePort: pipePortRange.min,
+          pipePort,
           pipeConsumer: null,
           pipeTransport: null,
         };
         void standbyWarmPipe
-          .ensure(topology, router, pipePortRange.min)
+          .ensure(topology, router, pipePort)
+          .then(() => {
+            // F1 (REQ-RO-003): announce the standby's bound {ip,port} UP to the
+            // primary so it can connect() its end. ANNOUNCED_IP default 127.0.0.1
+            // (single-host/localnet scope, design §9.5; enableSrtp:false). Best-
+            // effort: send() is OPEN-guarded — dropped if the link is not yet up
+            // (the standby re-announces on reconnect; the coordinator re-drives).
+            const ip = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
+            const params: PipeConnectParams = { ip, port: pipePort };
+            standbyLinkManager.send(JSON.stringify(buildPipeConnectFrame(roomId, params)));
+          })
           .catch((err) => logger.error({ err, roomId }, 'G3.2b: standby warm-pipe ensure failed'));
+      },
+      // F1 (REQ-RO-009): room teardown — release BOTH the standby + primary pipe
+      // ports back to the allocator and drop the coordinator state, so a reused
+      // roomId starts fresh and the port range does not leak. Routed through the
+      // context (mirrors registry.clear) so signaling.ts stays decoupled from the
+      // allocator/coordinator handles.
+      releaseRoom: (roomId) => {
+        pipePortAllocator.release(roomId);
+        pipePortAllocator.release(`${roomId}:primary`);
+        primaryPipe.clear(roomId);
+        standbyWarmPipe.clear(roomId);
       },
     };
 
@@ -465,6 +534,25 @@ if (isMainModule) {
     // RO-020: thread the probe-state provider so /api/probe reflects the
     // standby's current role + warm-pipe liveness.
     const metricsServer = startMetricsServer(metrics, logger, () => probeLiveness);
+
+    // F1 (REQ-RO-010/011): honest probe-liveness flip. Polls getStats() on the
+    // standby's pipe consumer; sets pipeConsumerAlive on existence, rtcpAlive ONLY
+    // on a non-zero RTCP/packet ADVANCE across >=2 samples (never set-on-create);
+    // clears both false on null/closed. The setter closures write the SAME
+    // probeLiveness box GET /api/probe reads. This is the single switch that moves
+    // a standby from on-chain duration_seconds=0 (unpaid) to >0 (reward-eligible)
+    // via the already-wired validator gate — it must NOT pay a cold standby
+    // (design §6; OQ-2 fallback (a): if a PAUSED consumer's RTCP never advances,
+    // rtcpAlive stays provably-false → standby honestly unpaid). buildProbeResponse
+    // / ProbeState are UNCHANGED (no metrics-server contract change).
+    const pipeLiveness = createPipeLivenessObserver({
+      getPipeConsumer: () => standbyWarmPipe.currentPipeConsumer(),
+      setLiveness: (next) => {
+        probeLiveness.pipeConsumerAlive = next.pipeConsumerAlive;
+        probeLiveness.rtcpAlive = next.rtcpAlive;
+      },
+    });
+    pipeLiveness.start();
 
     // Step 6: Start heartbeat loop (30s default)
     const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
@@ -552,23 +640,12 @@ if (isMainModule) {
           probeLiveness.role = role;
 
           if (role === 'primary') {
-            // PRIMARY: install the announcer over the inter-relay link to the
-            // standby. The standby OPENS the link (it knows the primary's
-            // endpoint); the primary pushes announces over the accepted socket.
-            //
-            // DEFERRED-LIVE (bench Phase 5.3): the relay-ID -> endpoint URL
-            // resolution (via relay_registry::get_active_relays(), per
-            // CONTEXT D-RO-3) + the accepted-socket bookkeeping are wired at
-            // the live bench. BENCH-2: the announce SINK now genuinely transmits
-            // (createWsInterRelaySender) — the bench only needs to set
-            // `interRelayLink.socket` to the accepted standby `ws` socket and the
-            // primary's real producerId announces flow over it. The announcer
-            // factory + WS send contract are unit-tested
-            // (inter-relay-warmpipe.test.ts createWsInterRelaySender).
-            logger.info(
-              { roomId, relayMode, role },
-              'G1: relay is PRIMARY for room — announcer installs on standby link (live-wire at bench)',
-            );
+            // F1: PRIMARY for this room. The live pipe is driven at the produce
+            // event (interRelayContext.onPrimaryProducer → PrimaryPipeCoordinator):
+            // it mints+connects the primary pipe, pipes the producer, and announces
+            // the PIPED consumer id over the accepted standby socket. No work here
+            // beyond recording the role.
+            logger.info({ roomId, relayMode, role }, 'G1: relay is PRIMARY for room');
           } else {
             // STANDBY: resolve the primary's WS endpoint so the inter-relay link
             // can be opened to it. G3.2a (HERE): resolve relayIds[0] -> primaryUrl
@@ -650,7 +727,10 @@ if (isMainModule) {
           stopChainListener: () => chainListener.stop(),
           stopStandbyLink: () => standbyLinkManager.shutdown(),
           stopRelayEndpoints: () => stopRelayEndpoints(),
-          stopRoomPoller: () => roomPoller.stop(),
+          stopRoomPoller: () => {
+            pipeLiveness.stop(); // F1: stop the probe-liveness poll alongside the room poller
+            roomPoller.stop();
+          },
           stopHeartbeat, // C-B: relocated from EARLY into the LAST group
           closeRelayProbe,
           closeMetricsServer: () => metricsServer.close(),

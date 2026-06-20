@@ -26,6 +26,9 @@ export default defineConfig({
     exclude: [
       ...configDefaults.exclude,
       '**/apps/relay/**/__tests__/integration/canary-*.integration.test.ts',
+      // F1 Tier-3 live-link gate runs under its OWN config (vitest.relay-livelink.config.ts):
+      // it binds a metrics port + ws server, so keep it OUT of the heavy-bench run.
+      '**/apps/relay/**/__tests__/integration/live/**',
     ],
     globals: false,
     testTimeout: 30_000,
