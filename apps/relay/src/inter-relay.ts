@@ -92,6 +92,13 @@ export interface PipeProducerAnnounce {
   /** The PRIMARY's real mediasoup producer ID (post pipeToRouter). */
   producerId: string;
   kind: msTypes.MediaKind;
+  /**
+   * REQ-RO-018 — the peerId of the publisher whose stream this piped producer
+   * carries. OPTIONAL on the wire (additive / back-compat: pre-F1 frames omit
+   * it and still validate). The standby threads it to the client so post-cutover
+   * E2EE re-attach binds to the REAL producer's per-producer key.
+   */
+  producerPeerId?: string;
 }
 
 /** Type guard for an inbound JSON frame on the relay WS server. */
@@ -102,7 +109,8 @@ export function isPipeProducerAnnounce(msg: unknown): msg is PipeProducerAnnounc
     m['type'] === 'pipe-producer' &&
     typeof m['roomId'] === 'string' &&
     typeof m['producerId'] === 'string' &&
-    (m['kind'] === 'audio' || m['kind'] === 'video')
+    (m['kind'] === 'audio' || m['kind'] === 'video') &&
+    (m['producerPeerId'] === undefined || typeof m['producerPeerId'] === 'string')
   );
 }
 
@@ -113,13 +121,75 @@ export function isPipeProducerAnnounce(msg: unknown): msg is PipeProducerAnnounc
 export function buildPipeProducerAnnounce(
   roomId: string,
   producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+  producerPeerId?: string,
 ): PipeProducerAnnounce {
   return {
     type: 'pipe-producer',
     roomId,
     producerId: producer.id,
     kind: producer.kind,
+    ...(producerPeerId !== undefined ? { producerPeerId } : {}),
   };
+}
+
+// ── Connect-param exchange contract (pipe-connect, REQ-RO-006) ─────────
+
+/**
+ * The symmetric inter-relay connect-param frame.
+ *
+ * Exchanged BOTH ways: the standby announces its bound `{ip, port}` UP to the
+ * primary; the primary replies DOWN with its own tuple. Each PipeTransport
+ * needs the OTHER's `tuple.localPort` (known only after createPipeTransport)
+ * before `connect()` — this frame carries it.
+ *
+ * Mirrors PipeProducerAnnounce exactly: flat JSON, string-literal discriminant,
+ * typeof-every-field guard, NO version/correlation id (the codebase's
+ * fire-and-forget convention; ordering robustness lives in the coordinator's
+ * pending/re-drive, not a correlation id). `srtpParameters` is OPTIONAL —
+ * undefined on the single-host loopback pipe (enableSrtp:false); present only
+ * cross-host (enableSrtp:true). Shares the PipeConnectParams payload shape
+ * (declared below, the params the caller passes to buildPipeConnectFrame).
+ */
+export interface PipeConnectFrame {
+  type: 'pipe-connect';
+  roomId: string;
+  ip: string;
+  port: number;
+  srtpParameters?: msTypes.SrtpParameters;
+}
+
+/** Type guard for an inbound pipe-connect frame on the inter-relay link. */
+export function isPipeConnectFrame(msg: unknown): msg is PipeConnectFrame {
+  if (typeof msg !== 'object' || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  return (
+    m['type'] === 'pipe-connect' &&
+    typeof m['roomId'] === 'string' &&
+    typeof m['ip'] === 'string' &&
+    typeof m['port'] === 'number'
+  );
+}
+
+/**
+ * Build the pipe-connect frame an endpoint sends to its peer.
+ * Consumes the PipeConnectParams (`{ip, port, srtpParameters?}`) the endpoint
+ * read from its own PipeTransport `tuple`. `srtpParameters` is forwarded only
+ * when present (single-host loopback leaves it undefined → omitted from JSON).
+ */
+export function buildPipeConnectFrame(
+  roomId: string,
+  params: PipeConnectParams,
+): PipeConnectFrame {
+  const frame: PipeConnectFrame = {
+    type: 'pipe-connect',
+    roomId,
+    ip: params.ip,
+    port: params.port,
+  };
+  if (params.srtpParameters !== undefined) {
+    frame.srtpParameters = params.srtpParameters;
+  }
+  return frame;
 }
 
 // ── Primary-side announcer (index.ts glue) ──────────────────────────────
@@ -141,9 +211,13 @@ export interface InterRelaySender {
  */
 export function createInterRelayAnnouncer(
   sender: InterRelaySender,
-): (roomId: string, producer: Pick<msTypes.Producer, 'id' | 'kind'>) => void {
-  return (roomId, producer) => {
-    const frame = buildPipeProducerAnnounce(roomId, producer);
+): (
+  roomId: string,
+  producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+  producerPeerId?: string,
+) => void {
+  return (roomId, producer, producerPeerId) => {
+    const frame = buildPipeProducerAnnounce(roomId, producer, producerPeerId);
     try {
       sender.send(JSON.stringify(frame));
     } catch {
@@ -221,6 +295,8 @@ export function createWsInterRelaySender(
 export interface AnnouncedProducer {
   producerId: string;
   kind: msTypes.MediaKind;
+  /** REQ-RO-018 — publisher peerId, when the announce carried it (additive). */
+  producerPeerId?: string;
 }
 
 /**
@@ -245,6 +321,9 @@ export class InterRelayProducerRegistry {
     room.set(announce.producerId, {
       producerId: announce.producerId,
       kind: announce.kind,
+      ...(announce.producerPeerId !== undefined
+        ? { producerPeerId: announce.producerPeerId }
+        : {}),
     });
   }
 
@@ -294,6 +373,13 @@ export interface InboundInterRelayContext {
    * producerId (placeholder cutover). Omitted in pure-registry unit tests.
    */
   onAnnounce?: (roomId: string) => void | Promise<void>;
+  /**
+   * F1 (REQ-RO-003/006 standby half) — the primary's DOWN pipe-connect reply
+   * arrived on the link the standby opened. The handler feeds {ip,port[,srtp]}
+   * here so the standby connect()s its already-bound PipeTransport (design §2
+   * step 5). Optional — omitted in pure-registry unit tests.
+   */
+  onConnectParams?: (roomId: string, params: PipeConnectParams) => void | Promise<void>;
   logger?: Logger;
 }
 
@@ -319,6 +405,23 @@ export async function handleInboundInterRelayFrame(
   } catch {
     ctx.logger?.debug('G3.2b: inbound inter-relay frame is not JSON — ignoring');
     return false;
+  }
+  // F1 (REQ-RO-003/006 standby half): an inbound pipe-connect is the primary's
+  // DOWN reply — route it to onConnectParams so the standby connect()s its
+  // already-bound transport, then return (it is not an announce).
+  if (isPipeConnectFrame(parsed)) {
+    if (ctx.onConnectParams) {
+      await ctx.onConnectParams(parsed.roomId, {
+        ip: parsed.ip,
+        port: parsed.port,
+        ...(parsed.srtpParameters !== undefined ? { srtpParameters: parsed.srtpParameters } : {}),
+      });
+    }
+    ctx.logger?.debug(
+      { roomId: parsed.roomId, ip: parsed.ip, port: parsed.port },
+      'G3.2b: inbound pipe-connect reply — routed to onConnectParams',
+    );
+    return true;
   }
   if (!isPipeProducerAnnounce(parsed)) {
     ctx.logger?.debug(
@@ -503,6 +606,51 @@ export class StandbyWarmPipeCoordinator {
   clear(roomId: string): void {
     this.states.delete(roomId);
   }
+
+  /**
+   * F1 (REQ-RO-003, design §2 step 5) — the primary's DOWN pipe-connect reply
+   * arrived. Connect the standby's ALREADY-BOUND PipeTransport (minted by
+   * createStandbyPipeTransport + retained on topology.pipeTransport via
+   * ensureWarmPipe) to the primary's params. Safe no-op when the room has no
+   * bound transport yet (the standby re-announces UP on reconnect; the primary
+   * re-replies; the coordinator re-drives). enableSrtp:false on the single-host
+   * loopback → srtpParameters undefined.
+   */
+  async onPrimaryConnectParams(roomId: string, params: PipeConnectParams): Promise<void> {
+    const state = this.states.get(roomId);
+    const transport = state?.topology.pipeTransport;
+    if (!transport) {
+      this.logger?.debug(
+        { roomId, primaryPort: params.port },
+        'F1: standby onPrimaryConnectParams — no bound transport yet, ignoring (re-drive on reconnect)',
+      );
+      return;
+    }
+    await transport.connect({
+      ip: params.ip,
+      port: params.port,
+      ...(params.srtpParameters !== undefined ? { srtpParameters: params.srtpParameters } : {}),
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+    this.logger?.info(
+      { roomId, primaryPort: params.port },
+      'F1: standby PipeTransport connected to primary reply params (handshake complete)',
+    );
+  }
+
+  /**
+   * F6 accessor (REQ-RO-010/011 wiring) — the CURRENT standby pipe consumer the
+   * liveness observer polls (topology.pipeConsumer), or null when none. The
+   * optional roomId selects a room; omitted = the single tracked room (the K=2
+   * single-room demo scope). Returns null for an unknown/absent room.
+   */
+  currentPipeConsumer(roomId?: string): msTypes.Consumer | null {
+    if (roomId !== undefined) {
+      return this.states.get(roomId)?.topology.pipeConsumer ?? null;
+    }
+    // No-arg convenience: the first (single-room) tracked state.
+    const first = this.states.values().next();
+    return first.done ? null : (first.value.topology.pipeConsumer ?? null);
+  }
 }
 
 // ── Primary-side pipe half (Phase 5.3 spike — the missing production half) ──
@@ -574,4 +722,208 @@ export async function pipeProducerOntoPrimaryTransport(
   return pipeTransport.consume({ producerId } as Parameters<
     msTypes.PipeTransport['consume']
   >[0]);
+}
+
+// ── Primary-side warm-pipe coordinator (F1 — REQ-RO-001/002/008) ─────────
+
+/**
+ * Duck-type of `createPipePortAllocator`'s return (sibling cluster). Kept as an
+ * interface so the PrimaryPipeCoordinator is unit-testable with a stub allocator
+ * and does NOT depend on the allocator's concrete impl (clusters compose without
+ * ordering coupling).
+ */
+export interface PipePortAllocatorLike {
+  allocate(key: string): number;
+  release(key: string): void;
+  size(): number;
+}
+
+/** Injected collaborators for the PrimaryPipeCoordinator (all unit-mockable). */
+export interface PrimaryPipeCoordinatorDeps {
+  /**
+   * Pushes the PIPED-consumer announce to the standby. Backed by
+   * createInterRelayAnnouncer (inter-relay.ts) in the wiring layer. Receives the
+   * PIPED consumer (its .id is the id the standby must consume) — NOT the source
+   * producer.
+   */
+  announcer: (roomId: string, producer: Pick<msTypes.Producer, 'id' | 'kind'>) => void;
+  /** Per-(room,role) port allocator. Keyed `${roomId}:primary` for the primary leg. */
+  portAllocator: PipePortAllocatorLike;
+  /**
+   * Sends the primary's OWN pipe-connect params DOWN to the standby (the reply
+   * leg of the §2 handshake). Backed by the interRelaySender in the wiring layer.
+   */
+  paramSender: (roomId: string, params: PipeConnectParams) => void;
+  logger?: Logger;
+}
+
+/** Per-room primary-pipe state (module-private; mirrors WarmPipeState shape). */
+interface PrimaryPipeState {
+  /** The primary's PipeTransport once minted; null until both router + params seen. */
+  pipeTransport: msTypes.PipeTransport | null;
+  /** True once the transport has been connect()'d to the standby's params. */
+  connected: boolean;
+  /**
+   * Producers seen before the pair was connectable. Drained (piped + announced)
+   * once connected — REQ-RO-008 either-order tolerance. We keep only the fields
+   * the announce + pipe need (id, kind) so a plain mock is a valid pending entry.
+   */
+  pendingProducers: Array<Pick<msTypes.Producer, 'id' | 'kind'>>;
+  /** The standby's pipe-connect params once received; null until they arrive. */
+  standbyParams: PipeConnectParams | null;
+  /** The allocator port held for `${roomId}:primary` (for release on clear). */
+  pipePort: number | null;
+}
+
+/**
+ * F1 — the PRIMARY half mirror of StandbyWarmPipeCoordinator. Drives
+ * createPrimaryPipeTransport + pipeProducerOntoPrimaryTransport so REAL RTP
+ * crosses the inter-relay pipe, and announces the PIPED consumer id (REQ-RO-002)
+ * — never producer.id.
+ *
+ * Either-order tolerance (REQ-RO-008, no correlation id): per-room state holds
+ * {pipeTransport, connected, pendingProducers[], standbyParams}. RTP is NEVER
+ * piped onto an unconnected transport — a producer arriving before the standby's
+ * params is QUEUED and drained once the pair connects; params arriving after a
+ * producer trigger the same drain. The transport is minted lazily on the FIRST
+ * event that has BOTH a router (from onProducer) AND the standby params, so
+ * createPipeTransport is called at most ONCE per room (REQ-RO-009 idempotent
+ * binding via the allocator + the pipeTransport!=null guard).
+ *
+ * All logic in this exported factory class (REQ-RO-012); index.ts only assembles.
+ */
+export class PrimaryPipeCoordinator {
+  private readonly states = new Map<string, PrimaryPipeState>();
+
+  constructor(private readonly deps: PrimaryPipeCoordinatorDeps) {}
+
+  private getState(roomId: string): PrimaryPipeState {
+    let s = this.states.get(roomId);
+    if (!s) {
+      s = {
+        pipeTransport: null,
+        connected: false,
+        pendingProducers: [],
+        standbyParams: null,
+        pipePort: null,
+      };
+      this.states.set(roomId, s);
+    }
+    return s;
+  }
+
+  /**
+   * The standby's pipe-connect params arrived (the UP leg of the handshake).
+   * Stashes them; does NOT mint the transport yet (minting needs the router,
+   * which only onProducer carries). If a producer was already queued AND we have
+   * a router stashed via a prior onProducer, the drain runs there — here we only
+   * record + (cheaply) reserve the per-room port so a later onProducer binds it.
+   */
+  async onStandbyConnectParams(roomId: string, params: PipeConnectParams): Promise<void> {
+    const s = this.getState(roomId);
+    s.standbyParams = params;
+    if (s.pipePort === null) {
+      s.pipePort = this.deps.portAllocator.allocate(`${roomId}:primary`);
+    }
+    this.deps.logger?.debug(
+      { roomId, standbyPort: params.port, primaryPort: s.pipePort },
+      'F1: primary coordinator received standby pipe-connect params',
+    );
+    // If a producer is queued AND we have already minted+connected (params is a
+    // re-send), drain now. The common params-first order mints on onProducer.
+    if (s.connected && s.pipeTransport !== null && s.pendingProducers.length > 0) {
+      await this.drain(roomId, s);
+    }
+  }
+
+  /**
+   * A real producer is created on the primary for this room. Queues it, then
+   * (if the standby params are present) lazily mints+connects the pipe transport
+   * ONCE and drains all pending producers — piping each + announcing its PIPED id.
+   */
+  async onProducer(
+    roomId: string,
+    router: msTypes.Router,
+    producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+  ): Promise<void> {
+    const s = this.getState(roomId);
+    s.pendingProducers.push(producer);
+
+    if (s.standbyParams === null) {
+      // params-not-yet: keep queued; a later onStandbyConnectParams → onProducer
+      // re-drive (the standby re-sends on link attach) completes the pair.
+      this.deps.logger?.debug(
+        { roomId, producerId: producer.id },
+        'F1: primary coordinator queued producer — awaiting standby pipe-connect params',
+      );
+      return;
+    }
+
+    // Mint + connect ONCE (REQ-RO-009 idempotent binding).
+    if (s.pipeTransport === null) {
+      if (s.pipePort === null) {
+        s.pipePort = this.deps.portAllocator.allocate(`${roomId}:primary`);
+      }
+      const transport = await createPrimaryPipeTransport(router, s.pipePort);
+      s.pipeTransport = transport;
+      await transport.connect({
+        ip: s.standbyParams.ip,
+        port: s.standbyParams.port,
+        srtpParameters: s.standbyParams.srtpParameters,
+      } as Parameters<msTypes.PipeTransport['connect']>[0]);
+      s.connected = true;
+
+      // Reply DOWN with the primary's OWN bound port (the §2 handshake reply).
+      const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
+      this.deps.paramSender(roomId, {
+        ip: announcedIp,
+        port: transport.tuple.localPort,
+      });
+      this.deps.logger?.info(
+        { roomId, primaryPort: transport.tuple.localPort, standbyPort: s.standbyParams.port },
+        'F1: primary pipe transport minted + connected to standby',
+      );
+    }
+
+    await this.drain(roomId, s);
+  }
+
+  /**
+   * Pipe every queued producer onto the connected transport and announce its
+   * PIPED consumer id (REQ-RO-002). Safe to call repeatedly — it shifts the
+   * queue, so an already-piped producer is never re-piped.
+   */
+  private async drain(roomId: string, s: PrimaryPipeState): Promise<void> {
+    if (!s.connected || s.pipeTransport === null) return;
+    while (s.pendingProducers.length > 0) {
+      const producer = s.pendingProducers.shift()!;
+      const pipedConsumer = await pipeProducerOntoPrimaryTransport(
+        s.pipeTransport,
+        producer.id,
+      );
+      // Announce the PIPED id (pipedConsumer.id), NOT producer.id (REQ-RO-002).
+      this.deps.announcer(roomId, { id: pipedConsumer.id, kind: pipedConsumer.kind });
+      this.deps.logger?.info(
+        { roomId, sourceProducerId: producer.id, pipedConsumerId: pipedConsumer.id },
+        'F1: piped producer onto primary pipe + announced PIPED consumer id',
+      );
+    }
+  }
+
+  /** Drops a room's state, closes the transport, releases the port (REQ-RO-009). */
+  clear(roomId: string): void {
+    const s = this.states.get(roomId);
+    if (!s) return;
+    if (s.pipeTransport !== null) {
+      try {
+        s.pipeTransport.close();
+      } catch {
+        // Best-effort close — must not block teardown.
+      }
+    }
+    if (s.pipePort !== null) {
+      this.deps.portAllocator.release(`${roomId}:primary`);
+    }
+    this.states.delete(roomId);
+  }
 }

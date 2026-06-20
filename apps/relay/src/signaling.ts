@@ -26,7 +26,9 @@ import { McuPipeline } from './mcu-pipeline.js';
 import {
   type InterRelayProducerRegistry,
   type InterRelaySocketLike,
+  type PipeConnectParams,
   isPipeProducerAnnounce,
+  isPipeConnectFrame,
   isValidInterRelayToken,
   INTER_RELAY_SUBPROTOCOL,
 } from './inter-relay.js';
@@ -166,6 +168,21 @@ interface PipeProducerMessage {
   roomId: string;
   producerId: string;
   kind: msTypes.MediaKind;
+  /** REQ-RO-018 — publisher peerId (optional on the wire, back-compat). */
+  producerPeerId?: string;
+}
+
+/**
+ * REQ-RO-006 — inbound inter-relay connect-param frame on the relay WS server,
+ * distinguished from client frames by `type`. Shape mirrors PipeConnectFrame in
+ * inter-relay.ts.
+ */
+interface PipeConnectMessage {
+  type: 'pipe-connect';
+  roomId: string;
+  ip: string;
+  port: number;
+  srtpParameters?: msTypes.SrtpParameters;
 }
 
 /**
@@ -210,6 +227,7 @@ type SignalingMessage =
   | ResumeConsumerMessage
   | LeaveMessage
   | PipeProducerMessage
+  | PipeConnectMessage
   | E2EEKeyBundleMessage;
 
 /**
@@ -248,7 +266,11 @@ export interface InterRelayContext {
    * Primary-side: push a producer announce to the paired standby.
    * The wiring layer holds the inter-relay WS link to the standby endpoint.
    */
-  announceProducer(roomId: string, producer: Pick<msTypes.Producer, 'id' | 'kind'>): void;
+  announceProducer(
+    roomId: string,
+    producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+    producerPeerId?: string,
+  ): void;
   /**
    * G3.2b PRIMARY-side: the server accepted a TAGGED inter-relay peer (the
    * standby dialing in over the authenticated link). The wiring layer stores it
@@ -265,6 +287,21 @@ export interface InterRelayContext {
    * it in production). Optional.
    */
   onStandbyRoomReady?(roomId: string, router: msTypes.Router): void;
+  /**
+   * REQ-RO-006 dispatch half — the server received an inter-relay pipe-connect
+   * frame through the token gate. The wiring layer (PrimaryPipeCoordinator,
+   * cluster C) binds + connect()s its PipeTransport to these params. Optional —
+   * absent on the in-process bench. Params are the peer's {ip, port[, srtp]}.
+   */
+  onConnectParams?(roomId: string, params: PipeConnectParams): void;
+  /**
+   * REQ-RO-001/002 (consumed by Tasks 5-6 + driven by Task 15) — the primary has a real producer to
+   * pipe for a room it is primary for. The coordinator mints + connects the
+   * primary PipeTransport, pipes the producer, and announces the PIPED consumer
+   * id. Declared here (optional, unused by THIS cluster's routing) so the
+   * coordinator can plug in without re-touching the context type.
+   */
+  onPrimaryProducer?(roomId: string, router: msTypes.Router, producer: msTypes.Producer): void;
 }
 
 /** Send a JSON message to a WebSocket. */
@@ -570,6 +607,11 @@ export function createSignalingServer(
         break;
       }
 
+      case 'pipe-connect': {
+        handlePipeConnect(msg, ws);
+        break;
+      }
+
       case 'setConsumerLayers': {
         await handleSetConsumerLayers(ws, msg);
         break;
@@ -624,6 +666,41 @@ export function createSignalingServer(
     logger.info(
       { roomId: msg.roomId, producerId: msg.producerId, kind: msg.kind },
       'Inter-relay: recorded announced pipe producer (standby)',
+    );
+  }
+
+  /**
+   * REQ-RO-006 dispatch half — route an inbound inter-relay pipe-connect frame
+   * to onConnectParams. Reuses the SAME interRelayPeers token gate as
+   * handlePipeProducerAnnounce: with INTER_RELAY_TOKEN set, only a tagged
+   * inter-relay peer may drive the primary's pipe (an unauthed client cannot).
+   * Token unset → gate open (single-host / bench). Malformed frames are dropped
+   * (no throw — a noisy peer must not crash the WS loop).
+   */
+  function handlePipeConnect(msg: PipeConnectMessage, ws: WebSocket): void {
+    if (!interRelay) {
+      logger.debug('Received pipe-connect but no InterRelayContext — ignoring');
+      return;
+    }
+    if (interRelayToken !== '' && !interRelayPeers.has(ws)) {
+      logger.warn(
+        { roomId: msg.roomId },
+        'REQ-RO-006: dropping pipe-connect from untagged (non-inter-relay) socket',
+      );
+      return;
+    }
+    if (!isPipeConnectFrame(msg)) {
+      logger.warn({ msg }, 'Malformed pipe-connect — ignoring');
+      return;
+    }
+    interRelay.onConnectParams?.(msg.roomId, {
+      ip: msg.ip,
+      port: msg.port,
+      ...(msg.srtpParameters !== undefined ? { srtpParameters: msg.srtpParameters } : {}),
+    });
+    logger.info(
+      { roomId: msg.roomId, ip: msg.ip, port: msg.port },
+      'Inter-relay: routed pipe-connect to onConnectParams',
     );
   }
 
@@ -1114,15 +1191,34 @@ export function createSignalingServer(
     // Notify all other peers about the new producer (SFU fan-out)
     await notifyNewProducer(room, mapping.peerId, producer, logger);
 
-    // G1 PRIMARY side — announce this producer to the paired standby so it can
-    // resolve the real producerId for its warm pipe + client consume requests.
-    // Only the primary announces (the standby is the consumer of announces).
+    // F1 (CONSISTENCY-FIX HIGH#2, REQ-RO-001/002) PRIMARY side — DRIVE the
+    // PrimaryPipeCoordinator at the produce event (the ONLY place a real
+    // producerId exists). It mints+connects the primary pipe, pipes the producer,
+    // and announces the PIPED consumer id (NOT producer.id) via its own announcer
+    // dep. This REPLACES the old direct announceProducer(producer.id) — keeping
+    // both would double-announce (producer.id + the piped id). When onPrimaryProducer
+    // is absent (in-process bench / no coordinator), fall back to the legacy direct
+    // announce so the bench path is unaffected.
     if (interRelay && interRelay.role === 'primary') {
-      interRelay.announceProducer(mapping.roomId, producer);
-      logger.info(
-        { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId },
-        'Inter-relay: announced producer to standby (primary)',
-      );
+      if (interRelay.onPrimaryProducer) {
+        interRelay.onPrimaryProducer(mapping.roomId, room.router, producer);
+        logger.info(
+          {
+            producerId: producer.id,
+            kind: producer.kind,
+            roomId: mapping.roomId,
+            producerPeerId: mapping.peerId,
+          },
+          'Inter-relay: drove PrimaryPipeCoordinator at produce (primary) — announces PIPED id',
+        );
+      } else {
+        // Legacy in-process bench path (no coordinator wired): direct announce.
+        interRelay.announceProducer(mapping.roomId, producer, mapping.peerId);
+        logger.info(
+          { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId },
+          'Inter-relay: announced producer to standby (primary, legacy direct)',
+        );
+      }
     }
 
     logger.info(
@@ -1172,12 +1268,16 @@ export function createSignalingServer(
       return;
     }
 
+    const announcedPeer =
+      interRelay?.registry.resolve(mapping.roomId)?.producerPeerId;
+
     sendJson(ws, {
       type: 'consumed',
       consumerId: consumer.id,
       producerId,
       kind: consumer.kind,
       rtpParameters: consumer.rtpParameters,
+      ...(announcedPeer !== undefined ? { producerPeerId: announcedPeer } : {}),
     });
 
     logger.debug(

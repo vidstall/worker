@@ -96,6 +96,94 @@ export function parsePipePortRange(envValue: string | undefined): PipePortRange 
   return { min, max };
 }
 
+// ── createPipePortAllocator (REQ-RO-009) ──────────────────────────────
+
+/**
+ * Per-room + per-role PIPE_PORT allocator over [min..max].
+ *
+ * The warm pipe used a single hardcoded `pipePortRange.min` for every room —
+ * so a 2nd room hit EADDRINUSE binding its PipeTransport. This allocator hands
+ * each KEY a distinct free port and recycles on release.
+ *
+ * Keyed per room AND per role (`roomId` for the standby, `${roomId}:primary`
+ * for the primary) so a same-host primary+standby never collide (D3).
+ *
+ * Idempotent per key — `allocate(key)` twice returns the SAME port and consumes
+ * only ONE slot (preserves the N3 not-ready re-run invariant: a coordinator
+ * re-run rebinds on the SAME pipePort, never leaking a second).
+ *
+ * `release(key)` frees the slot (room close / `coordinator.clear`). Releasing an
+ * unknown key is a no-op. Throws when the range is exhausted.
+ */
+export function createPipePortAllocator(range: PipePortRange): {
+  allocate(key: string): number;
+  release(key: string): void;
+  size(): number;
+} {
+  const assigned = new Map<string, number>();
+  const free: number[] = [];
+  for (let p = range.min; p <= range.max; p++) {
+    free.push(p);
+  }
+
+  return {
+    allocate(key: string): number {
+      // Idempotent per key — N3 re-run rebinds the same port, no second slot.
+      const existing = assigned.get(key);
+      if (existing !== undefined) {
+        return existing;
+      }
+      const port = free.shift();
+      if (port === undefined) {
+        throw new Error(
+          `createPipePortAllocator: port range [${range.min}-${range.max}] exhausted (${assigned.size} keys assigned)`,
+        );
+      }
+      assigned.set(key, port);
+      return port;
+    },
+    release(key: string): void {
+      const port = assigned.get(key);
+      if (port === undefined) {
+        // Unknown key — no-op (idempotent release; double-release is safe).
+        return;
+      }
+      assigned.delete(key);
+      free.push(port);
+    },
+    size(): number {
+      return assigned.size;
+    },
+  };
+}
+
+// ── createStandbyPipeTransport ─────────────────────────────────────────
+
+/**
+ * Mint the STANDBY's PipeTransport handle so the F1 live handshake can read
+ * tuple.localPort, announce it (pipe-connect), and connect() it to the primary's
+ * reply BEFORE consuming. Mirrors createPrimaryPipeTransport (inter-relay.ts)
+ * exactly: listenIp 0.0.0.0 + ANNOUNCED_IP announcedIp (default 127.0.0.1 for
+ * local/bench), the dedicated pipe port, enableRtx/enableSrtp:false (single-host
+ * loopback — cross-host needs enableSrtp:true, a documented STRETCH).
+ *
+ * Additive — ensureWarmPipe still defaults to creating its OWN transport when no
+ * handle is passed (the legacy 4-arg path). The caller that needs the handle
+ * mints it here and passes it to ensureWarmPipe's optional 5th param.
+ */
+export async function createStandbyPipeTransport(
+  router: msTypes.Router,
+  pipePort: number,
+): Promise<msTypes.PipeTransport> {
+  const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
+  return router.createPipeTransport({
+    listenIp: { ip: '0.0.0.0', announcedIp },
+    port: pipePort,
+    enableRtx: false,
+    enableSrtp: false,
+  } as Parameters<msTypes.Router['createPipeTransport']>[0]);
+}
+
 // ── ensureWarmPipe ─────────────────────────────────────────────────────
 
 /**
@@ -124,6 +212,7 @@ export async function ensureWarmPipe(
   router: msTypes.Router,
   pipePort: number,
   producerId?: string,
+  pipeTransport?: msTypes.PipeTransport,
 ): Promise<msTypes.Consumer | null> {
   // Primary relay does not call pipeToRouter
   if (topology.role === 'primary') {
@@ -138,29 +227,36 @@ export async function ensureWarmPipe(
   // N3 leak fix: a prior not-ready run (the StandbyWarmPipeCoordinator re-run)
   // resets pipeConsumer to null while leaving its PipeTransport bound. Close the
   // stale transport before rebinding so we neither leak it nor hit EADDRINUSE on
-  // a fixed pipePort.
-  if (topology.pipeTransport !== null) {
-    topology.pipeTransport.close();
-    topology.pipeTransport = null;
+  // a fixed pipePort. Only applies to a transport WE created (create-own path);
+  // a caller-passed transport (F1 handshake) is owned by the caller, so we never
+  // close it here — we only retain it for teardown (N2).
+  let transport: msTypes.PipeTransport;
+  if (pipeTransport !== undefined) {
+    // Caller minted the transport (createStandbyPipeTransport) so it could read
+    // tuple.localPort + connect() it before consuming. Consume onto it as-is.
+    transport = pipeTransport;
+  } else {
+    if (topology.pipeTransport !== null) {
+      topology.pipeTransport.close();
+      topology.pipeTransport = null;
+    }
+    // Create a PipeTransport on the standby router to receive piped media.
+    // listenIp '0.0.0.0' with the dedicated pipe port from PIPE_PORT_RANGE;
+    // announcedIp is the deploy-routable address the primary connects back to,
+    // externalized via ANNOUNCED_IP (default loopback for local/bench). Mirrors
+    // the room-handler.ts WebRTC-transport pattern.
+    const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
+    transport = await router.createPipeTransport({
+      listenIp: { ip: '0.0.0.0', announcedIp },
+      port: pipePort,
+      enableRtx: false,
+      enableSrtp: false,
+    } as Parameters<msTypes.Router['createPipeTransport']>[0]);
   }
-
-  // Create a PipeTransport on the standby router to receive piped media.
-  // The primary will connect its end via a paired pipeToRouter call.
-  // listenIp '0.0.0.0' with the dedicated pipe port from PIPE_PORT_RANGE;
-  // announcedIp is the deploy-routable address the primary connects back to,
-  // externalized via ANNOUNCED_IP (default loopback for local/bench). Mirrors
-  // the room-handler.ts WebRTC-transport pattern.
-  const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
-  const pipeTransport = await router.createPipeTransport({
-    listenIp: { ip: '0.0.0.0', announcedIp },
-    port: pipePort,
-    enableRtx: false,
-    enableSrtp: false,
-  } as Parameters<msTypes.Router['createPipeTransport']>[0]);
 
   // N2 leak fix: retain the transport so teardown / a coordinator re-run can
   // close it (an un-retained transport leaks idle on the router until exit).
-  topology.pipeTransport = pipeTransport;
+  topology.pipeTransport = transport;
 
   // Consume from the pipe transport — the producer lives on the primary Router.
   // G1 wiring: the caller (signaling layer) resolves the PRIMARY's real
@@ -170,7 +266,7 @@ export async function ensureWarmPipe(
   // re-runs ensureWarmPipe once the announce arrives (the topology.pipeConsumer
   // idempotency guard is reset by the caller in that not-ready path).
   const resolvedProducerId = producerId ?? `pipe-producer-pending-${topology.roomId}`;
-  const consumer = await pipeTransport.consume({
+  const consumer = await transport.consume({
     producerId: resolvedProducerId,
   } as Parameters<msTypes.PipeTransport['consume']>[0]);
 
@@ -182,4 +278,170 @@ export async function ensureWarmPipe(
   topology.pipeConsumer = consumer;
 
   return consumer;
+}
+
+// ── createPipeLivenessObserver ─────────────────────────────────────────
+
+/**
+ * Liveness flags written by {@link createPipeLivenessObserver} into the
+ * daemon's /api/probe state box (index.ts probeLiveness). Plain booleans —
+ * no mediasoup types cross this seam (mirrors metrics-server ProbeState).
+ */
+export interface PipeLivenessFlags {
+  /** The standby's warm-pipe consumer is open (exists + not closed). */
+  pipeConsumerAlive: boolean;
+  /**
+   * A real RTCP/packet counter ADVANCE was observed across >=2 getStats()
+   * samples. NEVER true on the first sample (no prior to compare) and never
+   * true for a paused-but-static counter (REQ-RO-011 anti-over-claim).
+   */
+  rtcpAlive: boolean;
+}
+
+/**
+ * Dependencies injected into {@link createPipeLivenessObserver}. Keeping the
+ * consumer behind a getter (not a captured reference) lets the observer see
+ * the LIVE pipe consumer as the coordinator swaps it, and clear liveness when
+ * it goes null/closed (worker.died, cutover teardown).
+ */
+export interface PipeLivenessObserverDeps {
+  /** Resolve the CURRENT standby pipe consumer (null when none). */
+  getPipeConsumer: () => msTypes.Consumer | null;
+  /** Write the resolved flags into the /api/probe state box. */
+  setLiveness: (flags: PipeLivenessFlags) => void;
+  /** Poll cadence (ms). Default 2000. */
+  intervalMs?: number;
+  /** Samples required to confirm an advance. Default 2 (this-vs-prior). */
+  requiredSamples?: number;
+}
+
+/** Handle returned by {@link createPipeLivenessObserver}. */
+export interface PipeLivenessObserver {
+  start(): void;
+  stop(): void;
+}
+
+/**
+ * Sum every cumulative mediasoup counter that moves when real RTP/RTCP is on
+ * the pipe (a ConsumerStat is RtpStreamSendStats). Any monotonic increase
+ * across two samples => genuine activity. byteCount alone could be 0 on a
+ * tiny-RTCP-only path, so we OR several counters; all are non-decreasing.
+ */
+function readPipeStatCounter(
+  stats: ReadonlyArray<{
+    packetCount?: number;
+    byteCount?: number;
+    nackCount?: number;
+    pliCount?: number;
+    firCount?: number;
+  }>,
+): number {
+  let total = 0;
+  for (const s of stats) {
+    total +=
+      (s.packetCount ?? 0) +
+      (s.byteCount ?? 0) +
+      (s.nackCount ?? 0) +
+      (s.pliCount ?? 0) +
+      (s.firCount ?? 0);
+  }
+  return total;
+}
+
+/**
+ * Honest probe-liveness observer (REQ-RO-010 / REQ-RO-011).
+ *
+ * Polls getPipeConsumer().getStats() on an interval and writes
+ * {pipeConsumerAlive, rtcpAlive} via setLiveness:
+ *   - pipeConsumerAlive = consumer exists AND not closed.
+ *   - rtcpAlive = a non-zero counter ADVANCE was seen across >=requiredSamples
+ *     samples. NEVER set on the first sample (no baseline) and never true for a
+ *     static (paused-unpaid) counter — this is the single switch that moves the
+ *     standby from on-chain duration_seconds=0 (never paid) to >0, so it MUST
+ *     NOT over-claim a cold/static standby (REQ-RO-011).
+ *   - both CLEARED false on null / closed consumer (no stale liveness).
+ *
+ * Does NOT touch metrics-server (buildProbeResponse / ProbeState unchanged) —
+ * it only writes the existing probeLiveness box (OQ-2 fallback-safe). All logic
+ * is in this factory; index.ts only assembles (REQ-RO-012).
+ */
+export function createPipeLivenessObserver(
+  deps: PipeLivenessObserverDeps,
+): PipeLivenessObserver {
+  const intervalMs = deps.intervalMs ?? 2000;
+  const requiredSamples = deps.requiredSamples ?? 2;
+
+  let timer: ReturnType<typeof setInterval> | null = null;
+  // History of counter readings for the CURRENT live consumer. Reset whenever
+  // the consumer goes null/closed so a fresh pipe starts from no-baseline
+  // (never set-on-create after a swap).
+  let prevCounter: number | null = null;
+  let advanceSamples = 0;
+
+  function resetHistory(): void {
+    prevCounter = null;
+    advanceSamples = 0;
+  }
+
+  async function poll(): Promise<void> {
+    const consumer = deps.getPipeConsumer();
+    // Clear on null/closed — never report stale liveness.
+    if (consumer === null || consumer.closed) {
+      resetHistory();
+      deps.setLiveness({ pipeConsumerAlive: false, rtcpAlive: false });
+      return;
+    }
+
+    let counter: number | null = null;
+    try {
+      const stats = (await consumer.getStats()) as ReadonlyArray<{
+        packetCount?: number;
+        byteCount?: number;
+        nackCount?: number;
+        pliCount?: number;
+        firCount?: number;
+      }>;
+      counter = readPipeStatCounter(stats);
+    } catch {
+      // Transient getStats() failure (transport mid-rebuild): keep the
+      // consumer-alive signal but make no liveness claim this tick.
+      counter = null;
+    }
+
+    if (counter === null) {
+      // Consumer exists but no usable sample this tick.
+      deps.setLiveness({ pipeConsumerAlive: true, rtcpAlive: false });
+      return;
+    }
+
+    // ADVANCE detection across >=requiredSamples. First sample = baseline only
+    // (NEVER set-on-create). An increase vs the prior reading counts a sample.
+    if (prevCounter !== null && counter > prevCounter) {
+      advanceSamples += 1;
+    } else if (prevCounter !== null && counter <= prevCounter) {
+      // No movement this tick — require contiguous advance, so reset the run.
+      advanceSamples = 0;
+    }
+    prevCounter = counter;
+
+    const rtcpAlive = advanceSamples >= requiredSamples - 1;
+    deps.setLiveness({ pipeConsumerAlive: true, rtcpAlive });
+  }
+
+  return {
+    start(): void {
+      if (timer !== null) return; // idempotent
+      resetHistory();
+      timer = setInterval(() => {
+        void poll();
+      }, intervalMs);
+    },
+    stop(): void {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      resetHistory();
+    },
+  };
 }

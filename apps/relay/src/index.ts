@@ -403,8 +403,8 @@ if (isMainModule) {
       // Default to 'primary'; corrected per-room by the RoomAssigned poller.
       role: 'primary',
       registry: interRelayRegistry,
-      announceProducer: (roomId, producer) => {
-        pushAnnounce(roomId, producer);
+      announceProducer: (roomId, producer, producerPeerId) => {
+        pushAnnounce(roomId, producer, producerPeerId);
       },
       // G3.2b PRIMARY: the signaling server hands us the accepted standby socket
       // (tagged inter-relay) so the announce sender transmits over it; null on detach.

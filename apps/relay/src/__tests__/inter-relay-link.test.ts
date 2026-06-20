@@ -28,14 +28,17 @@ function startCapturingServer(): Promise<{
   headers: () => IncomingHttpHeaders | null;
   pushTo: (sock: WsServerSocket, frame: unknown) => void;
   firstSocket: () => Promise<WsServerSocket>;
+  received: () => string[];
 }> {
   return new Promise((resolve) => {
     const wss = new WebSocketServer({ port: 0 });
     let captured: IncomingHttpHeaders | null = null;
     let resolveSock: ((s: WsServerSocket) => void) | null = null;
     const sockPromise = new Promise<WsServerSocket>((r) => { resolveSock = r; });
+    const received: string[] = [];
     wss.on('connection', (ws, req) => {
       captured = req.headers;
+      ws.on('message', (d) => received.push(d.toString()));
       resolveSock?.(ws);
     });
     wss.on('listening', () => {
@@ -47,6 +50,7 @@ function startCapturingServer(): Promise<{
         headers: () => captured,
         pushTo: (sock, frame) => sock.send(JSON.stringify(frame)),
         firstSocket: () => sockPromise,
+        received: () => received,
       });
     });
   });
@@ -70,6 +74,10 @@ interface FakeSocket {
   close: ReturnType<typeof vi.fn>;
   on(event: 'close', cb: () => void): void;
   fireClose(): void;
+  // CONSISTENCY-FIX MEDIUM: StandbyLinkSocket now REQUIRES these — keep the
+  // pre-existing connectTo tests type-valid against the widened interface.
+  send: ReturnType<typeof vi.fn>;
+  readyState: number;
 }
 function fakeSocketFactory() {
   const sockets: FakeSocket[] = [];
@@ -83,6 +91,8 @@ function fakeSocketFactory() {
       fireClose() {
         s.closeCb?.();
       },
+      send: vi.fn(),
+      readyState: 1, // WebSocket.OPEN
     };
     sockets.push(s);
     return s;
@@ -209,5 +219,62 @@ describe('openInterRelayLink', () => {
 
     expect(link.readyState).toBe(1); // WebSocket.OPEN
     link.close();
+  });
+});
+
+// ── StandbyLinkManager.send (REQ-RO-007) — standby→primary push path ──────
+// The link was push-only (primary→standby) before F1. The standby must ALSO
+// push its pipe-connect {ip,port} UP the link it opened. send() is best-effort
+// + OPEN-guarded (mirrors createWsInterRelaySender): no socket / not OPEN → no-op.
+
+describe('StandbyLinkManager.send (REQ-RO-007)', () => {
+  it('pushes a frame UP the live link to the primary when OPEN', async () => {
+    const srv = await startCapturingServer();
+    server = srv.wss;
+
+    const mgr = createStandbyLinkManager({
+      open: (url) => openInterRelayLink({ url, onFrame: vi.fn(), logger: mockLogger() }),
+      reconnectMs: 1000,
+    });
+    mgr.connectTo(`ws://127.0.0.1:${srv.port}`);
+    await srv.firstSocket();
+    // give the client socket a tick to reach OPEN before we push.
+    await tick(120);
+
+    mgr.send(JSON.stringify({ type: 'pipe-connect', roomId: 'room-Z', ip: '127.0.0.1', port: 40000 }));
+    await tick(120);
+
+    const msgs = srv.received();
+    expect(msgs.length).toBe(1);
+    expect(JSON.parse(msgs[0]!)).toMatchObject({ type: 'pipe-connect', roomId: 'room-Z', port: 40000 });
+
+    mgr.shutdown();
+  });
+
+  it('is a no-op (no throw) when no link is connected yet', () => {
+    const { open } = fakeSocketFactory();
+    const mgr = createStandbyLinkManager({ open, reconnectMs: 1000 });
+    // never connectTo → no socket attached
+    expect(() => mgr.send('{"type":"pipe-connect"}')).not.toThrow();
+  });
+
+  it('is a no-op (no throw) when the socket is not OPEN', () => {
+    // fake socket reports a non-OPEN readyState (CONNECTING=0).
+    const open = vi.fn((_url: string) => {
+      const s = {
+        closeCb: null as null | (() => void),
+        readyState: 0, // CONNECTING — not OPEN
+        send: vi.fn(),
+        close: vi.fn(),
+        on(_e: 'close', cb: () => void) { s.closeCb = cb; },
+      };
+      return s as any;
+    });
+    const mgr = createStandbyLinkManager({ open, reconnectMs: 1000 });
+    mgr.connectTo('ws://p:4000');
+    expect(() => mgr.send('{"x":1}')).not.toThrow();
+    // send must NOT have been forwarded to a non-OPEN socket.
+    const created = open.mock.results[0]!.value as { send: ReturnType<typeof vi.fn> };
+    expect(created.send).not.toHaveBeenCalled();
   });
 });

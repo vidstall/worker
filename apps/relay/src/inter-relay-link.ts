@@ -75,6 +75,13 @@ export function openInterRelayLink(opts: OpenInterRelayLinkOptions): WebSocket {
 export interface StandbyLinkSocket {
   on(event: 'close', listener: () => void): void;
   close(): void;
+  /**
+   * Push a frame UP the link to the primary (REQ-RO-007 — the standby's
+   * pipe-connect announce). The live `ws` socket already exposes this.
+   */
+  send(data: string): void;
+  /** `ws` WebSocket.OPEN === 1 is the only state on which send is attempted. */
+  readyState: number;
 }
 
 export interface StandbyLinkManager {
@@ -84,6 +91,12 @@ export interface StandbyLinkManager {
   shutdown(): void;
   /** The URL currently targeted (diagnostic). */
   currentUrl(): string | null;
+  /**
+   * Best-effort push of a frame UP the live link to the primary (REQ-RO-007).
+   * No-op when no socket is attached or the socket is not OPEN; a send that
+   * throws (link died mid-flight) is swallowed so the caller never crashes.
+   */
+  send(data: string): void;
 }
 
 export interface StandbyLinkManagerOptions {
@@ -141,5 +154,24 @@ export function createStandbyLinkManager(opts: StandbyLinkManagerOptions): Stand
       socket?.close();
     },
     currentUrl: () => url,
+    send: (data: string) => {
+      if (!socket) {
+        opts.logger?.debug('G3.2b: standby→primary send dropped — no link attached');
+        return;
+      }
+      if (socket.readyState !== WebSocket.OPEN) {
+        opts.logger?.debug(
+          { readyState: socket.readyState },
+          'G3.2b: standby→primary send dropped — link not OPEN',
+        );
+        return;
+      }
+      try {
+        socket.send(data);
+      } catch (err) {
+        // Best-effort — link died mid-flight must not crash the caller.
+        opts.logger?.warn({ err }, 'G3.2b: standby→primary send failed (link down)');
+      }
+    },
   };
 }

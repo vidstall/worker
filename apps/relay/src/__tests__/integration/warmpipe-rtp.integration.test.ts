@@ -41,6 +41,7 @@ import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
 import {
   ensureWarmPipe,
+  createStandbyPipeTransport,
   type RoomTopology,
 } from '../../relay-role-manager.js';
 import {
@@ -327,6 +328,73 @@ describe('warm-pipe RTP -- production-faithful (manual cross-PipeTransport pairi
         `inboundByteCount=${inbound?.byteCount} ` +
         `resume->firstRtp=${cutoverMs}ms`,
     );
+
+    sink.consumer.close();
+    warmPipeConsumer!.close();
+    src.producer.close();
+  }, 20_000);
+
+  it('REQ-RO-005: ensureWarmPipe consumes onto a CONNECTED createStandbyPipeTransport handle, stays paused, RTP flows on resume', async () => {
+    const src = await makePrimaryRtpSource();
+
+    // PRIMARY half (port:0 => OS-assigned, avoid PIPE_PORT_RANGE collisions).
+    const primaryPipe = await createPrimaryPipeTransport(primaryRouter, 0);
+
+    // STANDBY half via the NEW factory — we hold the handle, so we can read
+    // tuple.localPort + connect() BEFORE consuming (the F1 handshake order).
+    const standbyPipe = await createStandbyPipeTransport(standbyRouter, 0);
+
+    await primaryPipe.connect({
+      ip: '127.0.0.1',
+      port: standbyPipe.tuple.localPort,
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+    await standbyPipe.connect({
+      ip: '127.0.0.1',
+      port: primaryPipe.tuple.localPort,
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+
+    const primaryPipeConsumer = await pipeProducerOntoPrimaryTransport(primaryPipe, src.producer.id);
+    const pipedProducerId = primaryPipeConsumer.id;
+
+    // The downstream-readable producer on the standby pipe.
+    const pipedProducer = await standbyPipe.produce({
+      id: pipedProducerId,
+      kind: primaryPipeConsumer.kind,
+      rtpParameters: primaryPipeConsumer.rtpParameters,
+      paused: primaryPipeConsumer.producerPaused,
+    } as Parameters<msTypes.PipeTransport['produce']>[0]);
+
+    // KEY ASSERTION: ensureWarmPipe consumes onto the PASSED-IN connected
+    // transport (REQ-RO-005 refactor) — paused, retained, no new transport.
+    const topology: RoomTopology = {
+      roomId: 'passed-pipe-room',
+      role: 'standby',
+      primaryEndpoint: 'ws://127.0.0.1:0',
+      standbyEndpoint: 'ws://127.0.0.1:0',
+      pipePort: 0,
+      pipeConsumer: null,
+      pipeTransport: null,
+    };
+    const warmPipeConsumer = await ensureWarmPipe(
+      topology,
+      standbyRouter,
+      0,
+      pipedProducerId,
+      standbyPipe, // <-- passed-in transport
+    );
+    expect(warmPipeConsumer).not.toBeNull();
+    expect(warmPipeConsumer!.paused).toBe(true);          // REQ-RO-005 still paused
+    expect(topology.pipeTransport).toBe(standbyPipe);     // retained (N2)
+
+    // Real RTP across the CONNECTED handle, observed via a downstream sink.
+    const sink = await makeStandbySink(pipedProducer.id);
+    src.start();
+    await sleep(250);
+    expect(sink.rtpCount()).toBe(0);                      // paused → nothing yet
+    await sink.consumer.resume();                         // CUTOVER
+    await sleep(500);
+    src.stop();
+    expect(sink.rtpCount()).toBeGreaterThan(0);
 
     sink.consumer.close();
     warmPipeConsumer!.close();

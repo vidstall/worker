@@ -24,8 +24,12 @@ import {
   buildPipeProducerAnnounce,
   InterRelayProducerRegistry,
   createInterRelayAnnouncer,
+  isPipeConnectFrame,
+  buildPipeConnectFrame,
   type PipeProducerAnnounce,
   type InterRelaySender,
+  type PipeConnectFrame,
+  type PipeConnectParams,
 } from '../inter-relay.js';
 
 // ── isPipeProducerAnnounce ─────────────────────────────────────────────
@@ -164,5 +168,96 @@ describe('createInterRelayAnnouncer', () => {
     // Must NOT throw — the primary's produce path stays healthy even if the
     // standby link is temporarily down (announce is best-effort).
     expect(() => announce('room-8', { id: 'p8', kind: 'video' })).not.toThrow();
+  });
+});
+
+// ── isPipeConnectFrame (REQ-RO-006) ───────────────────────────────────
+// The symmetric pipe-connect connect-param frame, exchanged BOTH ways. Mirrors
+// PipeProducerAnnounce exactly (flat JSON, string-literal discriminant,
+// typeof-every-field guard, NO version/correlation id). srtpParameters is
+// OPTIONAL (single-host scope = enableSrtp:false → undefined).
+
+describe('isPipeConnectFrame', () => {
+  it('RED-RO-006-1: accepts a valid pipe-connect frame (no srtpParameters)', () => {
+    const frame: PipeConnectFrame = {
+      type: 'pipe-connect',
+      roomId: 'room-1',
+      ip: '127.0.0.1',
+      port: 40000,
+    };
+    expect(isPipeConnectFrame(frame)).toBe(true);
+  });
+
+  it('RED-RO-006-2: accepts a valid pipe-connect frame WITH srtpParameters', () => {
+    const frame: PipeConnectFrame = {
+      type: 'pipe-connect',
+      roomId: 'room-1',
+      ip: '10.0.0.7',
+      port: 40005,
+      srtpParameters: {
+        cryptoSuite: 'AES_CM_128_HMAC_SHA1_80',
+        keyBase64: 'YWJjZGVmZ2hpamtsbW5vcA==',
+      } as PipeConnectFrame['srtpParameters'],
+    };
+    expect(isPipeConnectFrame(frame)).toBe(true);
+  });
+
+  it('RED-RO-006-3: rejects a frame with the wrong type', () => {
+    expect(
+      isPipeConnectFrame({ type: 'pipe-producer', roomId: 'r', ip: '127.0.0.1', port: 40000 }),
+    ).toBe(false);
+  });
+
+  it('RED-RO-006-4: rejects a frame missing ip', () => {
+    expect(isPipeConnectFrame({ type: 'pipe-connect', roomId: 'r', port: 40000 })).toBe(false);
+  });
+
+  it('RED-RO-006-5: rejects a frame whose port is not a number', () => {
+    expect(
+      isPipeConnectFrame({ type: 'pipe-connect', roomId: 'r', ip: '127.0.0.1', port: '40000' }),
+    ).toBe(false);
+  });
+
+  it('RED-RO-006-6: rejects null / non-object', () => {
+    expect(isPipeConnectFrame(null)).toBe(false);
+    expect(isPipeConnectFrame('pipe-connect')).toBe(false);
+    expect(isPipeConnectFrame(42)).toBe(false);
+  });
+});
+
+// ── buildPipeConnectFrame (REQ-RO-006) ────────────────────────────────
+
+describe('buildPipeConnectFrame', () => {
+  it('RED-RO-006-7: produces the locked frame shape from PipeConnectParams (no srtp)', () => {
+    const params: PipeConnectParams = { ip: '127.0.0.1', port: 40010 };
+    const frame = buildPipeConnectFrame('room-9', params);
+
+    expect(frame).toEqual({
+      type: 'pipe-connect',
+      roomId: 'room-9',
+      ip: '127.0.0.1',
+      port: 40010,
+    });
+    // round-trip: the built frame passes its own guard
+    expect(isPipeConnectFrame(frame)).toBe(true);
+  });
+
+  it('RED-RO-006-8: carries srtpParameters through when present', () => {
+    const params: PipeConnectParams = {
+      ip: '10.0.0.7',
+      port: 40011,
+      srtpParameters: {
+        cryptoSuite: 'AES_CM_128_HMAC_SHA1_80',
+        keyBase64: 'YWJjZGVmZ2hpamtsbW5vcA==',
+      } as PipeConnectParams['srtpParameters'],
+    };
+    const frame = buildPipeConnectFrame('room-10', params);
+
+    expect(frame.type).toBe('pipe-connect');
+    expect(frame.roomId).toBe('room-10');
+    expect(frame.ip).toBe('10.0.0.7');
+    expect(frame.port).toBe(40011);
+    expect(frame.srtpParameters).toEqual(params.srtpParameters);
+    expect(isPipeConnectFrame(frame)).toBe(true);
   });
 });

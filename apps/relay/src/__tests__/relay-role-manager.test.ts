@@ -16,6 +16,9 @@ import {
   determineRole,
   parsePipePortRange,
   ensureWarmPipe,
+  createPipePortAllocator,
+  createStandbyPipeTransport,
+  createPipeLivenessObserver,
   type RoomTopology,
 } from '../relay-role-manager.js';
 
@@ -334,5 +337,382 @@ describe('ensureWarmPipe — G3.1 ANNOUNCED_IP + pipeTransport retention', () =>
     // the stale transport1 must have been closed before transport2 was bound.
     expect(transport1.close).toHaveBeenCalledOnce();
     expect(topology.pipeTransport).toBe(transport2);
+  });
+});
+
+// ── createPipePortAllocator (REQ-RO-009) ──────────────────────────────
+// Per-room + per-role PIPE_PORT allocator. Replaces the single hardcoded
+// pipePortRange.min so >1 room never collides (EADDRINUSE). Idempotent per key
+// (preserves the N3 re-run invariant). Released on room close / coordinator.clear.
+
+describe('createPipePortAllocator', () => {
+  it('RED-RO-009-1: allocate returns distinct ports for distinct keys', () => {
+    const alloc = createPipePortAllocator({ min: 40000, max: 40100 });
+    const a = alloc.allocate('room-1');
+    const b = alloc.allocate('room-2');
+    const c = alloc.allocate('room-1:primary');
+
+    expect(a).not.toBe(b);
+    expect(b).not.toBe(c);
+    expect(a).not.toBe(c);
+    // all within range
+    for (const p of [a, b, c]) {
+      expect(p).toBeGreaterThanOrEqual(40000);
+      expect(p).toBeLessThanOrEqual(40100);
+    }
+    expect(alloc.size()).toBe(3);
+  });
+
+  it('RED-RO-009-2: allocate is idempotent per key (re-run returns the SAME port, N3 invariant)', () => {
+    const alloc = createPipePortAllocator({ min: 40000, max: 40100 });
+    const first = alloc.allocate('room-g3');
+    const again = alloc.allocate('room-g3');
+
+    expect(again).toBe(first);
+    // a re-run must NOT consume a second slot
+    expect(alloc.size()).toBe(1);
+  });
+
+  it('RED-RO-009-3: keys a room standby and its :primary distinctly (same-host no collision)', () => {
+    const alloc = createPipePortAllocator({ min: 40000, max: 40100 });
+    const standby = alloc.allocate('room-x');
+    const primary = alloc.allocate('room-x:primary');
+
+    expect(standby).not.toBe(primary);
+    expect(alloc.size()).toBe(2);
+  });
+
+  it('RED-RO-009-4: release frees a key, lowering size and recycling the port', () => {
+    const alloc = createPipePortAllocator({ min: 40000, max: 40001 });
+    const a = alloc.allocate('room-1');
+    const b = alloc.allocate('room-2');
+    expect(alloc.size()).toBe(2);
+
+    alloc.release('room-1');
+    expect(alloc.size()).toBe(1);
+
+    // the freed port is recyclable on a new key (exhausted otherwise: range holds 2)
+    const c = alloc.allocate('room-3');
+    expect(c).toBe(a);
+    expect(b).not.toBe(c);
+    expect(alloc.size()).toBe(2);
+  });
+
+  it('RED-RO-009-5: release of an unknown key is a no-op (no throw, size unchanged)', () => {
+    const alloc = createPipePortAllocator({ min: 40000, max: 40100 });
+    alloc.allocate('room-1');
+    expect(() => alloc.release('never-allocated')).not.toThrow();
+    expect(alloc.size()).toBe(1);
+  });
+
+  it('RED-RO-009-6: throws on exhaustion when every port in the range is taken', () => {
+    // range [40000..40002] = 3 ports
+    const alloc = createPipePortAllocator({ min: 40000, max: 40002 });
+    alloc.allocate('a');
+    alloc.allocate('b');
+    alloc.allocate('c');
+    expect(alloc.size()).toBe(3);
+
+    expect(() => alloc.allocate('d')).toThrow(/exhausted/i);
+  });
+});
+
+// ── createStandbyPipeTransport + ensureWarmPipe(passed-in transport) (REQ-RO-005) ──
+// F1 live handshake needs the standby's PipeTransport handle BEFORE consuming
+// (to read tuple.localPort, announce it, connect() it). createStandbyPipeTransport
+// mints it (mirrors createPrimaryPipeTransport); ensureWarmPipe then consumes onto
+// the PASSED-IN transport (still paused, retained for teardown) instead of minting
+// its own — preserving the 4-arg create-own contract for every existing caller.
+
+describe('createStandbyPipeTransport (REQ-RO-005)', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('mints a PipeTransport on the router with ANNOUNCED_IP + enableSrtp:false', async () => {
+    vi.stubEnv('ANNOUNCED_IP', '10.0.0.9');
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    const result = await createStandbyPipeTransport(router as any, 40005);
+
+    expect(result).toBe(pipeTransport);
+    expect(router.createPipeTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        listenIp: { ip: '0.0.0.0', announcedIp: '10.0.0.9' },
+        port: 40005,
+        enableRtx: false,
+        enableSrtp: false,
+      }),
+    );
+  });
+
+  it('defaults announcedIp to 127.0.0.1 when ANNOUNCED_IP is unset', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    await createStandbyPipeTransport(router as any, 40006);
+
+    expect(router.createPipeTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' } }),
+    );
+  });
+});
+
+describe('ensureWarmPipe — consume onto a PASSED-IN transport (REQ-RO-005)', () => {
+  let topology: RoomTopology;
+
+  beforeEach(() => {
+    topology = {
+      roomId: 'room-passed',
+      role: 'standby',
+      primaryEndpoint: 'ws://primary:4000',
+      standbyEndpoint: 'ws://standby:4000',
+      pipePort: 40000,
+      pipeConsumer: null,
+      pipeTransport: null,
+    };
+  });
+
+  it('consumes onto the passed-in transport (does NOT create its own) and still pauses', async () => {
+    const consumer = makeMockConsumer();
+    const passedTransport = makeMockPipeTransport(consumer);
+    // router must NOT be asked to create a transport when one is passed in.
+    const router = makeMockRouter(makeMockPipeTransport(makeMockConsumer()));
+
+    const result = await ensureWarmPipe(
+      topology,
+      router as any,
+      40000,
+      'producer-REAL',
+      passedTransport as any,
+    );
+
+    expect(router.createPipeTransport).not.toHaveBeenCalled();
+    expect(passedTransport.consume).toHaveBeenCalledOnce();
+    const consumeArg = passedTransport.consume.mock.calls[0]![0] as { producerId: string };
+    expect(consumeArg.producerId).toBe('producer-REAL');
+    expect(consumer.pause).toHaveBeenCalledOnce(); // REQ-RO-005 preserved
+    expect(result).toBe(consumer);
+  });
+
+  it('retains the passed-in transport on topology.pipeTransport (teardown / N2)', async () => {
+    const consumer = makeMockConsumer();
+    const passedTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(makeMockPipeTransport(makeMockConsumer()));
+
+    await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL', passedTransport as any);
+
+    expect(topology.pipeTransport).toBe(passedTransport);
+  });
+
+  it('falls back to create-own (4-arg, unchanged) when no transport is passed', async () => {
+    const consumer = makeMockConsumer();
+    const ownTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(ownTransport);
+
+    const result = await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL');
+
+    expect(router.createPipeTransport).toHaveBeenCalledOnce(); // create-own path
+    expect(ownTransport.consume).toHaveBeenCalledOnce();
+    expect(consumer.pause).toHaveBeenCalledOnce();
+    expect(topology.pipeTransport).toBe(ownTransport);
+    expect(result).toBe(consumer);
+  });
+});
+
+// ── createPipeLivenessObserver (REQ-RO-010 + REQ-RO-011) ──────────────
+// Honest probe flip: pipeConsumerAlive on consumer existence (not closed);
+// rtcpAlive ONLY on a non-zero counter ADVANCE across >=2 getStats() samples
+// (NEVER set-on-create); BOTH cleared false on null/closed. Writes via the
+// injected setLiveness closure (index.ts wires it to the probeLiveness box).
+// Uses fake timers to drive the poll deterministically (no real wall-clock).
+
+describe('createPipeLivenessObserver — honest probe flip', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  /** A mock pipe consumer whose getStats() returns a controllable counter. */
+  function makeStatConsumer(initial = 0) {
+    let packetCount = initial;
+    return {
+      consumer: {
+        closed: false,
+        getStats: vi.fn(async () => [
+          { type: 'outbound-rtp', packetCount, byteCount: 0, nackCount: 0, pliCount: 0, firCount: 0 },
+        ]),
+      },
+      advanceBy: (n: number) => {
+        packetCount += n;
+      },
+    };
+  }
+
+  /** Drive N poll ticks, awaiting the async getStats() each tick settles. */
+  async function pump(ticks: number, intervalMs: number): Promise<void> {
+    for (let i = 0; i < ticks; i++) {
+      await vi.advanceTimersByTimeAsync(intervalMs);
+    }
+  }
+
+  it('RED-RO-010: NEVER set-on-create — rtcpAlive false after the first sample (no prior to compare)', async () => {
+    const { consumer } = makeStatConsumer(500); // non-zero ABSOLUTE counter
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => consumer as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(1, 100); // exactly ONE sample taken
+    obs.stop();
+
+    const last = calls.at(-1)!;
+    expect(last.pipeConsumerAlive).toBe(true); // consumer exists
+    expect(last.rtcpAlive).toBe(false); // no ADVANCE yet — never set-on-create
+  });
+
+  it('RED-RO-010: flips rtcpAlive true after a non-zero ADVANCE across >=2 samples', async () => {
+    const sc = makeStatConsumer(100);
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => sc.consumer as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(1, 100); // sample #1 (baseline)
+    expect(calls.at(-1)!.rtcpAlive).toBe(false);
+    sc.advanceBy(7); // real RTP/RTCP moved the counter
+    await pump(1, 100); // sample #2 — advance detected
+    obs.stop();
+
+    expect(calls.at(-1)!.rtcpAlive).toBe(true);
+    expect(calls.at(-1)!.pipeConsumerAlive).toBe(true);
+  });
+
+  it('RED-RO-011: STATIC counters never flip rtcpAlive (paused-unpaid honesty — no over-claim)', async () => {
+    const sc = makeStatConsumer(900); // big but NEVER advances
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => sc.consumer as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(5, 100); // 5 samples, counter frozen
+    obs.stop();
+
+    expect(calls.every((c) => c.rtcpAlive === false)).toBe(true);
+    expect(calls.at(-1)!.pipeConsumerAlive).toBe(true);
+  });
+
+  it('RED-RO-010: clears BOTH false when getPipeConsumer returns null', async () => {
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => null,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(1, 100);
+    obs.stop();
+
+    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false });
+  });
+
+  it('RED-RO-010: clears BOTH false when the consumer is closed', async () => {
+    const closedConsumer = {
+      closed: true,
+      getStats: vi.fn(async () => []),
+    };
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => closedConsumer as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(1, 100);
+    obs.stop();
+
+    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false });
+    expect(closedConsumer.getStats).not.toHaveBeenCalled(); // short-circuit on closed
+  });
+
+  it('RED-RO-010: a previously-live rtcpAlive RESETS to false if the consumer disappears (no stale true)', async () => {
+    const sc = makeStatConsumer(0);
+    let present: typeof sc.consumer | null = sc.consumer;
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => present as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(1, 100); // baseline
+    sc.advanceBy(10);
+    await pump(1, 100); // rtcpAlive -> true
+    expect(calls.at(-1)!.rtcpAlive).toBe(true);
+    present = null; // pipe consumer gone (worker.died / cutover teardown)
+    await pump(1, 100);
+    obs.stop();
+
+    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false });
+  });
+
+  it('RED-RO-010: stop() halts polling (no further setLiveness calls)', async () => {
+    const sc = makeStatConsumer(0);
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => sc.consumer as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(2, 100);
+    const countAtStop = calls.length;
+    obs.stop();
+    sc.advanceBy(50);
+    await pump(5, 100);
+
+    expect(calls.length).toBe(countAtStop); // no polls after stop
+  });
+
+  it('RED-RO-010: a rejected getStats() leaves liveness flags untouched (does not crash the loop)', async () => {
+    const flakyConsumer = {
+      closed: false,
+      getStats: vi.fn(async () => {
+        throw new Error('getStats on a transient transport');
+      }),
+    };
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => flakyConsumer as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(2, 100); // both ticks: getStats rejects
+    obs.stop();
+
+    // consumer EXISTS + not closed -> pipeConsumerAlive true; rtcpAlive stays
+    // false (no usable sample); loop survived the rejection.
+    expect(calls.at(-1)!.pipeConsumerAlive).toBe(true);
+    expect(calls.at(-1)!.rtcpAlive).toBe(false);
   });
 });
