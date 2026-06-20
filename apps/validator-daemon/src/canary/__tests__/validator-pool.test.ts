@@ -24,7 +24,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildRoomScopedValidatorPool,
+  buildRelayScopedValidatorPool,
   type RoomScopeInput,
+  type RelayScopeInput,
+  type ScopedRoom,
 } from '../validator-pool.js';
 import { assignCells, type CanaryValidator } from '../cell.js';
 
@@ -37,6 +40,13 @@ const room = (validatorIds: string[], primaryRelayId?: string): { validatorIds: 
   validatorIds,
   primaryRelayId,
 });
+
+/** A ScopedRoom fixture (relay slots + co-auditors) for the per-relay builder. */
+const scopedRoom = (
+  validatorIds: string[],
+  primaryRelayId?: string,
+  standbyRelayId?: string,
+): ScopedRoom => ({ validatorIds, primaryRelayId, standbyRelayId });
 
 const minerIds = (pool: CanaryValidator[]): string[] => pool.map((v) => v.minerId).sort();
 
@@ -123,5 +133,126 @@ describe('room-scoped pool fed to assignCells — coverage honesty (REQ-CFA-025)
     const cellsBelow = assignCells({ relays: ['relay-A'], validators: belowFloor, round: 1, assignmentSecret });
     // Honest: a single-distinct pool cannot reach the >=2 floor → covered flips to false.
     expect(cellsBelow[0]?.covered).toBe(false);
+  });
+});
+
+// ── M4a chunk 1: PER-RELAY room-scoping (REQ-CFA-036 / REQ-CFA-037, D-CFA-30/31) ──
+//
+// M3's buildRoomScopedValidatorPool UNIONs the co-auditors across ALL of this daemon's
+// own rooms. When that union is fed to assignCells for relay-A's cell, a room-B-ONLY
+// co-auditor can be picked into relay-A's cell -> the cross-receiver denominator the loss
+// classifier reasons over OVER-COUNTS (W-M3-OVERCOUNT). The per-relay builder narrows the
+// pool to ONLY the co-auditors of the room(s) THIS relay serves (primary OR standby),
+// drawn from the already-event-sourced ScopedRoom.primaryRelayId/standbyRelayId — ZERO new
+// chain read, INV-C-safe (miner_id only). It is a coverage-ACCURACY fix on the SELF-REPORT
+// half (D-CFA-15), NOT a slashing change.
+
+describe('buildRelayScopedValidatorPool (REQ-CFA-036 / D-CFA-30)', () => {
+  it("(a) relay-A's pool EXCLUDES a room-B-only co-auditor (no cross-room union)", () => {
+    // relay-A serves room A=[v1,v2]; relay-B serves room B=[v3,v4].
+    const input: RelayScopeInput = {
+      activeRooms: [scopedRoom(['v1', 'v2'], 'relay-A'), scopedRoom(['v3', 'v4'], 'relay-B')],
+      self: SELF,
+      relayId: 'relay-A',
+    };
+    const ids = minerIds(buildRelayScopedValidatorPool(input));
+    // v3/v4 are room-B-only — they MUST NOT appear in relay-A's cell.
+    expect(ids).not.toContain('v3');
+    expect(ids).not.toContain('v4');
+    // Only relay-A's own room co-auditors + self.
+    expect(ids).toEqual(['self-miner', 'v1', 'v2']);
+  });
+
+  it('(b) a relay serving as STANDBY in a room sees that room co-auditors', () => {
+    // relay-S is the STANDBY of room A (primary relay-P). Auditing the standby slot must
+    // still scope to room A's co-auditors (RO-019a: the validator probes BOTH slots).
+    const input: RelayScopeInput = {
+      activeRooms: [scopedRoom(['v1', 'v2'], 'relay-P', 'relay-S')],
+      self: SELF,
+      relayId: 'relay-S',
+    };
+    expect(minerIds(buildRelayScopedValidatorPool(input))).toEqual(['self-miner', 'v1', 'v2']);
+  });
+
+  it('(c) ALWAYS includes the self-entry with its REAL session wallet', () => {
+    const input: RelayScopeInput = {
+      activeRooms: [scopedRoom(['v1'], 'relay-A')],
+      self: SELF,
+      relayId: 'relay-A',
+    };
+    const pool = buildRelayScopedValidatorPool(input);
+    const selfEntry = pool.find((v) => v.minerId === 'self-miner');
+    expect(selfEntry?.sessionWallet).toBe('self-session');
+  });
+
+  it('(d) a relay this daemon does not serve yields a self-only pool', () => {
+    const input: RelayScopeInput = {
+      activeRooms: [scopedRoom(['v1', 'v2'], 'relay-A')],
+      self: SELF,
+      relayId: 'relay-UNKNOWN',
+    };
+    expect(minerIds(buildRelayScopedValidatorPool(input))).toEqual(['self-miner']);
+  });
+
+  it('(e) zero new chain read: never reads the demoted registry discovery set', () => {
+    // The per-relay builder takes NO `discovered` input at all — the registry-wide set
+    // cannot widen a relay-scoped pool (it never could, D-CFA-24; here it is not even an arg).
+    const input: RelayScopeInput = {
+      activeRooms: [scopedRoom(['v1', 'v2'], 'relay-A')],
+      self: SELF,
+      relayId: 'relay-A',
+    };
+    // @ts-expect-error — RelayScopeInput has no `discovered` field by design.
+    input.discovered = ['reg-only'];
+    expect(minerIds(buildRelayScopedValidatorPool(input))).not.toContain('reg-only');
+  });
+});
+
+describe('multi-homed relay disposition (REQ-CFA-037 / D-CFA-31 — NO silent re-union)', () => {
+  // A relay miner_id homed in TWO of this daemon's rooms (room A=[v1,v2], room B=[v5,v6])
+  // must yield ONE cell per (relay, room). The PURE builder is room-scoped per call: scoping
+  // relay-M against room A's slice excludes room B's co-auditors, and vice-versa. A silent
+  // re-union (returning v1,v2,v5,v6 in BOTH cells) re-opens W-M3-OVERCOUNT and MUST fail.
+
+  it("per-(relay,room) scoping: relay-M's room-A pool excludes room-B co-auditors", () => {
+    const roomA = scopedRoom(['v1', 'v2'], 'relay-M');
+    const roomB = scopedRoom(['v5', 'v6'], 'relay-M');
+
+    // Scope relay-M against ONLY room A's slice (the per-(relay,room) loop passes one room).
+    const poolForRoomA = buildRelayScopedValidatorPool({
+      activeRooms: [roomA],
+      self: SELF,
+      relayId: 'relay-M',
+    });
+    const idsA = minerIds(poolForRoomA);
+    expect(idsA).toEqual(['self-miner', 'v1', 'v2']);
+    // The re-union guard: room-B co-auditors MUST NOT bleed into relay-M's room-A cell.
+    expect(idsA).not.toContain('v5');
+    expect(idsA).not.toContain('v6');
+
+    // Scope relay-M against ONLY room B's slice.
+    const poolForRoomB = buildRelayScopedValidatorPool({
+      activeRooms: [roomB],
+      self: SELF,
+      relayId: 'relay-M',
+    });
+    const idsB = minerIds(poolForRoomB);
+    expect(idsB).toEqual(['self-miner', 'v5', 'v6']);
+    expect(idsB).not.toContain('v1');
+    expect(idsB).not.toContain('v2');
+  });
+
+  it('a multi-room-in-one-call scope WOULD re-union — pin that the per-room slice is the contract', () => {
+    // If the builder is (incorrectly) handed BOTH of relay-M's rooms in a single call, it
+    // unions them (v1,v2,v5,v6) — exactly the re-union W-M3-OVERCOUNT. This test PINS that
+    // the over-count closure DEPENDS on the caller passing ONE room per (relay,room) cell;
+    // the per-(relay,room) loop in startCanaryCellLoop is what guarantees that disposition.
+    const reUnioned = buildRelayScopedValidatorPool({
+      activeRooms: [scopedRoom(['v1', 'v2'], 'relay-M'), scopedRoom(['v5', 'v6'], 'relay-M')],
+      self: SELF,
+      relayId: 'relay-M',
+    });
+    // Documents the failure mode: a multi-room call DOES over-count. The loop MUST never do this.
+    expect(minerIds(reUnioned)).toEqual(['self-miner', 'v1', 'v2', 'v5', 'v6']);
   });
 });

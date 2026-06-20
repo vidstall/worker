@@ -95,6 +95,63 @@ export function buildRoomScopedValidatorPool(input: RoomScopeInput): CanaryValid
   return [...union.values()];
 }
 
+/** Inputs to {@link buildRelayScopedValidatorPool} (M4a chunk 1, D-CFA-30). */
+export interface RelayScopeInput {
+  /**
+   * This daemon's active rooms (the relay slots + co-auditor `validatorIds`). The pool is
+   * scoped to ONLY the rooms `relayId` serves (primary OR standby), NOT the union across
+   * all rooms — that union is the M3 over-count (W-M3-OVERCOUNT).
+   */
+  activeRooms: ScopedRoom[];
+  /** This daemon's own validator entry — ALWAYS included so the daemon never loses self-coverage. */
+  self: CanaryValidator;
+  /** The relay miner_id whose cell is being built. Only rooms it serves contribute co-auditors. */
+  relayId: string;
+}
+
+/**
+ * REQ-CFA-036 / D-CFA-30 — build the PER-RELAY-scoped canary validator pool: the co-auditors
+ * of ONLY the rooms `relayId` serves (as primary OR standby), plus the self-entry (always).
+ *
+ * M3's {@link buildRoomScopedValidatorPool} unions the co-auditors across ALL of this
+ * daemon's rooms; when that union is fed to `assignCells` for relay-A's cell, a room-B-ONLY
+ * co-auditor can be picked into relay-A's cell -> the cross-receiver denominator the loss
+ * classifier reasons over OVER-COUNTS (W-M3-OVERCOUNT). This sibling narrows the pool to the
+ * rooms THIS relay actually serves, drawn from the already-event-sourced
+ * `ScopedRoom.primaryRelayId/standbyRelayId` (`applyRoomAssigned`) — **ZERO new chain read**,
+ * INV-C-safe (every id is a public miner_id; no on-chain A<->B link, no secret).
+ *
+ * MULTI-HOMED RELAY (REQ-CFA-037 / D-CFA-31): the per-`(relay,room)` loop calls this ONCE per
+ * room a relay serves (passing that single room's slice), so a relay homed in two rooms emits
+ * ONE cell per `(relay,room)` — NO silent re-union. A registry validator is NEVER read here
+ * (no `discovered` arg) so the demoted registry set cannot widen a relay-scoped pool.
+ *
+ * Deduped by `minerId` (the self-entry keeps its REAL session wallet; room-derived co-auditors
+ * carry an EMPTY `sessionWallet` — the same shape `assignCells` already dedups by `minerId`,
+ * never using `sessionWallet` for distinctness). PURE: deterministic, allocation-only, no I/O.
+ *
+ * SCOPE HONESTY (D-CFA-15 / W-M3-OVERCOUNT): a coverage-ACCURACY fix on the SELF-REPORT half —
+ * it SHRINKS the per-relay pool. NOT a slashing-correctness change.
+ */
+export function buildRelayScopedValidatorPool(input: RelayScopeInput): CanaryValidator[] {
+  const union = new Map<string, CanaryValidator>();
+  // Self is ALWAYS first and authoritative (keeps its real session wallet).
+  union.set(input.self.minerId, input.self);
+
+  for (const room of input.activeRooms) {
+    // Only rooms THIS relay serves (primary OR standby) contribute co-auditors — never the
+    // cross-room union (that is the M3 over-count). RO-019a: the validator audits both slots.
+    const servesRoom = room.primaryRelayId === input.relayId || room.standbyRelayId === input.relayId;
+    if (!servesRoom) continue;
+    for (const minerId of room.validatorIds) {
+      // Never overwrite the self-entry's real session wallet with a room placeholder.
+      if (!union.has(minerId)) union.set(minerId, { minerId, sessionWallet: '' });
+    }
+  }
+
+  return [...union.values()];
+}
+
 // ── Pure event reducers (the RoomAssigned/RelayPromoted seam index.ts delegates to) ──
 //
 // The inline RoomAssigned arm inside index.ts's `main()` is not unit-testable in isolation

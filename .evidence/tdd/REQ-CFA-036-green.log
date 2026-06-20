@@ -1,0 +1,20 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon[39m
+
+{"level":30,"time":1781934603089,"pid":9492,"hostname":"Quang","name":"canary/cell","round":0,"scopes":2,"cells":2,"covered":2,"msg":"canary cell round assigned"}
+{"level":30,"time":1781934603092,"pid":9492,"hostname":"Quang","name":"canary/cell","round":0,"scopes":2,"cells":2,"covered":2,"msg":"canary cell round assigned"}
+ [32m✓[39m src/canary/__tests__/validator-pool.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+{"level":30,"time":1781934603094,"pid":9492,"hostname":"Quang","name":"canary/cell","round":0,"scopes":1,"cells":1,"covered":1,"msg":"canary cell round assigned"}
+{"level":30,"time":1781934603090,"pid":9492,"hostname":"Quang","name":"canary/cell","intervalMs":1000000,"msg":"canary cell loop started"}
+{"level":30,"time":1781934603090,"pid":9492,"hostname":"Quang","name":"canary/cell","msg":"canary cell loop stopped"}
+{"level":30,"time":1781934603092,"pid":9492,"hostname":"Quang","name":"canary/cell","intervalMs":1000000,"msg":"canary cell loop started"}
+{"level":30,"time":1781934603092,"pid":9492,"hostname":"Quang","name":"canary/cell","msg":"canary cell loop stopped"}
+{"level":30,"time":1781934603094,"pid":9492,"hostname":"Quang","name":"canary/cell","intervalMs":1000000,"msg":"canary cell loop started"}
+{"level":30,"time":1781934603094,"pid":9492,"hostname":"Quang","name":"canary/cell","msg":"canary cell loop stopped"}
+ [32m✓[39m src/canary/__tests__/relay-scoped-cell-loop.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 21[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m16 passed[39m[22m[90m (16)[39m
+[2m   Start at [22m 12:50:02
+[2m   Duration [22m 1.12s[2m (transform 227ms, setup 0ms, collect 1.12s, tests 40ms, environment 0ms, prepare 468ms)[22m
+

@@ -16,7 +16,7 @@
 
 import 'dotenv/config';
 import type { SuiClient } from '@mysten/sui/client';
-import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import {
   createSuiClient,
@@ -69,10 +69,16 @@ import {
   deriveAssignmentSecret,
   type CanaryValidator,
   type CanaryCellLoopHandle,
+  type RelayRoomScope,
 } from './canary/cell.js';
 import { discoverActiveValidatorMinerIds } from './canary/validator-discovery.js';
-import { buildRoomScopedValidatorPool } from './canary/validator-pool.js';
+import { buildRelayScopedValidatorPool, type ScopedRoom } from './canary/validator-pool.js';
 import { startCoverageServer, type CoverageStateProvider } from './canary/coverage-server.js';
+import {
+  startCanaryVerifyLoop,
+  type CanaryVerifyLoopHandle,
+  type CanaryForwardCaptureResult,
+} from './canary/verify-loop.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -105,10 +111,11 @@ export interface ActiveRoom {
   /**
    * REQ-CFA-023 (M3 chunk 1, D-CFA-24): the co-auditor validator miner_ids for THIS
    * room, sourced from the in-event `RoomAssigned.validator_ids` (already parsed for the
-   * self-membership test, then discarded — ZERO new chain cost). Room-scopes the canary
-   * validator pool (`buildRoomScopedValidatorPool`) so coverage is reported/assigned over
-   * this daemon's OWN rooms' co-auditors, NOT the registry-wide set (closes the M2 over-
-   * count, W-M2-3). Written ONLY by the RoomAssigned arm; relay promotion leaves it
+   * self-membership test, then discarded — ZERO new chain cost). M4a chunk 1 (D-CFA-30):
+   * per-relay scopes the canary validator pool (`buildRelayScopedValidatorPool`) so coverage
+   * is reported/assigned over ONLY the co-auditors of the room(s) a given relay serves, NOT
+   * the cross-room union (closes the over-count W-M3-OVERCOUNT; M3 closed the registry-wide
+   * over-count W-M2-3). Written ONLY by the RoomAssigned arm; relay promotion leaves it
    * unchanged (promote_relay touches only assigned_relays — W-M3-STALE). Defaults to [].
    */
   validatorIds?: string[];
@@ -159,6 +166,17 @@ export interface DaemonState {
    * covert-publish / verify loops (Task 5.2+).
    */
   canaryCellLoop: CanaryCellLoopHandle | null;
+  /**
+   * REQ-CFA-042/043 (M4a chunk 3, D-CFA-33): the additive crash-safe canary VERIFY loop handle
+   * (verifyForwardedCanary -> classifyDivergences -> buildDivergenceProof -> submit, behind an
+   * injectable capture+submit seam). Null if the loop failed to start (guarded) — its start is
+   * wrapped so a fault can NEVER abort the daemon. It is the FIRST real reader of
+   * `relayStunLossBps` (closes W-M3-STUN-PATH). The production capture seam yields NO live
+   * frames yet (the live producer/SFU-forward/consumer media plane is M4b, port-locked); the
+   * loop is WIRED and reads STUN, but promotes nothing until M4b supplies live captures
+   * (W-M3-SIM narrowed; this loop AMPLIFIES the off-chain gate W-M3-OFFCHAIN — on record).
+   */
+  canaryVerifyLoop: CanaryVerifyLoopHandle | null;
   /**
    * M2 chunk 2 (REQ-CFA-019/020): the latest live-discovered active-validator miner_ids
    * (Wallet-A ids from validator_registry::get_active_validators), refreshed each canary
@@ -304,6 +322,7 @@ export async function startDaemon(overrides?: {
     relayStunLossBps: new Map(),
     healthMonitorStop: null,
     canaryCellLoop: null,
+    canaryVerifyLoop: null,
     discoveredValidatorMinerIds: undefined,
     coverageServer: null,
     running: true,
@@ -383,37 +402,45 @@ export async function startDaemon(overrides?: {
       assignmentSecret,
       logger: cellLog,
       deps: {
-        getRelays: () => {
-          const relays = new Set<string>();
-          for (const room of state.activeRooms.values()) {
-            if (room.primaryRelayId) relays.add(room.primaryRelayId);
-            if (room.standbyRelayId) relays.add(room.standbyRelayId);
+        // REQ-CFA-037 (M4a chunk 1, D-CFA-30/31): enumerate ONE (relay,room) scope per relay
+        // slot per room. A relay homed in two of this daemon's rooms contributes TWO scopes
+        // (same relayId, different roomId) so the loop emits one cell per (relay,room) — NO
+        // silent re-union (the over-count root). The map key IS the room object id (public).
+        getRelayRoomScopes: (): RelayRoomScope[] => {
+          const scopes: RelayRoomScope[] = [];
+          for (const [roomId, room] of state.activeRooms.entries()) {
+            if (room.primaryRelayId) scopes.push({ relayId: room.primaryRelayId, roomId });
+            if (room.standbyRelayId) scopes.push({ relayId: room.standbyRelayId, roomId });
           }
-          return [...relays];
+          return scopes;
         },
-        // REQ-CFA-024 (M3 chunk 1, D-CFA-24): ROOM-SCOPE the validator pool. M2 unioned the
-        // registry-wide discovered set with the self-entry, which OVER-COUNTS — the cross-
-        // receiver denominator the loss classifier reasons over (and the M2 coverage feed)
-        // is meaningless on an inflated set. M3 builds the pool from the UNION of THIS
-        // daemon's OWN rooms' co-auditors (state.activeRooms[*].validatorIds, event-sourced
-        // from RoomAssigned, ZERO new chain cost) + the self-entry, via the unit-tested pure
-        // buildRoomScopedValidatorPool. The registry-wide discovery cache is DEMOTED to a
-        // liveness/identity refresh ONLY — it never widens the pool (a registry validator
-        // covering none of our rooms is excluded). Coverage-ACCURACY fix on the SELF-REPORT
-        // half (D-CFA-15 / W-M2-1), NOT a slashing change. assignCells stays UNTOUCHED.
-        getValidators: (): CanaryValidator[] => {
+        // REQ-CFA-036 (M4a chunk 1, D-CFA-30): PER-RELAY room-scope the validator pool. M3
+        // unioned the co-auditors across ALL of this daemon's rooms, which OVER-COUNTS — a
+        // room-B-only co-auditor could be picked into relay-A's cell, inflating the cross-
+        // receiver denominator the loss classifier reasons over (W-M3-OVERCOUNT). M4a scopes
+        // the pool to ONLY the rooms THIS relay serves (primary OR standby), via the unit-
+        // tested pure buildRelayScopedValidatorPool over state.activeRooms[*] (event-sourced
+        // from RoomAssigned, ZERO new chain cost) + the self-entry. The registry-wide
+        // discovery cache is read ONLY for liveness/identity refresh — it NEVER widens a
+        // relay-scoped pool (not even an arg here). Coverage-ACCURACY fix on the SELF-REPORT
+        // half (D-CFA-15 / W-M3-OVERCOUNT), NOT a slashing change. assignCells stays UNTOUCHED.
+        getValidators: (scope: RelayRoomScope): CanaryValidator[] => {
           const self: CanaryValidator = { minerId: validatorMinerId, sessionWallet: sessionAddress };
-          const activeRooms = [...state.activeRooms.values()].map((r) => ({
-            validatorIds: r.validatorIds ?? [],
-          }));
+          // The single room this scope audits (keyed by the public room object id).
+          const room = state.activeRooms.get(scope.roomId);
+          const activeRooms: ScopedRoom[] = room
+            ? [
+                {
+                  validatorIds: room.validatorIds ?? [],
+                  primaryRelayId: room.primaryRelayId,
+                  standbyRelayId: room.standbyRelayId,
+                },
+              ]
+            : [];
           // Kick off a registry refresh for the NEXT round's liveness/identity view (no new
-          // timer — rides this round's tick). Crash-safe; the result no longer widens the pool.
+          // timer — rides this round's tick). Crash-safe; the result never widens the pool.
           void refreshDiscoveredValidators(state, cellLog);
-          return buildRoomScopedValidatorPool({
-            activeRooms,
-            self,
-            discovered: state.discoveredValidatorMinerIds ?? [],
-          });
+          return buildRelayScopedValidatorPool({ activeRooms, self, relayId: scope.relayId });
         },
       },
     });
@@ -431,6 +458,93 @@ export async function startDaemon(overrides?: {
     });
   } catch (err) {
     log.error({ err }, 'canary cell loop / coverage feed failed to start (daemon continues)');
+  }
+
+  // REQ-CFA-042/043 (M4a chunk 3, D-CFA-33): start the additive crash-safe canary VERIFY loop —
+  // the HERMETIC HALF of the verify/publish gate. It wires the M3 chain (verifyForwardedCanary ->
+  // classifyDivergences -> buildDivergenceProof -> submit) behind an INJECTABLE capture+submit
+  // seam, and is the FIRST real reader of state.relayStunLossBps (closes W-M3-STUN-PATH). ADDITIVE
+  // + CRASH-SAFE in its OWN try (independent of the cell loop) so a fault here can NEVER abort
+  // the daemon.
+  //
+  // HONEST SCOPE (DA-3, on record): the PRODUCTION capture seam yields NO live frames yet — the
+  // live producer/SFU-forward/consumer media plane (real publisher.publish() + WebRtcTransport
+  // capture) is M4b (port-locked this session, INV-B keeps every tap validator-daemon-side, never
+  // apps/relay/). So the loop reads STUN + assembles a real (empty) per-receiver Map + persists
+  // the per-relay accumulator, but PROMOTES NOTHING until M4b supplies live captures. W-M3-SIM is
+  // NARROWED not closed (the >=2-distinct-Wallet-B co-sign protocol W-M4-COSIGN is unbuilt); this
+  // loop AMPLIFIES the off-chain gate W-M3-OFFCHAIN (tied to W-E4) — never "resolved".
+  try {
+    const verifyIntervalMs = parseInt(
+      process.env['CANARY_VERIFY_INTERVAL_MS'] ?? '300000',
+      10,
+    );
+    const verifyK = parseInt(process.env['CANARY_VERIFY_K'] ?? '2', 10);
+    const verifyDeltaBps = BigInt(process.env['CANARY_VERIFY_DELTA_BPS'] ?? '500');
+    const verifyLog = log.child({ component: 'canary-verify' });
+    state.canaryVerifyLoop = startCanaryVerifyLoop({
+      intervalMs: verifyIntervalMs,
+      logger: verifyLog,
+      deps: {
+        // Reuse chunk-1's per-(relay,room) scopes so the SECONDARY >=k denominator is truthful.
+        getRelayRoomScopes: () => {
+          const scopes: RelayRoomScope[] = [];
+          for (const [roomId, room] of state.activeRooms.entries()) {
+            if (room.primaryRelayId) scopes.push({ relayId: room.primaryRelayId, roomId });
+            if (room.standbyRelayId) scopes.push({ relayId: room.standbyRelayId, roomId });
+          }
+          return scopes;
+        },
+        // The room-scoped co-auditor pool (chunk 1) — NOT the cross-room union (W-M3-OVERCOUNT).
+        getValidators: (scope: RelayRoomScope): CanaryValidator[] => {
+          const self: CanaryValidator = { minerId: validatorMinerId, sessionWallet: sessionAddress };
+          const room = state.activeRooms.get(scope.roomId);
+          const scopedRooms: ScopedRoom[] = room
+            ? [
+                {
+                  validatorIds: room.validatorIds ?? [],
+                  primaryRelayId: room.primaryRelayId,
+                  standbyRelayId: room.standbyRelayId,
+                },
+              ]
+            : [];
+          return buildRelayScopedValidatorPool({ activeRooms: scopedRooms, self, relayId: scope.relayId });
+        },
+        // FIRST real reader of relayStunLossBps (closes W-M3-STUN-PATH): the per-relay STUN
+        // packet-loss prior (basis points), folded into the classifier benign budget (D-CFA-25,
+        // a COARSE prior). Defaults to 0n for a relay not yet measured.
+        getStunLossBps: (relayId: string): bigint => state.relayStunLossBps.get(relayId) ?? 0n,
+        // PRODUCTION capture seam: NO live media this session (M4b). Yield an EMPTY per-receiver
+        // map so the loop runs hermetically (reads STUN, persists the accumulator) without a
+        // producer/SFU/consumer plane. The live capture lands in M4b (port-locked here, INV-B).
+        capture: async (scope): Promise<CanaryForwardCaptureResult> => ({
+          relayId: scope.relayId,
+          roomId: scope.roomId,
+          canaryKid: state.canaryCellLoop?.latest()?.round ?? 0,
+          // No live frames this session (M4b): an EMPTY perReceiver map means the verifier is
+          // never invoked, so kRoom/cellSecret/expectedCtrs are inert placeholders (the loop
+          // still reads STUN + folds an empty round into the accumulator). No secret on a wire.
+          expectedCtrs: [],
+          kRoom: new Uint8Array(0),
+          cellSecret: new Uint8Array(0),
+          perReceiver: new Map(),
+        }),
+        // Synthetic peer session keypairs satisfy buildDivergenceProof's MIN_ATTESTERS=2 floor.
+        // The REAL >=2-distinct-Wallet-B co-sign collection protocol (W-M4-COSIGN) is M4b.
+        syntheticPeerKeypairs: () => [new Ed25519Keypair(), new Ed25519Keypair()],
+        // Submit seam — no live PTB this session (M4b). The production capture yields no
+        // promotions, so this is never invoked until the live plane lands; logged if it ever is.
+        submit: async (proof): Promise<void> => {
+          verifyLog.info(
+            { roomId: proof.roomId, relayMinerId: proof.relayMinerId, frameSeq: proof.frameSeq },
+            'canary divergence proof built (submit deferred to M4b live plane)',
+          );
+        },
+        config: { k: verifyK, deltaBps: verifyDeltaBps, sendRate: verifyK },
+      },
+    });
+  } catch (err) {
+    log.error({ err }, 'canary verify loop failed to start (daemon continues)');
   }
 
   // P17 M2b-P9 (DOH-022): track the in-flight cycle so the graceful-shutdown drain
@@ -568,7 +682,8 @@ export async function startDaemon(overrides?: {
         room.standbyRelayId = standbyRelayId;
         // REQ-CFA-023 (M3 chunk 1, D-CFA-24): persist the in-event co-auditor set (already
         // parsed above for the self-membership test, previously discarded) so the canary
-        // validator pool can room-scope (buildRoomScopedValidatorPool). ZERO new chain cost.
+        // validator pool can per-relay room-scope (buildRelayScopedValidatorPool, M4a chunk 1
+        // D-CFA-30). ZERO new chain cost.
         // A re-assignment REPLACES the set (latest assignment is authoritative);
         // promote_relay/swap_relay never reach this arm, so the set is stable under a relay
         // swap (W-M3-STALE — mirrors validator-pool.ts::applyRoomAssigned, the unit-tested seam).
@@ -914,6 +1029,13 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
     state.canaryCellLoop.stop();
     state.canaryCellLoop = null;
     l.info('Canary cell loop stopped');
+  }
+
+  // REQ-CFA-042/043 (M4a chunk 3): stop the additive canary verify loop.
+  if (state.canaryVerifyLoop) {
+    state.canaryVerifyLoop.stop();
+    state.canaryVerifyLoop = null;
+    l.info('Canary verify loop stopped');
   }
 
   // M2 chunk 1 (REQ-CFA-015): close the off-chain coverage feed server.

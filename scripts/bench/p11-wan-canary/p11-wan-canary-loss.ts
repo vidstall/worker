@@ -90,7 +90,7 @@
  */
 
 import http from 'node:http';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -106,6 +106,11 @@ import {
   type CanaryDivergence,
   CANARY_SFRAME_LEN,
 } from '../../../apps/validator-daemon/src/canary/verifier.js';
+import {
+  newDropAccumulator,
+  type DropAccumulator,
+  type LossClassifierConfig,
+} from '../../../apps/validator-daemon/src/canary/loss-classifier.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DAEMONS_ROOT = path.resolve(HERE, '../../..');
@@ -118,18 +123,33 @@ const mediaCodecs: msTypes.RtpCodecCapability[] = [
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const log = (m: string): void => console.log(`[p11-wan-canary] ${m}`);
 
-/** Tuning read from env so the runbook can sweep loss without editing the script. */
-interface DemoCfg {
+/**
+ * Tuning read from env so the runbook can sweep loss without editing the script.
+ * EXPORTED so the hermetic shape test (`wan-harness-shape.test.ts`) can build the SAME cfg
+ * the harness feeds `buildClassifyArgs` — pinning the REAL `classifyDivergences` call shape
+ * (REQ-CFA-039/040, closes W-M4-HARNESS-SHAPE).
+ */
+export interface DemoCfg {
   /** Injected app-level drop rate (0..100). The WAN "loss" — NOT the loopback's own. */
   lossPct: number;
   /** Cumulative-bound send rate window n (frames per window) — mirrors classifier cfg. */
   sendRate: number;
-  /** Single-window budget Δ (bps) the WEAK-PRIOR floor compares against. */
+  /** Single-window budget Δ (bps) the WEAK-PRIOR floor compares against. A NUMBER at the env/
+   *  call site (env is parsed as a number); coerced to the classifier's bigint in
+   *  `buildClassifyArgs` (the classifier's `LossClassifierConfig.deltaBps` is a bigint). */
   deltaBps: number;
   /** ≥k distinct co-homed verifiers for the SECONDARY (SIMULATED) signal. */
   k: number;
   /** Number of synthetic cumulative rounds to drive for the sub-budget-withholding leg. */
   rounds: number;
+  /**
+   * The STABLE relay miner_id this batch audits — the REQUIRED key into the per-relay
+   * cumulative accumulator (`classifyDivergences:256` / `cumulativeBoundCrossed:171-180`).
+   * Omitting it (the old call) keyed the cumulative bound by `'undefined'`, so a SUSTAINED
+   * withholding run silently passed as benign. Sourced from env (the OOB-known relay id) with
+   * a stable default so the cumulative tooth keys consistently across rounds (D-CFA-21).
+   */
+  relayMinerId: string;
 }
 
 function readCfg(): DemoCfg {
@@ -139,6 +159,7 @@ function readCfg(): DemoCfg {
     deltaBps: Number(process.env['P11_DELTA_BPS'] ?? '500'),
     k: Number(process.env['P11_K'] ?? '2'),
     rounds: Number(process.env['P11_ROUNDS'] ?? '12'),
+    relayMinerId: process.env['P11_RELAY_MINER_ID'] ?? 'p11-relay-under-audit',
   };
 }
 
@@ -171,7 +192,7 @@ interface CaptureRoom {
  * by contrast, has a HEALTHY tail-extractable rate on the frames that WERE forwarded and
  * MISSING only on the frames that were dropped.
  */
-interface SanityGate {
+export interface SanityGate {
   forwardedCanarySizedPackets: number;
   tailExtractable: number;
   extractRate: number;
@@ -180,7 +201,7 @@ interface SanityGate {
   reason: string;
 }
 
-function runTailSanityGate(
+export function runTailSanityGate(
   packets: Buffer[],
   vr: VerifyResult,
   expectedCtrCount: number,
@@ -429,6 +450,46 @@ function buildPerReceiverMap(
   return m;
 }
 
+/**
+ * Build the args for the SHIPPED `classifyDivergences` from the harness cfg + the measured
+ * live loss prior, in the EXACT shape the real signature requires (REQ-CFA-039/040, closes
+ * W-M4-HARNESS-SHAPE). PURE — no I/O, no ports — so the hermetic shape test can call it.
+ *
+ * Three defects this REPLACES (all were masked by an `as unknown as Parameters<...>[2]` cast):
+ *   (1) the accumulator field is `byRelay` (a fresh `newDropAccumulator()`), NOT `perRelay`;
+ *   (2) `cfg.relayMinerId` is REQUIRED (the cumulative bound keys by it — omitting it keyed
+ *       `'undefined'`, so a sustained withholder silently passed as benign);
+ *   (3) `deltaBps` is coerced to a `bigint` (the classifier sums `stunPacketLossBps + deltaBps`;
+ *       a `number` deltaBps throws `Cannot mix BigInt and other types` at runtime).
+ *
+ * A FRESH accumulator is returned every call (a single benign window must NOT promote); a
+ * sustained-withholding run folds rounds into THIS accumulator via `accumulateRound` across
+ * windows before classifying (the cumulative tooth). The cast is GONE — `tsc` now enforces the
+ * real shape, so a future drift fails the typecheck AND the import-shape smoke.
+ */
+export function buildClassifyArgs(
+  liveLossBps: bigint,
+  cfg: DemoCfg,
+): {
+  stunPacketLossBps: bigint;
+  roundAccumulator: DropAccumulator;
+  classifierCfg: LossClassifierConfig;
+} {
+  return {
+    stunPacketLossBps: liveLossBps,
+    // (1) the REAL DropAccumulator (`byRelay` field), not the bogus `{ perRelay: new Map() }`.
+    roundAccumulator: newDropAccumulator(),
+    classifierCfg: {
+      // (2) the REQUIRED relayMinerId the cumulative bound keys by.
+      relayMinerId: cfg.relayMinerId,
+      k: cfg.k,
+      // (3) bigint deltaBps (the env/cfg value is a number — coerced here).
+      deltaBps: BigInt(cfg.deltaBps),
+      sendRate: cfg.sendRate,
+    },
+  };
+}
+
 function gitHead(repoDir: string): string {
   try {
     return execSync('git rev-parse HEAD', { cwd: repoDir }).toString().trim().slice(0, 12);
@@ -588,12 +649,14 @@ async function main(): Promise<void> {
   // The STUN budget is a weak prior; here we feed the measured live loss as the prior.
   const liveLossBps = BigInt(Math.round((room.injectedDrops / Math.max(1, room.injectedDrops + room.packets.length)) * 10_000));
   const perReceiver = buildPerReceiverMap(vr.divergences, cfg, /*correlated*/ false);
+  // REAL-shape args (REQ-CFA-039/040): a `byRelay` accumulator, the REQUIRED relayMinerId, and
+  // a bigint deltaBps — the `as unknown as` cast is GONE, so `tsc` enforces the shape.
+  const { stunPacketLossBps, roundAccumulator, classifierCfg } = buildClassifyArgs(liveLossBps, cfg);
   const { promoted, absorbed } = classifyDivergences(
     perReceiver,
-    liveLossBps,
-    // a fresh accumulator: a single benign window must NOT promote.
-    { perRelay: new Map() } as unknown as Parameters<typeof classifyDivergences>[2],
-    { k: cfg.k, deltaBps: cfg.deltaBps, sendRate: cfg.sendRate },
+    stunPacketLossBps,
+    roundAccumulator,
+    classifierCfg,
   );
 
   // Acceptance: a BENIGN, independent, within-budget loss window promotes ZERO DROP proofs.
@@ -635,7 +698,20 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  console.error('[p11-wan-canary] FATAL', err);
-  process.exit(1);
-});
+/**
+ * Run `main()` ONLY when this file is the process entry point (`tsx … p11-wan-canary-loss.ts`),
+ * NOT when it is IMPORTED (the hermetic shape test imports `runTailSanityGate` /
+ * `buildClassifyArgs` for REQ-CFA-039..041 and must NOT trip `main()`'s deferred-run guard /
+ * bind ports / boot mediasoup). The DEFERRED-RUN guard inside `main()` is UNCHANGED — a real
+ * `tsx` invocation still hits it and refuses without `P11_I_ACKNOWLEDGE_DEFERRED_RUN=yes`.
+ */
+const isEntryPoint =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntryPoint) {
+  main().catch((err: unknown) => {
+    console.error('[p11-wan-canary] FATAL', err);
+    process.exit(1);
+  });
+}

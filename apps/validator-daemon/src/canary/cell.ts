@@ -242,12 +242,41 @@ export interface CellRoundSnapshot {
   cells: CellAssignment[];
 }
 
-/** Supplies the current relay + validator pool each round (event-discovered, off-chain). */
+/**
+ * REQ-CFA-037 (M4a chunk 1, D-CFA-31): one `(relay, room)` scope = one canary cell. A relay
+ * homed in two of this daemon's rooms yields TWO scopes (same `relayId`, different `roomId`)
+ * so the loop emits ONE cell per `(relay,room)` — NO silent re-union (the over-count root).
+ * `roomId` is the room-scoping key the relay/room-aware `getValidators` reads; it is a public
+ * room object id (INV-C-safe), never placed on a wire/snapshot surface.
+ */
+export interface RelayRoomScope {
+  /** The relay miner_id whose forward path this cell audits. */
+  relayId: string;
+  /** The room this relay serves — the scoping key for the per-room co-auditor slice. */
+  roomId: string;
+}
+
+/**
+ * Supplies the current `(relay, room)` scopes + the PER-SCOPE validator pool each round
+ * (event-discovered, off-chain). M4a chunk 1 (D-CFA-30/31): the contract is now
+ * relay/room-aware — the loop iterates `(relay, room)` PAIRS and asks for ONLY that room's
+ * co-auditors, so a multi-homed relay gets one cell per room (REQ-CFA-037) and a room-B-only
+ * co-auditor can NEVER be picked into relay-A's cell (REQ-CFA-036, closes W-M3-OVERCOUNT
+ * — CONDITIONAL on this per-(relay,room) non-union disposition; a re-union re-opens it, pinned
+ * by the multi-room fixture in validator-pool.test.ts / relay-scoped-cell-loop.test.ts).
+ */
 export interface CanaryCellLoopDeps {
-  /** Relay miner ids to cover this round (e.g. the daemon's known active relays). */
-  getRelays: () => string[];
-  /** The eligible validator pool this round (deduped by miner_id inside assignCells). */
-  getValidators: () => CanaryValidator[];
+  /**
+   * The `(relay, room)` scopes to cover this round — one cell each. A multi-homed relay
+   * contributes one scope per room it serves (NO dedup-to-one; that re-opens the over-count).
+   */
+  getRelayRoomScopes: () => RelayRoomScope[];
+  /**
+   * The eligible validator pool for ONE `(relay, room)` scope (room-scoped to that relay's
+   * own room co-auditors; deduped by miner_id inside `assignCells`). The `validators[]` arg
+   * to `assignCells` NARROWS per scope — `assignCells` itself is BYTE-IDENTICAL (REQ-CFA-038).
+   */
+  getValidators: (scope: RelayRoomScope) => CanaryValidator[];
 }
 
 /** Live handle: the latest snapshot for downstream pub/consume loops + a stop fn. */
@@ -285,13 +314,25 @@ export function startCanaryCellLoop(args: {
 
   const tick = (): void => {
     try {
-      const relays = deps.getRelays();
-      const validators = deps.getValidators();
-      const cells = assignCells({ relays, validators, round, assignmentSecret });
+      // M4a chunk 1 (D-CFA-30/31): per-(relay,room) loop — ONE assignCells call per scope
+      // with a room-narrowed validator pool, so a multi-homed relay emits one cell per
+      // (relay,room) and a room-B-only co-auditor is never picked into relay-A's cell
+      // (closes W-M3-OVERCOUNT — CONDITIONAL on this per-(relay,room) non-union disposition; a
+      // re-union re-opens it, fixture-pinned). assignCells stays BYTE-IDENTICAL — only its validators[]
+      // arg narrows (REQ-CFA-038). Each scope is single-relay, so `assignCells` returns a
+      // 1-element array; we flatten the per-scope results into the round's cells.
+      const scopes = deps.getRelayRoomScopes();
+      const cells: CellAssignment[] = [];
+      for (const scope of scopes) {
+        const validators = deps.getValidators(scope);
+        // Single-relay assignCells call (body unchanged); [0] is this (relay,room)'s cell.
+        const [cell] = assignCells({ relays: [scope.relayId], validators, round, assignmentSecret });
+        if (cell) cells.push(cell);
+      }
       snapshot = { round, cells };
       const covered = cells.filter((c) => c.covered).length;
       log.info(
-        { round, relays: relays.length, validators: validators.length, cells: cells.length, covered },
+        { round, scopes: scopes.length, cells: cells.length, covered },
         'canary cell round assigned',
       );
       round += 1;

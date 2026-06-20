@@ -1,0 +1,134 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon[39m
+
+{"level":30,"time":1781934521181,"pid":38224,"hostname":"Quang","name":"canary/loss-classifier","relayMinerId":"p11-relay-under-audit","promoted":0,"absorbed":1,"tampers":0,"cumulativeCrossed":false,"msg":"canary divergences classified (drop gate / tamper p=1)"}
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.196Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.198Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.199Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.200Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.200Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.201Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.202Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.202Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.203Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.204Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.205Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:48:41.205Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781934521205,"pid":38224,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":6,"byteIdentical":6,"divergences":0,"msg":"canary forwarding verified"}
+{"level":30,"time":1781934521206,"pid":38224,"hostname":"Quang","name":"canary/loss-classifier","relayMinerId":"p11-relay-under-audit","promoted":0,"absorbed":0,"tampers":0,"cumulativeCrossed":false,"msg":"canary divergences classified (drop gate / tamper p=1)"}
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.207Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.207Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.208Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.209Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.209Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.210Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.210Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.211Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.211Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.212Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.212Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:48:41.213Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781934521213,"pid":38224,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":0,"byteIdentical":0,"divergences":6,"msg":"canary forwarding verified"}
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.214Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.214Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.215Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.215Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.215Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.216Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":6,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.216Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":7,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.217Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.217Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.218Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.218Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.219Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.219Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.219Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":6,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:48:41.220Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":7,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781934521220,"pid":38224,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":7,"byteIdentical":7,"divergences":1,"msg":"canary forwarding verified"}
+{"level":30,"time":1781934521221,"pid":38224,"hostname":"Quang","name":"canary/loss-classifier","relayMinerId":"p11-relay-under-audit","promoted":1,"absorbed":0,"tampers":0,"cumulativeCrossed":true,"msg":"canary divergences classified (drop gate / tamper p=1)"}
+{"level":30,"time":1781934521221,"pid":38224,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":0,"byteIdentical":0,"divergences":0,"msg":"canary forwarding verified"}
+ [32m✓[39m src/canary/__tests__/wan-harness-shape.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 46[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m8 passed[39m[22m[90m (8)[39m
+[2m   Start at [22m 12:48:39
+[2m   Duration [22m 1.96s[2m (transform 232ms, setup 0ms, collect 1.42s, tests 46ms, environment 0ms, prepare 224ms)[22m
+

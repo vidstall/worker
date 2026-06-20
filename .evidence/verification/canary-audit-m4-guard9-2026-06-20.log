@@ -1,0 +1,49 @@
+CANARY FORWARDING-AUDIT — MILESTONE 4a — MAIN GUARD #9 (authoritative re-run) — 2026-06-20
+================================================================================================
+
+Method: MAIN re-ran the suites ITSELF (never trusts a subagent count); hermetic ONLY (no port/localnet/
+mediasoup bound — a concurrent session holds them). Integration dirs EXCLUDED via the root vitest.config.ts.
+
+HERMETIC TEST SUITES
+--------------------
+- dvconf-daemons validator-daemon unit (pnpm exec vitest run --config vitest.config.ts apps/validator-daemon/src):
+    26 test files / 170 tests PASSED, EXIT=0.
+    (full log: .evidence/verification/canary-audit-m4-guard9-daemons-2026-06-20.log)
+    New M4a tests included: validator-pool.test.ts (per-relay pool + multi-homed re-union pin),
+    relay-scoped-cell-loop.test.ts (per-(relay,room) loop + assignCells byte-identity),
+    verify-loop.test.ts (6: STUN read live + accumulator persistence + crash-safe), wan-harness-shape.test.ts
+    (8: real classifyDivergences signature smoke + synthetic lossy/tail-abort/sub-budget chain).
+- dvconf-client crypto unit (pnpm exec vitest run src/lib/crypto):
+    12 test files / 99 tests PASSED, EXIT=0.
+    (full log: dvconf-client/.evidence/verification/canary-audit-m4-guard9-client-2026-06-20.log)
+    New: cell-secret-oob.test.ts (8: mint + seal-to-N + same-secret-all-members + wrong-key-reject, synthetic keys).
+
+TYPECHECK
+---------
+- pnpm --filter @dvconf/validator-daemon exec tsc --noEmit: EXIT=0, 0 errors, NONE referencing the edited
+  production files (cell.ts / validator-pool.ts / verify-loop.ts / index.ts).
+
+INVARIANTS (git-diff verification, per-commit method)
+-----------------------------------------------------
+- INV-A (byte-frozen verify/proof core): apps/validator-daemon/src/canary/proof.ts + verifier.ts EMPTY diff.
+  The 145-byte canonicalProofMessage UNTOUCHED.
+- INV-B (relay forward path): apps/relay/ NON-TEST source diff EMPTY; ZERO untracked .ts under apps/relay/src.
+- INV-C (no A<->B link / no secret on wire-or-log): no raw console.* in edited production files; the only
+  secret-name grep hit is a JSDoc comment in verify-loop.ts:36 asserting "holds NO key material" (NOT a log).
+  All loop logs carry only {round, relayMinerId, roomId, perReceiver, promoted, absorbed, stunLossBps}.
+- Move byte-identity: dvconf-contracts sources/audit/canary_audit.move + tests/audit/canary_audit_tests.move
+  EMPTY diff; NO Move change in M4a (contracts repo receives no M4a commit). Move.lock is a concurrent-session
+  artifact, NOT staged.
+
+REVIEW FOLD
+-----------
+3 independent reviewers (correctness / honesty / invariants) all returned verdict=approve, 0 invariant
+violations, 0 overclaims. Only LOW cosmetic findings; MAIN folded 3 honesty/accuracy comment polishes:
+- cell.ts: two bare "closes W-M3-OVERCOUNT" comments → appended the per-(relay,room) NON-UNION conditional
+  qualifier (the DESIGN D-CFA-31 framing; fixture-pinned).
+- verify-loop.ts: softened a stale "index.ts:154/306/850" line-ref to "decl/init + measureRelay write".
+The disclosed test-only rootDir artifact (wan-harness-shape.test.ts importing the bench script) is accepted,
+consistent with the M3 cross-repo-import precedent; tsc still EXIT=0 here.
+
+VERDICT: GUARD #9 GREEN. M4a hermetic surface verified; INV-A/B/C + byte-frozen-145 + Move byte-identity held.
+Ready for scoped commits + the independent SHIP gate.

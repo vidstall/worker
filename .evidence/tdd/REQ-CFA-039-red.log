@@ -1,0 +1,275 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon[39m
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts
+[22m[39m[p11-wan-canary] REFUSING TO RUN — P11 is the DEFERRED WAN/real-camera demo (REQ-CFA-034).
+[p11-wan-canary] The live run is deferred to a viva/M4 milestone (port lock + net-new media plane).
+[p11-wan-canary] To run it THEN, set P11_I_ACKNOWLEDGE_DEFERRED_RUN=yes and CANARY_CELL_SECRET=<hex>.
+[p11-wan-canary] See scripts/bench/p11-wan-canary/P11-WAN-CANARY-RUNBOOK.md.
+
+[90mstderr[2m | src/canary/__tests__/wan-harness-shape.test.ts
+[22m[39m[p11-wan-canary] FATAL Error: process.exit unexpectedly called with "2"
+    at process.exit (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/[4m.pnpm[24m/vitest@3.2.4_@types+debug@4_a458b9ad9d411cea5de0abc92801602b/node_modules/[4mvitest[24m/dist/chunks/execute.B7h3T_Hc.js:525:9)
+    at main (C:\Thesis\dvconf\dvconf-daemons\scripts\bench\p11-wan-canary\p11-wan-canary-loss.ts:516:13)
+    at C:\Thesis\dvconf\dvconf-daemons\scripts\bench\p11-wan-canary\p11-wan-canary-loss.ts:638:1
+    at VitestExecutor.runModule (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/[4m.pnpm[24m/vite-node@3.2.4_@types+node@22.19.13_tsx@4.21.0/node_modules/[4mvite-node[24m/dist/client.mjs:397:4)
+    at VitestExecutor.directRequest (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/[4m.pnpm[24m/vite-node@3.2.4_@types+node@22.19.13_tsx@4.21.0/node_modules/[4mvite-node[24m/dist/client.mjs:375:3)
+    at VitestExecutor.cachedRequest (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/[4m.pnpm[24m/vite-node@3.2.4_@types+node@22.19.13_tsx@4.21.0/node_modules/[4mvite-node[24m/dist/client.mjs:189:11)
+    at VitestExecutor.dependencyRequest (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/[4m.pnpm[24m/vite-node@3.2.4_@types+node@22.19.13_tsx@4.21.0/node_modules/[4mvite-node[24m/dist/client.mjs:239:10)
+    at [90mC:\Thesis\dvconf\dvconf-daemons\apps\validator-daemon\[39msrc\canary\__tests__\wan-harness-shape.test.ts:52:1
+    at VitestExecutor.runModule (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/[4m.pnpm[24m/vite-node@3.2.4_@types+node@22.19.13_tsx@4.21.0/node_modules/[4mvite-node[24m/dist/client.mjs:397:4)
+    at VitestExecutor.directRequest (file:///C:/Thesis/dvconf/dvconf-daemons/node_modules/[4m.pnpm[24m/vite-node@3.2.4_@types+node@22.19.13_tsx@4.21.0/node_modules/[4mvite-node[24m/dist/client.mjs:375:3)
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.589Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.591Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.592Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.593Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.594Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.595Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.596Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.596Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.597Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.598Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.599Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[22m[39m{"timestamp":"2026-06-20T05:47:17.600Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781934437600,"pid":19840,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":6,"byteIdentical":6,"divergences":0,"msg":"canary forwarding verified"}
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.604Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.604Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.605Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.606Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.606Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.607Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.607Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.608Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.609Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.609Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.610Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[22m[39m{"timestamp":"2026-06-20T05:47:17.610Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781934437611,"pid":19840,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":0,"byteIdentical":0,"divergences":6,"msg":"canary forwarding verified"}
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.612Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.612Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.613Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.613Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.614Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.614Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":6,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.615Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":7,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.615Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":0,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.616Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":1,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.616Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":2,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.616Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":3,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.617Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":4,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.617Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":5,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.618Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":6,"byteLength":62,"codecOffset":10}}
+
+[90mstdout[2m | src/canary/__tests__/wan-harness-shape.test.ts[2m > [22m[2mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22m[2mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[22m[39m{"timestamp":"2026-06-20T05:47:17.618Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":3,"ctr":7,"byteLength":62,"codecOffset":10}}
+
+{"level":30,"time":1781934437619,"pid":19840,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":7,"byteIdentical":7,"divergences":1,"msg":"canary forwarding verified"}
+{"level":30,"time":1781934437620,"pid":19840,"hostname":"Quang","name":"canary/verifier","canaryKid":3,"mediaPackets":0,"byteIdentical":0,"divergences":0,"msg":"canary forwarding verified"}
+ [31m❯[39m src/canary/__tests__/wan-harness-shape.test.ts [2m([22m[2m8 tests[22m[2m | [22m[31m7 failed[39m[2m)[22m[32m 42[2mms[22m[39m
+[31m   [31m×[31m REQ-CFA-039/040 — P11 classify-call shape matches the REAL classifyDivergences signature[2m > [22mbuildClassifyArgs produces a byRelay accumulator (NOT perRelay), a relayMinerId, and a bigint deltaBps[39m[32m 2[2mms[22m[39m
+[31m     → (0 , buildClassifyArgs) is not a function[39m
+[31m   [31m×[31m REQ-CFA-039/040 — P11 classify-call shape matches the REAL classifyDivergences signature[2m > [22mthe real classifyDivergences accepts the harness-built args without a cast and without a BigInt throw[39m[32m 0[2mms[22m[39m
+[31m     → (0 , buildClassifyArgs) is not a function[39m
+[31m   [31m×[31m REQ-CFA-039/040 — P11 classify-call shape matches the REAL classifyDivergences signature[2m > [22mbuildClassifyArgs returns the SAME bigint-keyed shape the loss-classifier accumulator API mints[39m[32m 0[2mms[22m[39m
+[31m     → (0 , buildClassifyArgs) is not a function[39m
+[31m   [31m×[31m REQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO[39m[32m 19[2mms[22m[39m
+[31m     → (0 , runTailSanityGate) is not a function[39m
+[31m   [31m×[31m REQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS[39m[32m 9[2mms[22m[39m
+[31m     → (0 , runTailSanityGate) is not a function[39m
+[31m   [31m×[31m REQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted[39m[32m 9[2mms[22m[39m
+[31m     → (0 , runTailSanityGate) is not a function[39m
+[31m   [31m×[31m REQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22msanity gate is keyed off CANARY_SFRAME_LEN-sized packets (a too-short packet is not counted)[39m[32m 0[2mms[22m[39m
+[31m     → (0 , runTailSanityGate) is not a function[39m
+   [32m✓[39m REQ-CFA-040 — importing the harness does NOT execute main() (RUN stays deferred)[2m > [22mthe deferred-run guard env is NOT set in this hermetic test process[32m 0[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 7 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/wan-harness-shape.test.ts[2m > [22mREQ-CFA-039/040 — P11 classify-call shape matches the REAL classifyDivergences signature[2m > [22mbuildClassifyArgs produces a byRelay accumulator (NOT perRelay), a relayMinerId, and a bigint deltaBps
+[31m[1mTypeError[22m: (0 , buildClassifyArgs) is not a function[39m
+[36m [2m❯[22m src/canary/__tests__/wan-harness-shape.test.ts:[2m98:68[22m[39m
+    [90m 96| [39mdescribe('REQ-CFA-039/040 — P11 classify-call shape matches the REAL c…
+    [90m 97| [39m  it('buildClassifyArgs produces a byRelay accumulator (NOT perRelay),…
+    [90m 98| [39m    const { stunPacketLossBps, roundAccumulator, classifierCfg } = bui…
+    [90m   | [39m                                                                   [31m^[39m
+    [90m 99| [39m
+    [90m100| [39m    // (1) the accumulator is a real DropAccumulator with the `byRelay…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/wan-harness-shape.test.ts[2m > [22mREQ-CFA-039/040 — P11 classify-call shape matches the REAL classifyDivergences signature[2m > [22mthe real classifyDivergences accepts the harness-built args without a cast and without a BigInt throw
+[31m[1mTypeError[22m: (0 , buildClassifyArgs) is not a function[39m
+[36m [2m❯[22m src/canary/__tests__/wan-harness-shape.test.ts:[2m120:68[22m[39m
+    [90m118| [39m
+    [90m119| [39m  it('the real classifyDivergences accepts the harness-built args with…
+    [90m120| [39m    const { stunPacketLossBps, roundAccumulator, classifierCfg } = bui…
+    [90m   | [39m                                                                   [31m^[39m
+    [90m121| [39m    [35mconst[39m perReceiver[33m:[39m [33mPerReceiverDivergences[39m [33m=[39m [35mnew[39m [33mMap[39m([
+    [90m122| [39m      ['v1', [{ frameSeq: 4, expectedHash: 'a'.repeat(64), observedHas…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/wan-harness-shape.test.ts[2m > [22mREQ-CFA-039/040 — P11 classify-call shape matches the REAL classifyDivergences signature[2m > [22mbuildClassifyArgs returns the SAME bigint-keyed shape the loss-classifier accumulator API mints
+[31m[1mTypeError[22m: (0 , buildClassifyArgs) is not a function[39m
+[36m [2m❯[22m src/canary/__tests__/wan-harness-shape.test.ts:[2m133:41[22m[39m
+    [90m131| [39m  it('buildClassifyArgs returns the SAME bigint-keyed shape the loss-c…
+    [90m132| [39m    // Drift guard: the harness accumulator must be interchangeable wi…
+    [90m133| [39m    const harnessAcc: DropAccumulator = buildClassifyArgs(0n, demoCfg(…
+    [90m   | [39m                                        [31m^[39m
+    [90m134| [39m    [35mconst[39m apiAcc [33m=[39m [34mnewDropAccumulator[39m()[33m;[39m
+    [90m135| [39m    [34mexpect[39m([33mObject[39m[33m.[39m[34mkeys[39m(harnessAcc))[33m.[39m[34mtoEqual[39m([33mObject[39m[33m.[39m[34mkeys[39m(apiAcc))[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/7]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/wan-harness-shape.test.ts[2m > [22mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22mBENIGN absorbed: forwarded-intact canary frames pass the sanity gate and promote ZERO
+[31m[1mTypeError[22m: (0 , runTailSanityGate) is not a function[39m
+[36m [2m❯[22m src/canary/__tests__/wan-harness-shape.test.ts:[2m160:18[22m[39m
+    [90m158| [39m    [34mexpect[39m(vr[33m.[39mdivergences)[33m.[39m[34mtoHaveLength[39m([34m0[39m)[33m;[39m [90m// all intact[39m
+    [90m159| [39m
+    [90m160| [39m    [35mconst[39m gate [33m=[39m [34mrunTailSanityGate[39m(captured[33m,[39m vr[33m,[39m ctrs[33m.[39mlength)[33m;[39m
+    [90m   | [39m                 [31m^[39m
+    [90m161| [39m    [34mexpect[39m(gate[33m.[39mok)[33m.[39m[34mtoBe[39m([35mtrue[39m)[33m;[39m [90m// extraction healthy → classify on[39m
+    [90m162| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/7]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/wan-harness-shape.test.ts[2m > [22mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22mW-M3-TAIL-ABORT: a re-packetized path (canary tail moved) → all-MISSING with broken extraction → gate ABORTS
+[31m[1mTypeError[22m: (0 , runTailSanityGate) is not a function[39m
+[36m [2m❯[22m src/canary/__tests__/wan-harness-shape.test.ts:[2m190:18[22m[39m
+    [90m188| [39m    expect(vr.mediaPackets).toBe(0); // no parseable tail trailer on a…
+    [90m189| [39m
+    [90m190| [39m    [35mconst[39m gate [33m=[39m [34mrunTailSanityGate[39m(captured[33m,[39m vr[33m,[39m ctrs[33m.[39mlength)[33m;[39m
+    [90m   | [39m                 [31m^[39m
+    [90m191| [39m    expect(gate.ok).toBe(false); // ABORT — extraction broke (W-M3-TAI…
+    [90m192| [39m    [34mexpect[39m(gate[33m.[39mextractRate)[33m.[39m[34mtoBeLessThan[39m([34m0.5[39m)[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/7]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/wan-harness-shape.test.ts[2m > [22mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22mSUSTAINED-SUB-BUDGET-PROMOTED: a real DROP gap, gate healthy, cumulative crossed + >=k → promoted
+[31m[1mTypeError[22m: (0 , runTailSanityGate) is not a function[39m
+[36m [2m❯[22m src/canary/__tests__/wan-harness-shape.test.ts:[2m216:18[22m[39m
+    [90m214| [39m    expect(vr.divergences[0]?.observedHash).toBe(OBSERVED_HASH_MISSING…
+    [90m215| [39m
+    [90m216| [39m    [35mconst[39m gate [33m=[39m [34mrunTailSanityGate[39m(captured[33m,[39m vr[33m,[39m ctrs[33m.[39mlength)[33m;[39m
+    [90m   | [39m                 [31m^[39m
+    [90m217| [39m    expect(gate.ok).toBe(true); // healthy extraction on the forwarded…
+    [90m218| [39m    [34mexpect[39m(gate[33m.[39mextractRate)[33m.[39m[34mtoBeGreaterThanOrEqual[39m([34m0.5[39m)[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/7]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/wan-harness-shape.test.ts[2m > [22mREQ-CFA-041 — synthetic lossy/re-packetized chain: verifier -> runTailSanityGate -> classifier[2m > [22msanity gate is keyed off CANARY_SFRAME_LEN-sized packets (a too-short packet is not counted)
+[31m[1mTypeError[22m: (0 , runTailSanityGate) is not a function[39m
+[36m [2m❯[22m src/canary/__tests__/wan-harness-shape.test.ts:[2m241:18[22m[39m
+    [90m239| [39m    const tiny = Buffer.alloc(12 + CANARY_SFRAME_LEN - 1, 0); // one b…
+    [90m240| [39m    [35mconst[39m vr [33m=[39m [35mawait[39m [34mverifyForwardedCanary[39m([tiny][33m,[39m [34mverifyInput[39m([]))[33m;[39m
+    [90m241| [39m    [35mconst[39m gate [33m=[39m [34mrunTailSanityGate[39m([tiny][33m,[39m vr[33m,[39m [34m0[39m)[33m;[39m
+    [90m   | [39m                 [31m^[39m
+    [90m242| [39m    [34mexpect[39m(gate[33m.[39mforwardedCanarySizedPackets)[33m.[39m[34mtoBe[39m([34m0[39m)[33m;[39m
+    [90m243| [39m    expect(gate.ok).toBe(true); // nothing canary-sized forwarded → no…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/7]⎯[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Unhandled Errors [49m[22m[31m⎯⎯⎯⎯⎯⎯[39m
+[31m[1m
+Vitest caught 1 unhandled error during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.[22m[39m
+
+[31m⎯⎯⎯⎯[39m[1m[41m Unhandled Rejection [49m[22m[31m⎯⎯⎯⎯⎯[39m
+[31m[1mError[22m: process.exit unexpectedly called with "1"[39m
+[90m [2m❯[22m process.exit ../../node_modules/.pnpm/vitest@3.2.4_@types+debug@4_a458b9ad9d411cea5de0abc92801602b/node_modules/vitest/dist/chunks/execute.B7h3T_Hc.js:[2m525:9[22m[39m
+[36m [2m❯[22m ../../scripts/bench/p11-wan-canary/p11-wan-canary-loss.ts:[2m640:11[22m[39m
+    [90m638| [39m[34mmain[39m()[33m.[39m[35mcatch[39m((err[33m:[39m unknown) [33m=>[39m {
+    [90m639| [39m  console[33m.[39m[34merror[39m([32m'[p11-wan-canary] FATAL'[39m[33m,[39m err)[33m;[39m
+    [90m640| [39m  process[33m.[39m[34mexit[39m([34m1[39m)[33m;[39m
+    [90m   | [39m          [31m^[39m
+    [90m641| [39m})[33m;[39m
+    [90m642| [39m
+
+[31mThis error originated in "[1msrc/canary/__tests__/wan-harness-shape.test.ts[22m" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.[39m
+[31m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m7 failed[39m[22m[2m | [22m[1m[32m1 passed[39m[22m[90m (8)[39m
+[2m     Errors [22m [1m[31m1 error[39m[22m
+[2m   Start at [22m 12:47:15
+[2m   Duration [22m 1.94s[2m (transform 219ms, setup 0ms, collect 1.40s, tests 42ms, environment 0ms, prepare 220ms)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\validator-daemon:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/canary/__tests__/wan-harness-shape.test.ts
