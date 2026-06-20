@@ -1,0 +1,30 @@
+    [90m220| [39m    // floor — W-M4-COSIGN unbuilt) and submit via the injected seam (…
+    [90m221| [39m    [35mfor[39m ([35mconst[39m d [35mof[39m result[33m.[39mpromoted) {
+    [90m222| [39m      [35mconst[39m sessionKeypairs [33m=[39m deps[33m.[39m[34msyntheticPeerKeypairs[39m()[33m;[39m
+    [90m   | [39m                                   [31m^[39m
+    [90m223| [39m      [35mconst[39m proof [33m=[39m [35mawait[39m [34mbuildDivergenceProof[39m({
+    [90m224| [39m        roomId[33m:[39m scope[33m.[39mroomId[33m,[39m
+[90m [2m❯[22m runShared src/canary/__tests__/verify-loop.test.ts:[2m163:19[22m[39m
+[90m [2m❯[22m src/canary/__tests__/verify-loop.test.ts:[2m204:5[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/canary/__tests__/verify-loop.test.ts[2m > [22mREQ-CFA-052 — pull-corroboration claim board gates the slash on a >=2-distinct quorum[2m > [22ma SELF-ONLY loop FAILS CLOSED: a sustained drop is published but never reaches >=2 distinct → NO submit
+[31m[1mTypeError[22m: deps.syntheticPeerKeypairs is not a function[39m
+[36m [2m❯[22m runCanaryVerifyRound src/canary/verify-loop.ts:[2m222:36[22m[39m
+    [90m220| [39m    // floor — W-M4-COSIGN unbuilt) and submit via the injected seam (…
+    [90m221| [39m    [35mfor[39m ([35mconst[39m d [35mof[39m result[33m.[39mpromoted) {
+    [90m222| [39m      [35mconst[39m sessionKeypairs [33m=[39m deps[33m.[39m[34msyntheticPeerKeypairs[39m()[33m;[39m
+    [90m   | [39m                                   [31m^[39m
+    [90m223| [39m      [35mconst[39m proof [33m=[39m [35mawait[39m [34mbuildDivergenceProof[39m({
+    [90m224| [39m        roomId[33m:[39m scope[33m.[39mroomId[33m,[39m
+[90m [2m❯[22m src/canary/__tests__/verify-loop.test.ts:[2m268:19[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m3 failed[39m[22m[2m | [22m[1m[32m4 passed[39m[22m[90m (7)[39m
+[2m   Start at [22m 14:58:57
+[2m   Duration [22m 2.05s[2m (transform 224ms, setup 0ms, collect 1.08s, tests 444ms, environment 0ms, prepare 221ms)[22m
+

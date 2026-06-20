@@ -259,3 +259,94 @@ export function deserializeDivergenceProof(wire: Uint8Array): DivergenceProof {
     })),
   };
 }
+
+// ── W-M4-COSIGN (DESIGN-COSIGN.md, D-CFA-39/40/45) — pull-corroboration claim-board helpers ──
+//
+// ADDITIVE siblings for the off-chain >=2-distinct-Wallet-B attestation-COLLECTION protocol
+// (W-M4-COSIGN — the M4b designable-now slice). They DO NOT touch the byte-frozen
+// `canonicalProofMessage` / `MIN_ATTESTERS` / `buildDivergenceProof` above (INV-A): a claim board
+// accrues PRE-SIGNED REMOTE attestations (signatures, not keypairs), so the local-sign
+// `buildDivergenceProof` cannot be reused — `assembleProofFromAttestations` is the required net-new
+// sibling (the on-record W-M4-COSIGN-SEAM delta). Distinctness stays AUTHORITATIVELY on-chain
+// (canary_audit.move VecSet<ID> dedup by miner_id via lookup_session_wallet); the off-chain
+// >=2-distinct-pubkey check here is an ADVISORY pre-check only (D-CFA-45).
+
+/** The 6 proof fields that identify ONE canary divergence (no keypairs/sigs) — the board cell's claim. */
+export type DivergenceClaim = Omit<DivergenceProofInput, 'sessionKeypairs'>;
+
+/** Lowercase hex of a raw public key, for distinctness dedup (must match the on-chain pubkey bytes). */
+export function attesterPubkeyHex(pk: Uint8Array): string {
+  let s = '';
+  for (const b of pk) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+
+/** Count DISTINCT `sessionPublicKey`s among attestations (advisory off-chain pre-check, D-CFA-45). */
+export function distinctAttesterCount(attestations: DivergenceAttestation[]): number {
+  const seen = new Set<string>();
+  for (const a of attestations) seen.add(attesterPubkeyHex(a.sessionPublicKey));
+  return seen.size;
+}
+
+/**
+ * Mint the single PUBLISH-OWN leg (D-CFA-39): ONE Wallet-B SESSION signature over the UNCHANGED
+ * 145-byte `canonicalProofMessage`. Distinct from `buildDivergenceProof` — it does NOT enforce the
+ * `MIN_ATTESTERS` quorum (one self-attestation is the unit a board accrues; the >=2 gate is enforced
+ * at assembly + AUTHORITATIVELY on-chain). NO Wallet-A leg / NO `dualKeySign` (INV-C identity-hiding).
+ */
+export async function signSelfAttestation(
+  canonicalMsg: Uint8Array,
+  selfSessionKeypair: Ed25519Keypair,
+): Promise<DivergenceAttestation> {
+  const signature = await selfSessionKeypair.sign(canonicalMsg);
+  return {
+    sessionPublicKey: selfSessionKeypair.getPublicKey().toRawBytes(),
+    signature,
+  };
+}
+
+/**
+ * Assemble a `DivergenceProof` from PRE-SIGNED REMOTE attestations a claim board accrued (D-CFA-40).
+ * Re-asserts the >=2-DISTINCT-`sessionPublicKey` quorum as an ADVISORY off-chain pre-check (D-CFA-45)
+ * — the AUTHORITATIVE distinctness gate is the on-chain `VecSet<ID>` dedup by `miner_id` (a Wallet-B-
+ * rotating validator → 2 pubkeys but 1 miner_id → rejected on-chain regardless). Throws below
+ * `MIN_ATTESTERS` distinct so a degenerate board never submits a doomed tx. Output attestations are
+ * deduped to ONE per distinct pubkey (the chain dedups anyway; this avoids wasting gas).
+ */
+export function assembleProofFromAttestations(
+  claim: DivergenceClaim,
+  attestations: DivergenceAttestation[],
+): DivergenceProof {
+  const byPubkey = new Map<string, DivergenceAttestation>();
+  for (const a of attestations) {
+    const h = attesterPubkeyHex(a.sessionPublicKey);
+    if (!byPubkey.has(h)) byPubkey.set(h, a);
+  }
+  if (byPubkey.size < MIN_ATTESTERS) {
+    throw new Error(
+      `canary/proof: assemble needs >=${MIN_ATTESTERS} DISTINCT Wallet-B attesters, got ${byPubkey.size} distinct of ${attestations.length}`,
+    );
+  }
+  const distinctAttestations = [...byPubkey.values()];
+  log.info(
+    {
+      roomId: claim.roomId,
+      relayMinerId: claim.relayMinerId,
+      canaryId: claim.canaryId,
+      frameSeq: claim.frameSeq,
+      drop: claim.observedHash === OBSERVED_HASH_MISSING,
+      distinctAttesters: byPubkey.size,
+      totalAttestations: attestations.length,
+    },
+    'canary divergence proof assembled from remote attestations (W-M4-COSIGN)',
+  );
+  return {
+    roomId: claim.roomId,
+    relayMinerId: claim.relayMinerId,
+    canaryId: claim.canaryId,
+    frameSeq: claim.frameSeq,
+    expectedHash: claim.expectedHash,
+    observedHash: claim.observedHash,
+    attestations: distinctAttestations,
+  };
+}

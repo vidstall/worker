@@ -79,6 +79,7 @@ import {
   type CanaryVerifyLoopHandle,
   type CanaryForwardCaptureResult,
 } from './canary/verify-loop.js';
+import { InMemoryClaimBoard } from './canary/claim-board.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -529,9 +530,12 @@ export async function startDaemon(overrides?: {
           cellSecret: new Uint8Array(0),
           perReceiver: new Map(),
         }),
-        // Synthetic peer session keypairs satisfy buildDivergenceProof's MIN_ATTESTERS=2 floor.
-        // The REAL >=2-distinct-Wallet-B co-sign collection protocol (W-M4-COSIGN) is M4b.
-        syntheticPeerKeypairs: () => [new Ed25519Keypair(), new Ed25519Keypair()],
+        // W-M4-COSIGN pull-corroboration claim board (D-CFA-42/43). In-memory fake this session
+        // (the live OFF-MEDIA-PATH cp-daemon `/canary/claims` carrier is M4b, D-CFA-47); the
+        // production capture yields no promotions, so nothing is published until the live plane
+        // lands. selfSessionKeypair = this daemon's Wallet-B session keypair (signs its OWN leg only).
+        claimBoard: new InMemoryClaimBoard(),
+        selfSessionKeypair: sessionKeypair,
         // Submit seam — no live PTB this session (M4b). The production capture yields no
         // promotions, so this is never invoked until the live plane lands; logged if it ever is.
         submit: async (proof): Promise<void> => {

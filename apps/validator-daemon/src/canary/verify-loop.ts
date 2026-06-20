@@ -14,9 +14,12 @@
  *     the captured forwarded Buffers come from the injected `capture` seam (synthetic in
  *     tests; the LIVE producer/SFU-forward/consumer plane is M4b, port-locked this session).
  *   - ZERO `apps/relay/` edit (INV-B). Every media tap stays validator-daemon-side.
- *   - The `MIN_ATTESTERS=2` floor (proof.ts:165-168) is satisfied with SYNTHETIC peer Ed25519
- *     keypairs from the injected `syntheticPeerKeypairs` seam. The REAL >=2-distinct-Wallet-B
- *     co-sign collection protocol (W-M4-COSIGN) is UNBUILT (= M4b, the TRUE root of W-M3-SIM).
+ *   - The `MIN_ATTESTERS=2` quorum is now formed by the W-M4-COSIGN PULL-CORROBORATION claim board
+ *     (claim-board.ts, D-CFA-42): each daemon PUBLISHES its OWN Wallet-B self-attestation
+ *     (signSelfAttestation) and a slash ASSEMBLEs only when >=2 DISTINCT session pubkeys accrue. The
+ *     M4a synthetic-peer-keypair seam is GONE. The LIVE cross-validator media capture + the live
+ *     cp-daemon carrier remain M4b — the gate is exercised over SYNTHETIC captures here (W-M3-SIM
+ *     narrowed, not closed; W-M4-COSIGN protocol root is now BUILT, its live transport is M4b).
  *
  * ── WHAT THIS GENUINELY CLOSES vs WHAT IT DOES NOT (DA-3, on record) ─────────────────────
  *   CLOSES W-M3-STUN-PATH: `state.relayStunLossBps` (index.ts decl/init + the measureRelay write
@@ -48,7 +51,17 @@ import {
   type DropAccumulator,
   type PerReceiverDivergences,
 } from './loss-classifier.js';
-import { OBSERVED_HASH_MISSING, buildDivergenceProof, type DivergenceProof } from './proof.js';
+import {
+  OBSERVED_HASH_MISSING,
+  canonicalProofMessage,
+  signSelfAttestation,
+  assembleProofFromAttestations,
+  distinctAttesterCount,
+  MIN_ATTESTERS,
+  type DivergenceProof,
+  type DivergenceClaim,
+} from './proof.js';
+import { attestIfIndependentlyObserved, type ClaimBoard } from './claim-board.js';
 import type { CanaryValidator, RelayRoomScope } from './cell.js';
 
 const MOD = 'canary/verify-loop';
@@ -111,10 +124,14 @@ export interface CanaryVerifyDeps {
   /** Capture the forwarded canary frames per receiver (injectable; synthetic in tests). */
   capture: CanaryForwardCapture;
   /**
-   * Mint >= MIN_ATTESTERS synthetic peer session keypairs to satisfy buildDivergenceProof's
-   * floor. The REAL multi-validator co-sign protocol (W-M4-COSIGN) is UNBUILT (= M4b).
+   * The pull-corroboration claim board (W-M4-COSIGN, D-CFA-42/43): this validator PUBLISHES its own
+   * Wallet-B self-attestation here and POLL-CORROBORATEs open cells against it. In-memory fake in
+   * tests; the live OFF-MEDIA-PATH cp-daemon carrier is M4b (D-CFA-47). REPLACES the M4a
+   * synthetic-peer-keypair seam — a real >=2-distinct quorum now forms from independent attestations.
    */
-  syntheticPeerKeypairs: () => Ed25519Keypair[];
+  claimBoard: ClaimBoard;
+  /** This validator's Wallet-B SESSION keypair — signs its OWN single attestation only (INV-C). */
+  selfSessionKeypair: Ed25519Keypair;
   /** Submit a built proof (injectable; the live PTB submit is M4b). */
   submit: CanarySlashSubmit;
   /** Gate tuning. */
@@ -184,6 +201,9 @@ export async function runCanaryVerifyRound(
   const promoted: CanaryDivergence[] = [];
   const absorbed: CanaryDivergence[] = [];
   let perReceiverCount = 0;
+  // This daemon's local divergence view per (roomId|relayMinerId) scope — the POLL-CORROBORATE step
+  // (after the scope loop) checks open cells against it so it only ever attests what it observed.
+  const localByScope = new Map<string, CanaryDivergence[]>();
 
   for (const scope of deps.getRelayRoomScopes()) {
     const cap = await deps.capture(scope);
@@ -216,23 +236,34 @@ export async function runCanaryVerifyRound(
       sendRate: deps.config.sendRate,
     });
 
-    // (5) for each promoted frameSeq build a proof (SYNTHETIC peers for the MIN_ATTESTERS=2
-    // floor — W-M4-COSIGN unbuilt) and submit via the injected seam (live PTB = M4b).
+    // (5) W-M4-COSIGN PULL-CORROBORATION (D-CFA-42, replaces the M4a synthetic-mint). PUBLISH-OWN:
+    // for each promoted divergence, sign ONE Wallet-B self-attestation over the UNCHANGED 145-byte
+    // canonical message and post it to the claim board. The >=2-distinct quorum + assemble/submit
+    // happen AFTER the scope loop (a peer daemon's independent attestation must be able to accrue).
     for (const d of result.promoted) {
-      const sessionKeypairs = deps.syntheticPeerKeypairs();
-      const proof = await buildDivergenceProof({
+      const claim: DivergenceClaim = {
         roomId: scope.roomId,
         relayMinerId: scope.relayId,
         canaryId: cap.canaryKid,
         frameSeq: d.frameSeq,
         expectedHash: d.expectedHash,
         observedHash: d.observedHash,
-        sessionKeypairs,
-      });
-      await deps.submit(proof);
+      };
+      const selfAtt = await signSelfAttestation(
+        canonicalProofMessage({ ...claim, sessionKeypairs: [] }),
+        deps.selfSessionKeypair,
+      );
+      await deps.claimBoard.post(claim, selfAtt, round);
       promoted.push(d);
     }
     absorbed.push(...result.absorbed);
+
+    // Remember this scope's local divergence view (union over receivers) so the post-loop
+    // POLL-CORROBORATE step can append THIS daemon's attestation to peer-opened cells it can
+    // INDEPENDENTLY confirm (D-CFA-41), keyed by the cell's (roomId, relayMinerId) scope.
+    const scopeDivs: CanaryDivergence[] = [];
+    for (const divs of perReceiver.values()) scopeDivs.push(...divs);
+    localByScope.set(`${scope.roomId}|${scope.relayId}`, scopeDivs);
 
     log.info(
       {
@@ -247,6 +278,29 @@ export async function runCanaryVerifyRound(
       'canary verify round classified (hermetic half — synthetic capture, STUN read live)',
     );
   }
+
+  // (6) POLL-CORROBORATE (D-CFA-41): append THIS daemon's attestation to any OPEN cell it can
+  // INDEPENDENTLY re-observe — only on a local byte-match, so it can never be coerced into
+  // attesting a divergence it did not observe. Keyed by the cell's (roomId, relayMinerId) scope.
+  for (const open of await deps.claimBoard.listOpen()) {
+    const localDivs = localByScope.get(`${open.claim.roomId}|${open.claim.relayMinerId}`) ?? [];
+    const att = await attestIfIndependentlyObserved(open.claim, localDivs, deps.selfSessionKeypair);
+    if (att) await deps.claimBoard.post(open.claim, att, round);
+  }
+
+  // (7) ASSEMBLE + SUBMIT (D-CFA-40/44): any cell that reached >= MIN_ATTESTERS DISTINCT Wallet-B
+  // attesters is assembled from the accrued REMOTE attestations and submitted ONCE (markSubmitted).
+  // Sub-quorum cells never submit (FAIL CLOSED). The chain re-verifies + dedups by miner_id.
+  for (const open of await deps.claimBoard.listOpen()) {
+    if (distinctAttesterCount(open.attestations) >= MIN_ATTESTERS) {
+      const proof = assembleProofFromAttestations(open.claim, open.attestations);
+      await deps.submit(proof);
+      await deps.claimBoard.markSubmitted(open.key);
+    }
+  }
+
+  // (8) GC stale un-quorumed cells (fail-closed after W_corr) + drop submitted cells past the window.
+  await deps.claimBoard.gc(round);
 
   return { accumulator: acc, promoted, absorbed, perReceiverCount };
 }
