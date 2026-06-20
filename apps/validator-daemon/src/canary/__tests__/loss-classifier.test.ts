@@ -9,8 +9,9 @@
  *
  * Chosen model (user gate F1 2026-06-20, Hybrid honest-framed; refined by the M3 build review):
  * a DROP is promoted IFF BOTH composed rules hold, RANKED by what is actually exercisable:
- *   (1) PRIMARY  — cumulative cross-round bound 1-(1-f)^n keyed by relayMinerId (hermetic now):
- *       the cumulative drop rate over >= MIN_ROUNDS rounds strictly exceeds the benign budget;
+ *   (1) PRIMARY  — cumulative cross-round bound (1-(1-f)^n-style; a cumulative MEAN drop-rate
+ *       threshold, not the literal binomial) keyed by relayMinerId (hermetic now): the
+ *       cumulative drop rate over >= MIN_ROUNDS rounds strictly exceeds the benign budget;
  *   (2) SECONDARY (SIMULATED) — MISSING in >= k distinct co-homed receivers.
  * The validator-probed STUN loss prior is FOLDED INTO the budget (= stunPacketLossBps + deltaBps,
  * D-CFA-25), NOT a separate third gate (a separate term reading the same cumulative rate is
@@ -54,7 +55,7 @@ const tamper = (frameSeq: number): CanaryDivergence => ({
 
 /** A config with the cumulative bound already crossed (so isolated rules can be tested). */
 const crossedAcc = (): DropAccumulator => {
-  // 12 rounds at 100 sends each, ALL dropped → cumulative far above any benign 1-(1-f)^n.
+  // 12 rounds at 100 sends each, ALL dropped → cumulative mean rate far above any benign budget.
   let acc = newDropAccumulator();
   for (let r = 0; r < 12; r++) {
     acc = accumulateRound(acc, RELAY, { observedDrops: 100, expectedSends: 100 });
@@ -194,7 +195,7 @@ describe('classifyDivergences — DROP tooth gating (REQ-CFA-028, D-CFA-21)', ()
   });
 });
 
-describe('cumulative accumulator — ShortMAC 1-(1-f)^n over synthetic rounds (REQ-CFA-028 PRIMARY)', () => {
+describe('cumulative accumulator — ShortMAC-style cumulative-rate bound over synthetic rounds (REQ-CFA-028 PRIMARY)', () => {
   it('keyed by relayMinerId: independent relays accumulate separately', () => {
     let acc = newDropAccumulator();
     // Accumulate enough rounds (>= MIN_ROUNDS_FOR_CUMULATIVE) so the confidence gate is met

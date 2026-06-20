@@ -17,9 +17,11 @@
  *     STRUCTURAL part of the closure.
  *   - DROP (observedHash === 'MISSING' — a frame never forwarded) is STATISTICAL: promoted
  *     IFF BOTH composed rules hold, RANKED by what is actually exercisable —
- *       (1) PRIMARY  — the cumulative cross-round bound 1-(1-f)^n keyed by relayMinerId
- *           (a pure accumulator, FULLY HERMETIC now): the relay's cumulative observed drop
- *           rate over >= MIN_ROUNDS_FOR_CUMULATIVE rounds STRICTLY exceeds the benign budget;
+ *       (1) PRIMARY  — the cumulative cross-round bound (1-(1-f)^n-STYLE; implemented as a
+ *           cumulative MEAN drop-rate threshold, NOT the literal binomial — a ShortMAC-style
+ *           cumulative-detection adaptation) keyed by relayMinerId (a pure accumulator, FULLY
+ *           HERMETIC now): the relay's cumulative observed drop rate over >=
+ *           MIN_ROUNDS_FOR_CUMULATIVE rounds STRICTLY exceeds the benign budget;
  *       (2) SECONDARY (SIMULATED-only, W-M3-SIM) — MISSING in >= k DISTINCT co-homed
  *           receivers (verifyForwardedCanary has ZERO production callers; fed by synthetic
  *           per-receiver fixtures here, the live verify loop is Task 5.2+).
@@ -91,6 +93,11 @@ export interface ClassifyResult {
 
 // ── PRIMARY: the per-relay cumulative cross-round accumulator (ShortMAC adaptation) ──
 //
+// IMPLEMENTED BOUND: a cumulative MEAN drop-rate threshold (total drops / total sends, in basis
+// points, compared > budget) over >= MIN_ROUNDS rounds — NOT the literal 1-(1-f)^n binomial.
+// This is a ShortMAC-STYLE cumulative-detection ADAPTATION (D-CFA-21, no novelty over 0.74); the
+// "1-(1-f)^n" references below name the family, not the exact formula.
+//
 // Across `n` send-rate rounds the cumulative observed drop fraction converges to the relay's
 // TRUE drop rate. A withholder dropping ABOVE the modeled benign floor is caught cumulatively
 // even when each single window is sub-delta (W-E2-RES: this is the ONLY catcher of sustained
@@ -114,7 +121,7 @@ export interface RoundObservation {
 
 /**
  * Minimum rounds of history before the cumulative bound is allowed to fire. Below this the
- * sample is too small for 1-(1-f)^n to be statistically meaningful (a single unlucky window
+ * sample is too small for the cumulative-rate bound to be statistically meaningful (a single unlucky window
  * must not slash). A modest floor — the WAN run calibrates it alongside delta.
  */
 export const MIN_ROUNDS_FOR_CUMULATIVE = 5;
@@ -215,7 +222,7 @@ function groupByFrame(perReceiver: PerReceiverDivergences): {
  *
  *   - TAMPER (observedHash !== MISSING): ALWAYS promoted, p=1, 1-of-n, NEVER gated.
  *   - DROP (observedHash === MISSING): promoted IFF
- *       (PRIMARY)   the cumulative 1-(1-f)^n bound keyed by relayMinerId is crossed
+ *       (PRIMARY)   the cumulative-rate bound (1-(1-f)^n-style) keyed by relayMinerId is crossed
  *                   (cumulative rate over >= MIN_ROUNDS rounds > stunPacketLossBps + deltaBps), AND
  *       (SECONDARY) MISSING in >= cfg.k DISTINCT receivers (simulated).
  *     The STUN prior is FOLDED INTO the budget (D-CFA-25), not a separate gate.

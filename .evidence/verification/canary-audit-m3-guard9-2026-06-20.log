@@ -1,0 +1,41 @@
+CANARY FORWARDING-AUDIT — MILESTONE 3 — MAIN guard #9 (authoritative re-run)
+Date: 2026-06-20   Branch: dvconf-daemons quangdm_main
+Scope: M3 chunk 1 (room-scoped co-auditors, REQ-CFA-023..025) + chunk 2 (loss classifier,
+       REQ-CFA-026..030) after MAIN folded the M3-build-review MEDIUMs (cross-teeth dedup +
+       STUN-folded-into-budget two-signal refinement + test-label fixes).
+
+MAIN does NOT trust the subagent counts — every line below is a fresh local re-run.
+
+== HERMETIC UNIT TESTS (default config; NO ports/mediasoup/localnet) ==
+- loss-classifier.test.ts ............ 13/13 GREEN  (incl. NEW cross-teeth-dedup + W-E2-RES sub-budget)
+- full canary unit suite + index .... 11 files / 85 tests GREEN  (was 83 pre-refinement; +2 MAIN tests)
+  (validator-pool, room-scope-staleness, loss-classifier, + existing canary unit + index.test.ts)
+
+== TSC (validator-daemon) ==
+- 4 errors, ALL in PRE-EXISTING UNTOUCHED cross-repo files (dvconf-client e2ee-spike.ts /
+  sframe-transform.ts + canary/keying.ts + canary/verifier.ts importing them, rootDir/TS2835).
+  My new files (loss-classifier.ts, validator-pool.ts) + index.ts edits add ZERO new errors.
+
+== BYTE-FROZEN PROOF (INV — must be EMPTY) ==
+- git diff --stat verifier.ts proof.ts cell.ts ........... EMPTY (byte-equality core + 145-byte
+  canonical message + assignCells all untouched). The classifier gates UPSTREAM of buildDivergenceProof.
+
+== INV-B (relay forward path untouched — must be EMPTY) ==
+- git diff --stat apps/relay/ (non-test) ................. EMPTY. STUN loss read is the validator's
+  OWN probe (measurement.packetLossRate), never relay-self-reported; no relay-side canary counter.
+
+== INV-C ==
+- ActiveRoom.validatorIds sourced from already-parsed RoomAssigned.validator_ids (vector<ID> = miner_id
+  only, zero new chain read); relayStunLossBps keyed by relayMinerId; distinctness by minerId; no A<->B
+  link; no secret/sessionWallet on any wire or log surface.
+
+== MOVE 361/361 BY BYTE-IDENTITY ==
+- dvconf-contracts: NO sources/**/*.move changes (git status clean for .move) — Move suite is
+  non-regression by byte-identity (M3 = zero Move change). canary_audit.move untouched.
+
+== console.* ==
+- grep console. in loss-classifier.ts + validator-pool.ts ... NONE (createLogger only; non-secret metadata).
+
+VERDICT: guard #9 PASS. M3 chunks 1+2 hermetic, invariant-preserving, byte-frozen-proof intact.
+Cross-receiver signal SIMULATED-only (W-M3-SIM, verify loop Task 5.2+); relayStunLossBps is a
+written-now-read-later seam. Ready for the independent multi-auditor SHIP gate.
