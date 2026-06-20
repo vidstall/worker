@@ -71,6 +71,7 @@ import {
   type CanaryCellLoopHandle,
 } from './canary/cell.js';
 import { discoverActiveValidatorMinerIds } from './canary/validator-discovery.js';
+import { buildRoomScopedValidatorPool } from './canary/validator-pool.js';
 import { startCoverageServer, type CoverageStateProvider } from './canary/coverage-server.js';
 
 const logger = createLogger('validator-daemon');
@@ -101,6 +102,16 @@ export interface ActiveRoom {
    * RO-019a: the validator probes + submits a per-relay proof for BOTH slots.
    */
   standbyRelayId?: string;
+  /**
+   * REQ-CFA-023 (M3 chunk 1, D-CFA-24): the co-auditor validator miner_ids for THIS
+   * room, sourced from the in-event `RoomAssigned.validator_ids` (already parsed for the
+   * self-membership test, then discarded — ZERO new chain cost). Room-scopes the canary
+   * validator pool (`buildRoomScopedValidatorPool`) so coverage is reported/assigned over
+   * this daemon's OWN rooms' co-auditors, NOT the registry-wide set (closes the M2 over-
+   * count, W-M2-3). Written ONLY by the RoomAssigned arm; relay promotion leaves it
+   * unchanged (promote_relay touches only assigned_relays — W-M3-STALE). Defaults to [].
+   */
+  validatorIds?: string[];
 }
 
 /** Internal state for the running daemon. */
@@ -127,6 +138,18 @@ export interface DaemonState {
    */
   rttSamplesMs: number[];
   consecutiveUnreachable: number;
+  /**
+   * REQ-CFA-029 (M3 chunk 2, D-CFA-26): the latest validator-probed STUN packet-loss
+   * (basis points) per relayMinerId. Written in `measureRelay` (next to the rttSamplesMs
+   * push) from `measurement.packetLossRate` — a value the per-relay session-proof BCS
+   * folds in (~:821) then otherwise DISCARDS. This is the per-relay SEAM that WILL be read by
+   * the loss classifier once the verify loop is wired (Task 5.2+, W-M3-SIM): the classifier
+   * is pure/test-only today (zero production callers), so this is written-now-read-later — NOT
+   * yet a live data path. When wired it folds into the classifier's BUDGET (D-CFA-25,
+   * stunPacketLossBps + delta): STUN-UDP != canary-RTP and the probe is a single global host,
+   * so it is a COARSE prior, NOT a binding signal (not per-relay-attributed until G3).
+   */
+  relayStunLossBps: Map<string, bigint>;
   /** Stop function for the F61 HealthMonitor (DOH-018). */
   healthMonitorStop: (() => void) | null;
   /**
@@ -278,6 +301,7 @@ export async function startDaemon(overrides?: {
     heartbeatStop: null,
     rttSamplesMs: [],
     consecutiveUnreachable: 0,
+    relayStunLossBps: new Map(),
     healthMonitorStop: null,
     canaryCellLoop: null,
     discoveredValidatorMinerIds: undefined,
@@ -367,23 +391,29 @@ export async function startDaemon(overrides?: {
           }
           return [...relays];
         },
-        // M2 chunk 2: UNION the live discovered validator set (Wallet-A miner_ids; no
-        // session wallet) with THIS daemon's own self-entry, so the daemon never loses its
-        // own coverage if discovery returns empty/errors. The duplicate-collapsing dedup in
-        // assignCells makes the widened pool safe against a Wallet-B self-coverage sybil.
+        // REQ-CFA-024 (M3 chunk 1, D-CFA-24): ROOM-SCOPE the validator pool. M2 unioned the
+        // registry-wide discovered set with the self-entry, which OVER-COUNTS — the cross-
+        // receiver denominator the loss classifier reasons over (and the M2 coverage feed)
+        // is meaningless on an inflated set. M3 builds the pool from the UNION of THIS
+        // daemon's OWN rooms' co-auditors (state.activeRooms[*].validatorIds, event-sourced
+        // from RoomAssigned, ZERO new chain cost) + the self-entry, via the unit-tested pure
+        // buildRoomScopedValidatorPool. The registry-wide discovery cache is DEMOTED to a
+        // liveness/identity refresh ONLY — it never widens the pool (a registry validator
+        // covering none of our rooms is excluded). Coverage-ACCURACY fix on the SELF-REPORT
+        // half (D-CFA-15 / W-M2-1), NOT a slashing change. assignCells stays UNTOUCHED.
         getValidators: (): CanaryValidator[] => {
           const self: CanaryValidator = { minerId: validatorMinerId, sessionWallet: sessionAddress };
-          // Discovery is async; the loop is sync. We refresh a cached snapshot every round
-          // (fire-and-forget) and read the latest cache here — crash-safe to self-only.
-          const discovered = state.discoveredValidatorMinerIds ?? [];
-          const union = new Map<string, CanaryValidator>();
-          union.set(self.minerId, self);
-          for (const minerId of discovered) {
-            if (!union.has(minerId)) union.set(minerId, { minerId, sessionWallet: '' });
-          }
-          // Kick off a refresh for the NEXT round (no new timer — rides this round's tick).
+          const activeRooms = [...state.activeRooms.values()].map((r) => ({
+            validatorIds: r.validatorIds ?? [],
+          }));
+          // Kick off a registry refresh for the NEXT round's liveness/identity view (no new
+          // timer — rides this round's tick). Crash-safe; the result no longer widens the pool.
           void refreshDiscoveredValidators(state, cellLog);
-          return [...union.values()];
+          return buildRoomScopedValidatorPool({
+            activeRooms,
+            self,
+            discovered: state.discoveredValidatorMinerIds ?? [],
+          });
         },
       },
     });
@@ -536,6 +566,13 @@ export async function startDaemon(overrides?: {
         const room = activeRooms.get(parsed.room_id) ?? {};
         room.primaryRelayId = primaryRelayId;
         room.standbyRelayId = standbyRelayId;
+        // REQ-CFA-023 (M3 chunk 1, D-CFA-24): persist the in-event co-auditor set (already
+        // parsed above for the self-membership test, previously discarded) so the canary
+        // validator pool can room-scope (buildRoomScopedValidatorPool). ZERO new chain cost.
+        // A re-assignment REPLACES the set (latest assignment is authoritative);
+        // promote_relay/swap_relay never reach this arm, so the set is stable under a relay
+        // swap (W-M3-STALE — mirrors validator-pool.ts::applyRoomAssigned, the unit-tested seam).
+        room.validatorIds = [...validatorIds];
 
         if (!activeRooms.has(parsed.room_id)) {
           activeRooms.set(parsed.room_id, room);
@@ -792,6 +829,14 @@ async function measureRelay(
     state.consecutiveUnreachable = 0;
     state.rttSamplesMs.push(Number(measurement.avgLatencyMs));
     if (state.rttSamplesMs.length > RTT_WINDOW) state.rttSamplesMs.shift();
+    // REQ-CFA-029 (M3 chunk 2, D-CFA-26): persist this relay's STUN packet-loss (basis
+    // points) as the per-relay SEAM the loss classifier WILL read once the verify loop is
+    // wired (Task 5.2+, W-M3-SIM — written now, read later; no live reader today). The same
+    // value is folded into the session-proof BCS below (~packetLossRate) then otherwise
+    // discarded; here it is keyed by relayMinerId so the classifier can fold it into its
+    // BUDGET. Coarse prior only (D-CFA-25): STUN-UDP != canary-RTP, single global probe host
+    // (per-relay attribution = G3).
+    state.relayStunLossBps.set(relayMinerId, measurement.packetLossRate);
   } else {
     state.consecutiveUnreachable += 1;
   }

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>P11 — WAN/real-camera canary-loss demo (DEFERRED)</title>
+  </head>
+  <body>
+    <h1>P11 WAN canary-loss demo</h1>
+    <p>
+      Headless Chrome → <strong>REAL camera</strong> (getUserMedia, no fake device) → real
+      WebRTC → SINGLE-HOP in-process mediasoup relay → relay-internal tap with an injected
+      loss model. The publisher additionally emits the deterministic canary SFrame stream
+      (from CANARY_CELL_SECRET) so the validator-daemon verifier + loss classifier can be
+      exercised over real loss.
+    </p>
+    <p>
+      OPTIMISTIC FLOOR: loopback ICE, real camera, NOT WAN glass-to-glass. The live run is
+      DEFERRED to a viva/M4 milestone. Served from http://127.0.0.1 so getUserMedia +
+      insertable streams have a secure context.
+    </p>
+    <script src="/bundle.js"></script>
+  </body>
+</html>
