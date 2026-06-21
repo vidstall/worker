@@ -92,17 +92,20 @@ import {
   readSframeTrailer,
   SFRAME_TRAILER_LEN,
   codecOffsetForFrameType,
-  type KeyLookup,
 } from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+// The 4 byte-identity helpers (+ VP8_PT) come from the SHARED util (Task 11 step 0a)
+// — extracted VERBATIM so the 1-hop and the REQ-RMS-020 multi-hop tests share ONE
+// byte-comparison framework (no copy-paste drift). NOTHING reimplements crypto.
 import {
-  KeyManager,
-  type RosterMember,
-} from '../../../../../../dvconf-client/src/lib/crypto/key-manager.js';
-import { createSessionKeypair } from '../../../../../../dvconf-client/src/lib/crypto/session-keypair.js';
+  VP8_PT,
+  makeVp8RtpWithBody,
+  makeRtcpSenderReport,
+  realKeying,
+  locateForwardedSframe,
+} from './_sframe-byteid-helpers.js';
 
 // -- VP8-only codec (mirrors mediasoup-manager.ts + the M1 bench / P5) ----------
 
-const VP8_PT = 101;
 const mediaCodecs: msTypes.RtpCodecCapability[] = [
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000, preferredPayloadType: VP8_PT },
 ];
@@ -124,135 +127,6 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // skipped), the tampered bytes fail AEAD decrypt. With the flag UNSET this is a no-op,
 // so GREEN is the real forwarded bytes. Mirrors P5's BLIND_FORCE_TAMPER.
 const FORCE_TAMPER = process.env['P10_FORCE_TAMPER'] === '1';
-
-/** Minimal RTCP Sender Report (PT=200) — VERBATIM from P5 / the M1 bench. Required
- *  so each SSRC has a non-zero GetSenderReportNtpMs(), the precondition the
- *  SimulcastConsumer demands to forward (G-MCS-1). */
-function makeRtcpSenderReport(
-  ssrc: number,
-  rtpTimestamp: number,
-  packetCount: number,
-  octetCount: number,
-): Buffer {
-  const buf = Buffer.alloc(28);
-  buf[0] = 0x80;
-  buf[1] = 200; // SR
-  buf.writeUInt16BE(6, 2);
-  buf.writeUInt32BE(ssrc >>> 0, 4);
-  const nowMs = Date.now();
-  const ntpSec = Math.floor(nowMs / 1000) + 2208988800;
-  const ntpFrac = Math.floor(((nowMs % 1000) / 1000) * 0x1_0000_0000);
-  buf.writeUInt32BE(ntpSec >>> 0, 8);
-  buf.writeUInt32BE(ntpFrac >>> 0, 12);
-  buf.writeUInt32BE(rtpTimestamp >>> 0, 16);
-  buf.writeUInt32BE(packetCount >>> 0, 20);
-  buf.writeUInt32BE(octetCount >>> 0, 24);
-  return buf;
-}
-
-/**
- * Build a VP8 RTP packet whose payload carries an arbitrary opaque BODY after a
- * real-VP8 header (G-MCS-1 keyframe start code on keyframes). The body is the REAL
- * SFrame ciphertext (positive) OR a cleartext plaintext (negative control) — the
- * relay forwards either opaquely; this builder is body-agnostic.
- *
- * VP8 header semantics are VERBATIM from P5's makeSframeVp8Rtp.
- */
-function makeVp8RtpWithBody(args: {
-  ssrc: number;
-  seq: number;
-  ts: number;
-  pictureId: number;
-  body: Uint8Array;
-  keyframe: boolean;
-}): Buffer {
-  const { ssrc, seq, ts, pictureId, body, keyframe } = args;
-
-  const header = Buffer.alloc(12);
-  header[0] = 0x80; // V=2
-  header[1] = (VP8_PT & 0x7f) | 0x80; // marker=1 + PT
-  header.writeUInt16BE(seq & 0xffff, 2);
-  header.writeUInt32BE(ts >>> 0, 4);
-  header.writeUInt32BE(ssrc >>> 0, 8);
-
-  const desc = Buffer.from([
-    0x90, // X=1, S=1
-    0x80, // I=1 (PictureID present)
-    0x80 | ((pictureId >> 8) & 0x7f), // M=1 + PID high 7 bits
-    pictureId & 0xff, // PID low 8 bits
-  ]);
-
-  let vp8PayloadHeader: Buffer;
-  if (keyframe) {
-    vp8PayloadHeader = Buffer.from([
-      0x10, 0x00, 0x00, // frame tag: P-bit=0 => keyframe
-      0x9d, 0x01, 0x2a, // VP8 keyframe start code (G-MCS-1)
-      0x80, 0x02, // width 640
-      0xe0, 0x01, // height 480
-    ]);
-  } else {
-    vp8PayloadHeader = Buffer.from([0x11, 0x00, 0x00]); // P-bit=1 => interframe
-  }
-
-  return Buffer.concat([header, desc, vp8PayloadHeader, Buffer.from(body)]);
-}
-
-/**
- * REAL keying (production source). Build two real session keypairs (coord + me),
- * have the coordinator bootstrap + seal K_room to the roster, and have ME open my
- * sealed envelope. Returns my real per-sender encrypt key + the real keyLookup the
- * receiver uses to decrypt. This is the SHIPPED P1/P3 path — no crypto here.
- *
- * Coordinator election is by smallest pubkey (electCoordinator); whichever of the
- * two wins bootstraps, and the OTHER's KeyManager applies the bundle. We always end
- * up with MY KeyManager holding the room key (either I bootstrapped, or I applied).
- */
-async function realKeying(): Promise<{
-  senderId: string;
-  kid: number;
-  encryptKey: CryptoKey;
-  keyLookup: KeyLookup;
-}> {
-  const a = createSessionKeypair({ withOpener: true });
-  const b = createSessionKeypair({ withOpener: true });
-  const roster: RosterMember[] = [
-    { peerId: 'peer-a', sessionPubkeyB64: a.publicKeyB64 },
-    { peerId: 'peer-b', sessionPubkeyB64: b.publicKeyB64 },
-  ];
-
-  // "me" is keypair `a`; the coordinator is whichever wins the election.
-  const meKm = new KeyManager({
-    roomId: 'p10-relayblind-room',
-    localSessionPubkeyB64: a.publicKeyB64,
-    opener: a.opener!,
-    graceWindowMs: 2000,
-  });
-  const otherKm = new KeyManager({
-    roomId: 'p10-relayblind-room',
-    localSessionPubkeyB64: b.publicKeyB64,
-    opener: b.opener!,
-    graceWindowMs: 2000,
-  });
-  meKm.setRoster(roster);
-  otherKm.setRoster(roster);
-
-  // The coordinator (smaller pubkey) bootstraps + seals; the other applies. Whoever
-  // I am, MY KeyManager (`meKm`) ends up holding the room key.
-  if (meKm.isCoordinator()) {
-    const bundle = await meKm.bootstrapRoomKey();
-    await otherKm.applyBundle(bundle); // not used to decrypt, but exercises the full seal/open path
-  } else {
-    const bundle = await otherKm.bootstrapRoomKey();
-    await meKm.applyBundle(bundle); // opens MY real sealed envelope (real libsodium box_open)
-  }
-
-  const senderId = a.publicKeyB64;
-  const kid = meKm.kid;
-  const encryptKey = await meKm.contentKeyForSenderAtKid(senderId, kid);
-  if (!encryptKey) throw new Error('realKeying: no K_content for the bootstrapped epoch');
-  const keyLookup = meKm.keyLookupForSender(senderId);
-  return { senderId, kid, encryptKey, keyLookup };
-}
 
 let worker: msTypes.Worker;
 let router: msTypes.Router;
@@ -347,38 +221,6 @@ async function forwardBodies(
     /* best-effort */
   }
   return captured;
-}
-
-/**
- * Locate the REAL partial-SFrame body in a FORWARDED VP8 RTP packet by SCANNING for the
- * candidate body start (offsets 12..64) and matching the AUTHORITATIVE sent-ciphertext
- * b64 set: `cand = pkt.subarray(off)`, and if `sentBodiesB64.has(cand.toString('base64'))`
- * the body is found. The M3 Lane B config byte 0x01 now lives in the TRAILER at the END,
- * so there is no front 0x01+KID signature to scan; the b64 byte-identity match IS the
- * authoritative locator. We then parse the trailer FROM THE END for {kid, ctr}.
- *
- * Why scan, not a fixed offset (same lesson as P5): mediasoup legitimately rewrites
- * RTP/VP8 HEADER bytes for routing (extension, descriptor) — that is the cleartext
- * metadata routing the blind-forward invariant PERMITS. It NEVER rewrites the SFrame body.
- *
- * Returns {bodyOffset, kid, ctr} when the trailing body matched a sent body; else null.
- */
-function locateForwardedSframe(
-  pkt: Buffer,
-  kid: number,
-  sentBodiesB64: Set<string>,
-): { bodyOffset: number; kid: number; ctr: number } | null {
-  const scanEnd = Math.min(pkt.length - SFRAME_TRAILER_LEN, 64);
-  for (let off = 12; off < scanEnd; off++) {
-    const cand = pkt.subarray(off);
-    if (cand.length < SFRAME_TRAILER_LEN + 16) break; // too short to hold body + trailer
-    if (sentBodiesB64.has(cand.toString('base64'))) {
-      const trailer = readSframeTrailer(cand);
-      void kid; // kid is asserted by the caller against trailer.kid
-      return { bodyOffset: off, kid: trailer.kid, ctr: trailer.ctr };
-    }
-  }
-  return null;
 }
 
 /**

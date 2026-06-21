@@ -1,0 +1,177 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:01:14.704Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:01:14.705Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:01:14.707Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:01:14.710Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:01:14.710Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:01:14.710Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m[REQ-RMS-020 hops=2] mediaPackets=55 byteIdentical=0 decryptedOk=0 [RED HOOK]
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:01:15.716Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:01:15.716Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:01:15.716Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:01:15.717Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:01:15.717Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:01:15.717Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m[REQ-RMS-020 hops=3] mediaPackets=56 byteIdentical=0 decryptedOk=0 [RED HOOK]
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:01:16.706Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:01:16.706Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:01:16.707Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:01:16.707Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:01:16.708Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:01:16.708Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m[REQ-RMS-020 hops=2] mediaPackets=56 byteIdentical=0 decryptedOk=0 [RED HOOK]
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:01:17.693Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:01:17.693Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:01:17.694Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:01:17.695Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:01:17.695Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:01:17.695Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m[REQ-RMS-020 hops=2] mediaPackets=58 byteIdentical=0 decryptedOk=0 [RED HOOK]
+
+ [31m❯[39m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts [2m([22m[2m4 tests[22m[2m | [22m[31m4 failed[39m[2m)[22m[33m 4303[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m2-hop: SFrame ciphertext byte-identical at the tail[39m[33m 1067[2mms[22m[39m
+[31m     → expected +0 to be 55 // Object.is equality[39m
+[31m   [31m×[31m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)[39m[33m 991[2mms[22m[39m
+[31m     → expected +0 to be 56 // Object.is equality[39m
+[31m   [31m×[31m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes[39m[33m 981[2mms[22m[39m
+[31m     → expected +0 to be 56 // Object.is equality[39m
+[31m   [31m×[31m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity[39m[33m 990[2mms[22m[39m
+[31m     → expected +0 to be 58 // Object.is equality[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 4 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m2-hop: SFrame ciphertext byte-identical at the tail
+[31m[1mAssertionError[22m: expected +0 to be 55 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 55[39m
+[31m+ 0[39m
+
+[36m [2m❯[22m assertByteIdenticalAtTail apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m130:25[22m[39m
+    [90m128| [39m  console.log(`[REQ-RMS-020 hops=${routers.length}] mediaPackets=${med…
+    [90m129| [39m  [34mexpect[39m(mediaPackets)[33m.[39m[34mtoBeGreaterThan[39m([34m0[39m)[33m;[39m
+    [90m130| [39m  expect(byteIdentical).toBe(mediaPackets); // RED hook flips a body b…
+    [90m   | [39m                        [31m^[39m
+    [90m131| [39m  [34mexpect[39m(decryptedOk)[33m.[39m[34mtoBe[39m(byteIdentical)[33m;[39m
+    [90m132| [39m}
+[90m [2m❯[22m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m138:5[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[31m[1mAssertionError[22m: expected +0 to be 56 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 56[39m
+[31m+ 0[39m
+
+[36m [2m❯[22m assertByteIdenticalAtTail apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m130:25[22m[39m
+    [90m128| [39m  console.log(`[REQ-RMS-020 hops=${routers.length}] mediaPackets=${med…
+    [90m129| [39m  [34mexpect[39m(mediaPackets)[33m.[39m[34mtoBeGreaterThan[39m([34m0[39m)[33m;[39m
+    [90m130| [39m  expect(byteIdentical).toBe(mediaPackets); // RED hook flips a body b…
+    [90m   | [39m                        [31m^[39m
+    [90m131| [39m  [34mexpect[39m(decryptedOk)[33m.[39m[34mtoBe[39m(byteIdentical)[33m;[39m
+    [90m132| [39m}
+[90m [2m❯[22m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m145:5[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[31m[1mAssertionError[22m: expected +0 to be 56 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 56[39m
+[31m+ 0[39m
+
+[36m [2m❯[22m assertByteIdenticalAtTail apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m130:25[22m[39m
+    [90m128| [39m  console.log(`[REQ-RMS-020 hops=${routers.length}] mediaPackets=${med…
+    [90m129| [39m  [34mexpect[39m(mediaPackets)[33m.[39m[34mtoBeGreaterThan[39m([34m0[39m)[33m;[39m
+    [90m130| [39m  expect(byteIdentical).toBe(mediaPackets); // RED hook flips a body b…
+    [90m   | [39m                        [31m^[39m
+    [90m131| [39m  [34mexpect[39m(decryptedOk)[33m.[39m[34mtoBe[39m(byteIdentical)[33m;[39m
+    [90m132| [39m}
+[90m [2m❯[22m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m153:5[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[31m[1mAssertionError[22m: expected +0 to be 58 // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 58[39m
+[31m+ 0[39m
+
+[36m [2m❯[22m assertByteIdenticalAtTail apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m130:25[22m[39m
+    [90m128| [39m  console.log(`[REQ-RMS-020 hops=${routers.length}] mediaPackets=${med…
+    [90m129| [39m  [34mexpect[39m(mediaPackets)[33m.[39m[34mtoBeGreaterThan[39m([34m0[39m)[33m;[39m
+    [90m130| [39m  expect(byteIdentical).toBe(mediaPackets); // RED hook flips a body b…
+    [90m   | [39m                        [31m^[39m
+    [90m131| [39m  [34mexpect[39m(decryptedOk)[33m.[39m[34mtoBe[39m(byteIdentical)[33m;[39m
+    [90m132| [39m}
+[90m [2m❯[22m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts:[2m159:5[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m4 failed[39m[22m[90m (4)[39m
+[2m   Start at [22m 02:01:13
+[2m   Duration [22m 5.08s[2m (transform 95ms, setup 0ms, collect 549ms, tests 4.30s, environment 0ms, prepare 99ms)[22m
+

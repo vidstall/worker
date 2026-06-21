@@ -1,0 +1,355 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+ [2m[90m↓[39m[22m apps/relay/src/__tests__/integration/single-worker-saturation-bench.integration.test.ts [2m([22m[2m2 tests[22m[2m | [22m[33m2 skipped[39m[2m)[22m
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 1/30: MTTR=64.0ms (detect=63.0 resume+relay=1.0) pPkts=15 sPkts=24
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 2/30: MTTR=65.0ms (detect=64.0 resume+relay=1.0) pPkts=15 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 3/30: MTTR=65.0ms (detect=64.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 4/30: MTTR=63.0ms (detect=62.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 5/30: MTTR=63.0ms (detect=62.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 6/30: MTTR=59.0ms (detect=58.0 resume+relay=1.0) pPkts=15 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 7/30: MTTR=65.0ms (detect=64.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 8/30: MTTR=64.0ms (detect=64.0 resume+relay=0.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 9/30: MTTR=55.0ms (detect=54.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 10/30: MTTR=63.0ms (detect=62.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 11/30: MTTR=66.0ms (detect=65.0 resume+relay=1.0) pPkts=16 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 12/30: MTTR=63.0ms (detect=63.0 resume+relay=0.0) pPkts=15 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 13/30: MTTR=64.0ms (detect=63.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 14/30: MTTR=64.0ms (detect=63.0 resume+relay=1.0) pPkts=14 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 15/30: MTTR=64.0ms (detect=63.0 resume+relay=1.0) pPkts=14 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 16/30: MTTR=63.0ms (detect=62.0 resume+relay=1.0) pPkts=15 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 17/30: MTTR=64.0ms (detect=63.0 resume+relay=1.0) pPkts=15 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 18/30: MTTR=64.0ms (detect=63.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 19/30: MTTR=65.0ms (detect=64.0 resume+relay=1.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 20/30: MTTR=63.0ms (detect=62.0 resume+relay=1.0) pPkts=14 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 21/30: MTTR=63.0ms (detect=62.0 resume+relay=1.0) pPkts=16 sPkts=24
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 22/30: MTTR=65.0ms (detect=64.0 resume+relay=1.0) pPkts=15 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 23/30: MTTR=63.0ms (detect=62.0 resume+relay=1.0) pPkts=15 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 24/30: MTTR=63.0ms (detect=63.0 resume+relay=0.0) pPkts=14 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 25/30: MTTR=63.0ms (detect=63.0 resume+relay=0.0) pPkts=15 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 26/30: MTTR=57.0ms (detect=56.0 resume+relay=1.0) pPkts=14 sPkts=27
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 27/30: MTTR=65.0ms (detect=64.0 resume+relay=1.0) pPkts=14 sPkts=26
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 28/30: MTTR=55.0ms (detect=55.0 resume+relay=0.0) pPkts=14 sPkts=27
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 29/30: MTTR=65.0ms (detect=64.0 resume+relay=1.0) pPkts=16 sPkts=25
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m[mttr-bench] run 30/30: MTTR=51.0ms (detect=51.0 resume+relay=0.0) pPkts=14 sPkts=27
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts[2m > [22m[2mrelay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22m[2mruns N=30 cutovers and meets P95<=100ms / P99<=200ms
+[22m[39m
+[mttr-bench] report -> C:\Thesis\dvconf\dvconf-daemons\.evidence\verification\relay-overlap-m1-bench-2026-06-05.md
+
+# Relay-Overlap M1 — Client-Perceived Cutover MTTR Bench
+
+**Date:** 2026-06-05  
+**Branch:** bench-3b-client-mttr (off spike-warmpipe-rtp)  
+**Verdict:** **PASS** vs success-metric P95 <= 100 ms / P99 <= 200 ms
+
+## Result
+
+| Metric | Value (ms) | Target | Pass |
+|---|---:|---|:--:|
+| N (runs) | 30 | >=30 | yes |
+| P50 MTTR | 63.0 | - | - |
+| **P95 MTTR** | **65.0** | <= 100 | yes |
+| **P99 MTTR** | **66.0** | <= 200 | yes |
+| mean | 62.5 | - | - |
+| min / max | 51.0 / 66.0 | - | - |
+| failed runs | 0 | 0 | yes |
+
+### MTTR component breakdown
+
+| Component | P50 (ms) | P95 (ms) |
+|---|---:|---:|
+| detection window (kill -> watcher fired) | 63.0 | 64.0 |
+| relay + resume (watcher fired -> first standby RTP) | 1.0 | 1.0 |
+
+## Knob values
+
+| Knob | Value |
+|---|---:|
+| RTP_TIMEOUT_MS | 50 |
+| JITTER_BUFFER_MS | 0 |
+| HEARTBEAT_INTERVAL_MS | 0 (reserved; no-op in this rig) |
+| BENCH_WARMUP_MS | 250 |
+| BENCH_SETTLE_MS | 400 |
+
+## Methodology
+
+- **In-process, real-mediasoup**: two real Workers (primary + standby relays, distinct child processes), two Routers, real PipeTransports, real Opus RTP. Warm pipe built by the production-faithful manual cross-PipeTransport pairing proven by the step-3a spike.
+- **Client model**: dual DirectTransport consumers — primary router (active) + standby router piped producer (pre-created PAUSED, REQ-RO-005). DirectTransport emits a per-packet rtp event -> sub-ms client-perceived arrival timestamps.
+- **Detection**: the dvconf-client rtp-timeout-watcher replicated verbatim (fire once after RTP_TIMEOUT_MS of silence, reset per packet), attached to the primary sink.
+- **t0** = client's last RTP from the primary sink (the primary relay drops the client). **t1** = client's first RTP from the standby after resume. **MTTR = t1 - t0.**
+- **"Kill primary"** = the PRIMARY RELAY drops the client, modelled by closing the client's PRIMARY sink consumer (`primarySink.close()`). The room peer (publisher) keeps sending and the warm pipe keeps carrying RTP to the standby — exactly the failure relay-overlap redundancy protects against, so the resumed standby sink has real RTP to deliver. (Deliberately NOT "stop the publisher": starving the source would also starve the standby — a source outage, not a relay failover, which M1 does not address.)
+
+## Honesty / bounds
+
+- **Optimistic floor** for the detection + relay/resume mechanism, **not** a WAN glass-to-glass latency. In-process loopback omits real-deployment terms a cross-process / WAN client adds: WebRTC jitter-buffer playout (~20-60 ms), OS UDP scheduling, network RTT.
+- The inter-relay WS connect-param exchange is **genuinely ~0 at cutover**: the warm pipe is pre-established before the kill (the point of REQ-RO-004/005), so it is off the cutover critical path.
+- MTTR is **bounded below by RTP_TIMEOUT_MS (50 ms)**; the detection window dominates (relay-level resume ~0-1 ms, spike-confirmed). Lowering RTP_TIMEOUT_MS lowers MTTR at the cost of false-positive cutovers on transient jitter.
+
+
+ [32m✓[39m apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 23661[2mms[22m[39m
+   [33m[2m✓[22m[39m relay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)[2m > [22mruns N=30 cutovers and meets P95<=100ms / P99<=200ms [33m 23494[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/bandwidth-scale-bench.integration.test.ts[2m > [22m[2mW5 M1 P9 — scaled bandwidth bench (REAL mediasoup, REQ-MCS-006)[2m > [22m[2mHARD-GATE: baseline/optimized forwarded-byte ratio >= 3.0 at N=12 (page-size 9)
+[22m[39m[bench REQ-MCS-006 N=12] forwarded outbound-rtp over 800ms window: baseline(all :2)=636992 bytes  optimized(1x:2 + 8x:0 + 3 paused)=97104 bytes  ratio=6.56  [speaker=57936 thumb=4896 offpage-paused=0]
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/bandwidth-scale-bench.integration.test.ts[2m > [22m[2mW5 M1 P9 — scaled bandwidth bench (REAL mediasoup, REQ-MCS-006)[2m > [22m[2mHARD-GATE: baseline/optimized forwarded-byte ratio >= 3.0 at N=12 (page-size 9)
+[22m[39m[bench REQ-MCS-006 N=25 DEMO] baseline(all :2)=1369680 bytes  optimized(1x:2 + 8x:0 + 16 paused)=99008 bytes  ratio=13.83
+[bench] sidecar -> C:\Thesis\dvconf\dvconf-daemons\.evidence\verification\transmission-m1-bench-2026-06-16.json
+
+ [32m✓[39m apps/relay/src/__tests__/integration/bandwidth-scale-bench.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 8245[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M1 P9 — scaled bandwidth bench (REAL mediasoup, REQ-MCS-006)[2m > [22mHARD-GATE: baseline/optimized forwarded-byte ratio >= 3.0 at N=12 (page-size 9) [33m 8167[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-forward.integration.test.ts[2m > [22m[2mW5 M2 P5 — relay blind-forward invariant (REAL mediasoup, REQ-MCS-011)[2m > [22m[2mINVARIANT (1): forwards SFrame ciphertext BYTE-IDENTICAL + cleartext KID/CTR header survives (relay is blind)
+[22m[39m[blind-forward REQ-MCS-011 invariant-1] forwarded=94 mediaPackets=94 ciphertextByteIdentical=94 kidPreserved=94
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-forward.integration.test.ts[2m > [22m[2mW5 M2 P5 — relay blind-forward invariant (REAL mediasoup, REQ-MCS-011)[2m > [22m[2mINVARIANT (2): M1 layer-select drops forwarded byteCount on :0 vs :2 OVER ciphertext (>=3x; RED hook BLIND_FORCE_LAYER_HIGH)
+[22m[39m[blind-forward REQ-MCS-011 invariant-2] forwarded outbound-rtp over 800ms: high(:2)=53237 bytes  low(:0)=5285 bytes  ratio=10.07
+
+ [32m✓[39m apps/relay/src/__tests__/integration/relay-blind-forward.integration.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 5971[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P5 — relay blind-forward invariant (REAL mediasoup, REQ-MCS-011)[2m > [22mINVARIANT (1): forwards SFrame ciphertext BYTE-IDENTICAL + cleartext KID/CTR header survives (relay is blind) [33m 1814[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P5 — relay blind-forward invariant (REAL mediasoup, REQ-MCS-011)[2m > [22mINVARIANT (2): M1 layer-select drops forwarded byteCount on :0 vs :2 OVER ciphertext (>=3x; RED hook BLIND_FORCE_LAYER_HIGH) [33m 4027[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:03:07.258Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:03:07.259Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:03:07.260Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:03:07.263Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:03:07.263Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m{"timestamp":"2026-06-21T19:03:07.263Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m2-hop: SFrame ciphertext byte-identical at the tail
+[22m[39m[REQ-RMS-020 hops=2] mediaPackets=57 byteIdentical=57 decryptedOk=57
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:03:08.254Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:03:08.254Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:03:08.254Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:03:08.255Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:03:08.255Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m{"timestamp":"2026-06-21T19:03:08.256Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5)
+[22m[39m[REQ-RMS-020 hops=3] mediaPackets=57 byteIdentical=57 decryptedOk=57
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:03:09.259Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:03:09.259Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:03:09.260Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:03:09.260Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:03:09.261Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m{"timestamp":"2026-06-21T19:03:09.261Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes
+[22m[39m[REQ-RMS-020 hops=2] mediaPackets=56 byteIdentical=56 decryptedOk=56
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:03:10.265Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:03:10.265Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:03:10.267Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:03:10.269Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":69,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:03:10.269Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":49,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m{"timestamp":"2026-06-21T19:03:10.269Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":81,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts[2m > [22m[2mREQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m[2mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity
+[22m[39m[REQ-RMS-020 hops=2] mediaPackets=56 byteIdentical=56 decryptedOk=56
+
+ [32m✓[39m apps/relay/src/__tests__/integration/multi-hop-byte-identity.integration.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 4299[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m2-hop: SFrame ciphertext byte-identical at the tail [33m 1048[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22m3-hop: SFrame ciphertext byte-identical at the tail (3-chain, spec risk #5) [33m 1002[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22mmid-cascade layer-select: a setPreferredLayers on a tail consumer does NOT alter ciphertext bytes [33m 1005[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-020 — multi-hop SFrame byte-identity (2-hop / 3-hop / layer-select / speaker-change)[2m > [22mactive-speaker change: re-driving the chain for a 2nd producer keeps byte-identity [33m 1014[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP -- production-faithful (manual cross-PipeTransport pairing)[2m > [22m[2mflows real Opus RTP across a manually-paired pipe; standby consumer paused->resume cutover observes RTP
+[22m[39m[spike] production-faithful: rtpPackets=31 inboundPacketCount=47 inboundByteCount=1457 resume->firstRtp=1ms
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T19:03:13.910Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"f1-warmpipe-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:03:13.910Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"f1-warmpipe-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T19:03:13.911Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"f1-warmpipe-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T19:03:13.912Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":80,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T19:03:13.912Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":45,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T19:03:13.912Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":87,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m[F1 REQ-RO-004/014 video-bench] captured=30 mediaPackets=30 byteIdentical=30 decryptedByteIdentical=30 pausedConsumerRtcpDelta=0 kid=1
+
+ [32m✓[39m apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 3675[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP -- baseline (router.pipeToRouter, same-process)[2m > [22mflows real Opus RTP primary->standby via pipeToRouter after resume [33m 656[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP -- production-faithful (manual cross-PipeTransport pairing)[2m > [22mflows real Opus RTP across a manually-paired pipe; standby consumer paused->resume cutover observes RTP [33m 767[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP -- production-faithful (manual cross-PipeTransport pairing)[2m > [22mREQ-RO-005: ensureWarmPipe consumes onto a CONNECTED createStandbyPipeTransport handle, stays paused, RTP flows on resume [33m 778[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable [33m 1277[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/simulcast-layer-bench-spike.integration.test.ts[2m > [22m[2mW5 M1 P1 — simulcast layer-select bandwidth spike (REAL mediasoup, REQ-MCS-006)[2m > [22m[2mPRECONDITION: byteCount(spatialLayer:0) < byteCount(spatialLayer:2) — low layer forwards fewer RTP bytes
+[22m[39m[spike DEBUG] consumer.type = simulcast
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/simulcast-layer-bench-spike.integration.test.ts[2m > [22m[2mW5 M1 P1 — simulcast layer-select bandwidth spike (REAL mediasoup, REQ-MCS-006)[2m > [22m[2mPRECONDITION: byteCount(spatialLayer:0) < byteCount(spatialLayer:2) — low layer forwards fewer RTP bytes
+[22m[39m[spike DEBUG] after select HIGH: {"consumerStatTypes":["outbound-rtp","inbound-rtp"],"current":{"spatialLayer":0,"temporalLayer":0},"preferred":{"spatialLayer":2,"temporalLayer":0},"producerScore":{"score":10,"producerScore":10,"producerScores":[10,10,10]},"producerStreams":[{"ssrc":286326784,"score":10,"byteCount":4712},{"ssrc":286326785,"score":10,"byteCount":25792},{"ssrc":286326786,"score":10,"byteCount":69192}]}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/simulcast-layer-bench-spike.integration.test.ts[2m > [22m[2mW5 M1 P1 — simulcast layer-select bandwidth spike (REAL mediasoup, REQ-MCS-006)[2m > [22m[2mPRECONDITION: byteCount(spatialLayer:0) < byteCount(spatialLayer:2) — low layer forwards fewer RTP bytes
+[22m[39m[spike DEBUG] after select LOW: {"consumerStatTypes":["outbound-rtp","inbound-rtp"],"current":{"spatialLayer":0,"temporalLayer":0},"preferred":{"spatialLayer":0,"temporalLayer":0},"producerScore":{"score":10,"producerScore":10,"producerScores":[10,10,10]},"producerStreams":[{"ssrc":286326784,"score":10,"byteCount":13300},{"ssrc":286326785,"score":10,"byteCount":72800},{"ssrc":286326786,"score":10,"byteCount":195300}]}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/simulcast-layer-bench-spike.integration.test.ts[2m > [22m[2mW5 M1 P1 — simulcast layer-select bandwidth spike (REAL mediasoup, REQ-MCS-006)[2m > [22m[2mPRECONDITION: byteCount(spatialLayer:0) < byteCount(spatialLayer:2) — low layer forwards fewer RTP bytes
+[22m[39m[spike REQ-MCS-006] FORWARDED (outbound-rtp) byteCount over 800ms window: LOW(spatialLayer:0)=4800 bytes [current=0]  HIGH(spatialLayer:2)=38176 bytes [current=0]  ratio(high/low)=7.95
+
+ [32m✓[39m apps/relay/src/__tests__/integration/simulcast-layer-bench-spike.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 3704[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M1 P1 — simulcast layer-select bandwidth spike (REAL mediasoup, REQ-MCS-006)[2m > [22mPRECONDITION: byteCount(spatialLayer:0) < byteCount(spatialLayer:2) — low layer forwards fewer RTP bytes [33m 3627[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m{"timestamp":"2026-06-21T19:03:18.814Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:03:18.814Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m{"timestamp":"2026-06-21T19:03:18.815Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m{"timestamp":"2026-06-21T19:03:18.815Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":82,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m{"timestamp":"2026-06-21T19:03:18.816Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":45,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m{"timestamp":"2026-06-21T19:03:18.816Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":97,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m[P10 REQ-MCS-014 positive] forwarded=55 mediaPackets=55 byteIdentical=55 realHeaderObserved=55 decryptedOk=55 tamperedUndecryptable=0 kid=1
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m{"timestamp":"2026-06-21T19:03:19.818Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T19:03:19.818Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER)
+[22m[39m{"timestamp":"2026-06-21T19:03:19.819Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"p10-relayblind-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts[2m > [22m[2mW5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22m[2mNEGATIVE CONTROL: the SAME plaintext WITHOUT SFrame (non-E2EE room) forwards as CLEARTEXT — decodable through the relay with NO key
+[22m[39m[P10 REQ-MCS-014 negative-control] forwarded=56 mediaPackets=56 cleartextRecovered=56 distinctPlaintexts=3
+
+ [32m✓[39m apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 2063[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22mPOSITIVE: REAL P2/P3 SFrame ciphertext survives the relay forward byte-identical, decryptable ONLY with K_content (RED hook P10_FORCE_TAMPER) [33m 1008[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P10 — relay-blind REAL-SFrame hermetic floor (REAL mediasoup + REAL client crypto, REQ-MCS-014)[2m > [22mNEGATIVE CONTROL: the SAME plaintext WITHOUT SFrame (non-E2EE room) forwards as CLEARTEXT — decodable through the relay with NO key [33m 974[2mms[22m[39m
+{"level":30,"time":1782068601023,"pid":4212,"hostname":"Quang","name":"bench:relay-m2","peerId":"peer-1","rtpPort":20000,"streamCount":1,"msg":"MCU: added input stream"}
+{"level":30,"time":1782068601024,"pid":4212,"hostname":"Quang","name":"bench:relay-m2","transportId":"60011bf5-63ed-4a6e-ba82-95078baa4338","producerId":"9b8d8f31-00d6-4b32-a781-678720323238","msg":"MCU: output transport and producer created"}
+{"level":30,"time":1782068601024,"pid":4212,"hostname":"Quang","name":"bench:relay-m2","streamCount":1,"resolution":{"width":1280,"height":720},"grid":{"cols":1,"rows":1},"args":"-protocol_whitelist rtp,udp -f rtp -i rtp://127.0.0.1:20000 -filter_complex [0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[s0];[s0]xstack=inputs=1:layout=0_0[out] -map [out] -c:v libvpx -b:v 2M -deadline realtime -cpu-used 4 -s 1280x720 -r 30 -f rtp rtp://127.0.0.1:45876?pkt_size=1200","msg":"MCU: spawning ffmpeg for recompose"}
+{"level":30,"time":1782068601028,"pid":4212,"hostname":"Quang","name":"bench:relay-m2","roomId":"mcu-primary","peerId":"peer-1","producerId":"0fae4598-f4eb-4b0c-a558-cb5c8766fa57","msg":"MCU: stream added to pipeline"}
+{"level":30,"time":1782068601191,"pid":4212,"hostname":"Quang","name":"bench:relay-m2","msg":"MCU: pipeline closed"}
+{"level":30,"time":1782068602359,"pid":4212,"hostname":"Quang","name":"bench:relay-m2","msg":"MCU: pipeline closed"}
+[90mstdout[2m | apps/relay/src/__tests__/integration/relay-overlap-m2-bench.integration.test.ts[2m > [22m[2mrelay-overlap M2 — Phase 5 gate (c): RO-014 no-ffmpeg + CPU floor[2m > [22m[2mstandby MCU media-ingest spawns 0 ffmpeg; primary spawns >=1 (positive control); CPU floor reported
+[22m[39m[bench gate-c] ffmpeg spawns: primary=1 standby=0 | standby McuPipeline streams=0 warm paused=true | cpu standby=0us sfu=0us delta=0us (eps=50000us)
+
+ [32m✓[39m apps/relay/src/__tests__/integration/relay-overlap-m2-bench.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 1486[2mms[22m[39m
+   [33m[2m✓[22m[39m relay-overlap M2 — Phase 5 gate (c): RO-014 no-ffmpeg + CPU floor[2m > [22mstandby MCU media-ingest spawns 0 ffmpeg; primary spawns >=1 (positive control); CPU floor reported [33m 1340[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-paused-rtcp-spike.integration.test.ts[2m > [22m[2mSPIKE: paused PipeTransport consumer getStats() counter advance (OQ-2)[2m > [22m[2mrecords whether a PAUSED pipe consumer counters advance across >=2 samples
+[22m[39m[spike OQ-2] pausedConsumer counters: sum1=576 sum2=2208 advanced=true statsLen=2 verdict=COUNTERS-ADVANCE (observer rtcpAlive can flip true)
+
+ [32m✓[39m apps/relay/src/__tests__/integration/warmpipe-paused-rtcp-spike.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 1301[2mms[22m[39m
+   [33m[2m✓[22m[39m SPIKE: paused PipeTransport consumer getStats() counter advance (OQ-2)[2m > [22mrecords whether a PAUSED pipe consumer counters advance across >=2 samples [33m 1123[2mms[22m[39m
+[90mstdout[2m | apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts[2m > [22m[2mREQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22m[2ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter
+[22m[39m[REQ-RMS-007 spike] captured=43 cross-worker RTP packets
+
+{"level":30,"time":1782068604654,"pid":4212,"hostname":"Quang","name":"test:rms007","numWorkers":2,"rtcMinPort":41000,"rtcMaxPort":41200,"msg":"Creating mediasoup Workers"}
+{"level":30,"time":1782068604737,"pid":4212,"hostname":"Quang","name":"test:rms007","workerId":24896,"index":0,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782068604815,"pid":4212,"hostname":"Quang","name":"test:rms007","workerId":25104,"index":1,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782068604819,"pid":4212,"hostname":"Quang","name":"test:rms007","workerCount":2,"msg":"Closing all mediasoup Workers"}
+ [32m✓[39m apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 1108[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter [33m 769[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/integration/simulcast-cascade-hop.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 161[2mms[22m[39m
+ [2m[90m↓[39m[22m apps/relay/src/__tests__/integration/audio-spike.integration.test.ts [2m([22m[2m1 test[22m[2m | [22m[33m1 skipped[39m[2m)[22m
+
+[2m Test Files [22m [1m[32m11 passed[39m[22m[2m | [22m[33m2 skipped[39m[90m (13)[39m
+[2m      Tests [22m [1m[32m20 passed[39m[22m[2m | [22m[33m3 skipped[39m[90m (23)[39m
+[2m   Start at [22m 02:02:27
+[2m   Duration [22m 57.22s[2m (transform 347ms, setup 0ms, collect 1.30s, tests 55.67s, environment 0ms, prepare 80ms)[22m
+
