@@ -62,10 +62,17 @@ import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+// REQ-RMS-001 — reuse the Opus injection primitive from the de-risk spike (the only Opus
+// source in the repo). The spike's own `it` stays `it.skip` unless RMS_BENCH=1, so importing
+// it here under the rms-bench config does not run the spike test twice.
+import { makeOpusProducer } from './audio-spike.integration.test.js';
 
 // -- VP8-only codec (mirrors mediasoup-manager.ts:34 + the P9 gate) -----------
 const VP8_PT = 101;
+// REQ-RMS-001 — add Opus so a single router serves BOTH video + audio producers (3-mode bench).
+const OPUS_PT = 100;
 const mediaCodecs: msTypes.RtpCodecCapability[] = [
+  { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2, preferredPayloadType: OPUS_PT },
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000, preferredPayloadType: VP8_PT },
 ];
 
@@ -274,12 +281,64 @@ async function makeViewer(
 
 interface Sample {
   m: number;
-  forwardPaths: number; // P * M
+  forwardPaths: number; // P * M (video)
+  audioPaths: number; // audio fan-out paths counted in this mode (0 in video-only)
   cpuCores: number; // worker CPU cores used over the window (PRIMARY ceiling signal)
   ruMaxRssMb: number; // worker RSS at end of window
   perViewerThroughput: number; // mean forwarded bytes/viewer over window (sampled)
   deliveryHealth: number; // perViewerThroughput / ref (1.0 = keeping up)
   injectionHealth: number; // injected bytes/window vs ref (M-INDEPENDENT if injector healthy)
+}
+
+// REQ-RMS-001 — the three named capacity-calibration modes (Step 2.4).
+type AudioMode = 'video-only' | 'audio-only-N' | 'mixed-30-70';
+interface RampMode {
+  optimized: boolean;
+  audio: AudioMode;
+}
+
+// ── An audio-only viewer: ONE transport carrying one consumer per audio producer ──
+interface AudioViewer {
+  consumers: msTypes.Consumer[];
+  readForwarded: () => Promise<number>; // summed outbound-rtp byteCount across its audio consumers
+  close: () => void;
+}
+
+async function makeAudioViewer(
+  router: msTypes.Router,
+  audioProducers: Array<Awaited<ReturnType<typeof makeOpusProducer>>>,
+): Promise<AudioViewer> {
+  const sink = await router.createDirectTransport();
+  const consumers = await Promise.all(
+    audioProducers.map(async (p) =>
+      sink.consume({
+        producerId: p.producer.id,
+        rtpCapabilities: router.rtpCapabilities,
+        paused: false,
+      }),
+    ),
+  );
+  const readForwarded = async (): Promise<number> => {
+    let sum = 0;
+    for (const c of consumers) {
+      const stats = await c.getStats();
+      const o = stats.find((s) => s.type === 'outbound-rtp') as { byteCount?: number } | undefined;
+      sum += o?.byteCount ?? 0;
+    }
+    return sum;
+  };
+  return {
+    consumers,
+    readForwarded,
+    close: () => {
+      try {
+        for (const c of consumers) c.close();
+        sink.close();
+      } catch {
+        /* best-effort */
+      }
+    },
+  };
 }
 
 const BATCH = 20; // viewers added per parallel batch (channel-friendly)
@@ -289,26 +348,89 @@ const BATCH = 20; // viewers added per parallel batch (channel-friendly)
 const SAT_CORES = parseFloat(process.env['SAT_STOP_CORES'] ?? '0.95');
 const SAT_HEALTH = parseFloat(process.env['SAT_STOP_HEALTH'] ?? '0.6'); // delivery collapsed
 
-/** One INCREMENTAL pass for a policy: build 9 producers once, then GROW the
- *  viewer set through the ramp (never rebuilding lower-M viewers), measuring the
- *  worker CPU + sampled delivery at each checkpoint. Early-stops once clearly
- *  saturated so the hopeless tail is skipped. Logs each point as it lands. */
-async function rampPass(optimized: boolean): Promise<Sample[]> {
-  const label = optimized ? 'OPTIMIZED (1x:2 + 8x:0)' : 'BASELINE (all 9 x:2)';
-  const router = await worker.createRouter({ mediaCodecs });
-  const producers: Producer[] = [];
-  for (let i = 0; i < PAGE_SIZE; i++) producers.push(await makeProducer(router, i));
+/** One INCREMENTAL pass for a mode: build the producers once (video and/or audio
+ *  per the mode), then GROW the viewer set through the ramp (never rebuilding
+ *  lower-M viewers), measuring the worker CPU + sampled delivery at each
+ *  checkpoint. Early-stops once clearly saturated so the hopeless tail is
+ *  skipped. Logs each point as it lands.
+ *
+ *  Modes (REQ-RMS-001):
+ *   - video-only : PAGE_SIZE video producers, video viewers, audioPaths=0 (this is
+ *                  the curve C_worker is read from — the per-room ceiling).
+ *   - audio-only-N: NO video; N=RAMP[last] audio producers; each "viewer" consumes
+ *                  ALL N audio producers (O(N^2) fan). audioPaths = N * M.
+ *   - mixed-30-70: PAGE_SIZE video producers AND up to 70 audio producers; each
+ *                  viewer consumes the 9 video AND every audio producer.
+ *                  audioPaths = audioProducers.length * M. */
+// The mixed/audio modes fan EVERY viewer out to EVERY audio producer (O(N^2)).
+// On a single dev box that consumer count makes viewer-creation channel round-trips
+// the bottleneck (NOT worker forwarding CPU), so these modes run on their OWN,
+// smaller ramp (env-tunable) and the mixed-mode audio fan is capped — keeping the
+// run inside the 600s window while the video-only ramp (the curve C_worker is read
+// from) goes as deep as SAT_RAMP. Plan default mixed audio fan = 70.
+const MIXED_AUDIO_COUNT = parseInt(process.env['RMS_MIXED_AUDIO'] ?? '70', 10);
+const AUDIO_RAMP: number[] = (process.env['RMS_AUDIO_RAMP'] ?? RAMP.join(','))
+  .split(',')
+  .map((s) => parseInt(s.trim(), 10))
+  .filter((n) => Number.isFinite(n) && n > 0);
 
-  const viewers: Viewer[] = [];
+async function rampPass(mode: RampMode): Promise<Sample[]> {
+  const { optimized, audio } = mode;
+  // Video-only walks the full SAT_RAMP (find the worker knee); the heavier audio
+  // fan-out modes walk the smaller AUDIO_RAMP so the run stays bounded.
+  const ramp = audio === 'video-only' ? RAMP : AUDIO_RAMP;
+  const label =
+    audio === 'video-only'
+      ? optimized
+        ? 'video-only OPTIMIZED (1x:2 + 8x:0)'
+        : 'video-only BASELINE (all 9 x:2)'
+      : audio === 'audio-only-N'
+        ? 'audio-only-N (O(N^2) fan)'
+        : 'mixed-30-70 (9 video + 70 audio)';
+  const router = await worker.createRouter({ mediaCodecs });
+
+  // Video producers: present in every mode EXCEPT audio-only-N.
+  const producers: Producer[] = [];
+  if (audio !== 'audio-only-N') {
+    for (let i = 0; i < PAGE_SIZE; i++) producers.push(await makeProducer(router, i));
+  }
+
+  // Audio producers: 0 (video-only), N=ramp[last] (audio-only-N, the O(N^2) fan),
+  // MIXED_AUDIO_COUNT (mixed-30-70, plan default 70).
+  const audioProducers: Array<Awaited<ReturnType<typeof makeOpusProducer>>> = [];
+  const audioCount =
+    audio === 'video-only' ? 0 : audio === 'audio-only-N' ? ramp[ramp.length - 1]! : MIXED_AUDIO_COUNT;
+  for (let i = 0; i < audioCount; i++) audioProducers.push(await makeOpusProducer(router, i));
+
+  // A viewer in any mode exposes the same {readForwarded, close} surface so the
+  // sampling/early-stop machinery below is mode-agnostic.
+  interface AnyViewer {
+    readForwarded: () => Promise<number>;
+    close: () => void;
+  }
+  const makeViewerForMode = async (): Promise<AnyViewer> => {
+    if (audio === 'audio-only-N') return makeAudioViewer(router, audioProducers);
+    const v = await makeViewer(router, producers, optimized);
+    if (audio === 'video-only') return v;
+    // mixed-30-70: a video viewer PLUS an audio companion consuming every audio producer.
+    const av = await makeAudioViewer(router, audioProducers);
+    return {
+      readForwarded: async () => (await v.readForwarded()) + (await av.readForwarded()),
+      close: () => {
+        v.close();
+        av.close();
+      },
+    };
+  };
+
+  const viewers: AnyViewer[] = [];
   const samples: Sample[] = [];
   let ref = 0;
   let refInj = 0;
-  for (const target of RAMP) {
+  for (const target of ramp) {
     while (viewers.length < target) {
       const add = Math.min(BATCH, target - viewers.length);
-      const batch = await Promise.all(
-        Array.from({ length: add }, () => makeViewer(router, producers, optimized)),
-      );
+      const batch = await Promise.all(Array.from({ length: add }, () => makeViewerForMode()));
       viewers.push(...batch);
     }
     await sleep(SETTLE_MS);
@@ -332,11 +454,16 @@ async function rampPass(optimized: boolean): Promise<Sample[]> {
       refInj = injectedDelta || 1;
     }
     const deliveryHealth = Number((perViewerThroughput / ref).toFixed(2));
-    const injectionHealth = Number((injectedDelta / refInj).toFixed(2));
+    // Audio-only mode has no VIDEO injector (producers.length===0 -> injectedDelta 0);
+    // its delivery is gated by audio forwarding (perViewerThroughput), so peg
+    // injectionHealth to 1 there to avoid a divide-by-refInj=1 false starvation read.
+    const injectionHealth =
+      producers.length === 0 ? 1 : Number((injectedDelta / refInj).toFixed(2));
 
     const s: Sample = {
       m: target,
-      forwardPaths: PAGE_SIZE * target,
+      forwardPaths: producers.length * target,
+      audioPaths: audioProducers.length * target,
       cpuCores,
       ruMaxRssMb: Number((cpu1.ru_maxrss / 1024).toFixed(1)),
       perViewerThroughput,
@@ -346,9 +473,9 @@ async function rampPass(optimized: boolean): Promise<Sample[]> {
     samples.push(s);
     // eslint-disable-next-line no-console
     console.log(
-      `[${label}] M=${String(target).padStart(4)} paths=${String(s.forwardPaths).padStart(5)} ` +
-        `cpu=${cpuCores.toFixed(3)}cores rss=${s.ruMaxRssMb}MB perViewer=${perViewerThroughput}B ` +
-        `deliveryHealth=${deliveryHealth.toFixed(2)} injectionHealth=${injectionHealth.toFixed(2)}`,
+      `[${label}] M=${String(target).padStart(4)} vpaths=${String(s.forwardPaths).padStart(5)} ` +
+        `apaths=${String(s.audioPaths).padStart(5)} cpu=${cpuCores.toFixed(3)}cores rss=${s.ruMaxRssMb}MB ` +
+        `perViewer=${perViewerThroughput}B deliveryHealth=${deliveryHealth.toFixed(2)} injectionHealth=${injectionHealth.toFixed(2)}`,
     );
     // Early-stop once CLEARLY past the ceiling. If delivery collapsed but the
     // injector ALSO sagged (injectionHealth low), the bound is partly harness
@@ -366,6 +493,7 @@ async function rampPass(optimized: boolean): Promise<Sample[]> {
 
   for (const v of viewers) v.close();
   for (const p of producers) p.close();
+  for (const ap of audioProducers) ap.close();
   router.close();
   return samples;
 }
@@ -397,39 +525,66 @@ describe('W5 M1 — single-worker forwarding-ceiling bench (REAL mediasoup, advi
   (RUN_SATURATION ? it : it.skip)(
     'ramps viewers per page-9 grid and locates the one-worker CPU/delivery knee',
     async () => {
-      // OPTIMIZED first (the M1 mechanism), then BASELINE (no-select contrast).
-      const optimizedCurve = await rampPass(/*optimized*/ true);
-      const baselineCurve = await rampPass(/*optimized*/ false);
+      // REQ-RMS-001 — three named capacity-calibration modes. The video-only
+      // OPTIMIZED curve is the PRIMARY (C_worker is read from its knee); the two
+      // audio modes measure the audio-cost tax (baked-in vs separate).
+      const os = await import('node:os');
+      const cores = os.cpus().length;
 
-      const optKnee = knee(optimizedCurve);
-      const baseKnee = knee(baselineCurve);
+      const videoCurve = await rampPass({ optimized: true, audio: 'video-only' });
+      const audioCurve = await rampPass({ optimized: false, audio: 'audio-only-N' });
+      const mixedCurve = await rampPass({ optimized: true, audio: 'mixed-30-70' });
+
+      const videoKnee = knee(videoCurve);
+      const audioKnee = knee(audioCurve);
+      const mixedKnee = knee(mixedCurve);
       const lastRamp = RAMP[RAMP.length - 1];
       // eslint-disable-next-line no-console
       console.log(
-        `\n[knee] OPTIMIZED: ${optKnee ? `M=${optKnee.m} [${optKnee.bound}] ${optKnee.reason}` : `NOT saturated up to M=${optimizedCurve[optimizedCurve.length - 1]?.m ?? lastRamp}`}` +
-          `\n[knee] BASELINE:  ${baseKnee ? `M=${baseKnee.m} [${baseKnee.bound}] ${baseKnee.reason}` : `NOT saturated up to M=${baselineCurve[baselineCurve.length - 1]?.m ?? lastRamp}`}`,
+        `\n[knee] video-only: ${videoKnee ? `M=${videoKnee.m} [${videoKnee.bound}] ${videoKnee.reason}` : `NOT saturated up to M=${videoCurve[videoCurve.length - 1]?.m ?? lastRamp}`}` +
+          `\n[knee] audio-only-N: ${audioKnee ? `M=${audioKnee.m} [${audioKnee.bound}] ${audioKnee.reason}` : `NOT saturated up to M=${audioCurve[audioCurve.length - 1]?.m ?? lastRamp}`}` +
+          `\n[knee] mixed-30-70: ${mixedKnee ? `M=${mixedKnee.m} [${mixedKnee.bound}] ${mixedKnee.reason}` : `NOT saturated up to M=${mixedCurve[mixedCurve.length - 1]?.m ?? lastRamp}`}`,
       );
+
+      // C_worker = forward-paths at the video-only knee (the per-room ceiling).
+      // null when the worker never saturated within this (modest) ramp -> the
+      // reporter flags that as INCOMPLETE rather than inventing a number.
+      const cWorkerPaths = videoKnee
+        ? (videoCurve.find((s) => s.m === videoKnee.m)?.forwardPaths ?? null)
+        : null;
+      // C_relay = cores * C_worker — an EXTRAPOLATION (one Worker benched), not a measurement.
+      const cRelayPaths = cWorkerPaths === null ? null : cWorkerPaths * cores;
+      // audioBakedIn: true when the mixed-mode knee lands materially BELOW the
+      // video-only knee, i.e. audio fan-out meaningfully eats into C_worker.
+      const audioBakedIn =
+        mixedKnee !== null && videoKnee !== null && mixedKnee.m < videoKnee.m;
 
       const sidecar = {
         bench: 'single-worker-forwarding-ceiling',
-        phase: 'W5 M1 advisor-gate-2 follow-up',
+        mode: '3-mode',
+        phase: 'relay-mesh-scaling M1 (REQ-RMS-001)',
         mediasoupVersion: mediasoup.version,
         numWorkers: 1,
+        cores,
         pageSize: PAGE_SIZE,
         windowMs: WINDOW_MS,
         settleMs: SETTLE_MS,
         ramp: RAMP,
-        optimizedCurve,
-        baselineCurve,
-        optimizedKnee: optKnee,
-        baselineKnee: baseKnee,
+        videoCurve,
+        audioCurve,
+        mixedCurve,
+        videoKnee,
+        audioKnee,
+        mixedKnee,
+        cWorkerPaths,
+        cRelayPaths,
+        audioBakedIn,
         honest_note:
           'ONE mediasoup Worker (==one core) forwarding ceiling. DirectTransport SKIPS SRTP -> measured CPU is OPTIMISTIC, real WebRTC ceiling is LOWER. Single box, synthetic RTP, no WAN/jitter. Multi-worker/multi-node cascade (DA-5) NOT built; extrapolating past one worker is a documented assumption, not a measurement. Exploratory curve, not a pass/fail gate.',
+        audio_note:
+          'audio-only fan-out is O(N^2); C_relay = cores*C_worker is an EXTRAPOLATION not a measurement; SRTP skipped -> CPU optimistic, +-2-3x variance. Synthetic Opus carries the ssrc-audio-level RTP header extension (mediasoup level meter does not decode payload); no server-side audio last-N (REQ-RMS-012 deferred), so audio paths are counted CONSERVATIVELY.',
       };
-      const sidecarPath = resolve(
-        process.cwd(),
-        '.evidence/verification/transmission-m1-single-worker-saturation.json',
-      );
+      const sidecarPath = resolve(process.cwd(), '.logs/bench/rms/saturation-3mode.json');
       mkdirSync(dirname(sidecarPath), { recursive: true });
       writeFileSync(sidecarPath, JSON.stringify(sidecar, null, 2), 'utf8');
       // eslint-disable-next-line no-console
@@ -438,14 +593,18 @@ describe('W5 M1 — single-worker forwarding-ceiling bench (REAL mediasoup, advi
       // ── Sanity guards only (EXPLORATORY bench, NOT a hard pass/fail gate) ─────
       // Real media flowed and the injector was healthy at the smallest M (no
       // dead-pipe false read, reference point trustworthy).
-      expect(optimizedCurve[0]!.perViewerThroughput).toBeGreaterThan(0);
-      expect(baselineCurve[0]!.perViewerThroughput).toBeGreaterThan(0);
-      expect(optimizedCurve[0]!.deliveryHealth).toBe(1);
-      expect(baselineCurve[0]!.deliveryHealth).toBe(1);
+      expect(videoCurve[0]!.perViewerThroughput).toBeGreaterThan(0);
+      expect(videoCurve[0]!.deliveryHealth).toBe(1);
       // The worker did real forwarding work somewhere on the ramp (load registered
       // on the clean subprocess CPU read — not a no-op measurement).
-      const peakCpu = Math.max(...optimizedCurve.map((s) => s.cpuCores), ...baselineCurve.map((s) => s.cpuCores));
+      const peakCpu = Math.max(
+        ...videoCurve.map((s) => s.cpuCores),
+        ...audioCurve.map((s) => s.cpuCores),
+        ...mixedCurve.map((s) => s.cpuCores),
+      );
       expect(peakCpu).toBeGreaterThan(0.1);
+      // The audio mode actually fanned out (no silent zero-audio false read).
+      expect(audioCurve[0]!.audioPaths).toBeGreaterThan(0);
       // NOTE: we deliberately do NOT assert OPTIMIZED CPU < BASELINE CPU — the
       // smoke run showed they are ~EQUAL, because forwarding CPU tracks PACKET
       // count (both layers share the packet rate), not payload bytes. Layer-select
