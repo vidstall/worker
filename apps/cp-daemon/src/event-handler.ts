@@ -42,6 +42,16 @@ import {
   type NodeCandidate,
   type ScoringWeights,
 } from './scoring.js';
+import {
+  estimateRoomLoad,
+  selectPlacementRelay,
+  poolHealthGate,
+  MIN_RELAY,
+  type RoomClass,
+  type RelayCapacity,
+} from './admission-capacity.js';
+import { type AttestedLoad } from './coverage-load-reader.js';
+import { PVR_HEARTBEAT_STALE } from './scoring.js';
 import { timedCanonicalSort } from './latency-probe.js';
 import {
   submitProposal,
@@ -128,6 +138,8 @@ export function handleEvent(
   },
   pendingEscrows?: Map<string, EscrowCreated>,
   validatorState?: Map<string, NodeCandidate>,
+  attestedLoad?: Map<string, AttestedLoad>,
+  currentEpoch?: bigint,
 ): void {
   const eventName = extractEventName(event.type);
   const data = event.parsedJson as Record<string, unknown>;
@@ -159,6 +171,7 @@ export function handleEvent(
             handleEvent(
               { ...event, type: `${event.type.split('::')[0]}::economic_layer::EscrowCreated`, parsedJson: escrow as unknown as Record<string, unknown> },
               relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+              attestedLoad, currentEpoch,
             );
           }
         }
@@ -186,6 +199,21 @@ export function handleEvent(
         logger.info({ minerId: e.miner_id, rtt: e.rtt }, 'Relay RTT updated');
       } else {
         logger.warn({ minerId: e.miner_id }, 'RelayRTTUpdated for unknown relay, ignoring');
+      }
+      break;
+    }
+
+    case 'RelayHeartbeat': {
+      // REQ-RMS-019 — refresh candidate.heartbeatAge (was stuck at 0n; no arm existed).
+      const e = data as unknown as { miner_id: string; epoch: string };
+      const existing = relayState.get(e.miner_id);
+      if (existing) {
+        const hbEpoch = BigInt(e.epoch);
+        const now = currentEpoch ?? hbEpoch; // in tests with no chain epoch, treat the heartbeat as fresh
+        existing.heartbeatAge = now > hbEpoch ? now - hbEpoch : 0n;
+        logger.info({ minerId: e.miner_id, epoch: e.epoch, heartbeatAge: existing.heartbeatAge.toString() }, 'Relay heartbeat — age refreshed');
+      } else {
+        logger.warn({ minerId: e.miner_id }, 'RelayHeartbeat for unknown relay, ignoring');
       }
       break;
     }
@@ -318,6 +346,7 @@ export function handleEvent(
         handleEvent(
           { ...event, type: `${event.type.split('::')[0]}::economic_layer::EscrowCreated`, parsedJson: earlyEscrow as unknown as Record<string, unknown> },
           relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+          attestedLoad, currentEpoch,
         );
       } else {
         logger.info({ roomId: e.room_id, creator: e.creator, relayMode: e.relay_mode }, 'Room created — waiting for escrow before assignment');
@@ -391,10 +420,84 @@ export function handleEvent(
         .slice(0, Math.max(1, Math.min(3, rankedValidators.length)))
         .map(v => v.minerId);
 
-      // Get relay IDs for proposal (top 2 relays or all if fewer)
-      const topRelayIds = rankedRelays
-        .slice(0, Math.max(1, Math.min(2, rankedRelays.length)))
-        .map(r => r.minerId);
+      // ── REQ-RMS-002/005/016/018/019 — capacity-aware placement ──────────────
+      // Applied AFTER canonicalSort (consensus order preserved) and BEFORE the ballot
+      // slice. Narrows the consensus-sorted set by CANARY-ATTESTED capacity; the PVR
+      // consensus score (computeNodeScore/canonicalSort) is NOT touched.
+
+      // REQ-RMS-016 — seed L_r from the creator room-class hint on RoomCreated (off-chain consumed).
+      const classHint: RoomClass =
+        roomData.room_class_hint === 2 ? 'large' : roomData.room_class_hint === 1 ? 'webinar' : 'small';
+      // NOTE: the `RoomCreated` shared type has NO `expected_participants` field (only room_id,
+      // creator, relay_mode, room_class_hint). The room-class PRESET drives the video term of L_r;
+      // the audio_term seed is a documented conservative 0 floor (Task 8.4 NOTE). A future task that
+      // threads expected_participants onto BOTH the Move event and the shared type would replace this.
+      const expectedParticipants = 0;
+      const roomLoad = estimateRoomLoad(classHint, expectedParticipants, roomMode);
+
+      // C_worker is the calibrated per-room ceiling (REQ-RMS-001) — read from env (no hardcode), default to the bench floor.
+      const cWorker = parseInt(process.env['RMS_C_WORKER_PATHS'] ?? '300', 10);
+
+      // REQ-RMS-005/019 — build capacity rows from the CANARY-ATTESTED l_i, NOT candidate.load self-report.
+      // When NO canary feed map is wired (attestedLoad === undefined), the canary layer is inactive: fall
+      // back to relay self-report for load AND treat the pool as health-eligible (legacy pre-canary path).
+      const feedActive = attestedLoad !== undefined;
+      const capacities: RelayCapacity[] = rankedRelays.map((r) => {
+        const attested = attestedLoad?.get(r.minerId);
+        const node = relayState.get(r.minerId)!;
+        // Heartbeat freshness fallback (no feed): clamp self-reported age to the stale ceiling.
+        const selfFreshEpochs = Math.min(Number(node.heartbeatAge), Number(PVR_HEARTBEAT_STALE));
+        return {
+          minerId: r.minerId,
+          attestedLoadPaths: attested?.attestedLoadPaths ?? Number(node.load), // fall back to self-report ONLY if no canary feed
+          cWorker,
+          rtt: node.rtt,
+          heartbeatFreshEpochs: attested ? attested.heartbeatFreshEpochs : selfFreshEpochs,
+          // present in the feed => audited/healthy this round. With NO feed wired, the canary gate is
+          // inactive and the pool is treated as self-report-healthy (preserves pre-canary behavior).
+          canaryHealthy: feedActive ? attested !== undefined : true,
+        };
+      });
+
+      // REQ-RMS-018 — pool-health gate. M1 ships K_r=1 (single-relay placement); the recorded
+      // vector floor stays >= MIN_RELAY (2) per submit_pairing_proposal's on-chain assert.
+      const kR = 1;
+      if (!poolHealthGate(capacities, kR)) {
+        logger.warn({ roomId: e.room_id, healthyNeeded: kR }, 'Pool health below K_r — deferring admission (graceful degrade, no migration)');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
+        break;
+      }
+
+      // REQ-RMS-002 — i* = argmin (l_i + L_r)/C_worker s.t. <= C_worker, RTT tie-break.
+      const chosen = selectPlacementRelay(capacities, roomLoad);
+      if (!chosen) {
+        logger.warn({ roomId: e.room_id, roomLoad, cWorker }, 'No relay can absorb L_r under capacity ceiling — deferring');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
+        break;
+      }
+
+      // M1: single-relay placement (K_r=1). The RECORDED ballot must be >= MIN_RELAY (on-chain floor),
+      // even though only `chosen` serves the room. Order: chosen first, then capacity-eligible peers,
+      // then back-fill from the rest of the consensus-sorted relays to reach MIN_RELAY (a ballot, not
+      // a live assignment). rankedRelays is already consensus-sorted (canonicalSort), chosen-first below.
+      const chosenFirst: string[] = [chosen.minerId];
+      const eligiblePeers = capacities
+        .filter((c) => c.minerId !== chosen.minerId && c.attestedLoadPaths + roomLoad <= c.cWorker)
+        .map((c) => c.minerId);
+      const restByConsensus = rankedRelays
+        .map((r) => r.minerId)
+        .filter((id) => id !== chosen.minerId && !eligiblePeers.includes(id)); // not chosen, not already an eligible peer
+      const ballot = [...chosenFirst, ...eligiblePeers, ...restByConsensus]; // de-dup guaranteed by the filters
+      if (ballot.length < MIN_RELAY) {
+        // The ENTIRE pool has < MIN_RELAY relays — cannot record a valid ballot; defer (graceful).
+        logger.warn({ roomId: e.room_id, poolSize: ballot.length, minRelay: MIN_RELAY }, 'Fewer than MIN_RELAY relays exist — deferring (cannot satisfy on-chain ballot floor)');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
+        break;
+      }
+      const topRelayIds = ballot.slice(0, MIN_RELAY); // exactly MIN_RELAY for K_r=1 M1; chosen is index 0
 
       // Compute individual node scores for submittedScore
       const nodeScores: bigint[] = [];
@@ -637,6 +740,13 @@ export function createEventHandler(
     capTokenIssuer?: CapTokenIssuer;
     relayPromotedObserver?: RelayPromotedObserver;
   },
+  // REQ-RMS-005/019 — capacity-aware admission context (additive, optional). The daemon wiring
+  // populates `attestedLoad` from fetchAttestedLoad on the canary cadence and `currentEpoch`
+  // from the chain; both are injected + defaulted so existing callers/tests are unaffected.
+  capacityCtx?: {
+    attestedLoad?: Map<string, AttestedLoad>;
+    currentEpoch?: () => bigint | undefined;
+  },
 ): {
   handler: (event: SuiEvent) => Promise<void>;
   relayState: Map<string, NodeCandidate>;
@@ -652,7 +762,10 @@ export function createEventHandler(
   const pendingEscrows = new Map<string, EscrowCreated>();
 
   const handler = async (event: SuiEvent): Promise<void> => {
-    handleEvent(event, relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState);
+    handleEvent(
+      event, relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+      capacityCtx?.attestedLoad, capacityCtx?.currentEpoch?.(),
+    );
   };
 
   return { handler, relayState, signalingState, validatorState, pendingRooms, pendingEscrows };

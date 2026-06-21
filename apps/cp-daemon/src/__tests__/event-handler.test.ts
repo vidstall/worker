@@ -1,11 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { SuiEvent } from '@mysten/sui/client';
-import type { RoomCreated } from '@dvconf/shared';
+import type { SuiClient, SuiEvent } from '@mysten/sui/client';
+import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import type { NetworkConfig, RoomCreated } from '@dvconf/shared';
 import { handleEvent, createEventHandler, DEFAULT_WEIGHTS } from '../event-handler.js';
 import type { NodeCandidate } from '../scoring.js';
 import type { SignalingCandidate } from '../room-assignment.js';
+import * as roomAssignment from '../room-assignment.js';
 import { PVR_DEFAULT_HISTORY } from '../scoring.js';
 import { getRevoteCandidates, clearRevoteCandidate } from '../role-voter.js';
+import type { AttestedLoad } from '../coverage-load-reader.js';
 
 /** Create a mock Pino logger. */
 function mockLogger() {
@@ -217,6 +220,19 @@ describe('handleEvent', () => {
       rtt: 20n,
       load: 5n,
       stakeAmount: 8_000_000_000n,
+      heartbeatAge: 0n,
+      region: 'us',
+      historyScore: PVR_DEFAULT_HISTORY,
+    });
+    // REQ-RMS-002/004 (Task 8): the recorded ballot must be >= MIN_RELAY (2) or
+    // submit_pairing_proposal aborts on-chain (E_INVALID_BALLOT=509, room_manager.move:374).
+    // A second relay gives a pool of 2 so a valid ballot is recorded (the old single-relay
+    // fixture would now correctly DEFER under the on-chain floor).
+    relayState.set('relay-good-2', {
+      minerId: 'relay-good-2',
+      rtt: 40n,
+      load: 5n,
+      stakeAmount: 4_000_000_000n,
       heartbeatAge: 0n,
       region: 'us',
       historyScore: PVR_DEFAULT_HISTORY,
@@ -645,5 +661,109 @@ describe('handleEvent — SecretRotated → TurnIssuer emergency kill-switch (F8
       expect.objectContaining({ oldSecretId: '7' }),
       expect.stringContaining('no TurnIssuer in txContext'),
     );
+  });
+});
+
+describe('REQ-RMS-019 RelayHeartbeat arm refreshes heartbeatAge', () => {
+  it('updates an existing relay heartbeatAge from RelayHeartbeat.epoch (no longer stuck at 0n)', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, NodeCandidate>();
+    relayState.set('relay-1', {
+      minerId: 'relay-1', rtt: 0n, load: 0n, stakeAmount: 1n,
+      heartbeatAge: 5n, region: 'us', historyScore: PVR_DEFAULT_HISTORY,
+    });
+    // currentEpoch is threaded via the handler; the arm computes age = currentEpoch - hb.epoch.
+    const event = makeSuiEvent('RelayHeartbeat', { miner_id: 'relay-1', epoch: '10', region: [1] });
+    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    // After a fresh heartbeat the age must be refreshed toward 0 (was 5n).
+    expect(relayState.get('relay-1')!.heartbeatAge).toBe(0n);
+  });
+});
+
+describe('REQ-RMS-002 capacity-aware placement replaces the hardcoded top-2 slice', () => {
+  it('selects i* = argmin (l_i + L_r)/C_worker, not just the top PVR score', () => {
+    // CONCRETE failing-test-first for REQ-RMS-002's load-bearing selection. This is RED BEFORE
+    // 8.4: today the EscrowCreated arm slices the top-2 by PVR score, so the high-stake 'hot'
+    // relay (best PVR score) wins even though it is over capacity — the assertion below fails.
+    const logger = mockLogger();
+    const relayState = new Map<string, NodeCandidate>();
+    // 'hot' has high stake (best PVR score) but is near-saturated on attested load; 'cool' is light.
+    relayState.set('hot',  { minerId: 'hot',  rtt: 0n, load: 0n, stakeAmount: 5_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
+    relayState.set('cool', { minerId: 'cool', rtt: 0n, load: 0n, stakeAmount: 1_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
+    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
+    const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
+    const attested = new Map<string, AttestedLoad>([
+      ['hot',  { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }], // 295 + L_r(12) = 307 > C_worker 300 -> rejected
+      ['cool', { attestedLoadPaths: 10,  heartbeatFreshEpochs: 1 }], // 10 + 12 = 22 -> chosen
+    ]);
+    const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
+    // attestedLoad is the 10th positional arg (after event,relayState,signalingState,pendingRooms,
+    // logger,weights,txContext,pendingEscrows,validatorState). txContext=undefined => test mode logs topRelays.
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), new Map(), attested);
+    const proposalLog = logger.info.mock.calls.find((c: any[]) => c[1] === 'Room proposal: submitting TX');
+    // RED today (PVR-top 'hot' wins the hardcoded slice); GREEN after 8.4 (capacity override picks 'cool').
+    expect(proposalLog?.[0].topRelays?.[0]).toBe('cool');
+  });
+
+  it('REQ-RMS-002 records a ballot >= MIN_RELAY even when only ONE relay is capacity-eligible', () => {
+    const logger = mockLogger();
+    const relayState = new Map<string, NodeCandidate>();
+    // 'ok' is the sole capacity-eligible relay; 'full' is over its ceiling (rejected by selection)
+    // but MUST still appear in the recorded ballot to satisfy the on-chain min_relay floor.
+    relayState.set('ok',   { minerId: 'ok',   rtt: 0n, load: 0n, stakeAmount: 2_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
+    relayState.set('full', { minerId: 'full', rtt: 0n, load: 0n, stakeAmount: 1_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
+    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
+    const pendingRooms = new Map<string, RoomCreated>([['room2', { room_id: 'room2', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
+    const attested = new Map<string, AttestedLoad>([
+      ['ok',   { attestedLoadPaths: 10,  heartbeatFreshEpochs: 1 }], // 10 + 12 = 22 <= 300 -> only eligible
+      ['full', { attestedLoadPaths: 299, heartbeatFreshEpochs: 1 }], // 299 + 12 = 311 > 300 -> NOT eligible
+    ]);
+    const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e2', room_id: 'room2', amount: '1' });
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), new Map(), attested);
+    const proposalLog = logger.info.mock.calls.find((c: any[]) => c[1] === 'Room proposal: submitting TX');
+    const ballot = proposalLog?.[0].topRelays as string[] | undefined;
+    expect(ballot?.[0]).toBe('ok');                       // chosen (sole eligible) is index 0
+    expect(ballot?.length).toBeGreaterThanOrEqual(2);     // >= MIN_RELAY — back-filled 'full' clears the on-chain floor
+  });
+});
+
+describe('REQ-RMS-004 capacity-selected N-vector reaches submit_pairing_proposal unchanged', () => {
+  it('REQ-RMS-004 records the capacity-selected N-vector via submit_pairing_proposal unchanged', async () => {
+    const spy = vi.spyOn(roomAssignment, 'submitProposal').mockResolvedValue(undefined);
+    roomAssignment.clearVotedRoom('room1'); // votedRooms is a module Set — clear so the proposal is not skipped as already-voted
+
+    const logger = mockLogger();
+    const relayState = new Map<string, NodeCandidate>();
+    relayState.set('hot',  { minerId: 'hot',  rtt: 0n, load: 0n, stakeAmount: 5_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
+    relayState.set('cool', { minerId: 'cool', rtt: 0n, load: 0n, stakeAmount: 1_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
+    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
+    const validatorState = new Map<string, NodeCandidate>([
+      ['val', { minerId: 'val', rtt: 0n, load: 0n, stakeAmount: 1_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY }],
+    ]);
+    const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
+    const attested = new Map<string, AttestedLoad>([
+      ['hot',  { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }],
+      ['cool', { attestedLoadPaths: 10,  heartbeatFreshEpochs: 1 }],
+    ]);
+    // Minimal txContext — submitProposal is mocked, so client/signer/config/cpCapId need only satisfy the type.
+    const txContext = {
+      client: {} as unknown as SuiClient,
+      signer: {} as unknown as Ed25519Keypair,
+      config: {} as unknown as NetworkConfig,
+      cpCapId: '0xcap',
+    };
+    const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
+    // Full positional call: event, relayState, signalingState, pendingRooms, logger, weights, txContext,
+    // pendingEscrows, validatorState, attestedLoad.
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, txContext, new Map(), validatorState, attested);
+
+    expect(spy).toHaveBeenCalled();
+    const args = spy.mock.calls[0]!;
+    // args[5] = relayMinerIds (capacity-selected, length >= MIN_RELAY); args[8] = submittedScore (bigint, PVR consensus).
+    expect(Array.isArray(args[5])).toBe(true);
+    expect((args[5] as string[]).length).toBeGreaterThanOrEqual(2);
+    expect((args[5] as string[])[0]).toBe('cool'); // capacity-selected relay leads the recorded vector
+    expect(typeof args[8]).toBe('bigint');
+    spy.mockRestore();
   });
 });
