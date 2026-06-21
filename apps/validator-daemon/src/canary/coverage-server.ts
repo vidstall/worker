@@ -29,12 +29,20 @@
  * by minerId ONLY; reporterMinerId is the Wallet-A validatorMinerId (NEVER sessionAddress).
  * assignmentSecret is NEVER on this wire (it lives only in the cell loop closure).
  *
+ * REQ-RMS-005/019 (additive): GET /canary/load exposes the per-relay ATTESTED forwarding-path
+ * load (cumulative canary `sends`, the content-blind l_i proxy) + heartbeat freshness, mapped
+ * PURE by buildLoadPayload (INV-C — minerId-only, never sessionWallet, never relay self-report).
+ * It inherits the loopback bind + restricted CORS, so it is UNREACHABLE by a remote relay
+ * (D-CFA-18). The CP-daemon load reader MUST be CO-LOCATED with this validator daemon (loopback).
+ * The route is OPTIONAL: 404 ("load feed disabled") when no loadProvider is injected.
+ *
  * LOGGING (HARD-GATE): structured createLogger only — no console.*.
  */
 
 import { createServer, type Server } from 'node:http';
 import { type Logger } from '@dvconf/shared';
 import { MIN_DISTINCT_CANARY_VALIDATORS, type CellRoundSnapshot } from './cell.js';
+import type { DropAccumulator } from './loss-classifier.js';
 
 /** One relay's coverage row on the wire (LOCKED camelCase, DESIGN section 2.1). */
 export interface CoverageRelayRow {
@@ -104,6 +112,47 @@ export function buildCoveragePayload(
   };
 }
 
+/** One relay's ATTESTED load row (REQ-RMS-005/019) — forwarding-path load, NOT self-report. */
+export interface LoadRelayRow {
+  relayMinerId: string;
+  /** Verified forwarding-path observations (cumulative canary `sends`) — the l_i proxy. */
+  attestedLoadPaths: number;
+  /** Epochs since this relay's last on-chain heartbeat (freshness for pool-health). */
+  heartbeatFreshEpochs: number;
+}
+
+/** The LOCKED attested-load wire payload (REQ-RMS-005/019) — minerId-only, INV-C. */
+export interface LoadPayload {
+  service: 'validator-daemon';
+  reporterMinerId: string;
+  relays: LoadRelayRow[];
+  ts: number;
+}
+
+/** Injected provider for the load feed: the live per-relay DropAccumulator + heartbeat freshness map. */
+export type LoadStateProvider = () => { acc: DropAccumulator; heartbeatFresh: Map<string, number> };
+
+/**
+ * PURE map of the per-relay DropAccumulator (+ heartbeat freshness) to the attested-load wire
+ * shape. INV-C: minerId-only, NEVER sessionWallet. `attestedLoadPaths` = cumulative `sends`
+ * (forwarding-path observations the canary verify-loop recorded) — the content-blind l_i proxy,
+ * NOT the relay's self-reported calculateLoad.
+ *
+ * No HTTP, no I/O — unit-testable in isolation (mirrors buildCoveragePayload).
+ */
+export function buildLoadPayload(
+  acc: DropAccumulator,
+  heartbeatFresh: Map<string, number>,
+  reporterMinerId: string,
+): LoadPayload {
+  const relays: LoadRelayRow[] = [...acc.byRelay.entries()].map(([relayMinerId, s]) => ({
+    relayMinerId,
+    attestedLoadPaths: s.sends,
+    heartbeatFreshEpochs: heartbeatFresh.get(relayMinerId) ?? Number.MAX_SAFE_INTEGER,
+  }));
+  return { service: 'validator-daemon', reporterMinerId, relays, ts: Date.now() };
+}
+
 /**
  * Default dashboard origin allowed to read the coverage feed cross-origin. Restricted (NOT
  * `*`, D-CFA-18) — override via CANARY_COVERAGE_CORS_ORIGIN for a deployed dashboard host.
@@ -126,6 +175,14 @@ export function startCoverageServer(args: {
   logger: Logger;
   /** Override the CORS-allowed dashboard origin (default CANARY_COVERAGE_CORS_ORIGIN env). */
   corsOrigin?: string;
+  /**
+   * OPTIONAL attested-load feed provider (REQ-RMS-005/019). When supplied, GET /canary/load
+   * returns the per-relay attested forwarding-path load + heartbeat freshness; when omitted the
+   * route 404s ("load feed disabled"). LOOPBACK-only (inherits the D-CFA-18 unreachable-to-relay
+   * property): the CP-daemon reader MUST be co-located with this validator daemon; a relay must
+   * never reach this feed.
+   */
+  loadProvider?: LoadStateProvider;
 }): Server {
   const { port, provider, reporterMinerId, logger } = args;
   const corsOrigin =
@@ -150,6 +207,19 @@ export function startCoverageServer(args: {
     try {
       if (url === '/canary/coverage') {
         const payload = buildCoveragePayload(provider(), reporterMinerId);
+        res.writeHead(200, jsonHeaders);
+        res.end(JSON.stringify(payload));
+        return;
+      }
+      // REQ-RMS-005/019 — attested forwarding-path load feed (loopback-only, 404 when disabled).
+      if (url === '/canary/load') {
+        if (!args.loadProvider) {
+          res.writeHead(404, jsonHeaders);
+          res.end(JSON.stringify({ error: 'load feed disabled' }));
+          return;
+        }
+        const { acc, heartbeatFresh } = args.loadProvider();
+        const payload = buildLoadPayload(acc, heartbeatFresh, reporterMinerId);
         res.writeHead(200, jsonHeaders);
         res.end(JSON.stringify(payload));
         return;

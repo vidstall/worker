@@ -19,8 +19,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildCoveragePayload } from '../coverage-server.js';
+import { buildCoveragePayload, buildLoadPayload, type LoadStateProvider } from '../coverage-server.js';
 import type { CellRoundSnapshot } from '../cell.js';
+import type { DropAccumulator } from '../loss-classifier.js';
 
 const WALLET_A = '0x' + 'a'.padStart(64, 'a'); // the reporting validator's Wallet-A miner_id
 const SESSION_ADDR = '0x' + 'b'.padStart(64, 'b'); // a Wallet-B session address (MUST NOT leak)
@@ -104,5 +105,40 @@ describe('REQ-CFA-014 buildCoveragePayload — pure cell-snapshot -> wire mapper
     expect(p.round).toBe(-1);
     expect(p.relays).toEqual([]);
     expect(p.reporterMinerId).toBe(WALLET_A);
+  });
+});
+
+describe('REQ-RMS-005/019 buildLoadPayload — per-relay attested forwarding-path load (INV-C)', () => {
+  it('maps the DropAccumulator to attestedLoadPaths per relay (sends as the path proxy)', () => {
+    const acc: DropAccumulator = {
+      byRelay: new Map([
+        ['0xrelay1', { drops: 5, sends: 200, rounds: 6 }],
+        ['0xrelay2', { drops: 0, sends: 50, rounds: 6 }],
+      ]),
+    };
+    const heartbeatFresh = new Map<string, number>([['0xrelay1', 1], ['0xrelay2', 4]]);
+    const p = buildLoadPayload(acc, heartbeatFresh, '0x' + 'a'.repeat(64));
+    expect(p.service).toBe('validator-daemon');
+    const r1 = p.relays.find((r) => r.relayMinerId === '0xrelay1')!;
+    expect(r1.attestedLoadPaths).toBe(200);       // cumulative sends = forwarding-path observations
+    expect(r1.heartbeatFreshEpochs).toBe(1);
+    // INV-C: no sessionWallet anywhere on the wire.
+    expect(JSON.stringify(p)).not.toContain('sessionWallet');
+  });
+  it('null/empty accumulator -> empty relays (honest pre-first-round state)', () => {
+    const p = buildLoadPayload({ byRelay: new Map() }, new Map(), '0xreporter');
+    expect(p.relays).toEqual([]);
+  });
+  // INV-C type-channel anchor: the injected provider yields ONLY {acc, heartbeatFresh} —
+  // no sessionWallet surface. (Referenced so the provider contract stays type-checked.)
+  it('LoadStateProvider yields only acc + heartbeatFresh (minerId-only feed)', () => {
+    const provider: LoadStateProvider = () => ({
+      acc: { byRelay: new Map([['0xrelay1', { drops: 0, sends: 7, rounds: 1 }]]) },
+      heartbeatFresh: new Map<string, number>([['0xrelay1', 0]]),
+    });
+    const { acc, heartbeatFresh } = provider();
+    const p = buildLoadPayload(acc, heartbeatFresh, '0xreporter');
+    expect(p.relays[0]!.attestedLoadPaths).toBe(7);
+    expect(p.relays[0]!.heartbeatFreshEpochs).toBe(0);
   });
 });
