@@ -9,6 +9,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:demo:revote": "vitest run --config vitest.demo.config.ts",
     "bench:m2": "vitest run --config vitest.m2-bench.config.ts && tsx scripts/bench/report-m2-bench.ts",
+    "bench:rms": "RMS_BENCH=1 SAT_BENCH=1 vitest run --config vitest.rms-bench.config.ts && tsx scripts/bench/report-rms-bench.ts",
     "bench:p10:browser": "tsx scripts/bench/p10-browser/p10-relayblind-browser.ts",
     "build": "pnpm -r run build",
     "dev:signaling": "pnpm --filter @dvconf/signaling dev",
