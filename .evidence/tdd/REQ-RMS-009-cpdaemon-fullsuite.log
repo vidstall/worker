@@ -1,0 +1,115 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/cp-daemon[39m
+
+ [32m✓[39m src/__tests__/cap-token-issuer-cache-wiring.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+ [32m✓[39m src/__tests__/cap-token-issuer.test.ts [2m([22m[2m16 tests[22m[2m)[22m[32m 53[2mms[22m[39m
+ [32m✓[39m src/__tests__/heartbeat.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+ [32m✓[39m src/__tests__/auto-register.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 26[2mms[22m[39m
+ [32m✓[39m src/governance/__tests__/governance-coordinator.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 21[2mms[22m[39m
+ [32m✓[39m src/__tests__/turn-issuer.test.ts [2m([22m[2m25 tests[22m[2m)[22m[32m 44[2mms[22m[39m
+ [32m✓[39m src/__tests__/revote-watcher.test.ts [2m([22m[2m20 tests[22m[2m)[22m[32m 23[2mms[22m[39m
+ [32m✓[39m src/__tests__/sui-chain-state-reader.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 25[2mms[22m[39m
+ [32m✓[39m src/__tests__/role-voter.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 104[2mms[22m[39m
+ [32m✓[39m src/__tests__/turn-rpc.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 210[2mms[22m[39m
+ [32m✓[39m src/__tests__/relay-heartbeat-watcher.test.ts [2m([22m[2m16 tests[22m[2m)[22m[32m 31[2mms[22m[39m
+ [32m✓[39m src/__tests__/event-handler.test.ts [2m([22m[2m25 tests[22m[2m)[22m[32m 40[2mms[22m[39m
+ [32m✓[39m src/__tests__/cap-token-event-wiring.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 18[2mms[22m[39m
+ [32m✓[39m src/__tests__/health-monitor-wiring.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 141[2mms[22m[39m
+ [32m✓[39m src/__tests__/cap-token-submitter-wiring.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 144[2mms[22m[39m
+ [32m✓[39m src/__tests__/cap-token-issuer-bootstrap.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 212[2mms[22m[39m
+ [32m✓[39m src/__tests__/cap-token-submitter.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 23[2mms[22m[39m
+ [32m✓[39m src/__tests__/cap-token-issuer-epoch.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 12[2mms[22m[39m
+ [32m✓[39m src/__tests__/scoring.test.ts [2m([22m[2m22 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+ [32m✓[39m src/__tests__/bcs-equivalence.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m src/__tests__/admission-capacity.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m src/__tests__/resolve-peer-pubkey.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m src/__tests__/failover-detector.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+ [32m✓[39m src/__tests__/coverage-load-reader.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+ [32m✓[39m src/__tests__/graceful-shutdown-wiring.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+ [32m✓[39m src/__tests__/health-signals.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+ [32m✓[39m src/__tests__/room-assignment-spill.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 3[2mms[22m[39m
+ [31m❯[39m src/__tests__/integration/revote-watcher.integration.test.ts [2m([22m[2m1 test[22m[2m | [22m[33m1 skipped[39m[2m)[22m[33m 11732[2mms[22m[39m
+   [2m[90m↓[39m[22m RevoteWatcher integration (RV-013, Phase 4.1)[2m > [22mdrives idle scan → mark → revote_eligible_since → cooldown against live chain
+ [31m❯[39m src/__tests__/integration/sui-chain-state-reader.integration.test.ts [2m([22m[2m6 tests[22m[2m | [22m[33m6 skipped[39m[2m)[22m[33m 11776[2mms[22m[39m
+   [2m[90m↓[39m[22m SuiChainStateReader (live localnet, Phase 4.0 smoke)[2m > [22mgetCurrentEpoch returns a non-negative epoch
+   [2m[90m↓[39m[22m SuiChainStateReader (live localnet, Phase 4.0 smoke)[2m > [22mgetMaxIdleEpochs returns the default 30
+   [2m[90m↓[39m[22m SuiChainStateReader (live localnet, Phase 4.0 smoke)[2m > [22mgetRevoteCooldownEpochs returns the default 14
+   [2m[90m↓[39m[22m SuiChainStateReader (live localnet, Phase 4.0 smoke)[2m > [22mgetRoleCounts is all zero on a fresh chain
+   [2m[90m↓[39m[22m SuiChainStateReader (live localnet, Phase 4.0 smoke)[2m > [22mgetActiveMiners is empty on a fresh chain
+   [2m[90m↓[39m[22m SuiChainStateReader (live localnet, Phase 4.0 smoke)[2m > [22mgetRevoteEligibleSince is null for an unmarked miner
+ [31m❯[39m src/__tests__/integration/role-revote-e2e.integration.test.ts [2m([22m[2m1 test[22m[2m | [22m[33m1 skipped[39m[2m)[22m[33m 11951[2mms[22m[39m
+   [2m[90m↓[39m[22m Role-revote full E2E (RV-013, Phase 4.3)[2m > [22midle relay → watcher marks → CP re-votes → miner applies → role flipped + old registry empty
+ [31m❯[39m src/__tests__/integration/cap-token-wiring-e2e.integration.test.ts [2m([22m[2m1 test[22m[2m | [22m[33m1 skipped[39m[2m)[22m[33m 11656[2mms[22m[39m
+   [2m[90m↓[39m[22m Cap-token wiring LIVE round-trip E2E (REQ-ADW-003, W-P4)[2m > [22mRoomAssigned → issuer publishes CapabilityIssued → poller fills cache → verifyJoin accept / reject(missing) / reject(revoked)
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Suites 4 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/integration/cap-token-wiring-e2e.integration.test.ts[2m > [22mCap-token wiring LIVE round-trip E2E (REQ-ADW-003, W-P4)
+[31m[1mTypeError[22m: fetch failed[39m
+[90m [2m❯[22m JsonRpcHTTPTransport.request ../../node_modules/.pnpm/@mysten+sui@1.45.2_typescript@5.9.3/node_modules/@mysten/sui/src/jsonRpc/http-transport.ts:[2m95:15[22m[39m
+[90m [2m❯[22m SuiJsonRpcClient.getNormalizedMoveFunction ../../node_modules/.pnpm/@mysten+sui@1.45.2_typescript@5.9.3/node_modules/@mysten/sui/src/jsonRpc/client.ts:[2m394:10[22m[39m
+[90m [2m❯[22m ../../node_modules/.pnpm/@mysten+sui@1.45.2_typescript@5.9.3/node_modules/@mysten/sui/src/jsonRpc/json-rpc-resolver.ts:[2m278:17[22m[39m
+[90m [2m❯[22m normalizeInputs ../../node_modules/.pnpm/@mysten+sui@1.45.2_typescript@5.9.3/node_modules/@mysten/sui/src/jsonRpc/json-rpc-resolver.ts:[2m275:3[22m[39m
+[90m [2m❯[22m resolveTransactionData ../../node_modules/.pnpm/@mysten+sui@1.45.2_typescript@5.9.3/node_modules/@mysten/sui/src/jsonRpc/json-rpc-resolver.ts:[2m33:3[22m[39m
+[90m [2m❯[22m ../../node_modules/.pnpm/@mysten+sui@1.45.2_typescript@5.9.3/node_modules/@mysten/sui/src/transactions/Transaction.ts:[2m780:6[22m[39m
+[90m [2m❯[22m _Transaction.runPlugins_fn ../../node_modules/.pnpm/@mysten+sui@1.45.2_typescript@5.9.3/node_modules/@mysten/sui/src/transactions/Transaction.ts:[2m802:4[22m[39m
+
+[31m[1mCaused by: Error[22m: connect ECONNREFUSED 127.0.0.1:9000[39m
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[22m[39m
+[31m[1mSerialized Error:[22m[39m [90m{ errno: -4078, code: 'ECONNREFUSED', syscall: 'connect', address: '127.0.0.1', port: 9000 }[39m
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/integration/revote-watcher.integration.test.ts[2m > [22mRevoteWatcher integration (RV-013, Phase 4.1)
+[31m[1mError[22m: sui test-publish exited 1
+STDERR: [39m
+[36m [2m❯[22m publishPackage src/__tests__/integration/localnet-fixture.ts:[2m245:11[22m[39m
+    [90m243| [39m  )[33m;[39m
+    [90m244| [39m  [35mif[39m (result[33m.[39mcode [33m!==[39m [34m0[39m) {
+    [90m245| [39m    throw new Error(`sui test-publish exited ${result.code}\nSTDERR: $…
+    [90m   | [39m          [31m^[39m
+    [90m246| [39m  }
+    [90m247| [39m  [35mconst[39m jsonStart [33m=[39m result[33m.[39mstdout[33m.[39m[34mindexOf[39m([32m'{'[39m)[33m;[39m
+[90m [2m❯[22m bootLocalnet src/__tests__/integration/localnet-fixture.ts:[2m365:24[22m[39m
+[90m [2m❯[22m src/__tests__/integration/revote-watcher.integration.test.ts:[2m51:14[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/integration/role-revote-e2e.integration.test.ts[2m > [22mRole-revote full E2E (RV-013, Phase 4.3)
+[31m[1mError[22m: sui test-publish exited 1
+STDERR: [39m
+[36m [2m❯[22m publishPackage src/__tests__/integration/localnet-fixture.ts:[2m245:11[22m[39m
+    [90m243| [39m  )[33m;[39m
+    [90m244| [39m  [35mif[39m (result[33m.[39mcode [33m!==[39m [34m0[39m) {
+    [90m245| [39m    throw new Error(`sui test-publish exited ${result.code}\nSTDERR: $…
+    [90m   | [39m          [31m^[39m
+    [90m246| [39m  }
+    [90m247| [39m  [35mconst[39m jsonStart [33m=[39m result[33m.[39mstdout[33m.[39m[34mindexOf[39m([32m'{'[39m)[33m;[39m
+[90m [2m❯[22m bootLocalnet src/__tests__/integration/localnet-fixture.ts:[2m365:24[22m[39m
+[90m [2m❯[22m src/__tests__/integration/role-revote-e2e.integration.test.ts:[2m74:14[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/integration/sui-chain-state-reader.integration.test.ts[2m > [22mSuiChainStateReader (live localnet, Phase 4.0 smoke)
+[31m[1mError[22m: sui test-publish exited 1
+STDERR: [39m
+[36m [2m❯[22m publishPackage src/__tests__/integration/localnet-fixture.ts:[2m245:11[22m[39m
+    [90m243| [39m  )[33m;[39m
+    [90m244| [39m  [35mif[39m (result[33m.[39mcode [33m!==[39m [34m0[39m) {
+    [90m245| [39m    throw new Error(`sui test-publish exited ${result.code}\nSTDERR: $…
+    [90m   | [39m          [31m^[39m
+    [90m246| [39m  }
+    [90m247| [39m  [35mconst[39m jsonStart [33m=[39m result[33m.[39mstdout[33m.[39m[34mindexOf[39m([32m'{'[39m)[33m;[39m
+[90m [2m❯[22m bootLocalnet src/__tests__/integration/localnet-fixture.ts:[2m365:24[22m[39m
+[90m [2m❯[22m src/__tests__/integration/sui-chain-state-reader.integration.test.ts:[2m32:14[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m4 failed[39m[22m[2m | [22m[1m[32m27 passed[39m[22m[90m (31)[39m
+[2m      Tests [22m [1m[32m264 passed[39m[22m[2m | [22m[33m9 skipped[39m[90m (273)[39m
+[2m   Start at [22m 01:21:49
+[2m   Duration [22m 14.24s[2m (transform 2.72s, setup 0ms, collect 32.07s, tests 48.35s, environment 9ms, prepare 8.24s)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\cp-daemon:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run

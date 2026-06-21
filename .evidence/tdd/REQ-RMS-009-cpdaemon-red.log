@@ -1,0 +1,30 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/cp-daemon[39m
+
+ [31m❯[39m src/__tests__/room-assignment-spill.test.ts [2m([22m[2m1 test[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 5[2mms[22m[39m
+[31m   [31m×[31m submitSpillAuthorization (REQ-RMS-009)[2m > [22mtargets room_manager::authorize_spill_relay with 7 args (5 objects + 2 ids)[39m[32m 5[2mms[22m[39m
+[31m     → submitSpillAuthorization is not a function[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/room-assignment-spill.test.ts[2m > [22msubmitSpillAuthorization (REQ-RMS-009)[2m > [22mtargets room_manager::authorize_spill_relay with 7 args (5 objects + 2 ids)
+[31m[1mTypeError[22m: submitSpillAuthorization is not a function[39m
+[36m [2m❯[22m src/__tests__/room-assignment-spill.test.ts:[2m35:11[22m[39m
+    [90m 33| [39m      cpRegistryId[33m:[39m [32m'0xcp'[39m[33m,[39m relayRegistryId[33m:[39m [32m'0xrelay'[39m[33m,[39m
+    [90m 34| [39m    } [35mas[39m any[33m;[39m
+    [90m 35| [39m    [35mawait[39m [34msubmitSpillAuthorization[39m(
+    [90m   | [39m          [31m^[39m
+    [90m 36| [39m      {} as any, {} as any, config, '0xcap', 'room-1', 'relay-spill', …
+    [90m 37| [39m    )[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m   Start at [22m 01:21:11
+[2m   Duration [22m 949ms[2m (transform 136ms, setup 0ms, collect 493ms, tests 5ms, environment 0ms, prepare 210ms)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\cp-daemon:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/room-assignment-spill.test.ts

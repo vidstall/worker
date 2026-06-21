@@ -108,3 +108,42 @@ export async function submitProposal(
   // Track as voted
   votedRooms.add(roomId);
 }
+
+/**
+ * REQ-RMS-009 — submit the authorize_spill_relay TX (CP-quorum-gated append).
+ *
+ * Mirrors submitProposal's PTB shape: ControlPlaneCap signer, tx.pure.id args.
+ * Called when a relay's spill request (REQ-RMS-006, off-chain) is approved by the
+ * CP. Appends `spillRelayMinerId` to the room's on-chain assigned_relays so the
+ * cascade peer is authorized (a relay cannot self-co-opt — §4.4).
+ */
+export async function submitSpillAuthorization(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  cpCapId: string,
+  roomId: string,
+  spillRelayMinerId: string,
+  logger: Logger,
+): Promise<void> {
+  await executeWithRetry(
+    client,
+    signer,
+    (tx: Transaction) => {
+      tx.moveCall({
+        target: `${config.packageId}::room_manager::authorize_spill_relay`,
+        arguments: [
+          tx.object(config.networkRegistryId), // &NetworkRegistry
+          tx.object(config.roomManagerId),      // &mut RoomManager
+          tx.object(config.cpRegistryId),       // &ControlPlaneRegistry
+          tx.object(config.relayRegistryId),    // &RelayRegistry
+          tx.object(cpCapId),                   // &ControlPlaneCap
+          tx.pure.id(roomId),                   // room_id: ID
+          tx.pure.id(spillRelayMinerId),        // spill_relay: ID
+        ],
+      });
+    },
+    'authorize-spill-relay',
+    logger,
+  );
+}
