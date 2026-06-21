@@ -1,0 +1,35 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts[2m > [22m[2mREQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22m[2ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter
+[22m[39m[REQ-RMS-007 spike] captured=45 cross-worker RTP packets
+
+{"level":30,"time":1782058605435,"pid":33560,"hostname":"Quang","name":"test:rms007","numWorkers":2,"rtcMinPort":41000,"rtcMaxPort":41200,"msg":"Creating mediasoup Workers"}
+{"level":30,"time":1782058605531,"pid":33560,"hostname":"Quang","name":"test:rms007","workerId":23084,"index":0,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782058605650,"pid":33560,"hostname":"Quang","name":"test:rms007","workerId":40356,"index":1,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782058605650,"pid":33560,"hostname":"Quang","name":"test:rms007","workerCount":2,"msg":"Closing all mediasoup Workers"}
+ [31m❯[39m apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts [2m([22m[2m2 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[33m 1184[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter [33m 781[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22mgetWorkerExcluding returns a DISTINCT worker; pipeRoomToSecondWorker forwards RTP to it[39m[32m 223[2mms[22m[39m
+[31m     → manager.getWorkerExcluding is not a function[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts[2m > [22mREQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22mgetWorkerExcluding returns a DISTINCT worker; pipeRoomToSecondWorker forwards RTP to it
+[31m[1mTypeError[22m: manager.getWorkerExcluding is not a function[39m
+[36m [2m❯[22m apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts:[2m120:36[22m[39m
+    [90m118| [39m    [35mtry[39m {
+    [90m119| [39m      [35mconst[39m firstWorker [33m=[39m manager[33m.[39m[34mgetNextWorker[39m()[33m;[39m
+    [90m120| [39m      [35mconst[39m secondWorker [33m=[39m manager[33m.[39m[34mgetWorkerExcluding[39m(firstWorker)[33m;[39m
+    [90m   | [39m                                   [31m^[39m
+    [90m121| [39m      expect(secondWorker).not.toBe(firstWorker); // distinct worker (…
+    [90m122| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m1 passed[39m[22m[90m (2)[39m
+[2m   Start at [22m 23:16:43
+[2m   Duration [22m 2.21s[2m (transform 121ms, setup 0ms, collect 786ms, tests 1.18s, environment 0ms, prepare 83ms)[22m
+

@@ -1,0 +1,108 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+ [32m✓[39m apps/relay/src/__tests__/inter-relay-primary-coordinator.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 23[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/mcu-refuse-e2ee.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 45[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/turn-fetcher.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 57[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/inter-relay-link.test.ts [2m([22m[2m11 tests[22m[2m)[22m[33m 482[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/canary-isolation.config.test.ts [2m([22m[2m13 tests[22m[2m)[22m[33m 1068[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/inter-relay-warmpipe.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 27[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/relay-role-manager.test.ts [2m([22m[2m41 tests[22m[2m)[22m[32m 73[2mms[22m[39m
+{"level":30,"time":1782059856132,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856132,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856169,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856169,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+ [32m✓[39m apps/relay/src/__tests__/room-mode.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 112[2mms[22m[39m
+{"level":30,"time":1782059856189,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856201,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856205,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856211,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856214,"pid":20624,"hostname":"Quang","name":"test:metrics-server","trace_id":"968f7d5b-1089-4cfa-b785-a0422f5b54dd","url":"/api/probe","role":"standby","msg":"RO-020 probe served"}
+{"level":30,"time":1782059856221,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856224,"pid":20624,"hostname":"Quang","name":"test:metrics-server","trace_id":"57dcdd6c-285c-40f4-9735-ea25baddafb3","url":"/api/probe","role":"standby","msg":"RO-020 probe served"}
+{"level":30,"time":1782059856229,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856232,"pid":20624,"hostname":"Quang","name":"test:metrics-server","trace_id":"92ba27f5-632d-4968-91f7-8b4bd01451c5","url":"/api/probe","role":"primary","msg":"RO-020 probe served"}
+{"level":30,"time":1782059856237,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856240,"pid":20624,"hostname":"Quang","name":"test:metrics-server","trace_id":"ce148ac8-bfd3-492b-bd95-b2a123c0a2a2","url":"/api/probe","role":"standby","msg":"RO-020 probe served"}
+{"level":30,"time":1782059856224,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":40,"time":1782059856228,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"9b64aeb4-fd32-422d-ba70-1ee2ab91c83d","url":"/metrics","msg":"relay metrics: unauthorized (401)"}
+{"level":30,"time":1782059856233,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":40,"time":1782059856236,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"deb5b7f9-b455-4953-a3c6-279dfd1dc022","url":"/metrics/0xABCDEF","msg":"relay metrics: unauthorized (401)"}
+{"level":30,"time":1782059856242,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856245,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":40,"time":1782059856247,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"8953f916-3aa8-4ae2-8f8d-f15243ae0ff6","url":"/metrics","msg":"relay metrics: unauthorized (401)"}
+{"level":30,"time":1782059856249,"pid":20624,"hostname":"Quang","name":"test:metrics-server","trace_id":"b7e0326e-e888-439d-a091-1e12c9cc9d12","url":"/api/probe","role":"unknown","msg":"RO-020 probe served"}
+{"level":30,"time":1782059856253,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":40,"time":1782059856256,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"32a8e1ca-e215-40e5-8888-4712a55e5e15","url":"/metrics","msg":"relay metrics: unauthorized (401)"}
+{"level":30,"time":1782059856255,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856261,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856264,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":40,"time":1782059856265,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"34fb62a2-dc74-444d-92bd-8f2e1dbedad2","url":"/metrics","msg":"relay metrics: unauthorized (401)"}
+{"level":30,"time":1782059856270,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":40,"time":1782059856273,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"36d5fc55-c404-4684-b3b3-85091812a4e0","url":"/metrics","msg":"relay metrics: unauthorized (401)"}
+{"level":30,"time":1782059856274,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856278,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856283,"pid":20624,"hostname":"Quang","name":"test:metrics-server","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856287,"pid":20624,"hostname":"Quang","name":"test:metrics-server","trace_id":"e515d705-b08d-46ec-87f4-c2553843a0de","url":"/api/probe","role":"standby","msg":"RO-020 probe served"}
+{"level":30,"time":1782059856288,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856299,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+ [32m✓[39m apps/relay/src/__tests__/metrics-server.test.ts [2m([22m[2m12 tests[22m[2m)[22m[32m 207[2mms[22m[39m
+{"level":30,"time":1782059856304,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"9c9957b3-1e59-409f-9617-4d5c959f0206","url":"/api/probe","role":"unknown","msg":"RO-020 probe served"}
+{"level":30,"time":1782059856310,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","port":0,"msg":"Metrics HTTP server listening"}
+{"level":30,"time":1782059856314,"pid":11992,"hostname":"Quang","name":"test:metrics-server-auth","trace_id":"81d7af9b-35ba-446e-9e86-6bf21b6df8d6","url":"/api/probe","role":"unknown","msg":"RO-020 probe served"}
+ [32m✓[39m apps/relay/src/__tests__/inter-relay-wiring.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 319[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/metrics-server-auth.test.ts [2m([22m[2m15 tests[22m[2m)[22m[32m 231[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/relay-heartbeat.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 23[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/set-consumer-layers.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 543[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/recv-transport-bwe-cap.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 593[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/auto-register.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 39[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/room-password-roster.test.ts [2m([22m[2m8 tests[22m[2m)[22m[33m 689[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P1.0 — {peerId → sessionPubkey} roster capture + malformed-key reject[2m > [22mteardown drops the peer sessionPubkey from the roster on disconnect (roster shrinks) [33m 433[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/inter-relay.test.ts [2m([22m[2m21 tests[22m[2m)[22m[32m 22[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/pause-resume-consumer.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 739[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/inter-relay-auth.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/signaling.test.ts [2m([22m[2m12 tests[22m[2m)[22m[33m 813[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/active-speaker.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 881[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/signaling-drain.test.ts [2m([22m[2m6 tests[22m[2m)[22m[33m 934[2mms[22m[39m
+   [33m[2m✓[22m[39m relay graceful-drain accessors (DOH-021)[2m > [22mcloseRooms() does NOT close the inter-relay warm-pipe peer (only client rooms) [33m 378[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/standby-connect-half.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/metrics.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 10[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/relay-worker-recovery.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/identity-chain.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 11[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/coturn-url.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/heartbeat.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 24[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/pipe-connect-dispatch.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 580[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/health-monitor-wiring.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 256[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/spill-trigger.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 11[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/primary-produce-drive.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 202[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/inter-relay-connect.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/latency-probe.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/graceful-shutdown-wiring.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 18[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/health-signals.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 13[2mms[22m[39m
+{"level":30,"time":1782059858222,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","numWorkers":3,"rtcMinPort":10000,"rtcMaxPort":10100,"msg":"Creating mediasoup Workers"}
+{"level":30,"time":1782059858223,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerId":1,"index":0,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782059858223,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerId":2,"index":1,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782059858224,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerId":3,"index":2,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782059858226,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerCount":3,"msg":"Closing all mediasoup Workers"}
+{"level":30,"time":1782059858227,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","numWorkers":1,"rtcMinPort":10000,"rtcMaxPort":10100,"msg":"Creating mediasoup Workers"}
+{"level":30,"time":1782059858227,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerId":1,"index":0,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782059858227,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerCount":1,"msg":"Closing all mediasoup Workers"}
+{"level":30,"time":1782059858228,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","numWorkers":1,"rtcMinPort":10000,"rtcMaxPort":10100,"msg":"Creating mediasoup Workers"}
+{"level":30,"time":1782059858228,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerId":1,"index":0,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782059858228,"pid":18688,"hostname":"Quang","name":"test:rms007-unit","workerCount":1,"msg":"Closing all mediasoup Workers"}
+ [32m✓[39m apps/relay/src/__tests__/mediasoup-manager.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 10[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/relay-endpoint-resolver.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 3[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/inter-relay-auth-wiring.test.ts [2m([22m[2m10 tests[22m[2m)[22m[33m 2276[2mms[22m[39m
+   [33m[2m✓[22m[39m inter-relay auth gate (G3.2b)[2m > [22ma second tagged peer displaces the first; the first peer close does NOT detach the second [33m 540[2mms[22m[39m
+   [33m[2m✓[22m[39m inter-relay cross-daemon link END-TO-END (G3.2b)[2m > [22mstandby openInterRelayLink → primary announce → standby registry records over a real socket [33m 434[2mms[22m[39m
+ [32m✓[39m apps/relay/src/__tests__/e2ee-key-bundle.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 3368[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P4 — e2eeKeyBundle BLIND broadcast (recipient-oblivious)[2m > [22m(a) every OTHER member receives the byte-identical bundle; the sender gets NO echo [33m 688[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P4 — e2eeKeyBundle BLIND broadcast (recipient-oblivious)[2m > [22m(c) room-scoping / anti-spoof — a room-A member sending roomId=room-B does NOT broadcast into room B [33m 695[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P4 — e2eeKeyBundle BLIND broadcast (recipient-oblivious)[2m > [22m(e) a member NOT in any room sending a bundle is ignored (no throw, no broadcast) [33m 613[2mms[22m[39m
+   [33m[2m✓[22m[39m W5 M2 P4 — e2eeKeyBundle BLIND broadcast (recipient-oblivious)[2m > [22m(f) malformed bundle (missing/non-array envelopes) is dropped cleanly — no junk frame to peers, ignore+warn, no error [33m 640[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m40 passed[39m[22m[90m (40)[39m
+[2m      Tests [22m [1m[32m327 passed[39m[22m[90m (327)[39m
+[2m   Start at [22m 23:37:33
+[2m   Duration [22m 6.01s[2m (transform 3.13s, setup 0ms, collect 39.03s, tests 14.79s, environment 14ms, prepare 10.99s)[22m
+

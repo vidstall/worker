@@ -1,0 +1,14 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts[2m > [22m[2mREQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22m[2ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter
+[22m[39m[REQ-RMS-007 spike] captured=44 cross-worker RTP packets
+
+ [32m✓[39m apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 1071[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter [33m 788[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m   Start at [22m 23:11:54
+[2m   Duration [22m 1.58s[2m (transform 37ms, setup 0ms, collect 257ms, tests 1.07s, environment 0ms, prepare 94ms)[22m
+

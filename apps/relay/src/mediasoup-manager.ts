@@ -16,6 +16,9 @@ import type { Logger } from '@dvconf/shared';
 export interface MediasoupManager {
   workers: msTypes.Worker[];
   getNextWorker(): msTypes.Worker;
+  /** REQ-RMS-007 — a worker DISTINCT from `current` for tier-2 intra-box spill. Falls
+   *  back to the next round-robin worker when only one worker exists. */
+  getWorkerExcluding(current: msTypes.Worker): msTypes.Worker;
   createRouter(worker: msTypes.Worker): Promise<msTypes.Router>;
   /** Cumulative count of mediasoup Worker 'died' events (F61 health signal, DOH-014). */
   getWorkerDiedCount(): number;
@@ -101,6 +104,15 @@ export async function createMediasoupManager(logger: Logger): Promise<MediasoupM
       const worker = workers[nextWorkerIndex % workers.length]!;
       nextWorkerIndex++;
       return worker;
+    },
+
+    getWorkerExcluding(current: msTypes.Worker): msTypes.Worker {
+      if (workers.length === 0) {
+        throw new Error('No mediasoup Workers available');
+      }
+      // Prefer a worker that is not `current`; if only one exists, return it.
+      const other = workers.find((w) => w !== current);
+      return other ?? workers[0]!;
     },
 
     async createRouter(worker: msTypes.Worker): Promise<msTypes.Router> {

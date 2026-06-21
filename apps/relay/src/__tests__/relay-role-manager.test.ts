@@ -19,6 +19,7 @@ import {
   createPipePortAllocator,
   createStandbyPipeTransport,
   createPipeLivenessObserver,
+  pipeRoomToSecondWorker,
   type RoomTopology,
 } from '../relay-role-manager.js';
 
@@ -714,5 +715,41 @@ describe('createPipeLivenessObserver — honest probe flip', () => {
     // false (no usable sample); loop survived the rejection.
     expect(calls.at(-1)!.pipeConsumerAlive).toBe(true);
     expect(calls.at(-1)!.rtcpAlive).toBe(false);
+  });
+});
+
+// ── pipeRoomToSecondWorker (REQ-RMS-007 — tier-2 intra-box cross-worker spill) ──
+// Pure-logic branches over a mocked sourceRouter.pipeToRouter (no real mediasoup):
+//   - happy path: returns the minted pipeConsumer
+//   - defensive throw when mediasoup returns no pipeConsumer (optional-narrow)
+
+describe('pipeRoomToSecondWorker (REQ-RMS-007)', () => {
+  it('returns the pipeConsumer minted on the source router (kind mirrors producer)', async () => {
+    const pipeConsumer = { id: 'pipe-consumer-1', kind: 'video' };
+    const sourceRouter = { pipeToRouter: vi.fn().mockResolvedValue({ pipeConsumer }) };
+    const secondRouter = { id: 'router-second' };
+
+    const result = await pipeRoomToSecondWorker(
+      sourceRouter as any,
+      secondRouter as any,
+      'producer-REAL',
+    );
+
+    expect(result).toBe(pipeConsumer);
+    // No-cast call shape: { producerId, router } passed straight through.
+    expect(sourceRouter.pipeToRouter).toHaveBeenCalledWith({
+      producerId: 'producer-REAL',
+      router: secondRouter,
+    });
+  });
+
+  it('throws (producerId-bearing) when pipeToRouter returns no pipeConsumer', async () => {
+    // mediasoup types pipeConsumer as optional; the helper must fail loud.
+    const sourceRouter = { pipeToRouter: vi.fn().mockResolvedValue({ pipeConsumer: undefined }) };
+    const secondRouter = { id: 'router-second' };
+
+    await expect(
+      pipeRoomToSecondWorker(sourceRouter as any, secondRouter as any, 'producer-MISSING'),
+    ).rejects.toThrow('producer-MISSING');
   });
 });

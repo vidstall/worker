@@ -1,0 +1,36 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP -- production-faithful (manual cross-PipeTransport pairing)[2m > [22m[2mflows real Opus RTP across a manually-paired pipe; standby consumer paused->resume cutover observes RTP
+[22m[39m[spike] production-faithful: rtpPackets=33 inboundPacketCount=48 inboundByteCount=1488 resume->firstRtp=1ms
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T16:12:16.955Z","level":"INFO","source":"frontend","module":"crypto/e2ee-spike","message":"sealed K_room to roster","context":{"roomId":"f1-warmpipe-room","epoch":1,"kid":1,"envelopeCount":2}}
+{"timestamp":"2026-06-21T16:12:16.956Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"bootstrap K_room","context":{"roomId":"f1-warmpipe-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T16:12:16.959Z","level":"INFO","source":"frontend","module":"crypto/key-manager","message":"applied K_room bundle","context":{"roomId":"f1-warmpipe-room","epoch":1,"kid":1,"envelopeCount":2}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T16:12:16.964Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":0,"byteLength":80,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T16:12:16.965Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":1,"byteLength":45,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m{"timestamp":"2026-06-21T16:12:16.965Z","level":"INFO","source":"frontend","module":"webrtc/sframe-transform","message":"encrypted frame","context":{"kid":1,"ctr":2,"byteLength":87,"codecOffset":10}}
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts[2m > [22m[2mwarm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22m[2mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable
+[22m[39m[F1 REQ-RO-004/014 video-bench] captured=33 mediaPackets=33 byteIdentical=33 decryptedByteIdentical=33 pausedConsumerRtcpDelta=0 kid=1
+
+ [32m✓[39m apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 3816[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP -- baseline (router.pipeToRouter, same-process)[2m > [22mflows real Opus RTP primary->standby via pipeToRouter after resume [33m 676[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP -- production-faithful (manual cross-PipeTransport pairing)[2m > [22mflows real Opus RTP across a manually-paired pipe; standby consumer paused->resume cutover observes RTP [33m 774[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP -- production-faithful (manual cross-PipeTransport pairing)[2m > [22mREQ-RO-005: ensureWarmPipe consumes onto a CONNECTED createStandbyPipeTransport handle, stays paused, RTP flows on resume [33m 774[2mms[22m[39m
+   [33m[2m✓[22m[39m warm-pipe RTP — F1 extended bench (VP8 partial-SFrame VIDEO over PROD primary coordinator + CONNECTED ensureWarmPipe)[2m > [22mreal VP8 partial-SFrame RTP crosses the prod-coordinator pipe; standby body byte-identical to the sent SFrame; decrypt recovers byteIdentical post-cutover; paused-consumer RTCP observable [33m 1381[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m4 passed[39m[22m[90m (4)[39m
+[2m   Start at [22m 23:12:13
+[2m   Duration [22m 4.88s[2m (transform 137ms, setup 0ms, collect 787ms, tests 3.82s, environment 0ms, prepare 96ms)[22m
+

@@ -108,6 +108,13 @@ export function parsePipePortRange(envValue: string | undefined): PipePortRange 
  * Keyed per room AND per role (`roomId` for the standby, `${roomId}:primary`
  * for the primary) so a same-host primary+standby never collide (D3).
  *
+ * REQ-RMS-007 generalization: the key namespace is an OPAQUE string, so the
+ * primary leg generalizes additively to `${roomId}:${peerRelayId}:primary` once
+ * a room spills across MULTIPLE peer relays (mesh M2) — each (room, peerRelay)
+ * pair then holds its own distinct port slot without colliding. The M1 single-
+ * peer callers keep using `${roomId}:primary` unchanged (peerRelayId omitted),
+ * so this allocator's contract is byte-stable for the existing warm-pipe path.
+ *
  * Idempotent per key — `allocate(key)` twice returns the SAME port and consumes
  * only ONE slot (preserves the N3 not-ready re-run invariant: a coordinator
  * re-run rebinds on the SAME pipePort, never leaking a second).
@@ -278,6 +285,41 @@ export async function ensureWarmPipe(
   topology.pipeConsumer = consumer;
 
   return consumer;
+}
+
+// ── pipeRoomToSecondWorker (REQ-RMS-007 — tier-2 intra-box cross-worker spill) ──
+
+/**
+ * Tier-2 spill: pipe an EXISTING room's producer from its current worker's router
+ * to a SECOND worker's router WITHIN one process, raising per-room capacity toward
+ * C_relay before any network cascade. Uses mediasoup's high-level
+ * `router.pipeToRouter()` — the cheapest same-process path (proven by the
+ * REQ-RMS-007 spike). No manual {ip,port} handshake, no inter-relay WS (that is
+ * tier-3, REQ-RMS-008). Returns the pipe Consumer minted on the SOURCE router
+ * (its kind mirrors the producer); the piped producer is now consumable on
+ * `secondRouter` under the SAME producerId.
+ *
+ * Additive — does NOT touch ensureWarmPipe / the F1 warm-pipe path.
+ */
+export async function pipeRoomToSecondWorker(
+  sourceRouter: msTypes.Router,
+  secondRouter: msTypes.Router,
+  producerId: string,
+): Promise<msTypes.Consumer> {
+  // No cast: { producerId, router } matches PipeToRouterOptions directly, so let
+  // TS verify the call shape (unlike createPipeTransport, whose extra fields the
+  // mediasoup d.ts lacks — that one still needs its cast).
+  const { pipeConsumer } = await sourceRouter.pipeToRouter({
+    producerId,
+    router: secondRouter,
+  });
+  // mediasoup types pipeConsumer as optional (PipeToRouterResult.pipeConsumer?),
+  // but piping a Producer ALWAYS mints one on the source router. Narrow + fail
+  // loud if mediasoup ever returns none (would mean the producerId was unknown).
+  if (pipeConsumer === undefined) {
+    throw new Error(`pipeRoomToSecondWorker: pipeToRouter returned no pipeConsumer for producer ${producerId}`);
+  }
+  return pipeConsumer;
 }
 
 // ── createPipeLivenessObserver ─────────────────────────────────────────

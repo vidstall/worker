@@ -1,0 +1,18 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts[2m > [22m[2mREQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22m[2ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter
+[22m[39m[REQ-RMS-007 spike] captured=42 cross-worker RTP packets
+
+{"level":30,"time":1782059811915,"pid":32476,"hostname":"Quang","name":"test:rms007","numWorkers":2,"rtcMinPort":41000,"rtcMaxPort":41200,"msg":"Creating mediasoup Workers"}
+{"level":30,"time":1782059812024,"pid":32476,"hostname":"Quang","name":"test:rms007","workerId":10132,"index":0,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782059812112,"pid":32476,"hostname":"Quang","name":"test:rms007","workerId":13716,"index":1,"msg":"mediasoup Worker created"}
+{"level":30,"time":1782059812118,"pid":32476,"hostname":"Quang","name":"test:rms007","workerCount":2,"msg":"Closing all mediasoup Workers"}
+ [32m✓[39m apps/relay/src/__tests__/integration/intra-box-cross-worker-spike.integration.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 1227[2mms[22m[39m
+   [33m[2m✓[22m[39m REQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards live RTP[2m > [22ma producer on routerA is consumable + forwarding RTP on routerB after pipeToRouter [33m 791[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m   Start at [22m 23:36:49
+[2m   Duration [22m 2.36s[2m (transform 146ms, setup 0ms, collect 863ms, tests 1.23s, environment 0ms, prepare 109ms)[22m
+
