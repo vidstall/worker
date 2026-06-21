@@ -1201,6 +1201,7 @@ export async function createBenchRoom(
       tx.object(ids.userRegistryId),
       tx.pure.u8(mode),
       tx.pure.u64(expected),
+      tx.pure.u8(0), // room_class_hint = small (NEW REQ-RMS-016)
     ],
   });
 

@@ -128,6 +128,8 @@ async function main(): Promise<void> {
             tx.object(config.roomManagerId),
             tx.object(config.userRegistryId),
             tx.pure.u8(0), // SFU mode
+            tx.pure.u64(4), // expected_participants (was MISSING — pre-existing arg drift)
+            tx.pure.u8(0), // room_class_hint = small (NEW REQ-RMS-016)
           ],
         });
       },

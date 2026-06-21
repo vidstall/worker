@@ -494,6 +494,7 @@ export async function createRoomWithRelay(
           tx.object(config.userRegistryId),
           tx.pure.u8(0), // relay_mode SFU
           tx.pure.u64(2), // expected_participants
+          tx.pure.u8(0), // room_class_hint = small (NEW REQ-RMS-016)
         ],
       });
     },

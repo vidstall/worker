@@ -67,6 +67,12 @@ export interface RelayRTTUpdated {
   rtt: string;
 }
 
+export interface RelayHeartbeat {
+  miner_id: string;       // Sui ID hex (relay miner)
+  epoch: string;          // u64 epoch as decimal string
+  region: number[];       // UTF-8 bytes (mirrors vector<u8>)
+}
+
 // ── Validator events (validator_registry module) ────────────────────
 
 export interface ValidatorRegistered {
@@ -129,6 +135,7 @@ export interface RoomCreated {
   room_id: string;
   creator: string;
   relay_mode: number;
+  room_class_hint?: number; // NEW (REQ-RMS-016): 0=small,1=webinar,2=large; optional for back-compat
 }
 
 export interface RoomAssigned {
@@ -284,6 +291,7 @@ export type DvconfEvent =
   | RelayRegistered
   | RelayLoadUpdated
   | RelayRTTUpdated
+  | RelayHeartbeat
   | ValidatorRegistered
   | SessionWalletAssigned
   | SessionWalletRevealed
