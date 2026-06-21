@@ -300,26 +300,37 @@ export async function ensureWarmPipe(
  * `secondRouter` under the SAME producerId.
  *
  * Additive — does NOT touch ensureWarmPipe / the F1 warm-pipe path.
+ *
+ * RETURNS BOTH legs of the hop ({ pipeProducer, pipeConsumer }) — mirroring
+ * mediasoup's own PipeToRouterResult. The `pipeProducer` (minted on the
+ * DESTINATION router) lets a caller witness the producer as it arrived
+ * downstream — e.g. REQ-RMS-011 reads pipeProducer.rtpParameters.encodings to
+ * prove the FULL simulcast ladder survived the cascade hop. The `pipeConsumer`
+ * (minted on the SOURCE router) is the legacy single-leg the M1 callers used.
  */
 export async function pipeRoomToSecondWorker(
   sourceRouter: msTypes.Router,
   secondRouter: msTypes.Router,
   producerId: string,
-): Promise<msTypes.Consumer> {
+): Promise<{ pipeProducer: msTypes.Producer; pipeConsumer: msTypes.Consumer }> {
   // No cast: { producerId, router } matches PipeToRouterOptions directly, so let
   // TS verify the call shape (unlike createPipeTransport, whose extra fields the
   // mediasoup d.ts lacks — that one still needs its cast).
-  const { pipeConsumer } = await sourceRouter.pipeToRouter({
+  const { pipeProducer, pipeConsumer } = await sourceRouter.pipeToRouter({
     producerId,
     router: secondRouter,
   });
-  // mediasoup types pipeConsumer as optional (PipeToRouterResult.pipeConsumer?),
-  // but piping a Producer ALWAYS mints one on the source router. Narrow + fail
-  // loud if mediasoup ever returns none (would mean the producerId was unknown).
+  // mediasoup types both as optional (PipeToRouterResult.pipe{Producer,Consumer}?),
+  // but piping a Producer ALWAYS mints BOTH (a producer on the destination router
+  // + a consumer on the source router). Narrow + fail loud if mediasoup ever
+  // returns none (would mean the producerId was unknown).
   if (pipeConsumer === undefined) {
     throw new Error(`pipeRoomToSecondWorker: pipeToRouter returned no pipeConsumer for producer ${producerId}`);
   }
-  return pipeConsumer;
+  if (pipeProducer === undefined) {
+    throw new Error(`pipeRoomToSecondWorker: pipeToRouter returned no pipeProducer for producer ${producerId}`);
+  }
+  return { pipeProducer, pipeConsumer };
 }
 
 // ── createPipeLivenessObserver ─────────────────────────────────────────

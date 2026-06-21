@@ -217,6 +217,14 @@ export async function createConsumer(
   // SCOPE (D-M2-8): the relay's blindness is STRUCTURAL (no decode path); the
   // validator-blindness in M2 is ECONOMIC/OPERATIONAL (it holds the key). This is
   // NOT a cryptographic "relay/validator cannot decrypt" claim (Path C → M3).
+  // ── REQ-RMS-011 / REQ-RMS-010 — CASCADE HOP carry ───────────────────────────
+  // This same blind-forward + layer-select invariant holds across EACH added
+  // cascade pipe hop (tier-2 pipeToRouter / tier-3 inter-relay pipe). A piped
+  // producer arrives downstream with its FULL simulcast ladder; this createConsumer
+  // runs UNCHANGED on a piped producer, and setPreferredLayers layer-selects this
+  // relay's own viewers locally — control does NOT compose layers at the hop. The
+  // SFrame ciphertext stays byte-identical across every hop (header-only rewrites),
+  // proven by multi-hop-byte-identity.integration.test.ts (REQ-RMS-020).
   const consumer = await consumerPeer.recvTransport.consume({
     producerId: targetProducerId,
     rtpCapabilities,

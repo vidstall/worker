@@ -131,7 +131,8 @@ describe('REQ-RMS-007 spike — intra-box cross-worker pipeToRouter forwards liv
       const producer = await srcTransport.produce({ kind: 'video', rtpParameters: vp8RtpParameters });
 
       // Production helper: pipe an existing room's producer to a second worker's router.
-      const pipeConsumer = await pipeRoomToSecondWorker(routerFirst, routerSecond, producer.id);
+      // Task-10 (REQ-RMS-011) widened the return to { pipeProducer, pipeConsumer }.
+      const { pipeConsumer } = await pipeRoomToSecondWorker(routerFirst, routerSecond, producer.id);
       expect(pipeConsumer.kind).toBe('video');
       expect(
         routerSecond.canConsume({ producerId: producer.id, rtpCapabilities: routerSecond.rtpCapabilities }),
