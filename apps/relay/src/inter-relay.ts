@@ -48,6 +48,40 @@ import { ensureWarmPipe, type RoomTopology } from './relay-role-manager.js';
 export const INTER_RELAY_SUBPROTOCOL = 'dvconf-inter-relay.v1';
 
 /**
+ * REQ-RMS-008 — sentinel peerRelayId for the legacy single-peer F1 path. A frame
+ * with no peerRelayId (pre-mesh) keys under this so the M1 single-standby path is
+ * byte-for-byte unchanged; cascade frames carry a real peerRelayId. Every method
+ * that gained an OPTIONAL trailing `peerRelayId` defaults to THIS, so a caller
+ * that passes nothing keys consistently under one stable composite key end-to-end
+ * (record/resolve/states/clear) and never mid-flow key-mismatches.
+ */
+export const DEFAULT_PEER_RELAY_ID = '__default__';
+
+/**
+ * Composite coordinator/registry key: `${roomId}::${peerRelayId}`. The `::`
+ * separator can't collide with a roomId/peerRelayId (mediasoup ids + room ids are
+ * opaque strings; we never embed `::`). On the DEFAULT peer this is still a single
+ * stable bucket, so the legacy single-standby path is unchanged.
+ */
+function meshKey(roomId: string, peerRelayId: string): string {
+  return `${roomId}::${peerRelayId}`;
+}
+
+/**
+ * REQ-RMS-008 — the per-leg PIPE_PORT allocator key. On the DEFAULT peer it
+ * degrades to the LEGACY `${roomId}:primary` form (so the existing warm-pipe
+ * allocator slot + index.ts releaseRoom + warmpipe-rtp integration are
+ * byte-stable); a real cascade peer widens it to `${roomId}:${peerRelayId}:primary`
+ * so each (room, peerRelay) leg holds its own distinct port slot (per the
+ * createPipePortAllocator REQ-RMS-007 generalization comment).
+ */
+function primaryPortKey(roomId: string, peerRelayId: string): string {
+  return peerRelayId === DEFAULT_PEER_RELAY_ID
+    ? `${roomId}:primary`
+    : `${roomId}:${peerRelayId}:primary`;
+}
+
+/**
  * Validate the `Authorization: Bearer <token>` header presented on an
  * inter-relay WS upgrade against the configured INTER_RELAY_TOKEN.
  *
@@ -232,6 +266,16 @@ export interface InterRelaySender {
  * Serializes the locked frame and pushes it via the sender. Best-effort:
  * sender errors (link down) are swallowed so the primary's produce path never
  * crashes because the standby link is momentarily unavailable.
+ *
+ * REQ-RMS-008 — the returned closure gained a trailing OPTIONAL `peerRelayId`
+ * (4th arg) forwarded into the frame's peerRelayId field, so this LIVE backing of
+ * PrimaryPipeCoordinator.deps.announcer carries the cascade peer on the wire. Both
+ * trailing args default to undefined → the legacy single-standby path emits a
+ * byte-identical frame (builder OMITS undefined fields). The two live call sites
+ * thread DIFFERENT slots: the legacy in-process bench announce passes
+ * `producerPeerId` (3rd arg, peerRelayId omitted); the coordinator drain (via the
+ * index.ts adapter) passes `peerRelayId` (4th arg, producerPeerId omitted — a
+ * PIPED consumer carries no publisher peerId).
  */
 export function createInterRelayAnnouncer(
   sender: InterRelaySender,
@@ -239,9 +283,10 @@ export function createInterRelayAnnouncer(
   roomId: string,
   producer: Pick<msTypes.Producer, 'id' | 'kind'>,
   producerPeerId?: string,
+  peerRelayId?: string,
 ) => void {
-  return (roomId, producer, producerPeerId) => {
-    const frame = buildPipeProducerAnnounce(roomId, producer, producerPeerId);
+  return (roomId, producer, producerPeerId, peerRelayId) => {
+    const frame = buildPipeProducerAnnounce(roomId, producer, producerPeerId, peerRelayId);
     try {
       sender.send(JSON.stringify(frame));
     } catch {
@@ -329,18 +374,26 @@ export interface AnnouncedProducer {
  * video, or multiple peers) — we keep them all, keyed by producerId to dedup.
  */
 export class InterRelayProducerRegistry {
-  /** roomId → (producerId → AnnouncedProducer). */
+  /**
+   * REQ-RMS-008 — keyed by meshKey(roomId, peerRelayId) so K_r peer relays can
+   * each announce a DISTINCT leg of one room without their producers leaking into
+   * each other's bucket. A legacy announce (no peerRelayId) keys under
+   * DEFAULT_PEER_RELAY_ID — a single stable bucket, byte-identical to the prior
+   * roomId-only behaviour for the M1 single-standby path.
+   */
   private readonly byRoom = new Map<string, Map<string, AnnouncedProducer>>();
 
   /**
-   * Records an announced producer. Idempotent — re-announcing the same
-   * producerId for a room is a no-op (dedup guards against duplicate-pipe).
+   * Records an announced producer under (roomId, peerRelayId ?? DEFAULT).
+   * Idempotent — re-announcing the same producerId for a (room, peer) is a no-op
+   * (dedup guards against duplicate-pipe).
    */
   record(announce: PipeProducerAnnounce): void {
-    let room = this.byRoom.get(announce.roomId);
+    const key = meshKey(announce.roomId, announce.peerRelayId ?? DEFAULT_PEER_RELAY_ID);
+    let room = this.byRoom.get(key);
     if (!room) {
       room = new Map();
-      this.byRoom.set(announce.roomId, room);
+      this.byRoom.set(key, room);
     }
     room.set(announce.producerId, {
       producerId: announce.producerId,
@@ -352,34 +405,51 @@ export class InterRelayProducerRegistry {
   }
 
   /**
-   * Resolves the first announced producer for a room.
+   * Resolves the first announced producer for a (room, peer).
    * Returns null if no producer has been announced yet (standby should keep
    * the consumer paused / reply "not ready" to a client consume request).
    *
+   * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID so the legacy 1-arg call
+   * (signaling.ts, the coordinator's single-standby path) is unchanged.
+   *
    * For the warm-pipe Consumer, the standby pipes the room's producer(s); the
    * "first" producer is sufficient to establish the pipe Consumer lifecycle
-   * (REQ-RO-005). Multi-producer fan-out is M2 scope.
+   * (REQ-RO-005).
    */
-  resolve(roomId: string): AnnouncedProducer | null {
-    const room = this.byRoom.get(roomId);
+  resolve(
+    roomId: string,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): AnnouncedProducer | null {
+    const room = this.byRoom.get(meshKey(roomId, peerRelayId));
     if (!room || room.size === 0) return null;
     const first = room.values().next();
     return first.done ? null : first.value;
   }
 
-  /** All announced producers for a room (for multi-producer consume). */
-  resolveAll(roomId: string): AnnouncedProducer[] {
-    const room = this.byRoom.get(roomId);
+  /**
+   * ALL announced producers for a (room, peer). REQ-RMS-008: a cascade pipes
+   * EVERY producer the peer announced (>100-user fan-out), and per-peer isolation
+   * means one peer's producers never leak into another peer's resolveAll.
+   * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID (legacy single-standby).
+   */
+  resolveAll(
+    roomId: string,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): AnnouncedProducer[] {
+    const room = this.byRoom.get(meshKey(roomId, peerRelayId));
     if (!room) return [];
     return Array.from(room.values());
   }
 
-  /** Drops a room's records (on room close / worker.died rebuild). */
-  clear(roomId: string): void {
-    this.byRoom.delete(roomId);
+  /**
+   * Drops a (room, peer)'s records (on room close / worker.died rebuild).
+   * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID (legacy single-standby).
+   */
+  clear(roomId: string, peerRelayId: string = DEFAULT_PEER_RELAY_ID): void {
+    this.byRoom.delete(meshKey(roomId, peerRelayId));
   }
 
-  /** Test/diagnostic — total rooms tracked. */
+  /** Test/diagnostic — total (room, peer) buckets tracked. */
   get roomCount(): number {
     return this.byRoom.size;
   }
@@ -523,15 +593,16 @@ export class StandbyWarmPipeCoordinator {
     topology: RoomTopology,
     router: msTypes.Router,
     pipePort: number,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<msTypes.Consumer | null> {
-    const announced = this.registry.resolve(topology.roomId);
+    const announced = this.registry.resolve(topology.roomId, peerRelayId);
     const realId = announced?.producerId;
     const pending = realId === undefined;
     const consumedProducerId = realId ?? placeholderProducerId(topology.roomId);
 
     // Only record state for the standby (ensureWarmPipe returns null for primary).
     if (topology.role === 'standby') {
-      this.states.set(topology.roomId, {
+      this.states.set(meshKey(topology.roomId, peerRelayId), {
         topology,
         router,
         pipePort,
@@ -569,10 +640,11 @@ export class StandbyWarmPipeCoordinator {
     topology?: RoomTopology,
     router?: msTypes.Router,
     pipePort?: number,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<boolean> {
-    const state = this.states.get(roomId);
+    const state = this.states.get(meshKey(roomId, peerRelayId));
     if (!state) {
-      // Never ensured for this room — nothing to re-run.
+      // Never ensured for this (room, peer) — nothing to re-run.
       return false;
     }
     if (!state.pending) {
@@ -580,7 +652,7 @@ export class StandbyWarmPipeCoordinator {
       return false;
     }
 
-    const announced = this.registry.resolve(roomId);
+    const announced = this.registry.resolve(roomId, peerRelayId);
     if (!announced) {
       // Announce fired but still nothing resolvable — stay on the placeholder.
       return false;
@@ -615,7 +687,7 @@ export class StandbyWarmPipeCoordinator {
       announced.producerId,
     );
 
-    this.states.set(roomId, {
+    this.states.set(meshKey(roomId, peerRelayId), {
       topology: useTopology,
       router: useRouter,
       pipePort: usePipePort,
@@ -626,9 +698,12 @@ export class StandbyWarmPipeCoordinator {
     return consumer !== null;
   }
 
-  /** Drops a room's coordinator state (room close / worker rebuild). */
-  clear(roomId: string): void {
-    this.states.delete(roomId);
+  /**
+   * Drops a (room, peer)'s coordinator state (room close / worker rebuild).
+   * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID (legacy single-standby).
+   */
+  clear(roomId: string, peerRelayId: string = DEFAULT_PEER_RELAY_ID): void {
+    this.states.delete(meshKey(roomId, peerRelayId));
   }
 
   /**
@@ -640,8 +715,12 @@ export class StandbyWarmPipeCoordinator {
    * re-replies; the coordinator re-drives). enableSrtp:false on the single-host
    * loopback → srtpParameters undefined.
    */
-  async onPrimaryConnectParams(roomId: string, params: PipeConnectParams): Promise<void> {
-    const state = this.states.get(roomId);
+  async onPrimaryConnectParams(
+    roomId: string,
+    params: PipeConnectParams,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): Promise<void> {
+    const state = this.states.get(meshKey(roomId, peerRelayId));
     const transport = state?.topology.pipeTransport;
     if (!transport) {
       this.logger?.debug(
@@ -664,14 +743,34 @@ export class StandbyWarmPipeCoordinator {
   /**
    * F6 accessor (REQ-RO-010/011 wiring) — the CURRENT standby pipe consumer the
    * liveness observer polls (topology.pipeConsumer), or null when none. The
-   * optional roomId selects a room; omitted = the single tracked room (the K=2
-   * single-room demo scope). Returns null for an unknown/absent room.
+   * optional roomId selects a (room, peer) leg; omitted = the single tracked leg
+   * (the K=2 single-room demo scope). Returns null for an unknown/absent leg.
+   *
+   * REQ-RMS-008 hardening: once a room holds MULTIPLE per-(room,peerRelayId) legs
+   * (the M2 cascade), the no-arg form is AMBIGUOUS — it would poll an arbitrary
+   * leg's consumer (states insertion order). It now WARNs on that ambiguity so a
+   * cascade caller that forgot to pass (roomId, peerRelayId) is diagnosable rather
+   * than silently observing the wrong leg. It does NOT throw — the liveness poller
+   * (index.ts:556) must keep returning a consumer. Pass an explicit (roomId,
+   * peerRelayId) to disambiguate (and stay quiet). The single-leg no-arg path (M1
+   * single-standby) is byte-unchanged.
    */
-  currentPipeConsumer(roomId?: string): msTypes.Consumer | null {
+  currentPipeConsumer(
+    roomId?: string,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): msTypes.Consumer | null {
     if (roomId !== undefined) {
-      return this.states.get(roomId)?.topology.pipeConsumer ?? null;
+      return this.states.get(meshKey(roomId, peerRelayId))?.topology.pipeConsumer ?? null;
     }
-    // No-arg convenience: the first (single-room) tracked state.
+    // No-arg convenience: the single tracked leg. With >1 leg this is ambiguous
+    // (an M2 cascade with multiple peers) — warn and fall back to the first.
+    if (this.states.size > 1) {
+      this.logger?.warn(
+        { legCount: this.states.size },
+        'F6: currentPipeConsumer() called with no peerRelayId on a multi-leg room — ' +
+          'polling an ARBITRARY leg; pass an explicit (roomId, peerRelayId) to disambiguate',
+      );
+    }
     const first = this.states.values().next();
     return first.done ? null : (first.value.topology.pipeConsumer ?? null);
   }
@@ -770,8 +869,16 @@ export interface PrimaryPipeCoordinatorDeps {
    * PIPED consumer (its .id is the id the standby must consume) — NOT the source
    * producer.
    */
-  announcer: (roomId: string, producer: Pick<msTypes.Producer, 'id' | 'kind'>) => void;
-  /** Per-(room,role) port allocator. Keyed `${roomId}:primary` for the primary leg. */
+  announcer: (
+    roomId: string,
+    producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+    peerRelayId?: string,
+  ) => void;
+  /**
+   * Per-(room,peer,role) port allocator. Keyed `${roomId}:primary` for the legacy
+   * single-peer primary leg, widening to `${roomId}:${peerRelayId}:primary` for a
+   * cascade peer (REQ-RMS-008, via primaryPortKey).
+   */
   portAllocator: PipePortAllocatorLike;
   /**
    * Sends the primary's OWN pipe-connect params DOWN to the standby (the reply
@@ -821,8 +928,9 @@ export class PrimaryPipeCoordinator {
 
   constructor(private readonly deps: PrimaryPipeCoordinatorDeps) {}
 
-  private getState(roomId: string): PrimaryPipeState {
-    let s = this.states.get(roomId);
+  private getState(roomId: string, peerRelayId: string): PrimaryPipeState {
+    const key = meshKey(roomId, peerRelayId);
+    let s = this.states.get(key);
     if (!s) {
       s = {
         pipeTransport: null,
@@ -831,7 +939,7 @@ export class PrimaryPipeCoordinator {
         standbyParams: null,
         pipePort: null,
       };
-      this.states.set(roomId, s);
+      this.states.set(key, s);
     }
     return s;
   }
@@ -843,11 +951,15 @@ export class PrimaryPipeCoordinator {
    * a router stashed via a prior onProducer, the drain runs there — here we only
    * record + (cheaply) reserve the per-room port so a later onProducer binds it.
    */
-  async onStandbyConnectParams(roomId: string, params: PipeConnectParams): Promise<void> {
-    const s = this.getState(roomId);
+  async onStandbyConnectParams(
+    roomId: string,
+    params: PipeConnectParams,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): Promise<void> {
+    const s = this.getState(roomId, peerRelayId);
     s.standbyParams = params;
     if (s.pipePort === null) {
-      s.pipePort = this.deps.portAllocator.allocate(`${roomId}:primary`);
+      s.pipePort = this.deps.portAllocator.allocate(primaryPortKey(roomId, peerRelayId));
     }
     this.deps.logger?.debug(
       { roomId, standbyPort: params.port, primaryPort: s.pipePort },
@@ -856,7 +968,7 @@ export class PrimaryPipeCoordinator {
     // If a producer is queued AND we have already minted+connected (params is a
     // re-send), drain now. The common params-first order mints on onProducer.
     if (s.connected && s.pipeTransport !== null && s.pendingProducers.length > 0) {
-      await this.drain(roomId, s);
+      await this.drain(roomId, s, peerRelayId);
     }
   }
 
@@ -869,8 +981,9 @@ export class PrimaryPipeCoordinator {
     roomId: string,
     router: msTypes.Router,
     producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<void> {
-    const s = this.getState(roomId);
+    const s = this.getState(roomId, peerRelayId);
     s.pendingProducers.push(producer);
 
     if (s.standbyParams === null) {
@@ -886,7 +999,7 @@ export class PrimaryPipeCoordinator {
     // Mint + connect ONCE (REQ-RO-009 idempotent binding).
     if (s.pipeTransport === null) {
       if (s.pipePort === null) {
-        s.pipePort = this.deps.portAllocator.allocate(`${roomId}:primary`);
+        s.pipePort = this.deps.portAllocator.allocate(primaryPortKey(roomId, peerRelayId));
       }
       const transport = await createPrimaryPipeTransport(router, s.pipePort);
       s.pipeTransport = transport;
@@ -909,15 +1022,21 @@ export class PrimaryPipeCoordinator {
       );
     }
 
-    await this.drain(roomId, s);
+    await this.drain(roomId, s, peerRelayId);
   }
 
   /**
    * Pipe every queued producer onto the connected transport and announce its
    * PIPED consumer id (REQ-RO-002). Safe to call repeatedly — it shifts the
-   * queue, so an already-piped producer is never re-piped.
+   * queue, so an already-piped producer is never re-piped. The `peerRelayId` is
+   * threaded into the announce so a cascade frame carries it (the builder OMITS
+   * it on the DEFAULT peer → the emitted frame stays a legacy frame).
    */
-  private async drain(roomId: string, s: PrimaryPipeState): Promise<void> {
+  private async drain(
+    roomId: string,
+    s: PrimaryPipeState,
+    peerRelayId: string,
+  ): Promise<void> {
     if (!s.connected || s.pipeTransport === null) return;
     while (s.pendingProducers.length > 0) {
       const producer = s.pendingProducers.shift()!;
@@ -926,7 +1045,12 @@ export class PrimaryPipeCoordinator {
         producer.id,
       );
       // Announce the PIPED id (pipedConsumer.id), NOT producer.id (REQ-RO-002).
-      this.deps.announcer(roomId, { id: pipedConsumer.id, kind: pipedConsumer.kind });
+      // Pass peerRelayId only for a cascade peer; DEFAULT → omitted (legacy frame).
+      this.deps.announcer(
+        roomId,
+        { id: pipedConsumer.id, kind: pipedConsumer.kind },
+        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
+      );
       this.deps.logger?.info(
         { roomId, sourceProducerId: producer.id, pipedConsumerId: pipedConsumer.id },
         'F1: piped producer onto primary pipe + announced PIPED consumer id',
@@ -934,9 +1058,14 @@ export class PrimaryPipeCoordinator {
     }
   }
 
-  /** Drops a room's state, closes the transport, releases the port (REQ-RO-009). */
-  clear(roomId: string): void {
-    const s = this.states.get(roomId);
+  /**
+   * Drops a (room, peer)'s state, closes the transport, releases the port
+   * (REQ-RO-009). `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID so the legacy
+   * single-peer caller (index.ts releaseRoom) releases `${roomId}:primary`.
+   */
+  clear(roomId: string, peerRelayId: string = DEFAULT_PEER_RELAY_ID): void {
+    const key = meshKey(roomId, peerRelayId);
+    const s = this.states.get(key);
     if (!s) return;
     if (s.pipeTransport !== null) {
       try {
@@ -946,8 +1075,8 @@ export class PrimaryPipeCoordinator {
       }
     }
     if (s.pipePort !== null) {
-      this.deps.portAllocator.release(`${roomId}:primary`);
+      this.deps.portAllocator.release(primaryPortKey(roomId, peerRelayId));
     }
-    this.states.delete(roomId);
+    this.states.delete(key);
   }
 }

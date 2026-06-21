@@ -431,7 +431,14 @@ if (isMainModule) {
     // factory; index.ts only injects the announcer + port allocator + the
     // standby->primary param sender (the link's new send() path).
     const primaryPipe = new PrimaryPipeCoordinator({
-      announcer: pushAnnounce,
+      // REQ-RMS-008: the coordinator's announcer dep is (roomId, producer, peerRelayId?)
+      // — its drain threads the cascade peer as the 3rd arg. createInterRelayAnnouncer's
+      // closure is (roomId, producer, producerPeerId?, peerRelayId?), so map the
+      // coordinator's peerRelayId into the 4th slot (producerPeerId undefined — a PIPED
+      // consumer carries no publisher peerId). DEFAULT/legacy → peerRelayId undefined →
+      // builder omits it → byte-identical legacy frame.
+      announcer: (roomId, producer, peerRelayId) =>
+        pushAnnounce(roomId, producer, undefined, peerRelayId),
       portAllocator: pipePortAllocator,
       paramSender: (roomId, params) =>
         interRelaySender.send(JSON.stringify(buildPipeConnectFrame(roomId, params))),  // CONSISTENCY-FIX HIGH#5: C contract is (roomId, params); serialize the DOWN reply frame onto the live link (buildPipeConnectFrame imported in this file)
@@ -495,14 +502,21 @@ if (isMainModule) {
           })
           .catch((err) => logger.error({ err, roomId }, 'G3.2b: standby warm-pipe ensure failed'));
       },
-      // F1 (REQ-RO-009): room teardown — release BOTH the standby + primary pipe
-      // ports back to the allocator and drop the coordinator state, so a reused
-      // roomId starts fresh and the port range does not leak. Routed through the
-      // context (mirrors registry.clear) so signaling.ts stays decoupled from the
-      // allocator/coordinator handles.
+      // F1 (REQ-RO-009): room teardown — release the standby pipe port and drop
+      // both coordinator states, so a reused roomId starts fresh and the port
+      // range does not leak. Routed through the context (mirrors registry.clear)
+      // so signaling.ts stays decoupled from the allocator/coordinator handles.
+      //
+      // REQ-RMS-008: the `${roomId}:primary` slot is released by
+      // primaryPipe.clear(roomId) itself — its DEFAULT-peer primaryPortKey
+      // degrades to exactly `${roomId}:primary` (inter-relay.ts:78-82), and clear
+      // releases that key (inter-relay.ts:1061, proven by
+      // inter-relay-primary-coordinator.test.ts:240 + warmpipe-rtp integration
+      // :714). So PrimaryPipeCoordinator is the SOLE owner of that slot's
+      // lifecycle — we no longer double-release it here, avoiding two owners of one
+      // key as the M2 cascade lands real per-peer primary legs.
       releaseRoom: (roomId) => {
         pipePortAllocator.release(roomId);
-        pipePortAllocator.release(`${roomId}:primary`);
         primaryPipe.clear(roomId);
         standbyWarmPipe.clear(roomId);
       },

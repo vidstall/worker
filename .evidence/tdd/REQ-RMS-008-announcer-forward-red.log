@@ -1,0 +1,67 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/relay[39m
+
+ [31m❯[39m src/__tests__/inter-relay-mesh-keying.test.ts [2m([22m[2m11 tests[22m[2m | [22m[31m2 failed[39m[2m)[22m[32m 15[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mbuilder carries peerRelayId when supplied, omits it otherwise[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard accepts a frame WITH peerRelayId and a legacy frame WITHOUT it[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard rejects a non-string peerRelayId[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeConnectFrame (additive, back-compat)[2m > [22mbuilder carries peerRelayId; guard accepts with + without it[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mrecords + resolves producers ISOLATED per peerRelayId for the same room[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mresolveAll returns ALL producers for a (room, peer) so a >100-user cascade pipes every producer[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mlegacy single-peer callers (no peerRelayId) still resolve under the DEFAULT peer key (back-compat)[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22ma legacy ensure→onAnnounce cutover (no peerRelayId anywhere) re-consumes the REAL producer end-to-end (not just registry.resolve in isolation)[32m 2[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22mforwards a 4th positional peerRelayId arg into the emitted frame peerRelayId field; legacy 3rd-arg producerPeerId path is unchanged[39m[32m 6[2mms[22m[39m
+[31m     → expected undefined to be 'relay-B' // Object.is equality[39m
+[31m   [31m×[31m REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22ma REAL PrimaryPipeCoordinator backed by the REAL createInterRelayAnnouncer (index.ts adapter shape) emits a cascade frame carrying peerRelayId — the latent non-forward bug[39m[32m 2[2mms[22m[39m
+[31m     → expected undefined to be 'relay-B' // Object.is equality[39m
+   [32m✓[39m REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22mthe DEFAULT/legacy coordinator leg (no peerRelayId) emits a frame with peerRelayId OMITTED (byte-stable legacy frame)[32m 1[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 2 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/inter-relay-mesh-keying.test.ts[2m > [22mREQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22mforwards a 4th positional peerRelayId arg into the emitted frame peerRelayId field; legacy 3rd-arg producerPeerId path is unchanged
+[31m[1mAssertionError[22m: expected undefined to be 'relay-B' // Object.is equality[39m
+
+[32m- Expected:[39m 
+"relay-B"
+
+[31m+ Received:[39m 
+undefined
+
+[36m [2m❯[22m src/__tests__/inter-relay-mesh-keying.test.ts:[2m227:36[22m[39m
+    [90m225| [39m    announce('room-C', { id: 'piped-C', kind: 'video' }, undefined, 'r…
+    [90m226| [39m    [35mconst[39m cascade [33m=[39m [33mJSON[39m[33m.[39m[34mparse[39m(sent[[34m1[39m][33m![39m) [35mas[39m [33mRecord[39m[33m<[39mstring[33m,[39m unknown[33m>[39m[33m;[39m
+    [90m227| [39m    [34mexpect[39m(cascade[[32m'peerRelayId'[39m])[33m.[39m[34mtoBe[39m([32m'relay-B'[39m)[33m;[39m
+    [90m   | [39m                                   [31m^[39m
+    [90m228| [39m    expect('producerPeerId' in cascade).toBe(false); // peerRelayId di…
+    [90m229| [39m  })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/inter-relay-mesh-keying.test.ts[2m > [22mREQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22ma REAL PrimaryPipeCoordinator backed by the REAL createInterRelayAnnouncer (index.ts adapter shape) emits a cascade frame carrying peerRelayId — the latent non-forward bug
+[31m[1mAssertionError[22m: expected undefined to be 'relay-B' // Object.is equality[39m
+
+[32m- Expected:[39m 
+"relay-B"
+
+[31m+ Received:[39m 
+undefined
+
+[36m [2m❯[22m src/__tests__/inter-relay-mesh-keying.test.ts:[2m257:34[22m[39m
+    [90m255| [39m    [34mexpect[39m(frame[[32m'type'[39m])[33m.[39m[34mtoBe[39m([32m'pipe-producer'[39m)[33m;[39m
+    [90m256| [39m    [34mexpect[39m(frame[[32m'roomId'[39m])[33m.[39m[34mtoBe[39m([32m'room-C'[39m)[33m;[39m
+    [90m257| [39m    expect(frame['peerRelayId']).toBe('relay-B'); // the cascade peer …
+    [90m   | [39m                                 [31m^[39m
+    [90m258| [39m  })[33m;[39m
+    [90m259| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m2 failed[39m[22m[2m | [22m[1m[32m9 passed[39m[22m[90m (11)[39m
+[2m   Start at [22m 00:22:26
+[2m   Duration [22m 512ms[2m (transform 76ms, setup 0ms, collect 78ms, tests 15ms, environment 0ms, prepare 178ms)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\relay:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/inter-relay-mesh-keying.test.ts

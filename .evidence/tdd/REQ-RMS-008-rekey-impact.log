@@ -1,0 +1,51 @@
+REQ-RMS-008 — gitnexus impact evidence (the mandated "Always Do" step, run during the
+quality-review fix; previously skipped per the review's `important` issue).
+
+Index freshness (npx gitnexus status, dvconf-daemons):
+  Indexed commit:  78db0f7  (the committed Chunk A baseline)
+  Current commit:  78db0f7
+  Status: up-to-date
+NOTE: Task 5's re-keying edits are UNCOMMITTED in the working tree, so the index
+reflects the PRE-Task-5 shape of these symbols — which is the CORRECT baseline for
+measuring blast radius of these edits (the CALLERS are unchanged; only the callee
+internals/signatures gained an OPTIONAL trailing peerRelayId). gitnexus's call graph
+here is coarse (file-level CALLS), so per dvconf-daemons/CLAUDE.md the caller set is
+ALSO grep-corroborated below (grep is authoritative).
+
+────────────────────────────────────────────────────────────────────────────────
+npx gitnexus impact StandbyWarmPipeCoordinator --repo dvconf-daemons
+  risk: LOW | impactedCount: 1 | processes:0 modules:0
+  depth-1 caller: File apps/relay/src/index.ts (CALLS, conf 0.85)
+
+npx gitnexus impact PrimaryPipeCoordinator --repo dvconf-daemons
+  risk: LOW | impactedCount: 1 | processes:0 modules:0
+  depth-1 caller: File apps/relay/src/index.ts (CALLS, conf 0.85)
+
+npx gitnexus impact InterRelayProducerRegistry --repo dvconf-daemons
+  risk: LOW | impactedCount: 1 | processes:0 modules:0
+  depth-1 caller: File apps/relay/src/index.ts (CALLS, conf 0.85)
+
+VERDICT (all three): risk LOW. No HIGH/CRITICAL — no user warning required.
+
+────────────────────────────────────────────────────────────────────────────────
+GREP CORROBORATION (authoritative caller set — production .ts only, tests excluded).
+Every live call site uses the LEGACY DEFAULT form (1-arg / no peerRelayId), so the
+back-compat invariant holds and the blast radius is genuinely LOW:
+
+  signaling.ts:675   interRelay.registry.record(msg)                         -> legacy frame (no peerRelayId) -> DEFAULT key
+  signaling.ts:1255  interRelay.registry.resolve(mapping.roomId)             -> 1-arg -> DEFAULT peer
+  signaling.ts:1282  interRelay?.registry.resolve(mapping.roomId)?.producerPeerId -> 1-arg -> DEFAULT
+  signaling.ts:1505  interRelay?.registry.clear(roomId)                      -> 1-arg -> DEFAULT
+  index.ts:406       standbyWarmPipe.onAnnounce(roomId)                      -> 1-arg -> DEFAULT
+  index.ts:465       primaryPipe.onProducer(roomId, router, producer)        -> DEFAULT trailing
+  index.ts:473       primaryPipe.onStandbyConnectParams(roomId, params)      -> DEFAULT trailing
+  index.ts:492       standbyWarmPipe.ensure(topology, router, pipePort)      -> DEFAULT trailing
+  index.ts:513-514   primaryPipe.clear(roomId) / standbyWarmPipe.clear(roomId) -> DEFAULT
+  index.ts:556       standbyWarmPipe.currentPipeConsumer()                   -> no-arg -> single tracked leg (single-room demo)
+  inter-relay.ts:527 ctx.registry.record(parsed)   (standby inbound handler) -> frame-carried peerRelayId or DEFAULT
+  inter-relay.ts:598 this.registry.resolve(topology.roomId, peerRelayId)     -> coordinator-internal (defaults thread through)
+  inter-relay.ts:655 this.registry.resolve(roomId, peerRelayId)             -> coordinator-internal
+
+All other matches for these symbols are in apps/relay/src/__tests__/** (test callers).
+CONCLUSION: gitnexus LOW + grep-confirmed legacy-only live callers => back-compat holds,
+risk LOW, no user warning required.

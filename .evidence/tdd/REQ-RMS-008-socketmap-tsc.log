@@ -1,0 +1,39 @@
+../../../dvconf-client/src/lib/crypto/e2ee-spike.ts(40,27): error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../log.js'?
+../../../dvconf-client/src/lib/crypto/key-manager.ts(85,8): error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './e2ee-spike.js'?
+../../../dvconf-client/src/lib/crypto/key-manager.ts(86,36): error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './session-keypair.js'?
+../../../dvconf-client/src/lib/crypto/key-manager.ts(87,32): error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../webrtc/sframe-transform.js'?
+../../../dvconf-client/src/lib/crypto/key-manager.ts(88,27): error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../log.js'?
+../../../dvconf-client/src/lib/crypto/key-manager.ts(401,8): error TS7006: Parameter 'e' implicitly has an 'any' type.
+../../../dvconf-client/src/lib/crypto/key-manager.ts(662,36): error TS2345: Argument of type 'Promise<CryptoKey> | undefined' is not assignable to parameter of type 'Promise<CryptoKey>'.
+  Type 'undefined' is not assignable to type 'Promise<CryptoKey>'.
+../../../dvconf-client/src/lib/crypto/key-manager.ts(664,5): error TS2322: Type 'Promise<CryptoKey> | undefined' is not assignable to type 'Promise<CryptoKey>'.
+  Type 'undefined' is not assignable to type 'Promise<CryptoKey>'.
+../../../dvconf-client/src/lib/webrtc/sframe-transform.ts(60,27): error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../log.js'?
+src/__tests__/integration/canary-forward.integration.test.ts(40,8): error TS6059: File 'C:/Thesis/dvconf/dvconf-client/src/lib/webrtc/sframe-transform.ts' is not under 'rootDir' 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src'. 'rootDir' is expected to contain all source files.
+  The file is in the program because:
+    Imported via '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/canary-forward.integration.test.ts'
+    Imported via '../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon/src/canary/verifier.ts'
+    Imported via '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts'
+    Imported via '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts'
+  File is ECMAScript module because 'C:/Thesis/dvconf/dvconf-client/package.json' has field "type" with value "module"
+src/__tests__/integration/canary-forward.integration.test.ts(48,8): error TS6059: File 'C:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon/src/canary/verifier.ts' is not under 'rootDir' 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src'. 'rootDir' is expected to contain all source files.
+  File is ECMAScript module because 'C:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon/package.json' has field "type" with value "module"
+src/__tests__/integration/relay-blind-realsframe.integration.test.ts(100,8): error TS6059: File 'C:/Thesis/dvconf/dvconf-client/src/lib/crypto/key-manager.ts' is not under 'rootDir' 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src'. 'rootDir' is expected to contain all source files.
+  The file is in the program because:
+    Imported via '../../../../../../dvconf-client/src/lib/crypto/key-manager.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts'
+    Imported via '../../../../../../dvconf-client/src/lib/crypto/key-manager.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts'
+  File is ECMAScript module because 'C:/Thesis/dvconf/dvconf-client/package.json' has field "type" with value "module"
+src/__tests__/integration/relay-blind-realsframe.integration.test.ts(101,38): error TS6059: File 'C:/Thesis/dvconf/dvconf-client/src/lib/crypto/session-keypair.ts' is not under 'rootDir' 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src'. 'rootDir' is expected to contain all source files.
+  The file is in the program because:
+    Imported via '../../../../../../dvconf-client/src/lib/crypto/session-keypair.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/relay-blind-realsframe.integration.test.ts'
+    Imported via '../../../../../../dvconf-client/src/lib/crypto/session-keypair.js' from file 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/integration/warmpipe-rtp.integration.test.ts'
+  File is ECMAScript module because 'C:/Thesis/dvconf/dvconf-client/package.json' has field "type" with value "module"
+src/mediasoup-manager.ts(29,3): error TS2741: Property 'preferredPayloadType' is missing in type '{ kind: "audio"; mimeType: string; clockRate: number; channels: number; }' but required in type 'RtpCodecCapability'.
+src/mediasoup-manager.ts(35,3): error TS2741: Property 'preferredPayloadType' is missing in type '{ kind: "video"; mimeType: string; clockRate: number; }' but required in type 'RtpCodecCapability'.
+../validator-daemon/src/canary/keying.ts(31,8): error TS6059: File 'C:/Thesis/dvconf/dvconf-client/src/lib/crypto/e2ee-spike.ts' is not under 'rootDir' 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src'. 'rootDir' is expected to contain all source files.
+  File is ECMAScript module because 'C:/Thesis/dvconf/dvconf-client/package.json' has field "type" with value "module"
+../validator-daemon/src/canary/verifier.ts(54,54): error TS6059: File 'C:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon/src/canary/keying.ts' is not under 'rootDir' 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src'. 'rootDir' is expected to contain all source files.
+  File is ECMAScript module because 'C:/Thesis/dvconf/dvconf-daemons/apps/validator-daemon/package.json' has field "type" with value "module"
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\relay:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 2: tsc --noEmit

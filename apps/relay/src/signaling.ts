@@ -31,7 +31,14 @@ import {
   isPipeConnectFrame,
   isValidInterRelayToken,
   INTER_RELAY_SUBPROTOCOL,
+  DEFAULT_PEER_RELAY_ID,
 } from './inter-relay.js';
+import {
+  createInterRelaySocketMap,
+  resolveInterRelayPeerId,
+  shouldRecordPath,
+} from './inter-relay-socket-map.js';
+import { createSpillTrigger, type SpillTrigger } from './spill-trigger.js';
 import type { RelayRole } from './relay-role-manager.js';
 
 // ── Protocol message types ──────────────────────────────────────────
@@ -497,6 +504,27 @@ export function createSignalingServer(
   const interRelayPeers = new WeakSet<WebSocket>();
   let attachedInterRelaySocket: WebSocket | null = null;
 
+  // REQ-RMS-008: per-peer inter-relay socket map (multi-peer cascade). The single
+  // attachedInterRelaySocket above stays for the DEFAULT (single-standby) peer; a
+  // cascade peer attaches under its own x-inter-relay-peer-id so K_r links co-exist.
+  const interRelaySockets = createInterRelaySocketMap();
+
+  // REQ-RMS-006: self-observed spill trigger. Wired ONLY when RMS_C_WORKER_PATHS is
+  // set (the cascade-bench env), so the M1 single-room path is byte-unchanged — a
+  // vanilla stack has no trigger and shouldRecordPath(undefined) === false. The
+  // trigger fires ONCE per room when its forward-path count crosses the threshold;
+  // the request is logged (cp-daemon placement reads the canary-attested signal, not
+  // this self-report — see spill-trigger.ts header). FIRE-ONCE by design: it is NOT
+  // decremented on consumer/producer/room close in M2 (see Done Criteria / concerns).
+  const spillTrigger: SpillTrigger | undefined =
+    process.env['RMS_C_WORKER_PATHS'] !== undefined
+      ? createSpillTrigger({
+          onSpillRequested: (roomId, paths) =>
+            logger.info({ roomId, paths }, 'REQ-RMS-006: relay self-observed spill request'),
+          logger,
+        })
+      : undefined;
+
   const wss = new WebSocketServer({
     port,
     maxPayload: 64 * 1024,
@@ -538,8 +566,14 @@ export function createSignalingServer(
         logger.warn('G3.2b: inter-relay peer re-attached, displacing the prior announce socket');
       }
       attachedInterRelaySocket = ws;
+      // REQ-RMS-008: ALSO attach into the per-peer map under the cascade peerRelayId
+      // (default sentinel when the upgrade carries no x-inter-relay-peer-id — the M1
+      // single-standby path). Additive: the legacy attachedInterRelaySocket above is
+      // untouched, so the default-peer announce stream is byte-unchanged.
+      const peerRelayId = resolveInterRelayPeerId(req.headers, DEFAULT_PEER_RELAY_ID);
+      interRelaySockets.attach(peerRelayId, ws as unknown as InterRelaySocketLike);
       interRelay?.attachPeerSocket?.(ws);
-      logger.info('G3.2b: inter-relay peer connected + attached (tagged)');
+      logger.info({ peerRelayId }, 'G3.2b: inter-relay peer connected + attached (tagged)');
     }
 
     logger.debug('New WebSocket connection');
@@ -568,6 +602,11 @@ export function createSignalingServer(
         attachedInterRelaySocket = null;
         interRelay?.attachPeerSocket?.(null);
       }
+      // REQ-RMS-008: detach from the per-peer map under the SAME resolver — only
+      // this peer's leg is removed (multi-peer cascade), and the guarded detach is
+      // a no-op if a reconnect flap already replaced this socket (stale close).
+      const closingPeerId = resolveInterRelayPeerId(req.headers, DEFAULT_PEER_RELAY_ID);
+      interRelaySockets.detach(closingPeerId, ws as unknown as InterRelaySocketLike);
       handleDisconnect(ws);
     });
 
@@ -1200,6 +1239,15 @@ export function createSignalingServer(
 
     // Notify all other peers about the new producer (SFU fan-out)
     await notifyNewProducer(room, mapping.peerId, producer, logger);
+
+    // REQ-RMS-006/008: record a forward path on the self-observed spill trigger so a
+    // room that crosses the worker-path threshold fires a one-shot spill REQUEST.
+    // Gated by the TESTED shouldRecordPath(spillTrigger) — true only when the trigger
+    // was wired (RMS_C_WORKER_PATHS set), so the M1 single-room path (no trigger) is
+    // byte-unchanged. A produce success is one new forward path for the room.
+    if (shouldRecordPath(spillTrigger)) {
+      spillTrigger!.recordPath(mapping.roomId);
+    }
 
     // F1 (CONSISTENCY-FIX HIGH#2, REQ-RO-001/002) PRIMARY side — DRIVE the
     // PrimaryPipeCoordinator at the produce event (the ONLY place a real

@@ -1,0 +1,43 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/relay[39m
+
+ [31m❯[39m src/__tests__/inter-relay-mesh-keying.test.ts [2m([22m[2m14 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 21[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mbuilder carries peerRelayId when supplied, omits it otherwise[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard accepts a frame WITH peerRelayId and a legacy frame WITHOUT it[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard rejects a non-string peerRelayId[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeConnectFrame (additive, back-compat)[2m > [22mbuilder carries peerRelayId; guard accepts with + without it[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mrecords + resolves producers ISOLATED per peerRelayId for the same room[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mresolveAll returns ALL producers for a (room, peer) so a >100-user cascade pipes every producer[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mlegacy single-peer callers (no peerRelayId) still resolve under the DEFAULT peer key (back-compat)[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22ma legacy ensure→onAnnounce cutover (no peerRelayId anywhere) re-consumes the REAL producer end-to-end (not just registry.resolve in isolation)[32m 3[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — StandbyWarmPipeCoordinator.currentPipeConsumer per-(room,peer) disambiguation[2m > [22mexplicit (roomId, peerRelayId) returns THAT peer-leg consumer; the no-arg single-room path is byte-stable[32m 1[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-008 — StandbyWarmPipeCoordinator.currentPipeConsumer per-(room,peer) disambiguation[2m > [22ma multi-leg room makes the no-arg accessor WARN (ambiguous leg) instead of silently polling an arbitrary peer[39m[32m 8[2mms[22m[39m
+[31m     → expected "spy" to be called 1 times, but got 0 times[39m
+   [32m✓[39m REQ-RMS-008 — StandbyWarmPipeCoordinator.currentPipeConsumer per-(room,peer) disambiguation[2m > [22mexplicit per-peer accessor on a multi-leg room never warns (the unambiguous path stays quiet)[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22mforwards a 4th positional peerRelayId arg into the emitted frame peerRelayId field; legacy 3rd-arg producerPeerId path is unchanged[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22ma REAL PrimaryPipeCoordinator backed by the REAL createInterRelayAnnouncer (index.ts adapter shape) emits a cascade frame carrying peerRelayId — the latent non-forward bug[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into the announce frame (LIVE backing for PrimaryPipeCoordinator.deps.announcer)[2m > [22mthe DEFAULT/legacy coordinator leg (no peerRelayId) emits a frame with peerRelayId OMITTED (byte-stable legacy frame)[32m 1[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/inter-relay-mesh-keying.test.ts[2m > [22mREQ-RMS-008 — StandbyWarmPipeCoordinator.currentPipeConsumer per-(room,peer) disambiguation[2m > [22ma multi-leg room makes the no-arg accessor WARN (ambiguous leg) instead of silently polling an arbitrary peer
+[31m[1mAssertionError[22m: expected "spy" to be called 1 times, but got 0 times[39m
+[36m [2m❯[22m src/__tests__/inter-relay-mesh-keying.test.ts:[2m199:18[22m[39m
+    [90m197| [39m    const got = coord.currentPipeConsumer(); // NO peerRelayId on a 2-…
+    [90m198| [39m    expect(got).not.toBeNull();               // non-throwing: still r…
+    [90m199| [39m    expect(warn).toHaveBeenCalledTimes(1);     // RED today: silent, n…
+    [90m   | [39m                 [31m^[39m
+    [90m200| [39m  })[33m;[39m
+    [90m201| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m13 passed[39m[22m[90m (14)[39m
+[2m   Start at [22m 00:36:01
+[2m   Duration [22m 575ms[2m (transform 72ms, setup 0ms, collect 75ms, tests 21ms, environment 0ms, prepare 129ms)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\relay:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/inter-relay-mesh-keying.test.ts

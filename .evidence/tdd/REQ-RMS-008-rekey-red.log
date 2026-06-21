@@ -1,0 +1,46 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/relay[39m
+
+ [31m❯[39m src/__tests__/inter-relay-mesh-keying.test.ts [2m([22m[2m8 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 14[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mbuilder carries peerRelayId when supplied, omits it otherwise[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard accepts a frame WITH peerRelayId and a legacy frame WITHOUT it[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard rejects a non-string peerRelayId[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeConnectFrame (additive, back-compat)[2m > [22mbuilder carries peerRelayId; guard accepts with + without it[32m 0[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mrecords + resolves producers ISOLATED per peerRelayId for the same room[39m[32m 8[2mms[22m[39m
+[31m     → expected [ 'pA', 'pB' ] to deeply equal [ 'pA' ][39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mresolveAll returns ALL producers for a (room, peer) so a >100-user cascade pipes every producer[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mlegacy single-peer callers (no peerRelayId) still resolve under the DEFAULT peer key (back-compat)[32m 0[2mms[22m[39m
+   [32m✓[39m REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22ma legacy ensure→onAnnounce cutover (no peerRelayId anywhere) re-consumes the REAL producer end-to-end (not just registry.resolve in isolation)[32m 3[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/inter-relay-mesh-keying.test.ts[2m > [22mREQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll multi-producer[2m > [22mrecords + resolves producers ISOLATED per peerRelayId for the same room
+[31m[1mAssertionError[22m: expected [ 'pA', 'pB' ] to deeply equal [ 'pA' ][39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    "pA",[22m
+[31m+   "pB",[39m
+[2m  ][22m
+
+[36m [2m❯[22m src/__tests__/inter-relay-mesh-keying.test.ts:[2m102:74[22m[39m
+    [90m100| [39m    reg.record({ type: 'pipe-producer', roomId: 'room-1', producerId: …
+    [90m101| [39m    // resolveAll for one peer returns ONLY that peer's producers (cas…
+    [90m102| [39m    expect(reg.resolveAll('room-1', 'relay-B').map((p) => p.producerId…
+    [90m   | [39m                                                                         [31m^[39m
+    [90m103| [39m    expect(reg.resolveAll('room-1', 'relay-C').map((p) => p.producerId…
+    [90m104| [39m  })[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m7 passed[39m[22m[90m (8)[39m
+[2m   Start at [22m 00:10:16
+[2m   Duration [22m 469ms[2m (transform 69ms, setup 0ms, collect 67ms, tests 14ms, environment 0ms, prepare 157ms)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\relay:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/inter-relay-mesh-keying.test.ts
