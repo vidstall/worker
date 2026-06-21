@@ -1,0 +1,30 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/relay[39m
+
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Suites 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/spill-trigger.test.ts[2m [ src/__tests__/spill-trigger.test.ts ][22m
+[31m[1mError[22m: Cannot find module '../spill-trigger.js' imported from 'C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/spill-trigger.test.ts'[39m
+[36m [2m❯[22m src/__tests__/spill-trigger.test.ts:[2m11:1[22m[39m
+    [90m  9| [39m */[39m
+    [90m 10| [39m[35mimport[39m { describe[33m,[39m it[33m,[39m expect[33m,[39m vi[33m,[39m afterEach } [35mfrom[39m [32m'vitest'[39m[33m;[39m
+    [90m 11| [39m[35mimport[39m { createSpillTrigger } [35mfrom[39m [32m'../spill-trigger.js'[39m[33m;[39m
+    [90m   | [39m[31m^[39m
+    [90m 12| [39m
+    [90m 13| [39m[35mconst[39m [33mORIGINAL_ENV[39m [33m=[39m { [33m...[39mprocess[33m.[39menv }[33m;[39m
+
+[31m[1mCaused by: Error[22m: Failed to load url ../spill-trigger.js (resolved id: ../spill-trigger.js) in C:/Thesis/dvconf/dvconf-daemons/apps/relay/src/__tests__/spill-trigger.test.ts. Does the file exist?[39m
+[90m [2m❯[22m loadAndTransform ../../node_modules/.pnpm/vite@7.3.1_@types+node@22.19.13_tsx@4.21.0/node_modules/vite/dist/node/chunks/config.js:[2m22663:33[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [2mno tests[22m
+[2m   Start at [22m 22:57:53
+[2m   Duration [22m 549ms[2m (transform 66ms, setup 0ms, collect 0ms, tests 0ms, environment 0ms, prepare 253ms)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\relay:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/spill-trigger.test.ts
