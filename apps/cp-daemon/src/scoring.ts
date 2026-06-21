@@ -97,3 +97,11 @@ export function canonicalSort(
     return a.minerId < b.minerId ? -1 : a.minerId > b.minerId ? 1 : 0;
   });
 }
+
+// ── REQ-RMS-002/019 — OFF-CHAIN capacity layer (additive; NOT part of the consensus score) ──
+//
+// The PVR consensus score above MUST stay byte-identical to pairing_score.move. Capacity-aware
+// placement is a SEPARATE filter applied AFTER canonicalSort (see admission-capacity.ts +
+// event-handler EscrowCreated). This marker documents that boundary and is asserted by the
+// scoring test so an accidental 7th-weight edit fails loud.
+export const CAPACITY_LAYER_IS_ADDITIVE = true as const;

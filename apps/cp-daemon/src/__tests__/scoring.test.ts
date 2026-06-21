@@ -3,6 +3,7 @@ import {
   computeNodeScore,
   computePairingScore,
   canonicalSort,
+  CAPACITY_LAYER_IS_ADDITIVE,
   PVR_WEIGHTS,
   PVR_MAX_RTT,
   PVR_MAX_LOAD,
@@ -146,5 +147,14 @@ describe('PVR Scoring — must match pairing_score.move', () => {
     it('PVR_STAKE_CAP = 5 SUI', () => expect(PVR_STAKE_CAP).toBe(5_000_000_000n));
     it('PVR_HEARTBEAT_FRESH = 3', () => expect(PVR_HEARTBEAT_FRESH).toBe(3n));
     it('PVR_HEARTBEAT_STALE = 7', () => expect(PVR_HEARTBEAT_STALE).toBe(7n));
+  });
+
+  describe('REQ-RMS-002 capacity layer is additive — consensus score byte-frozen', () => {
+    it('exports the additive marker without changing the consensus formula', () => {
+      expect(CAPACITY_LAYER_IS_ADDITIVE).toBe(true);
+      // Re-pin a golden node score so any accidental edit to computeNodeScore fails LOUD.
+      const node: NodeCandidate = { minerId: '0x1', rtt: 100n, load: 20n, stakeAmount: 2_500_000_000n, heartbeatAge: 1n, region: 'us-east', historyScore: 5_000n };
+      expect(computeNodeScore(node, 'us-east', PVR_WEIGHTS)).toBe(7650n); // DERIVED in 9.3, pinned in 9.4 (byte-frozen consensus golden)
+    });
   });
 });
