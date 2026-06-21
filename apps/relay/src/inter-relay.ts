@@ -99,6 +99,13 @@ export interface PipeProducerAnnounce {
    * E2EE re-attach binds to the REAL producer's per-producer key.
    */
   producerPeerId?: string;
+  /**
+   * REQ-RMS-008 — the peer RELAY this piped producer is announced to/from in a
+   * cascade. OPTIONAL on the wire (additive / back-compat, exactly like
+   * producerPeerId?): pre-mesh F1 frames omit it. Keys the coordinator state +
+   * port allocator per (roomId, peerRelayId) so K_r relays can serve one room.
+   */
+  peerRelayId?: string;
 }
 
 /** Type guard for an inbound JSON frame on the relay WS server. */
@@ -111,6 +118,8 @@ export function isPipeProducerAnnounce(msg: unknown): msg is PipeProducerAnnounc
     typeof m['producerId'] === 'string' &&
     (m['kind'] === 'audio' || m['kind'] === 'video') &&
     (m['producerPeerId'] === undefined || typeof m['producerPeerId'] === 'string')
+    &&
+    (m['peerRelayId'] === undefined || typeof m['peerRelayId'] === 'string')
   );
 }
 
@@ -122,6 +131,7 @@ export function buildPipeProducerAnnounce(
   roomId: string,
   producer: Pick<msTypes.Producer, 'id' | 'kind'>,
   producerPeerId?: string,
+  peerRelayId?: string,
 ): PipeProducerAnnounce {
   return {
     type: 'pipe-producer',
@@ -129,6 +139,7 @@ export function buildPipeProducerAnnounce(
     producerId: producer.id,
     kind: producer.kind,
     ...(producerPeerId !== undefined ? { producerPeerId } : {}),
+    ...(peerRelayId !== undefined ? { peerRelayId } : {}),
   };
 }
 
@@ -156,6 +167,13 @@ export interface PipeConnectFrame {
   ip: string;
   port: number;
   srtpParameters?: msTypes.SrtpParameters;
+  /**
+   * REQ-RMS-008 — the peer RELAY this connect-param exchange pairs with in a
+   * cascade. OPTIONAL on the wire (additive / back-compat, exactly like
+   * srtpParameters?): pre-mesh F1 frames omit it. Keys the per-(room,peerRelay)
+   * pipe so K_r relays can each carry a distinct leg of one room.
+   */
+  peerRelayId?: string;
 }
 
 /** Type guard for an inbound pipe-connect frame on the inter-relay link. */
@@ -167,6 +185,8 @@ export function isPipeConnectFrame(msg: unknown): msg is PipeConnectFrame {
     typeof m['roomId'] === 'string' &&
     typeof m['ip'] === 'string' &&
     typeof m['port'] === 'number'
+    &&
+    (m['peerRelayId'] === undefined || typeof m['peerRelayId'] === 'string')
   );
 }
 
@@ -179,6 +199,7 @@ export function isPipeConnectFrame(msg: unknown): msg is PipeConnectFrame {
 export function buildPipeConnectFrame(
   roomId: string,
   params: PipeConnectParams,
+  peerRelayId?: string,
 ): PipeConnectFrame {
   const frame: PipeConnectFrame = {
     type: 'pipe-connect',
@@ -188,6 +209,9 @@ export function buildPipeConnectFrame(
   };
   if (params.srtpParameters !== undefined) {
     frame.srtpParameters = params.srtpParameters;
+  }
+  if (peerRelayId !== undefined) {
+    frame.peerRelayId = peerRelayId;
   }
   return frame;
 }

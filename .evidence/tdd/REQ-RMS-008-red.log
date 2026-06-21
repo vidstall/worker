@@ -1,0 +1,80 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons/apps/relay[39m
+
+ [31m❯[39m src/__tests__/inter-relay-mesh-keying.test.ts [2m([22m[2m4 tests[22m[2m | [22m[31m3 failed[39m[2m)[22m[32m 12[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mbuilder carries peerRelayId when supplied, omits it otherwise[39m[32m 8[2mms[22m[39m
+[31m     → expected undefined to be 'relay-B' // Object.is equality[39m
+   [32m✓[39m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard accepts a frame WITH peerRelayId and a legacy frame WITHOUT it[32m 0[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard rejects a non-string peerRelayId[39m[32m 2[2mms[22m[39m
+[31m     → expected true to be false // Object.is equality[39m
+[31m   [31m×[31m REQ-RMS-008 — peerRelayId on PipeConnectFrame (additive, back-compat)[2m > [22mbuilder carries peerRelayId; guard accepts with + without it[39m[32m 1[2mms[22m[39m
+[31m     → expected undefined to be 'relay-B' // Object.is equality[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 3 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/inter-relay-mesh-keying.test.ts[2m > [22mREQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mbuilder carries peerRelayId when supplied, omits it otherwise
+[31m[1mAssertionError[22m: expected undefined to be 'relay-B' // Object.is equality[39m
+
+[32m- Expected:[39m 
+"relay-B"
+
+[31m+ Received:[39m 
+undefined
+
+[36m [2m❯[22m src/__tests__/inter-relay-mesh-keying.test.ts:[2m17:34[22m[39m
+    [90m 15| [39m  it('builder carries peerRelayId when supplied, omits it otherwise', …
+    [90m 16| [39m    const withPeer = buildPipeProducerAnnounce('room-1', { id: 'prod-1…
+    [90m 17| [39m    [34mexpect[39m(withPeer[33m.[39mpeerRelayId)[33m.[39m[34mtoBe[39m([32m'relay-B'[39m)[33m;[39m
+    [90m   | [39m                                 [31m^[39m
+    [90m 18| [39m    const without = buildPipeProducerAnnounce('room-1', { id: 'prod-1'…
+    [90m 19| [39m    expect('peerRelayId' in without).toBe(false); // omitted, not unde…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/inter-relay-mesh-keying.test.ts[2m > [22mREQ-RMS-008 — peerRelayId on PipeProducerAnnounce (additive, back-compat)[2m > [22mguard rejects a non-string peerRelayId
+[31m[1mAssertionError[22m: expected true to be false // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- false[39m
+[31m+ true[39m
+
+[36m [2m❯[22m src/__tests__/inter-relay-mesh-keying.test.ts:[2m28:125[22m[39m
+    [90m 26| [39m
+    [90m 27| [39m  [34mit[39m([32m'guard rejects a non-string peerRelayId'[39m[33m,[39m () [33m=>[39m {
+    [90m 28| [39m    expect(isPipeProducerAnnounce({ type: 'pipe-producer', roomId: 'r'…
+    [90m   | [39m                                                                                                                            [31m^[39m
+    [90m 29| [39m  })[33m;[39m
+    [90m 30| [39m})[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m src/__tests__/inter-relay-mesh-keying.test.ts[2m > [22mREQ-RMS-008 — peerRelayId on PipeConnectFrame (additive, back-compat)[2m > [22mbuilder carries peerRelayId; guard accepts with + without it
+[31m[1mAssertionError[22m: expected undefined to be 'relay-B' // Object.is equality[39m
+
+[32m- Expected:[39m 
+"relay-B"
+
+[31m+ Received:[39m 
+undefined
+
+[36m [2m❯[22m src/__tests__/inter-relay-mesh-keying.test.ts:[2m35:27[22m[39m
+    [90m 33| [39m  it('builder carries peerRelayId; guard accepts with + without it', (…
+    [90m 34| [39m    const f = buildPipeConnectFrame('room-1', { ip: '127.0.0.1', port:…
+    [90m 35| [39m    [34mexpect[39m(f[33m.[39mpeerRelayId)[33m.[39m[34mtoBe[39m([32m'relay-B'[39m)[33m;[39m
+    [90m   | [39m                          [31m^[39m
+    [90m 36| [39m    expect(isPipeConnectFrame({ type: 'pipe-connect', roomId: 'r', ip:…
+    [90m 37| [39m    expect(isPipeConnectFrame({ type: 'pipe-connect', roomId: 'r', ip:…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m3 failed[39m[22m[2m | [22m[1m[32m1 passed[39m[22m[90m (4)[39m
+[2m   Start at [22m 23:44:03
+[2m   Duration [22m 594ms[2m (transform 79ms, setup 0ms, collect 77ms, tests 12ms, environment 0ms, prepare 147ms)[22m
+
+undefined
+C:\Thesis\dvconf\dvconf-daemons\apps\relay:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/__tests__/inter-relay-mesh-keying.test.ts
