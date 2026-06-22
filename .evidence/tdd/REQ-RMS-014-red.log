@@ -1,0 +1,33 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/mesh-placement-demo.integration.test.ts[2m > [22m[2mREQ-RMS-014 — integrated mesh placement demo (legs a+b: load-aware vs round-robin)[2m > [22m[2mHARD-GATE: load-aware max-relay-load << round-robin baseline (M=5, R=24)
+[22m[39m[demo REQ-RMS-014 placement] baseline(round-robin) max=1800  optimized(load-aware) max=8640  lowerBound=1800  reduction=0.21x  vsLowerBound=4.80x  [RED HOOK: RMS_DEMO_DISABLE_SCORER=1]
+
+ [31m❯[39m apps/relay/src/__tests__/integration/mesh-placement-demo.integration.test.ts [2m([22m[2m4 tests[22m[2m | [22m[31m1 failed[39m[2m | [22m[33m3 skipped[39m[2m)[22m[32m 12[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-014 — integrated mesh placement demo (legs a+b: load-aware vs round-robin)[2m > [22mHARD-GATE: load-aware max-relay-load << round-robin baseline (M=5, R=24)[39m[32m 11[2mms[22m[39m
+[31m     → expected 8640 to be less than or equal to 2160[39m
+   [2m[90m↓[39m[22m REQ-RMS-014 — legs c+d: >C_worker room triggers M2 cascade, zero cross-hop loss, E2EE byte-identity[2m > [22ma >C_worker room yields K_r>1 (cascade TRIGGERED by the load model) and the piped producer forwards body-byte-identical across the relay->relay hop
+   [2m[90m↓[39m[22m REQ-RMS-014 — legs e+f: +1 Byzantine relay slash-trigger SET + detect-latency bound[2m > [22mthe +1 Byzantine relay (overclaim->under-serve) crosses the cumulative bound and the slash-trigger is SET (asserted, not live)
+   [2m[90m↓[39m[22m REQ-RMS-014 — emit consolidated demo sidecar[2m > [22mwrites .logs/bench/rms/mesh-demo.json for report-rms-bench
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/mesh-placement-demo.integration.test.ts[2m > [22mREQ-RMS-014 — integrated mesh placement demo (legs a+b: load-aware vs round-robin)[2m > [22mHARD-GATE: load-aware max-relay-load << round-robin baseline (M=5, R=24)
+[31m[1mAssertionError[22m: expected 8640 to be less than or equal to 2160[39m
+[36m [2m❯[22m apps/relay/src/__tests__/integration/mesh-placement-demo.integration.test.ts:[2m130:26[22m[39m
+    [90m128| [39m    // materially below the baseline (>= 1.0x; with an even split it e…
+    [90m129| [39m    [90m// assert <= lowerBound*1.2 which the RED round violates).[39m
+    [90m130| [39m    expect(optimizedMax).toBeLessThanOrEqual(Math.ceil(lowerBound * 1.…
+    [90m   | [39m                         [31m^[39m
+    [90m131| [39m  })[33m;[39m
+    [90m132| [39m})[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[33m3 skipped[39m[90m (4)[39m
+[2m   Start at [22m 13:47:12
+[2m   Duration [22m 1.81s[2m (transform 231ms, setup 0ms, collect 1.50s, tests 12ms, environment 0ms, prepare 113ms)[22m
+

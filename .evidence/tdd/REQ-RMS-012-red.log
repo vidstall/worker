@@ -1,0 +1,67 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+ [31m❯[39m apps/relay/src/__tests__/room-handler-lastn.test.ts [2m([22m[2m3 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[32m 16[2mms[22m[39m
+[31m   [31m×[31m REQ-RMS-012 — notifyNewProducer audio last-N[2m > [22man AUDIO producer NOT in the top-k set is NOT fanned out to peers[39m[32m 14[2mms[22m[39m
+[31m     → expected [ { type: 'newProducer', …(3) } ] to have a length of +0 but got 1[39m
+   [32m✓[39m REQ-RMS-012 — notifyNewProducer audio last-N[2m > [22man AUDIO producer IN the top-k set IS fanned out; a VIDEO producer is ALWAYS fanned out[32m 1[2mms[22m[39m
+   [32m✓[39m REQ-RMS-012 — notifyNewProducer audio last-N[2m > [22mwhen room.audioTopK is undefined, audio is fanned out unconditionally (back-compat / last-N disabled)[32m 1[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/room-handler-lastn.test.ts[2m > [22mREQ-RMS-012 — notifyNewProducer audio last-N[2m > [22man AUDIO producer NOT in the top-k set is NOT fanned out to peers
+[31m[1mAssertionError[22m: expected [ { type: 'newProducer', …(3) } ] to have a length of +0 but got 1[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 0[39m
+[31m+ 1[39m
+
+[36m [2m❯[22m apps/relay/src/__tests__/room-handler-lastn.test.ts:[2m39:66[22m[39m
+    [90m 37| [39m    [35mawait[39m [34mnotifyNewProducer[39m(room[33m,[39m [32m'a'[39m[33m,[39m quietProducer[33m,[39m logger)[33m;[39m
+    [90m 38| [39m
+    [90m 39| [39m    expect(sentOf(b).filter((m) => m['type'] === 'newProducer')).toHav…
+    [90m   | [39m                                                                 [31m^[39m
+    [90m 40| [39m  })[33m;[39m
+    [90m 41| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m2 passed[39m[22m[90m (3)[39m
+[2m   Start at [22m 12:59:07
+[2m   Duration [22m 1.20s[2m (transform 162ms, setup 0ms, collect 729ms, tests 16ms, environment 0ms, prepare 183ms)[22m
+
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/audio-lastN.integration.test.ts[2m > [22m[2mREQ-RMS-012 GATE — audio last-N forwarded-byte reduction (REAL mediasoup)[2m > [22m[2mHARD-GATE: all-N / top-3 forwarded-byte ratio >= 7 at N=24
+[22m[39m[bench REQ-RMS-012 N=24 k=3] all-N=126336B  top-k=126336B  ratio=1.00  [RED HOOK: AUDIO_LASTN_FORCE_ALL=1]
+
+ [31m❯[39m apps/relay/src/__tests__/integration/audio-lastN.integration.test.ts [2m([22m[2m2 tests[22m[2m | [22m[31m1 failed[39m[2m | [22m[33m1 skipped[39m[2m)[22m[33m 3823[2mms[22m[39m
+   [2m[90m↓[39m[22m REQ-RMS-012 spike — Opus producer + AudioLevelObserver + pause zeroes forwarded bytes[2m > [22ma single Opus producer registers a volume, and pausing its consumer drops forwarded bytes to ~0
+[31m   [31m×[31m REQ-RMS-012 GATE — audio last-N forwarded-byte reduction (REAL mediasoup)[2m > [22mHARD-GATE: all-N / top-3 forwarded-byte ratio >= 7 at N=24[39m[33m 3698[2mms[22m[39m
+[31m     → expected 1 to be greater than or equal to 7[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m apps/relay/src/__tests__/integration/audio-lastN.integration.test.ts[2m > [22mREQ-RMS-012 GATE — audio last-N forwarded-byte reduction (REAL mediasoup)[2m > [22mHARD-GATE: all-N / top-3 forwarded-byte ratio >= 7 at N=24
+[31m[1mAssertionError[22m: expected 1 to be greater than or equal to 7[39m
+[36m [2m❯[22m apps/relay/src/__tests__/integration/audio-lastN.integration.test.ts:[2m226:19[22m[39m
+    [90m224| [39m    // THE HARD-GATE: forwarding only k of N must reduce forwarded byt…
+    [90m225| [39m    // Conservative target: at least (N/k - 1)x (slack for RTCP + sett…
+    [90m226| [39m    [34mexpect[39m(ratio)[33m.[39m[34mtoBeGreaterThanOrEqual[39m([33mMath[39m[33m.[39m[34mfloor[39m([33mN_AUDIO[39m [33m/[39m [33mK[39m) [33m-[39m [34m1[39m)[33m;[39m
+    [90m   | [39m                  [31m^[39m
+    [90m227| [39m  }[33m,[39m [34m120_000[39m)[33m;[39m
+    [90m228| [39m})[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[33m1 skipped[39m[90m (2)[39m
+[2m   Start at [22m 13:06:06
+[2m   Duration [22m 4.45s[2m (transform 49ms, setup 0ms, collect 309ms, tests 3.82s, environment 0ms, prepare 103ms)[22m
+
