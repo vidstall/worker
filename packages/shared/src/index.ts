@@ -131,6 +131,19 @@ export type {
   LatencyWriterOptions,
 } from './bench/index.js';
 
+// Multi-CP quorum Phase 1 / Leg 5 — the GENERIC quorum claim board (parametric sibling of the
+// canary-concrete InMemoryClaimBoard). Lives in @dvconf/shared so BOTH the canary lane
+// (validator-daemon) and the cap-token Leg-6 collector (cp-daemon) import it WITHOUT a cross-app
+// import. The canary board stays byte-identical; this is additive.
+export { InMemoryGenericClaimBoard, DEFAULT_W_CORR } from './quorum-board.js';
+export type {
+  QuorumClaimBoard,
+  BoardKindConfig,
+  ClaimKind,
+  GcFailMode,
+  OpenGenericCell,
+} from './quorum-board.js';
+
 // Relay endpoint cache (REQ-RO-008 / D-RO-3 — relay-ID → WS-URL map + room →
 // ordered relay-IDs, populated from RelayRegistered + RoomAssigned chain events).
 // Extracted from apps/signaling (G3.2a) so the signaling + relay daemons share
