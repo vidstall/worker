@@ -63,7 +63,9 @@ import {
   type CapTokenIssueClaim,
   type CapTokenIssueAttestation,
 } from './cap-token-issuer.js';
+import { InfraPeerPubkeyCache } from './cap-token-issuer.js';
 import { makeCapTokenSubmitter } from './cap-token-submitter.js';
+import { QuorumStateIdUnsetError } from './sui-chain-state-reader.js';
 import type { CpOperator } from './sui-chain-state-reader.js';
 
 export { CapTokenIssuer } from './cap-token-issuer.js';
@@ -85,6 +87,17 @@ const logger = createLogger('cp-daemon');
 // in index.ts (rather than a sibling file) to honour the dispatch lane file
 // ownership boundary which whitelists only `index.ts` + `cap-token-issuer.ts`.
 
+/**
+ * Leg 7c (G5) — the narrow live-chain read surface `startCapTokenIssuer` consumes on the
+ * multi-CP (threshold>=2) PROD path: the discovered active-CP operator set + the per-round
+ * on-chain `min_quorum`. Structurally satisfied by {@link SuiChainStateReader}; declared as
+ * an interface so unit tests can inject a mock WITHOUT a localnet client.
+ */
+export interface ChainQuorumReader {
+  getActiveCpOperators(): Promise<CpOperator[]>;
+  readMinQuorum(quorumStateObjectId: string): Promise<bigint>;
+}
+
 export interface StartCapTokenIssuerOptions {
   submitFn?: SubmitFn;
   client?: SuiClient;
@@ -98,6 +111,25 @@ export interface StartCapTokenIssuerOptions {
   quorumThreshold?: number;
   graceMs?: number;
   cache?: CapTokenCacheLike;
+  /**
+   * Leg 7c (G5) — injectable live-chain reader for the multi-CP discovery promotion. When
+   * omitted but a `client` is present, `startCapTokenIssuer` constructs a real
+   * `SuiChainStateReader` (cloning the revote-watcher lifecycle). Tests inject a mock.
+   */
+  chainReader?: ChainQuorumReader;
+  /**
+   * Leg 7c (G5) — network config used to construct a real {@link SuiChainStateReader} when
+   * `chainReader` is omitted but a `client` is present (the prod path). Tests inject
+   * `chainReader` directly and omit this.
+   */
+  networkConfig?: NetworkConfig;
+  /**
+   * Leg 7c (G3) — the infra-peer pubkey recovery cache, fed off the event-handler
+   * CapabilityIssued observer. When provided, `submitIssue`'s INFRA-peer path recovers the
+   * real 32-byte key via `recoverInfraPeerClaim` BEFORE the legacy `resolvePeerPubkey`
+   * placeholder (null → fail-closed skip). The E2EE `sessionPubkeyB64` path is unaffected.
+   */
+  infraPeerCache?: InfraPeerPubkeyCache;
   /**
    * W-P2 (D-W7) — explicit live-epoch source. When provided it overrides the
    * built-in cached-epoch refresher (tests/E2E inject a controlled epoch). When
@@ -140,6 +172,15 @@ export interface QuorumCollectorConfig {
   discoveredCps?: CpOperator[];
   /** M-of-N threshold (Leg-1 readMinQuorum). Hermetic tests inject; default 2 (D-B4). */
   minQuorum?: number;
+  /**
+   * Leg 7c (G5 prod promotion) — a PER-ROUND live `cp_quorum_sig::min_quorum` reader. When
+   * provided, the threshold>=2 poll loop calls it EVERY round (NO cache) so the off-chain
+   * board observes a live `update_threshold` mutation immediately (it can never assemble below
+   * the raised on-chain floor). Wired by `startCapTokenIssuer` to
+   * `reader.readMinQuorum(QUORUM_STATE_OBJECT_ID)`. Absent (hermetic callers) → the static
+   * `minQuorum` above is used unchanged.
+   */
+  readMinQuorum?: () => Promise<number>;
   /** Poll cadence (ms) between `listOpen()` checks. Default 50. */
   pollIntervalMs?: number;
   /** Max poll rounds before fail-LOUD escalation. Default 200. */
@@ -229,8 +270,10 @@ export function buildLocalCpKeystore(opts: {
 
       // ── Leg 6 — board-backed M-of-N collector (threshold >= 2) ───────────────
       // The effective quorum is max(on-chain min_quorum, the caller's threshold) — the
-      // board must never assemble below the on-chain floor (G5 fail-closed).
-      const effectiveQuorum = Math.max(minQuorum, threshold);
+      // board must never assemble below the on-chain floor (G5 fail-closed). When a live
+      // per-round reader is wired (Leg 7c prod path) min_quorum is re-read EVERY round (no
+      // cache) so a live `update_threshold` is honored immediately; otherwise the static
+      // `minQuorum` (hermetic default) is used.
       const canonicalMsgHex = canonicalBytesToHex(canonicalMsg);
       // The cell CLAIM: the only identifying field the collector needs is the cell key
       // (canonicalMsgHex) — every CP that re-derived these exact bytes opens the SAME cell.
@@ -256,8 +299,17 @@ export function buildLocalCpKeystore(opts: {
 
       const cellKey = `captoken-issue|${canonicalMsgHex}`;
 
-      // 2) POLL listOpen() until the cell reaches `effectiveQuorum` DISTINCT operators.
+      // 2) POLL listOpen() until the cell reaches the (per-round) effective quorum of DISTINCT
+      // operators. `effectiveQuorum` is recomputed inside the loop so a live `readMinQuorum`
+      // (Leg 7c G5) reflects an on-chain `update_threshold` immediately (NO cache).
+      let effectiveQuorum = Math.max(minQuorum, threshold);
       for (let round = 0; round < maxPollRounds; round++) {
+        if (cc.readMinQuorum) {
+          // PER-ROUND live read (Leg 7c) — never cached; the board can never assemble below the
+          // current on-chain floor even if it was raised mid-poll.
+          const liveMinQuorum = await cc.readMinQuorum();
+          effectiveQuorum = Math.max(liveMinQuorum, threshold);
+        }
         const open = await board.listOpen();
         const cell = open.find((c) => c.key === cellKey);
         if (cell) {
@@ -309,8 +361,79 @@ export async function startCapTokenIssuer(
   opts: StartCapTokenIssuerOptions,
 ): Promise<StartCapTokenIssuerResult> {
   const submitFn = opts.submitFn ?? selectProductionSubmitFn(opts);
-  const cpKeystore =
-    opts.cpKeystore ?? buildLocalCpKeystore({ signer: opts.signer, logger: opts.logger });
+  const threshold = opts.quorumThreshold ?? 2;
+  const isMultiCp = threshold >= 2;
+
+  // ── Leg 7c (G5) — multi-CP discovery promotion + fail-closed config gate ──────────────
+  //
+  // A multi-CP (threshold>=2) LIVE issue MUST source the on-chain `min_quorum` + the active-CP
+  // operator set from chain. Construct (or accept an injected) ChainQuorumReader. FAIL-CLOSED:
+  // a multi-CP daemon with `quorumStateObjectId` UNSET refuses to start (NO silent minQuorum=2).
+  // Single-CP (threshold<=1) is unaffected — it never reads the quorum-state object.
+  let chainReader: ChainQuorumReader | undefined = opts.chainReader;
+  if (!chainReader && opts.client && opts.networkConfig) {
+    // Clone the revote-watcher reader lifecycle (index.ts revote wiring): one reader instance,
+    // reused across rounds. Read-only devInspect — no signer, no TX.
+    chainReader = new SuiChainStateReader(opts.client, opts.networkConfig, opts.logger);
+  }
+
+  // Counters (additive pino observability — Leg 7c): live reads + recovery hit/miss are
+  // emitted from their call sites; the operator-set size is logged here at discovery time.
+  let discoveredCps: CpOperator[] | undefined;
+  let buildKeystore = (): CpKeystore =>
+    buildLocalCpKeystore({ signer: opts.signer, logger: opts.logger });
+
+  if (isMultiCp && !opts.cpKeystore) {
+    // FAIL-CLOSED gate (invariant #3): a multi-CP live issue with the quorum-state id unset
+    // must refuse — never silently default minQuorum=2.
+    if (!opts.quorumStateObjectId) {
+      opts.logger.error(
+        {
+          module: 'cap-token-bootstrap',
+          context: { threshold, reason: 'quorum-state-id-unset' },
+        },
+        'multi-CP CapTokenIssuer refused to start — QUORUM_STATE_OBJECT_ID unset (failing closed; will NOT silently default minQuorum=2)',
+      );
+      throw new QuorumStateIdUnsetError();
+    }
+    if (chainReader) {
+      // Discover the active-CP operator set ONCE at startup (the OQ-1 membership gate). The
+      // min_quorum read is deferred to a PER-ROUND closure (no cache) so a live
+      // `update_threshold` is honored every assembly round.
+      const reader = chainReader;
+      const quorumStateObjectId = opts.quorumStateObjectId;
+      discoveredCps = await reader.getActiveCpOperators();
+      opts.logger.debug(
+        {
+          module: 'cap-token-bootstrap',
+          context: { operator_set_size: discoveredCps.length },
+        },
+        'discovered active-CP operator set (G5 prod read)',
+      );
+      const resolvedCps = discoveredCps;
+      buildKeystore = (): CpKeystore =>
+        buildLocalCpKeystore({
+          signer: opts.signer,
+          logger: opts.logger,
+          quorumCollector: {
+            discoveredCps: resolvedCps,
+            readMinQuorum: async () => {
+              const q = await reader.readMinQuorum(quorumStateObjectId);
+              opts.logger.debug(
+                {
+                  module: 'cap-token-bootstrap',
+                  context: { min_quorum: Number(q), source: 'per-round-live-read' },
+                },
+                'read live min_quorum (G5 per-round, no cache)',
+              );
+              return Number(q);
+            },
+          },
+        });
+    }
+  }
+
+  const cpKeystore = opts.cpKeystore ?? buildKeystore();
 
   // W-P2 (D-W7) — cached-epoch source for token expiry. An explicit getCurrentEpoch
   // (tests/E2E) wins; otherwise, when a client is present, prime + poll the live Sui
@@ -353,6 +476,7 @@ export async function startCapTokenIssuer(
     ...(opts.quorumThreshold !== undefined && { quorumThreshold: opts.quorumThreshold }),
     ...(opts.graceMs !== undefined && { graceMs: opts.graceMs }),
     ...(opts.cache !== undefined && { cache: opts.cache }),
+    ...(opts.infraPeerCache !== undefined && { infraPeerCache: opts.infraPeerCache }),
   };
   const issuer = new CapTokenIssuer(issuerOpts);
 
@@ -712,15 +836,18 @@ async function main(): Promise<void> {
     : null;
 
   // F62 Stage 4 Item #1 — bootstrap CapTokenIssuer.
-  // Wired with LocalCpKeystore (signs with local CP Ed25519 key). Peer-CP
-  // discovery for true M-of-N is post-thesis (D-014); the daemon currently
-  // runs with `quorumThreshold` defaulting to 2, so until peer-CP discovery
-  // lands the issuer will log ERROR + skip submit on each event — exactly the
-  // behavior STATUS.md § Stage 4 readiness #1 prescribes as the M1 wiring goal.
+  // Leg 7c — the DEAD-ON-PROD discovery reads + peer-pubkey recovery are now promoted onto the
+  // prod path: a multi-CP (threshold>=2) issue sources `min_quorum` (per-round, no cache) +
+  // the active-CP operator set from chain via the SAME `reader` the revote-watcher uses, and
+  // FAILS CLOSED if QUORUM_STATE_OBJECT_ID is unset (no silent minQuorum=2). The
+  // InfraPeerPubkeyCache is fed off the event-handler CapabilityIssued observer (G3) so a
+  // multi-CP infra-peer mint recovers the real 32-byte key (no 916 abort). Single-CP startup
+  // is unaffected (threshold<=1 never reads the quorum-state object).
   const capTokenIssuerThreshold = parseInt(
     process.env['CAP_TOKEN_QUORUM_THRESHOLD'] ?? '2',
     10,
   );
+  const infraPeerCache = new InfraPeerPubkeyCache();
   const { issuer: capTokenIssuer, stop: stopCapTokenIssuer } = await startCapTokenIssuer({
     client,
     signer,
@@ -730,6 +857,10 @@ async function main(): Promise<void> {
     quorumStateObjectId: process.env['QUORUM_STATE_OBJECT_ID'] ?? '',
     quorumThreshold: capTokenIssuerThreshold,
     logger,
+    // Leg 7c — promote G5 (discovery) + G3 (recovery) onto the prod path.
+    chainReader: reader, // reuse the revote-watcher's SuiChainStateReader (one instance)
+    networkConfig: config,
+    infraPeerCache,
   });
   // Set up event handler with TX context for room assignment + TURN kill-switch
   // + cap-token issuance (F62 M2 W-P2 — capTokenIssuer threaded into txContext so

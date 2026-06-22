@@ -600,6 +600,46 @@ export function handleEvent(
       break;
     }
 
+    case 'CapabilityIssued': {
+      // Leg 7c (G3) — observe the on-chain CapabilityIssued event to feed the infra-peer
+      // pubkey recovery cache (clones the RoomAssigned dispatch shape above). The cache is
+      // keyed by (roomId, peerId); the event carries the real 32-byte peer_pubkey + the
+      // emitting peer's miner-id (peer_id). FAIL-CLOSED-AT-INSERT: the cache itself rejects a
+      // non-32-byte pubkey (never poisons recovery into a 916 mint). When the event omits a
+      // peer_id (the accepted async-hazard per the locked decision) we debug-log + skip the
+      // observe rather than key by a non-recovery field.
+      const e = data as unknown as {
+        token_id?: string;
+        room_id: string;
+        peer_pubkey: number[];
+        role?: number;
+        expires_epoch?: string;
+        peer_id?: string;
+      };
+      if (txContext?.capTokenIssuer) {
+        const traceId = randomUUID();
+        if (e.peer_id) {
+          txContext.capTokenIssuer.onCapabilityIssued(
+            e.peer_id,
+            {
+              tokenId: e.token_id,
+              roomId: e.room_id,
+              peerPubkey: e.peer_pubkey,
+              role: e.role,
+              expiresEpoch: e.expires_epoch,
+            },
+            traceId,
+          );
+        } else {
+          logger.debug(
+            { roomId: e.room_id },
+            'CapabilityIssued observed without a peer_id — infra-peer recovery cache not fed (accepted G3 async-hazard)',
+          );
+        }
+      }
+      break;
+    }
+
     case 'RoleAssigned': {
       // Clear voted miner from role-voter when role is assigned
       const e = data as unknown as RoleAssignedEvent;

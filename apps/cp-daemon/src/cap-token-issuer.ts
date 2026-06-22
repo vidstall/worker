@@ -180,6 +180,17 @@ export interface CapTokenIssuerOpts {
    * 0 → the legacy 100-epoch offset is preserved (back-compat).
    */
   getCurrentEpoch?: () => bigint;
+  /**
+   * Leg 7c (G3) — the infra-peer pubkey recovery cache, fed off the event-handler
+   * `CapabilityIssued` observer. When provided, `submitIssue`'s INFRA-peer path (no
+   * `sessionPubkeyB64`) recovers the REAL 32-byte key via `recoverInfraPeerClaim` BEFORE the
+   * legacy `resolvePeerPubkey` miner-id placeholder (which is NOT 32 bytes → would abort the
+   * Move mint `E_PUBKEY_WRONG_LENGTH` (916)). A recovery MISS → fail-closed SKIP + debug-log
+   * (never a malformed mint). When `undefined` (single-CP / legacy callers), `submitIssue`
+   * uses `resolvePeerPubkey` unchanged. The E2EE `sessionPubkeyB64` branch is NEVER routed
+   * through recovery.
+   */
+  infraPeerCache?: InfraPeerPubkeyCache;
 }
 
 /**
@@ -799,6 +810,8 @@ export class CapTokenIssuer {
   private readonly cache?: CapTokenCacheLike;
   /** W-P2 (D-W7) — optional live-epoch source; read lazily in resolveExpiresEpoch(). */
   private readonly getCurrentEpoch?: () => bigint;
+  /** Leg 7c (G3) — optional infra-peer pubkey recovery cache (multi-CP infra path). */
+  private readonly infraPeerCache?: InfraPeerPubkeyCache;
 
   constructor(opts: CapTokenIssuerOpts) {
     this.submitFn = opts.submitFn;
@@ -812,6 +825,7 @@ export class CapTokenIssuer {
     this.graceMs = opts.graceMs ?? 60_000;
     this.cache = opts.cache;
     this.getCurrentEpoch = opts.getCurrentEpoch;
+    this.infraPeerCache = opts.infraPeerCache;
   }
 
   /**
@@ -858,6 +872,29 @@ export class CapTokenIssuer {
         'onRoomAssigned failed — quorum collection or TX submit error',
       );
     }
+  }
+
+  /**
+   * Leg 7c (G3) — observe a `CapabilityIssued` chain event, feeding the infra-peer pubkey
+   * recovery cache keyed by `(roomId, peerId)`. Wired off the event-handler `CapabilityIssued`
+   * arm (additive observer — clones the RoomAssigned dispatch shape). No-op when no recovery
+   * cache is configured (single-CP / legacy). The cache itself REJECTS a non-32-byte
+   * `peer_pubkey` (never poisons recovery into a 916 mint).
+   *
+   * @param peerId  the infra peer's Sui miner-id (the recovery lookup key submitIssue uses).
+   * @param event   the observed `CapabilityIssued` payload (carries the real 32-byte pubkey).
+   */
+  onCapabilityIssued(peerId: string, event: CapabilityIssuedLike, traceId: string): void {
+    if (!this.infraPeerCache) return; // no recovery configured — observer is a no-op
+    this.infraPeerCache.observeCapabilityIssued(peerId, event);
+    this.logger.debug(
+      {
+        trace_id: traceId,
+        module: 'cap-token-issuer',
+        context: { peer_id: peerId, room_id: event.roomId, recovery_cache_fed: true },
+      },
+      'observed CapabilityIssued — infra-peer pubkey cache fed (G3)',
+    );
   }
 
   /**
@@ -1095,7 +1132,35 @@ export class CapTokenIssuer {
     // `peer_pubkey` instead — so the on-chain RoomCapability.peer_pubkey IS the
     // client session key (transparency log + sealed-box recipient). 0 Move
     // change: room_capability.move:198-201 only length-checks the 32-byte field.
-    const peerPubkey = resolvePeerPubkey(peer);
+    //
+    // Leg 7c (G3): for an INFRA peer (no session key) WITH a recovery cache wired, recover the
+    // REAL 32-byte `peer_pubkey` from the observed `CapabilityIssued` event BEFORE the legacy
+    // `resolvePeerPubkey` miner-id placeholder (which is NOT 32 bytes → would abort the Move
+    // mint 916). A recovery MISS → fail-closed SKIP + debug-log (never a malformed mint). The
+    // E2EE `sessionPubkeyB64` branch is NEVER routed through recovery — it resolves verbatim.
+    let peerPubkey: number[];
+    if (peer.sessionPubkeyB64 === undefined && this.infraPeerCache) {
+      const recovered = recoverInfraPeerClaim(
+        { roomId, peerId: peer.id, role: peer.role, expiresEpoch, nonce },
+        this.infraPeerCache,
+      );
+      if (recovered === null) {
+        // FAIL-CLOSED SKIP: no cached CapabilityIssued for (room, peer) yet (or a non-32-byte
+        // value). Skip this infra peer's mint rather than risk a 916 abort. Visible via debug.
+        this.logger.debug(
+          {
+            trace_id: traceId,
+            module: 'cap-token-issuer',
+            context: { dedupe_key: dedupeKey, peer_id: peer.id, reason: 'infra-peer-pubkey-unrecovered' },
+          },
+          'G3 recovery miss — fail-closed skip of infra-peer cap-token issue (no 916 mint)',
+        );
+        return;
+      }
+      peerPubkey = recovered.peerPubkey;
+    } else {
+      peerPubkey = resolvePeerPubkey(peer);
+    }
     const canonicalMsg = buildIssueCanonicalMsg({
       roomId,
       peerPubkey,
