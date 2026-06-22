@@ -273,4 +273,82 @@ describe('SuiChainStateReader', () => {
     const reader = new SuiChainStateReader(client, config, logger);
     expect(await reader.getRevoteEligibleSince(ZERO_ID)).toBeNull();
   });
+
+  // ── Leg 1 (multi-cp-quorum): discovery reads ──────────────────────────────
+  // Additive, read-only projections used by the G2 quorum assembler + the G5
+  // off-chain threshold. NO schema change; NO Move change.
+
+  describe('getActiveCpOperators (G2 operator-address discovery)', () => {
+    it('surfaces {minerId, operator} via a BCS round-trip of get_active_cps', async () => {
+      // Two CPs with DISTINCT operator addresses — the column toHeartbeat drops.
+      const cps = [
+        { operator: ADDR_A, miner_id: ADDR_OP, stake_amount: '5000', last_heartbeat: '7', is_active: true, registered_at: '1', reputation: '3' },
+        { operator: ADDR_B, miner_id: ADDR_A, stake_amount: '6000', last_heartbeat: '9', is_active: true, registered_at: '2', reputation: '4' },
+      ];
+      const cpBytes = bcs.vector(CPNodeInfoSchema).serialize(cps).toBytes();
+      let capturedTargets: string[] = [];
+      const client = {
+        devInspectTransactionBlock: vi.fn().mockImplementation(({ transactionBlock }) => {
+          capturedTargets = targetsOf(transactionBlock as never);
+          return Promise.resolve(devInspectResult(cpBytes));
+        }),
+      } as never;
+      const reader = new SuiChainStateReader(client, config, logger);
+      const ops = await reader.getActiveCpOperators();
+      // operator ADDRESS is surfaced (NOT discarded like toHeartbeat does).
+      expect(ops).toEqual([
+        { minerId: ADDR_OP, operator: ADDR_A },
+        { minerId: ADDR_A, operator: ADDR_B },
+      ]);
+      // Reuses the EXISTING get_active_cps getter against the CP registry.
+      expect(capturedTargets).toContain(`${PKG}::control_plane_registry::get_active_cps`);
+    });
+
+    it('returns [] for an empty CP registry', async () => {
+      const empty = bcs.vector(CPNodeInfoSchema).serialize([]).toBytes();
+      const client = {
+        devInspectTransactionBlock: vi.fn().mockResolvedValue(devInspectResult(empty)),
+      } as never;
+      const reader = new SuiChainStateReader(client, config, logger);
+      expect(await reader.getActiveCpOperators()).toEqual([]);
+    });
+  });
+
+  describe('readMinQuorum (G5 on-chain threshold, per-round, fail-closed)', () => {
+    const QSTATE = ID('99');
+
+    it('devInspects cp_quorum_sig::min_quorum against the QuorumConfigState id → u64 bigint', async () => {
+      let capturedTargets: string[] = [];
+      const client = {
+        devInspectTransactionBlock: vi.fn().mockImplementation(({ transactionBlock }) => {
+          capturedTargets = targetsOf(transactionBlock as never);
+          return Promise.resolve(devInspectResult(bcs.u64().serialize('3').toBytes()));
+        }),
+      } as never;
+      const reader = new SuiChainStateReader(client, config, logger);
+      expect(await reader.readMinQuorum(QSTATE)).toBe(3n);
+      expect(capturedTargets).toContain(`${PKG}::cp_quorum_sig::min_quorum`);
+    });
+
+    it('reads PER-ROUND (no cache) — a mutated threshold is observed on the next call', async () => {
+      const values = ['2', '4'];
+      let i = 0;
+      const devInspect = vi.fn().mockImplementation(() =>
+        Promise.resolve(devInspectResult(bcs.u64().serialize(values[i++]!).toBytes())),
+      );
+      const client = { devInspectTransactionBlock: devInspect } as never;
+      const reader = new SuiChainStateReader(client, config, logger);
+      expect(await reader.readMinQuorum(QSTATE)).toBe(2n);
+      expect(await reader.readMinQuorum(QSTATE)).toBe(4n); // update_threshold observed
+      expect(devInspect).toHaveBeenCalledTimes(2);
+    });
+
+    it('FAIL-CLOSED: throws (no devInspect) when the QuorumConfigState id is empty', async () => {
+      const devInspect = vi.fn();
+      const client = { devInspectTransactionBlock: devInspect } as never;
+      const reader = new SuiChainStateReader(client, config, logger);
+      await expect(reader.readMinQuorum('')).rejects.toThrow(/QUORUM_STATE_OBJECT_ID|quorum.*state.*id|unset/i);
+      expect(devInspect).not.toHaveBeenCalled();
+    });
+  });
 });

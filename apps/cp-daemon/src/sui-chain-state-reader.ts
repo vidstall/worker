@@ -93,6 +93,36 @@ interface DevInspectLike {
   results?: Array<{ returnValues?: Array<[number[], string]> } | undefined> | null;
 }
 
+/**
+ * An active CP projected to the identity columns the G2 quorum assembler needs:
+ * the on-chain `miner_id` plus the registered `operator` ADDRESS that
+ * {@link ChainStateReader} consumers (`toHeartbeat`) otherwise discard. No peer
+ * URL / session_wallet is surfaced (INV-C: operator addresses are PUBLIC).
+ */
+export interface CpOperator {
+  /** The CP node id (control_plane_registry::CPNodeInfo.miner_id). */
+  minerId: string;
+  /** The registered operator address — the `qs.signers` column verify_quorum iterates. */
+  operator: string;
+}
+
+/**
+ * Raised when {@link SuiChainStateReader.readMinQuorum} is asked to read the
+ * on-chain threshold but the `QuorumConfigState` object id is unset/empty. The
+ * G5 threshold MUST come from on-chain `min_quorum`; without it the off-chain
+ * board MUST NOT assemble a quorum (fail-closed) rather than fall back to a
+ * guessed/env threshold the chain would reject.
+ */
+export class QuorumStateIdUnsetError extends Error {
+  constructor() {
+    super(
+      'readMinQuorum: QUORUM_STATE_OBJECT_ID (QuorumConfigState id) is unset/empty — ' +
+        'cannot read on-chain min_quorum; failing closed so the quorum board never assembles',
+    );
+    this.name = 'QuorumStateIdUnsetError';
+  }
+}
+
 export class SuiChainStateReader implements ChainStateReader {
   constructor(
     private readonly client: SuiClient,
@@ -243,6 +273,67 @@ export class SuiChainStateReader implements ChainStateReader {
     this.logger.debug(
       { module: MODULE, method: 'getRevoteCooldownEpochs', value: value.toString() },
       'read revote_cooldown_epochs',
+    );
+    return value;
+  }
+
+  /**
+   * Active CPs projected to `{ minerId, operator }` (multi-cp-quorum Leg 1, G2).
+   *
+   * Runs the SAME read-only `get_active_cps` devInspect as {@link getActiveMiners}
+   * but preserves the `operator` ADDRESS column that `toHeartbeat` discards — the
+   * `qs.signers` column the on-chain `cp_quorum_sig::verify_quorum` iterates. The
+   * G2 assembler resolves each poster's pubkey → operator address against this
+   * discovered set; a stranger (not in this set) is a deliberate fail-closed drop.
+   *
+   * Additive — NO schema change (reuses {@link CPNodeInfoSchema}); read-only; an
+   * empty registry decodes to `[]`.
+   */
+  async getActiveCpOperators(): Promise<CpOperator[]> {
+    const target = `${this.config.packageId}::control_plane_registry::get_active_cps`;
+    const bytes = await this.devInspectBytes(target, this.config.cpRegistryId);
+    const decoded = bcs.vector(CPNodeInfoSchema).parse(Uint8Array.from(bytes)) as Array<{
+      miner_id: string;
+      operator: string;
+    }>;
+    const out = decoded.map((n) => ({ minerId: n.miner_id, operator: n.operator }));
+    this.logger.debug(
+      { module: MODULE, method: 'getActiveCpOperators', context: { count: out.length } },
+      'read active CP operators',
+    );
+    return out;
+  }
+
+  /**
+   * On-chain M threshold `cp_quorum_sig::min_quorum(state)` (multi-cp-quorum Leg 1, G5).
+   *
+   * Read PER-ROUND (NO cache) — `min_quorum` is mutable via `update_threshold`, so
+   * the off-chain board must observe the live value every assembly round, never a
+   * stale snapshot (else it could assemble at a count the chain now rejects, or
+   * never reach a raised threshold).
+   *
+   * FAIL-CLOSED: the `QuorumConfigState` id comes from the `QUORUM_STATE_OBJECT_ID`
+   * plumbing, NOT from {@link NetworkConfig}. When it is unset/empty this throws
+   * {@link QuorumStateIdUnsetError} WITHOUT issuing a devInspect, so a misconfigured
+   * daemon never silently assembles a quorum.
+   *
+   * @param quorumStateObjectId the shared `QuorumConfigState` object id.
+   */
+  async readMinQuorum(quorumStateObjectId: string): Promise<bigint> {
+    if (!quorumStateObjectId) {
+      this.logger.error(
+        { module: MODULE, method: 'readMinQuorum', context: { reason: 'quorum-state-id-unset' } },
+        'min_quorum read refused — QuorumConfigState id unset; failing closed',
+      );
+      throw new QuorumStateIdUnsetError();
+    }
+    const value = await this.readU64(
+      `${this.config.packageId}::cp_quorum_sig::min_quorum`,
+      quorumStateObjectId,
+    );
+    this.logger.debug(
+      { module: MODULE, method: 'readMinQuorum', context: { minQuorum: value.toString() } },
+      'read on-chain min_quorum (per-round, no cache)',
     );
     return value;
   }
