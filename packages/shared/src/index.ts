@@ -150,3 +150,20 @@ export type {
 // ONE impl. `DualRelayRouter` (ws-dependent) stays in apps/signaling.
 export { InMemoryRelayEndpointCache, subscribeRelayEndpoints } from './chain/relay-endpoint-cache.js';
 export type { RelayEndpointCache } from './chain/relay-endpoint-cache.js';
+
+// OQ-7 / ADR-0021 cross-host mTLS carrier — Phase A. The operator-manifest primitive (OOB discovery
+// + SPKI trust anchor + ed25519 manifest sign/verify). Off-relay shared so BOTH the cp-daemon
+// (cap-token) and validator-daemon (canary) carriers import it WITHOUT a cross-app import. No
+// transport yet — additive, vanilla stack byte-identical (nothing imports it until the TLS phases).
+export {
+  spkiFingerprint,
+  signManifest,
+  verifyManifest,
+  loadManifests,
+  canonicalManifestBytes,
+} from './operator-manifest.js';
+export type {
+  OperatorManifest,
+  SignedManifest,
+  ManifestVerifyResult,
+} from './operator-manifest.js';
