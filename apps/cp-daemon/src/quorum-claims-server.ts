@@ -43,6 +43,11 @@ import {
   resolveQuorumClaimsPort,
   assertQuorumPortFree,
 } from './quorum-claims-port.js';
+import {
+  isQuorumClaimsTlsEnabled,
+  createQuorumClaimsTlsServer,
+  type QuorumClaimsTlsConfig,
+} from './quorum-claims-tls.js';
 
 /** Body-size cap (cloned from turn-rpc.ts:56) — rejects with 400 'body too large'. */
 const MAX_BODY_BYTES = 4096;
@@ -87,6 +92,13 @@ export interface StartQuorumClaimsOptions {
    * resolve+assert path is the prod path and is exercised by the collision test.
    */
   portOverride?: number;
+  /**
+   * OQ-7 Phase B cross-host mTLS material + the pinned peer trust set. REQUIRED when the TLS fork is
+   * enabled (`QUORUM_CLAIMS_TLS_ENABLED` is `'1'`/`'true'`); IGNORED otherwise (the OFF path is the
+   * byte-identical node:http carrier). When the flag is ON but this is absent the factory FAILS LOUD.
+   * In Phase C `trustedSpki` is derived from the loaded operator manifests; here it is injected.
+   */
+  tls?: QuorumClaimsTlsConfig;
 }
 
 export interface StartQuorumClaimsResult {
@@ -256,9 +268,30 @@ export async function startQuorumClaimsServer(
     res.end(JSON.stringify(body));
   }
 
-  const server = createServer((req, res) => {
+  // The shared application listener — identical logic on BOTH the http and https forks. The mTLS
+  // fork wraps this with a per-request SPKI pin check; this listener still enforces the bearer
+  // token (defense-in-depth in BOTH modes).
+  const appListener = (req: IncomingMessage, res: ServerResponse): void => {
     void handle(req, res);
-  });
+  };
+
+  // ── Carrier transport selection (OQ-7 Phase B). ──
+  //   OFF (default): the EXISTING node:http carrier — byte-identical, no behavior change.
+  //   ON:            a node:https mTLS server (self-signed cert, requestCert + post-handshake SPKI
+  //                  pin against `opts.tls.trustedSpki`). FAIL-LOUD if the flag is on but no tls cfg.
+  const tlsEnabled = isQuorumClaimsTlsEnabled(env);
+  let server: Server;
+  if (tlsEnabled) {
+    if (opts.tls === undefined) {
+      throw new Error(
+        'QUORUM_CLAIMS_TLS_ENABLED is set but no opts.tls (key/cert/trustedSpki) was provided — ' +
+          'the cross-host mTLS carrier refuses to start without its TLS material + pinned peer set.',
+      );
+    }
+    server = createQuorumClaimsTlsServer(opts.tls, appListener) as unknown as Server;
+  } else {
+    server = createServer(appListener);
+  }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
@@ -386,7 +419,10 @@ export async function startQuorumClaimsServer(
   });
 
   const boundPort = (server.address() as { port: number } | null)?.port ?? port;
-  logger.info({ port: boundPort, host: '127.0.0.1', corsOrigin }, 'quorum/claims carrier listening (loopback)');
+  logger.info(
+    { port: boundPort, host: '127.0.0.1', corsOrigin, scheme: tlsEnabled ? 'https-mtls' : 'http' },
+    'quorum/claims carrier listening (loopback)',
+  );
 
   return {
     server,
