@@ -442,6 +442,10 @@ export function createSignalingServer(
     process.env['RELAY_AUDIO_LEVEL_THRESHOLD_DB'] ?? '-60',
     10,
   );
+  // REQ-RMS-012 — server-side audio last-N: forward only the k loudest audio
+  // producers. NEVER hardcode k (feedback_no_hardcodes); 0 or unset => last-N
+  // disabled (audioTopK stays undefined, audio fans out unconditionally).
+  const audioLastNK = parseInt(process.env['AUDIO_LASTN_K'] ?? '0', 10);
 
   // W5 M1 P7 (REQ-MCS-005): server-side BWE backstop — cap per recv transport so
   // a client cannot request high simulcast layers for every tile and blow its
@@ -1470,15 +1474,29 @@ export function createSignalingServer(
    */
   async function attachAudioLevelObserver(room: RoomState): Promise<void> {
     try {
+      // REQ-RMS-012: when last-N is enabled (AUDIO_LASTN_K > 0) the observer tracks
+      // the k loudest; otherwise it keeps the shipped maxEntries:1 active-speaker
+      // behavior (REQ-MCS-003). maxEntries must be >= 1.
+      const maxEntries = audioLastNK > 0 ? audioLastNK : 1;
       const observer = await room.router.createAudioLevelObserver({
-        maxEntries: 1,
+        maxEntries,
         threshold: audioObserverThresholdDb,
         interval: audioObserverIntervalMs,
       });
       room.audioLevelObserver = observer;
+      if (audioLastNK > 0) {
+        // Initialize the top-k set so notifyNewProducer's last-N gate is live for
+        // this room (undefined => disabled). Populated on each 'volumes' event.
+        room.audioTopK = new Set<string>();
+      }
 
       observer.on('volumes', (volumes) => {
         const dominant = volumes[0];
+        // REQ-RMS-012 — refresh the top-k loudest producer-id set from this
+        // 'volumes' snapshot (volumes are ordered loudest-first by mediasoup).
+        if (room.audioTopK !== undefined) {
+          room.audioTopK = new Set(volumes.map((v) => v.producer.id));
+        }
         if (!dominant) return;
         const dominantProducerId = dominant.producer.id;
 

@@ -30,6 +30,14 @@ export interface RoomState {
    * MCU rooms / when observer creation is unavailable (guarded everywhere).
    */
   audioLevelObserver?: msTypes.AudioLevelObserver;
+  /**
+   * REQ-RMS-012 — server-side audio last-N. The producerIds of the top-k LOUDEST
+   * audio producers, maintained by the AudioLevelObserver(maxEntries:k) wiring in
+   * signaling.ts. notifyNewProducer fans an AUDIO producer to peers ONLY when its
+   * id is in this set (video is always fanned out). Undefined => last-N disabled
+   * (back-compat: audio fans out unconditionally, the pre-M3 behavior).
+   */
+  audioTopK?: Set<string>;
 }
 
 export interface PeerState {
@@ -132,7 +140,18 @@ export async function notifyNewProducer(
     return;
   }
 
-  // SFU mode (or MCU fallback): fan-out to all peers
+  // SFU mode (or MCU fallback): fan-out to all peers.
+  // REQ-RMS-012 — server-side audio last-N: an AUDIO producer is fanned out only
+  // when it is among the top-k loudest (room.audioTopK), bounding the O(N^2) audio
+  // fan-out. Video is always fanned out. Undefined audioTopK => last-N disabled.
+  if (producer.kind === 'audio' && room.audioTopK !== undefined && !room.audioTopK.has(producer.id)) {
+    logger.debug(
+      { roomId: room.roomId, producerPeerId, producerId: producer.id, topK: room.audioTopK.size },
+      'Audio producer not in top-k loudest — last-N suppresses fan-out',
+    );
+    return;
+  }
+
   for (const [peerId, peer] of room.peers) {
     // Skip the producer's own peer
     if (peerId === producerPeerId) continue;
