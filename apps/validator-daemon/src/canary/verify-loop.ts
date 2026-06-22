@@ -388,3 +388,24 @@ export function startCanaryVerifyLoop(args: {
     runRoundForTest,
   };
 }
+
+/**
+ * REQ-RMS-015 — read-only export of the per-relay sustained-divergence signal the
+ * MESH placement scorer consumes to EXCLUDE a Byzantine relay BEFORE selection.
+ * Mirrors the classifier's PRIMARY cumulative gate WITHOUT re-implementing it:
+ * a relay is "flagged" iff it has >= MIN_ROUNDS_FOR_CUMULATIVE rounds of history
+ * AND its cumulative observed drop rate strictly exceeds `budgetBps`. PURE.
+ * (Re-uses MIN_ROUNDS_FOR_CUMULATIVE from loss-classifier; budgetBps is the same
+ * STUN-prior+delta budget the classifier gates against.)
+ */
+export function isRelayFlaggedByCanary(
+  acc: DropAccumulator,
+  relayMinerId: string,
+  budgetBps: bigint,
+  minRounds: number,
+): boolean {
+  const s = acc.byRelay.get(relayMinerId);
+  if (!s || s.rounds < minRounds || s.sends === 0) return false;
+  const rateBps = (BigInt(s.drops) * 10_000n) / BigInt(s.sends);
+  return rateBps > budgetBps;
+}
