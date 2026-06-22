@@ -11,6 +11,7 @@
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
+import { computeDemoVerdict, type DemoVerdict } from './report-rms-verdict.js';
 
 const cwd = process.cwd();
 const date = process.env['BENCH_DATE'] ?? new Date().toISOString().slice(0, 10);
@@ -81,9 +82,20 @@ function readNamedSidecar(name: string): Record<string, unknown> | null {
 const audio = readNamedSidecar('audio-lastn.json');
 const demo = readNamedSidecar('mesh-demo.json');
 
-// independent recompute: audio last-N gate (ratio >= floor(N/k)-1). `n` is M1's @:24 — reused.
+// independent recompute (BOTH gates) up front, so the gates-summary table can show
+// each verdict (no 'see §demo' placeholder). `n` is M1's @:24 — reused.
 const audioFloor = audio ? Math.floor(n(audio['n']) / n(audio['k'])) - 1 : 0;
 const audioPass = audio !== null && n(audio['ratio']) >= audioFloor && audioFloor > 0;
+
+const demoCascade = (demo?.['cascade'] ?? {}) as Record<string, unknown>;
+const demoByz = (demo?.['byzantine'] ?? {}) as Record<string, unknown>;
+const demoVerdict: DemoVerdict = demo === null
+  ? { pass: false, reasons: ['demo did not run'] }
+  : computeDemoVerdict({
+      optimizedMaxLoad: n(demo['optimizedMaxLoad']), lowerBound: n(demo['lowerBound']),
+      cascade: { zeroCrossHopLoss: demoCascade['zeroCrossHopLoss'] === true, e2eeByteIdentity: demoCascade['e2eeByteIdentity'] === true },
+      byzantine: { detectRound: n(demoByz['detectRound']), slashTriggerSet: demoByz['slashTriggerSet'] === true },
+    });
 
 // PUSH the M3 sections onto M1's existing `const L` (@:34), AFTER M1's saturation block + m1-bench write.
 L.push('');
@@ -95,7 +107,7 @@ L.push('');
 L.push('| Gate | REQ | What | Status |');
 L.push('|---|---|---|:--:|');
 L.push(`| audio last-N | REQ-RMS-012 | top-k forwarded-byte reduction | ${audio === null ? 'NOT RUN' : audioPass ? `PASS (ratio ${n(audio['ratio'])} >= ${audioFloor})` : 'FAIL'} |`);
-L.push(`| integrated demo | REQ-RMS-014 | placement + cascade + Byzantine | ${demo === null ? 'NOT RUN' : 'see §demo'} |`);  // 'see §demo' until Task 8 wires computeDemoVerdict
+L.push(`| integrated demo | REQ-RMS-014 | placement + cascade + Byzantine | ${demo === null ? 'NOT RUN' : demoVerdict.pass ? 'PASS' : 'FAIL'} |`);
 L.push('');
 
 // ── audio gate detail ─────────────────────────────────────────────────────────
@@ -116,6 +128,46 @@ if (audio === null) {
 }
 L.push('');
 
+// ── integrated-demo gate detail (REQ-RMS-014) ─────────────────────────────────
+L.push('## REQ-RMS-014 — integrated demo');
+L.push('');
+if (demo === null) {
+  L.push('_Sidecar `.logs/bench/rms/mesh-demo.json` not found — demo did not run._');
+} else {
+  const cascade = demoCascade;
+  const byz = demoByz;
+  L.push(`**Demo verdict (independently recomputed):** **${demoVerdict.pass ? 'PASS' : 'FAIL'}**${demoVerdict.pass ? '' : ' — ' + demoVerdict.reasons.join('; ')}`);
+  L.push('');
+  L.push('| Metric | Value | Target | Pass |');
+  L.push('|---|---:|---|:--:|');
+  L.push(`| M (relay pool) / R (rooms) | ${n(demo['M'])} / ${n(demo['R'])} | M=5 R=20-30 | — |`);
+  L.push(`| baseline algo | ${String(demo['baselineAlgo'])} | named | — |`);
+  L.push(`| baseline max-load | ${n(demo['baselineMaxLoad'])} | — | — |`);
+  L.push(`| optimized max-load | ${n(demo['optimizedMaxLoad'])} | <= 1.2x lower bound | ${n(demo['optimizedMaxLoad']) <= Math.ceil(n(demo['lowerBound']) * 1.2) ? 'yes' : 'no'} |`);
+  L.push(`| lower bound | ${n(demo['lowerBound'])} | — | — |`);
+  L.push(`| max-load reduction vs baseline | ${n(demo['maxLoadReductionVsBaseline'])}x | materially below | — |`);
+  L.push(`| cascade zero cross-hop loss | ${String(cascade['zeroCrossHopLoss'])} | true | ${cascade['zeroCrossHopLoss'] === true ? 'yes' : 'no'} |`);
+  L.push(`| E2EE byte-identity across hops | ${String(cascade['e2eeByteIdentity'])} | true | ${cascade['e2eeByteIdentity'] === true ? 'yes' : 'no'} |`);
+  L.push(`| Byzantine detect round | ${n(byz['detectRound'])} | <= 7 | ${n(byz['detectRound']) >= 0 && n(byz['detectRound']) <= 7 ? 'yes' : 'no'} |`);
+  L.push(`| Byzantine slash-trigger | ${String(byz['slashTriggerSet'])} (${String(byz['slashMode'])}) | set | ${byz['slashTriggerSet'] === true ? 'yes' : 'no'} |`);
+  L.push('');
+  L.push(`- **Honest note:** ${String(demo['honest_note'] ?? '')}`);
+}
+L.push('');
+L.push('## Methodology');
+L.push('');
+L.push('- **Placement** (legs a/b): a named round-robin baseline vs the load-aware i*=argmin scorer over M relays / R rooms; max-relay-load is the metric; the RED hook `RMS_DEMO_DISABLE_SCORER=1` collapses placement to the degenerate `placeAllOnFirst` (all rooms on relay 0), which overloads past 1.2x the lower bound and FAILS the gate — proving the scorer is load-bearing.');
+L.push('- **Cascade** (legs c/d): a real 2-router mediasoup pipe via the M2 primitives (`createPrimaryPipeTransport` / `pipeProducerOntoPrimaryTransport`); zero cross-hop loss = downstream packetCount>0; E2EE byte-identity = forwarded body bytes equal the sent ciphertext (mediasoup rewrites only the RTP header).');
+L.push('- **Byzantine** (legs e/f): the SHIPPED hermetic canary pipeline (`runCanaryVerifyRound`) is fed real per-(relay,room) DROP observations; detect-latency = rounds until the cumulative bound crosses; the slash-trigger is ASSERTED set (a proof is submitted to the injected seam), NOT a live on-chain slash.');
+L.push('- Reproduce: `pnpm bench:rms`.');
+L.push('');
+L.push('## Honesty / bounds');
+L.push('');
+L.push('- **Mechanism-floor:** >100 users/room is synthetic path-count load (not 100 real browsers), C_worker is an order-of-magnitude figure pending the M1 calibration bench, no WAN / glass-to-glass (BENCH-3-deferred).');
+L.push('- **Canary reuse is HERMETIC:** the Byzantine detect+slash reuses a hermetically-proven pipeline; live cross-validator media capture + the live on-chain slash submit are canary-M4b. The SECONDARY >=k receiver signal is SIMULATED (W-M3-SIM). The slash-trigger is ASSERTED, not executed live (stated per REQ-RMS-014).');
+L.push('- **No new Byzantine mechanism + no change to the 145-byte frozen proof / classifier** — the mesh reuses the shipped canary lane verbatim.');
+L.push('');
+
 // Write the M3 doc to a SEPARATE artifact (M1's m1-bench writeFileSync above STAYS). `date` is M1's.
 const outPathM3 = resolve(cwd, '..', '.evidence/verification', `relay-mesh-scaling-m3-bench-${date}.md`);
 const reportM3 = L.join('\n');
@@ -123,5 +175,5 @@ mkdirSync(dirname(outPathM3), { recursive: true });
 writeFileSync(outPathM3, reportM3, 'utf8');
 // eslint-disable-next-line no-console
 console.log(`[bench-report] audio=${audioPass ? 'PASS' : 'CHECK'} -> ${outPathM3}`);
-// combined exit-code: M1 INCOMPLETE OR audio-gate fail (Task 8 folds in the demo term).
-if (verdict === 'INCOMPLETE' || (audio !== null && !audioPass)) process.exitCode = 1;
+// combined exit-code: M1 INCOMPLETE OR audio-gate fail OR demo-gate fail (ONE write).
+if (verdict === 'INCOMPLETE' || (audio !== null && !audioPass) || (demo !== null && !demoVerdict.pass)) process.exitCode = 1;
