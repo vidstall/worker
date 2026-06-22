@@ -62,9 +62,66 @@ L.push('- **Audio fan-out is ~O(N^2)** with no server-side last-N (REQ-RMS-012 d
 L.push('- Single box, synthetic RTP, no WAN/jitter. This proves the MECHANISM-FLOOR, not a production capacity number.');
 L.push('');
 
+// M1 calibration artifact (relay-mesh-scaling-m1-bench-<date>.md) — written exactly as M1 shipped.
 const report = L.join('\n');
 mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, report, 'utf8');
 // eslint-disable-next-line no-console
 console.log(`[rms-bench-report] ${verdict} -> ${outPath}`);
-if (verdict === 'INCOMPLETE') process.exitCode = 1;
+
+// === M3 (REQ-RMS-012 / REQ-RMS-014) — ADDITIVE: audio last-N + integrated-demo sidecar sections. ===
+// Reuses M1's cwd/date/n/L (NOT re-declared); writes a SEPARATE relay-mesh-scaling-m3-bench-<date>.md.
+// M1's readSidecar(p) @:20 is PATH-based; the M3 reads are NAME-based -> readNamedSidecar (no collision).
+const inDir = resolve(cwd, '.logs/bench/rms');
+function readNamedSidecar(name: string): Record<string, unknown> | null {
+  const p = resolve(inDir, name);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>; } catch { return null; }
+}
+const audio = readNamedSidecar('audio-lastn.json');
+const demo = readNamedSidecar('mesh-demo.json');
+
+// independent recompute: audio last-N gate (ratio >= floor(N/k)-1). `n` is M1's @:24 — reused.
+const audioFloor = audio ? Math.floor(n(audio['n']) / n(audio['k'])) - 1 : 0;
+const audioPass = audio !== null && n(audio['ratio']) >= audioFloor && audioFloor > 0;
+
+// PUSH the M3 sections onto M1's existing `const L` (@:34), AFTER M1's saturation block + m1-bench write.
+L.push('');
+L.push('---');
+L.push('# Relay-Mesh-Scaling M3 — Bench Gates (REQ-RMS-012 / REQ-RMS-014)');
+L.push('');
+L.push('## Gates summary');
+L.push('');
+L.push('| Gate | REQ | What | Status |');
+L.push('|---|---|---|:--:|');
+L.push(`| audio last-N | REQ-RMS-012 | top-k forwarded-byte reduction | ${audio === null ? 'NOT RUN' : audioPass ? `PASS (ratio ${n(audio['ratio'])} >= ${audioFloor})` : 'FAIL'} |`);
+L.push(`| integrated demo | REQ-RMS-014 | placement + cascade + Byzantine | ${demo === null ? 'NOT RUN' : 'see §demo'} |`);  // 'see §demo' until Task 8 wires computeDemoVerdict
+L.push('');
+
+// ── audio gate detail ─────────────────────────────────────────────────────────
+L.push('## REQ-RMS-012 — audio last-N');
+L.push('');
+if (audio === null) {
+  L.push('_Sidecar `.logs/bench/rms/audio-lastn.json` not found — gate did not run._');
+} else {
+  L.push('| Metric | Value | Target | Pass |');
+  L.push('|---|---:|---|:--:|');
+  L.push(`| N audio producers | ${n(audio['n'])} | — | — |`);
+  L.push(`| k (top-k forwarded) | ${n(audio['k'])} | env AUDIO_LASTN_K | — |`);
+  L.push(`| all-N forwarded bytes | ${n(audio['baselineBytes'])} | — | — |`);
+  L.push(`| top-k forwarded bytes | ${n(audio['optimizedBytes'])} | — | — |`);
+  L.push(`| **ratio** | **${n(audio['ratio'])}** | >= ${audioFloor} | ${audioPass ? 'yes' : 'no'} |`);
+  L.push('');
+  L.push(`- **Honest note:** ${String(audio['honest_note'] ?? '')}`);
+}
+L.push('');
+
+// Write the M3 doc to a SEPARATE artifact (M1's m1-bench writeFileSync above STAYS). `date` is M1's.
+const outPathM3 = resolve(cwd, '..', '.evidence/verification', `relay-mesh-scaling-m3-bench-${date}.md`);
+const reportM3 = L.join('\n');
+mkdirSync(dirname(outPathM3), { recursive: true });
+writeFileSync(outPathM3, reportM3, 'utf8');
+// eslint-disable-next-line no-console
+console.log(`[bench-report] audio=${audioPass ? 'PASS' : 'CHECK'} -> ${outPathM3}`);
+// combined exit-code: M1 INCOMPLETE OR audio-gate fail (Task 8 folds in the demo term).
+if (verdict === 'INCOMPLETE' || (audio !== null && !audioPass)) process.exitCode = 1;
