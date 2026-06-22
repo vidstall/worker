@@ -220,6 +220,50 @@ function hexToBytes(s: string): number[] {
   return out;
 }
 
+/**
+ * REQ-MCS-012 (W5 M2 P1.0) — resolve the admission `peer_pubkey` value.
+ *
+ * CONTRACTS §0 (D-M2-16) / the F62 deferred-wiring gap (`:629-638`): the issuer
+ * historically put the Sui miner-ID hex at the `peer_pubkey` position as a
+ * structural placeholder. For the E2EE path the value MUST instead be the
+ * client's in-browser ed25519 SESSION pubkey (so the on-chain
+ * `RoomCapability.peer_pubkey` IS the client's session key → it lives in the
+ * `capability_events` transparency log and is the sealed-box recipient).
+ *
+ * Additive: when `sessionPubkeyB64` is present it is decoded (base64, must be
+ * exactly 32 bytes = ed25519); when absent the legacy miner-ID hex decode is
+ * preserved unchanged. 0 Move change — `room_capability.move:198-201` only
+ * length-checks the 32-byte field, which BOTH shapes satisfy.
+ *
+ * Throws on a malformed session pubkey (wrong length / non-base64) rather than
+ * silently falling back — an E2EE join with a bad provenance key must fail loud,
+ * not be admitted under a stale placeholder.
+ */
+export function resolvePeerPubkey(peer: {
+  id: string;
+  /** base64 of the client's 32-byte ed25519 session pubkey (E2EE path); absent ⇒ legacy. */
+  sessionPubkeyB64?: string;
+}): number[] {
+  if (peer.sessionPubkeyB64 === undefined) {
+    // Legacy infrastructure-peer path (F62): miner-ID hex placeholder, unchanged.
+    return hexToBytes(peer.id);
+  }
+  let decoded: Buffer;
+  try {
+    decoded = Buffer.from(peer.sessionPubkeyB64, 'base64');
+  } catch (err) {
+    throw new Error(`peer_pubkey: session pubkey is not valid base64: ${String(err)}`);
+  }
+  // Buffer.from(base64) is lenient (drops invalid chars), so a non-base64 input
+  // usually surfaces here as a wrong-length decode rather than a throw above.
+  if (decoded.length !== 32) {
+    throw new Error(
+      `peer_pubkey: session pubkey must decode to 32 bytes (ed25519), got ${decoded.length}`,
+    );
+  }
+  return Array.from(decoded);
+}
+
 /** Encode a u64 as 8 little-endian bytes (mirrors Move's `bcs_u64_le` helper). */
 function u64Le(v: bigint): number[] {
   const out: number[] = [];
@@ -619,23 +663,26 @@ export class CapTokenIssuer {
    * On collectQuorumSignatures throw: re-throw to caller which logs + absorbs.
    */
   private async submitIssue(
-    peer: { id: string; role: number },
+    peer: { id: string; role: number; sessionPubkeyB64?: string },
     roomId: string,
     dedupeKey: string,
     traceId: string,
   ): Promise<void> {
     const nonce = 1; // first issuance per (room, peer) — monotonic counter per D-010-B starts at 1
     const expiresEpoch = this.resolveExpiresEpoch(); // W-P2 D-W7: live epoch + offset (was 100n placeholder)
-    // Stage 4 Item #6 + D-014 sub-decision: `peer.id` is the Sui miner-ID hex
-    // string (relay/signaling/validator ID from RoomAssigned event payload).
-    // The Move-side `issue_capability_token` expects the actual peer ed25519
-    // pubkey at this position — wiring the miner→pubkey lookup is a separate
-    // Stage 4 readiness gap (CONTRACTS § 4.6 — Phase 3.1 envelope). For
-    // byte-equivalence at the encoder layer, we hex-decode the miner ID into
-    // bytes so the daemon's canonical_msg and Move's canonical_msg agree
-    // structurally; production peer-pubkey resolution happens at the next
-    // wiring step (post-M1).
-    const peerPubkey = hexToBytes(peer.id);
+    // REQ-MCS-012 (W5 M2 P1.0) — resolve the admission `peer_pubkey`.
+    //
+    // Legacy (infrastructure peer): `peer.id` is the Sui miner-ID hex string
+    // (relay/signaling/validator from the RoomAssigned event); we hex-decode it
+    // so the daemon's canonical_msg and Move's canonical_msg agree structurally
+    // (Stage 4 Item #6 + D-014). This was the F62 deferred-wiring placeholder.
+    //
+    // E2EE path (CONTRACTS §0 / D-M2-16): when the client's in-browser ed25519
+    // SESSION pubkey is supplied (`peer.sessionPubkeyB64`), it becomes the
+    // `peer_pubkey` instead — so the on-chain RoomCapability.peer_pubkey IS the
+    // client session key (transparency log + sealed-box recipient). 0 Move
+    // change: room_capability.move:198-201 only length-checks the 32-byte field.
+    const peerPubkey = resolvePeerPubkey(peer);
     const canonicalMsg = buildIssueCanonicalMsg({
       roomId,
       peerPubkey,
