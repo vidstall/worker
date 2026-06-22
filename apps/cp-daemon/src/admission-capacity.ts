@@ -67,6 +67,9 @@ export function selectPlacementRelay(relays: RelayCapacity[], roomLoad: number):
   let best: RelayCapacity | null = null;
   let bestRatio = Number.POSITIVE_INFINITY;
   for (const r of relays) {
+    // QC-1 (REQ-RMS-018): never place onto a PROVEN canary-unhealthy relay. Strict
+    // `=== false` only — field-absent (undefined) / no-feed (true) stay eligible (back-compat).
+    if (r.canaryHealthy === false) continue;
     const projected = r.attestedLoadPaths + roomLoad;
     if (projected > r.cWorker) continue;        // capacity ceiling
     const ratio = projected / r.cWorker;

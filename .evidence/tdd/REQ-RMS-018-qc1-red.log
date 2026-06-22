@@ -1,0 +1,20 @@
+QC-1 RED — selectPlacementRelay ignores canaryHealthy (pre-fix)
+cmd: pnpm exec vitest run apps/cp-daemon/src/__tests__/admission-capacity.test.ts
+(src fix git-stashed; new tests present)
+
+FAIL apps/cp-daemon/src/__tests__/admission-capacity.test.ts > REQ-RMS-002 selectPlacementRelay ... > QC-1: excludes a canaryHealthy:false relay even if it is the argmin — picks the healthy worse-ratio relay
+AssertionError: expected 'UNHEALTHY-BEST' to be 'HEALTHY-WORSE' // Object.is equality
+Expected: "HEALTHY-WORSE"
+Received: "UNHEALTHY-BEST"
+ ❯ apps/cp-daemon/src/__tests__/admission-capacity.test.ts:64:24
+
+FAIL apps/cp-daemon/src/__tests__/admission-capacity.test.ts > REQ-RMS-002 selectPlacementRelay ... > QC-1: returns null/defer when the only relay that fits the ceiling is canaryHealthy:false
+AssertionError: expected { minerId: 'ONLY-FIT-UNHEALTHY', …(4) } to be null
+- Expected: null
++ Received: { "attestedLoadPaths": 100, "cWorker": 300, "canaryHealthy": false, "minerId": "ONLY-FIT-UNHEALTHY", "rtt": 10n }
+ ❯ apps/cp-daemon/src/__tests__/admission-capacity.test.ts:72:43
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 17 passed (19)
+
+(back-compat test "canaryHealthy undefined stays eligible" passed pre-fix as expected)

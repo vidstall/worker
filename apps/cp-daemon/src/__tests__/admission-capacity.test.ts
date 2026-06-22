@@ -47,6 +47,38 @@ describe('REQ-RMS-002 selectPlacementRelay — i* = argmin (l_i + L_r)/C_worker 
     const full = relays.map((x) => ({ ...x, attestedLoadPaths: 295 }));
     expect(selectPlacementRelay(full, 60)).toBeNull();
   });
+
+  // QC-1 (REQ-RMS-018) — the scorer MUST skip a relay proven canary-unhealthy
+  // (canaryHealthy === false) even when it is the argmin-by-ratio winner. The
+  // request-side placement chooser was ignoring canaryHealthy; close that gap
+  // WITHOUT breaking the optional-field back-compat (undefined stays eligible).
+  it('QC-1: excludes a canaryHealthy:false relay even if it is the argmin — picks the healthy worse-ratio relay', () => {
+    const set: RelayCapacity[] = [
+      // BEST ratio (200+60=260, 0.866) but PROVEN canary-unhealthy -> must be skipped
+      { minerId: 'UNHEALTHY-BEST', attestedLoadPaths: 200, cWorker, rtt: 10n, canaryHealthy: false },
+      // WORSE ratio (250+60=310 > 300 rejected by ceiling) — not eligible anyway
+      // HEALTHY but worse ratio (260+... ) -> the correct winner
+      { minerId: 'HEALTHY-WORSE', attestedLoadPaths: 220, cWorker, rtt: 90n, canaryHealthy: true },
+    ];
+    const r = selectPlacementRelay(set, 60);
+    expect(r?.minerId).toBe('HEALTHY-WORSE'); // SPECIFIC healthy id, not the unhealthy argmin
+  });
+
+  it('QC-1: returns null/defer when the only relay that fits the ceiling is canaryHealthy:false', () => {
+    const set: RelayCapacity[] = [
+      { minerId: 'ONLY-FIT-UNHEALTHY', attestedLoadPaths: 100, cWorker, rtt: 10n, canaryHealthy: false }, // fits but unhealthy
+      { minerId: 'FULL', attestedLoadPaths: 295, cWorker, rtt: 20n, canaryHealthy: true },               // 295+60 > 300 rejected
+    ];
+    expect(selectPlacementRelay(set, 60)).toBeNull();
+  });
+
+  it('QC-1 back-compat: a relay with canaryHealthy undefined (field absent) stays eligible (M1/M2 + no-feed)', () => {
+    const set: RelayCapacity[] = [
+      { minerId: 'NO-FEED', attestedLoadPaths: 100, cWorker, rtt: 40n }, // canaryHealthy absent -> still chosen
+    ];
+    const r = selectPlacementRelay(set, 60);
+    expect(r?.minerId).toBe('NO-FEED');
+  });
 });
 
 describe('REQ-RMS-018 poolHealthGate — admit only if >= K_r healthy (fresh heartbeat + canary-healthy)', () => {
