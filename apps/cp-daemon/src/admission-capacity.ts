@@ -111,3 +111,45 @@ export function poolSize(
   const withRedundancy = Math.ceil(base * (1 + redundancy));
   return Math.max(MIN_RELAY, withRedundancy + byzantineMargin);
 }
+
+// ── REQ-RMS-015 — Byzantine exclusion (M3). Pure off-chain filter applied to the
+// candidate SET before PVR ranking; the consensus score (computeNodeScore ==
+// pairing_score.move) is NEVER touched. The flag predicate is sourced from the
+// canary verify-loop accumulator via isRelayFlaggedByCanary (validator-daemon). ──
+
+/** The minimal placement-candidate shape the exclusion filter needs. */
+export interface PlacementCandidate {
+  /** The relay's stable on-chain miner_id (the canary accumulator key). */
+  minerId: string;
+}
+
+/**
+ * Return a NEW candidate array with every relay the `isFlagged` predicate marks as
+ * a sustained canary diverger removed. Order-preserving, input not mutated. The
+ * caller supplies `isFlagged` bound to `isRelayFlaggedByCanary(acc, id, budget,
+ * MIN_ROUNDS_FOR_CUMULATIVE)`.
+ */
+export function excludeFlaggedRelays<C extends PlacementCandidate>(
+  candidates: C[],
+  isFlagged: (minerId: string) => boolean,
+): C[] {
+  return candidates.filter((c) => !isFlagged(c.minerId));
+}
+
+/**
+ * REQ-RMS-015 — a STANDALONE top-kr selector helper (the M1 EscrowCreated arm does
+ * NOT use it: M1 ships selectPlacementRelay i*=argmin + ballot.slice(0, MIN_RELAY)
+ * @ event-handler.ts:473/:500 — there is NO `min(2,len)` builder in live source, per
+ * BLOCKER-2). Kept as a pure exported helper exercised ONLY by the 5a.2 unit test so
+ * the exclude->select pipeline is independently checkable. `kr` defaults to 2 (= MIN_RELAY
+ * at the demo floor). Pure, order-preserving, input not mutated. Does NOT touch
+ * `computeNodeScore` / the PVR consensus ordering — `rankedRelays` is already the
+ * canonically-sorted set; this only takes the top-`kr` ids from it.
+ */
+export function selectTopRelays<C extends PlacementCandidate>(
+  rankedRelays: C[],
+  kr = 2,
+): string[] {
+  const take = Math.max(1, Math.min(kr, rankedRelays.length));
+  return rankedRelays.slice(0, take).map((r) => r.minerId);
+}

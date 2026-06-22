@@ -4,8 +4,11 @@ import {
   selectPlacementRelay,
   poolHealthGate,
   poolSize,
+  excludeFlaggedRelays,
+  selectTopRelays,
   type RoomClass,
   type RelayCapacity,
+  type PlacementCandidate,
 } from '../admission-capacity.js';
 
 describe('REQ-RMS-003 estimateRoomLoad — L_r = V_active * min(9, P_active) + audio_term', () => {
@@ -65,5 +68,53 @@ describe('REQ-RMS-013 poolSize — M = ceil(sum L_r / C_relay)*(1+redundancy)+by
   it('a tiny load floors at >= min_relay so a demo M=5 is justified, not arbitrary', () => {
     // sum 500 / C_relay 1200 = ceil 1; *1.2 -> 2; +1 = 3; clamp to >= 2 min_relay -> 3
     expect(poolSize(500, 1200, 0.2, 1)).toBe(3);
+  });
+});
+
+/**
+ * REQ-RMS-015 — a relay flagged by the canary lane is EXCLUDED from the placement
+ * candidate set BEFORE selection (i*=argmin never picks it). Pure off-chain filter:
+ * the consensus PVR score (computeNodeScore / pairing_score.move) is NOT touched.
+ */
+const cand = (minerId: string): PlacementCandidate => ({ minerId });
+
+describe('REQ-RMS-015 — excludeFlaggedRelays', () => {
+  it('drops a flagged relay from the candidate set, keeps the rest in order', () => {
+    const set = [cand('R1'), cand('R-byz'), cand('R2')];
+    const isFlagged = (id: string): boolean => id === 'R-byz';
+    const out = excludeFlaggedRelays(set, isFlagged);
+    expect(out.map((c) => c.minerId)).toEqual(['R1', 'R2']);
+  });
+
+  it('returns the full set when nothing is flagged', () => {
+    const set = [cand('R1'), cand('R2')];
+    expect(excludeFlaggedRelays(set, () => false).map((c) => c.minerId)).toEqual(['R1', 'R2']);
+  });
+
+  it('never mutates the input array (admission-local, no side effects)', () => {
+    const set = [cand('R1'), cand('R-byz')];
+    const copy = [...set];
+    excludeFlaggedRelays(set, (id) => id === 'R-byz');
+    expect(set.map((c) => c.minerId)).toEqual(copy.map((c) => c.minerId));
+  });
+});
+
+describe('REQ-RMS-015 — selectTopRelays (pure top-kr helper; NOT wired into EscrowCreated — see BLOCKER-2)', () => {
+  it('takes the top-kr ranked relay ids (default kr=2 = MIN_RELAY at the demo floor)', () => {
+    const ranked = [cand('R1'), cand('R2'), cand('R3')];
+    expect(selectTopRelays(ranked)).toEqual(['R1', 'R2']);
+    expect(selectTopRelays(ranked, 3)).toEqual(['R1', 'R2', 'R3']);
+  });
+
+  it('always returns >=1 id when relays exist (matches the shipped max(1, ...))', () => {
+    expect(selectTopRelays([cand('only')], 2)).toEqual(['only']);
+  });
+
+  it('a flagged relay excluded UPSTREAM never appears in the selected top-relay set (exclude->select pipeline)', () => {
+    const ranked = [cand('R1'), cand('R-byz'), cand('R2')];
+    const eligible = excludeFlaggedRelays(ranked, (id) => id === 'R-byz');
+    const selected = selectTopRelays(eligible, 2);
+    expect(selected).not.toContain('R-byz'); // observes the REAL produced id set
+    expect(selected).toEqual(['R1', 'R2']);
   });
 });

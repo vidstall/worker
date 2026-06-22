@@ -46,6 +46,7 @@ import {
   estimateRoomLoad,
   selectPlacementRelay,
   poolHealthGate,
+  excludeFlaggedRelays, // selectTopRelays is NOT imported here — unused in event-handler (BLOCKER-2); it lives only in the 5a.2 unit test
   MIN_RELAY,
   type RoomClass,
   type RelayCapacity,
@@ -140,6 +141,8 @@ export function handleEvent(
   validatorState?: Map<string, NodeCandidate>,
   attestedLoad?: Map<string, AttestedLoad>,
   currentEpoch?: bigint,
+  /** REQ-RMS-015 — optional canary-flag predicate; relays it flags are excluded from placement (additive/back-compat, undefined => M1 path). */
+  byzantineFlag?: (minerId: string) => boolean,
 ): void {
   const eventName = extractEventName(event.type);
   const data = event.parsedJson as Record<string, unknown>;
@@ -171,7 +174,7 @@ export function handleEvent(
             handleEvent(
               { ...event, type: `${event.type.split('::')[0]}::economic_layer::EscrowCreated`, parsedJson: escrow as unknown as Record<string, unknown> },
               relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
-              attestedLoad, currentEpoch,
+              attestedLoad, currentEpoch, byzantineFlag,
             );
           }
         }
@@ -346,7 +349,7 @@ export function handleEvent(
         handleEvent(
           { ...event, type: `${event.type.split('::')[0]}::economic_layer::EscrowCreated`, parsedJson: earlyEscrow as unknown as Record<string, unknown> },
           relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
-          attestedLoad, currentEpoch,
+          attestedLoad, currentEpoch, byzantineFlag,
         );
       } else {
         logger.info({ roomId: e.room_id, creator: e.creator, relayMode: e.relay_mode }, 'Room created — waiting for escrow before assignment');
@@ -378,9 +381,22 @@ export function handleEvent(
       }
 
       // Score all known relays for this room using PVR scoring
-      const relays = Array.from(relayState.values());
+      const allRelays = Array.from(relayState.values());
+      // REQ-RMS-015 — Byzantine exclusion BEFORE ranking: drop relays the canary
+      // lane flagged as sustained divergers so i*=argmin never selects them. The
+      // consensus PVR score (computeNodeScore == pairing_score.move) is untouched;
+      // this only narrows the candidate set. `byzantineFlag` is undefined in the
+      // single-relay/test path => no exclusion (M1 behavior preserved).
+      const relays = byzantineFlag
+        ? excludeFlaggedRelays(allRelays, byzantineFlag)
+        : allRelays;
       if (relays.length === 0) {
-        logger.info({ roomId: e.room_id }, 'No relays available — deferring assignment');
+        // Message text preserved (M1 test asserts it); `excludedByzantine` (0 in the
+        // genuine-empty case, >0 when every relay was canary-flagged) disambiguates.
+        logger.info(
+          { roomId: e.room_id, excludedByzantine: allRelays.length - relays.length },
+          'No relays available — deferring assignment',
+        );
         pendingRooms.set(e.room_id, roomData);
         pendingEscrows?.set(e.room_id, e);
         break;
@@ -746,6 +762,13 @@ export function createEventHandler(
   capacityCtx?: {
     attestedLoad?: Map<string, AttestedLoad>;
     currentEpoch?: () => bigint | undefined;
+    /**
+     * REQ-RMS-015 — fresh canary-flag predicate per dispatch (mirrors currentEpoch's
+     * thunk shape so the latest verify-loop accumulator is read each event). The daemon
+     * wiring binds it to isRelayFlaggedByCanary(acc, id, budget, MIN_ROUNDS_FOR_CUMULATIVE).
+     * Undefined => no exclusion (M1 path). The live accumulator producer is demo/M4b scope.
+     */
+    byzantineFlag?: () => ((minerId: string) => boolean) | undefined;
   },
 ): {
   handler: (event: SuiEvent) => Promise<void>;
@@ -764,7 +787,7 @@ export function createEventHandler(
   const handler = async (event: SuiEvent): Promise<void> => {
     handleEvent(
       event, relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
-      capacityCtx?.attestedLoad, capacityCtx?.currentEpoch?.(),
+      capacityCtx?.attestedLoad, capacityCtx?.currentEpoch?.(), capacityCtx?.byzantineFlag?.(),
     );
   };
 
