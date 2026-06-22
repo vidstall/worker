@@ -148,11 +148,18 @@ describe('startCapTokenIssuer (Item #1 — cp-daemon bootstrap factory)', () => 
     expect(await pubkey.verify(canonicalMsg, sig64)).toBe(true);
   });
 
-  it('default keystore.collectQuorumSignatures throws when threshold >= 2 and no peer-CPs are configured (degraded mode is documented)', async () => {
+  it('default keystore.collectQuorumSignatures FAIL-LOUDs when threshold >= 2 and no peer-CPs attest (Leg 6 board-backed collector — bounded window then escalate+throw, NOT a silent stall)', async () => {
     const signer = Ed25519Keypair.generate();
-    const keystore = buildLocalCpKeystore({ signer, logger: mockLogger() });
+    // Inject a tiny poll window so the fail-LOUD path resolves fast (the production default
+    // is 200 rounds × 50ms). With only the local CP attesting, the cell never reaches the
+    // M=2 quorum → the collector escalates (board fail-loud gc) + throws.
+    const keystore = buildLocalCpKeystore({
+      signer,
+      logger: mockLogger(),
+      quorumCollector: { minQuorum: 2, pollIntervalMs: 1, maxPollRounds: 3 },
+    });
     const msg = new TextEncoder().encode('test-message');
-    await expect(keystore.collectQuorumSignatures(msg, 2)).rejects.toThrow(/peer-CP discovery/);
+    await expect(keystore.collectQuorumSignatures(msg, 2)).rejects.toThrow(/quorum unreached/i);
   });
 
   it('factory propagates SubmitFn DI to the issuer (handler invokes it on event)', async () => {

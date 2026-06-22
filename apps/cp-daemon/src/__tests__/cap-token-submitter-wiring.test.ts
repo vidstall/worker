@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 
-// W-P1 wiring half (D-W6): startCapTokenIssuer must select the REAL single-CP submitter
-// (-> executeWithRetry) when threshold==1 and no submitFn is injected, and keep the
-// deferred (throwing, no-dispatch) stub at threshold>=2. executeWithRetry is mocked so
-// the wired submitter builds a PTB without a chain.
+// W-P1 wiring half (D-W6) + Leg 6 multi-CP wiring: startCapTokenIssuer must select the
+// REAL submitter (-> executeWithRetry) whenever a `client` is wired — for BOTH single-CP
+// (threshold==1) and multi-CP (threshold>=2). The M-of-N COLLECTION now happens upstream in
+// the keystore's board-backed collectQuorumSignatures (Leg 6); the submitter consumes the
+// assembled proof shape UNCHANGED. Only a MISSING client falls back to the deferred stub.
+// executeWithRetry is mocked so the wired submitter builds a PTB without a chain.
 const { mockExecuteWithRetry } = vi.hoisted(() => ({ mockExecuteWithRetry: vi.fn() }));
 vi.mock('@dvconf/shared', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@dvconf/shared')>();
@@ -87,7 +89,7 @@ describe('startCapTokenIssuer — production submitFn selection (D-W6)', () => {
     stop();
   });
 
-  it('keeps the deferred (no-dispatch) stub at threshold>=2 — never reaches executeWithRetry', async () => {
+  it('Leg 6: routes the REAL submitter (-> executeWithRetry) at threshold>=2 WITH a client (collection happens upstream in the keystore)', async () => {
     const { issuer, stop } = await startCapTokenIssuer({
       client: {} as any,
       signer: Ed25519Keypair.generate(),
@@ -95,14 +97,36 @@ describe('startCapTokenIssuer — production submitFn selection (D-W6)', () => {
       networkRegistryId: '0xnet',
       cpRegistryObjectId: '0xcpreg',
       quorumStateObjectId: '0xquorum',
-      quorumThreshold: 2, // multi-CP -> deferred (D-014)
+      quorumThreshold: 2, // multi-CP -> real submitter (Leg 6 wiring); the fakeKeystore
+      cpKeystore: fakeKeystore(), // returns a threshold-sized quorum so collection succeeds
+      logger: mockLogger(),
+    });
+
+    await issuer.onRoomAssigned(ROOM_EVENT, 'trace-wire-2');
+
+    // The multi-CP path now dispatches via the real submitter (the M-of-N proof was
+    // assembled upstream by the keystore) — executeWithRetry IS reached.
+    expect(mockExecuteWithRetry).toHaveBeenCalled();
+    const labels = mockExecuteWithRetry.mock.calls.map((c) => c[3]);
+    expect(labels.some((l) => l === 'cap-token-issue-capability-token')).toBe(true);
+    stop();
+  });
+
+  it('keeps the deferred (no-dispatch) stub at threshold>=2 WITHOUT a client — never reaches executeWithRetry', async () => {
+    const { issuer, stop } = await startCapTokenIssuer({
+      // no client → deferred stub (a no-client daemon cannot publish on-chain)
+      signer: Ed25519Keypair.generate(),
+      packageId: '0xpkg',
+      networkRegistryId: '0xnet',
+      cpRegistryObjectId: '0xcpreg',
+      quorumStateObjectId: '0xquorum',
+      quorumThreshold: 2,
       cpKeystore: fakeKeystore(),
       logger: mockLogger(),
     });
 
-    // The deferred submitFn throws; the issuer absorbs it (logs error) — either way,
-    // no on-chain dispatch is attempted.
-    await issuer.onRoomAssigned(ROOM_EVENT, 'trace-wire-2').catch(() => undefined);
+    // The deferred submitFn throws; the issuer absorbs it (logs error) — no dispatch.
+    await issuer.onRoomAssigned(ROOM_EVENT, 'trace-wire-3').catch(() => undefined);
 
     expect(mockExecuteWithRetry).not.toHaveBeenCalled();
     stop();

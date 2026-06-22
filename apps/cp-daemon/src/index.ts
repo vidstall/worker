@@ -19,8 +19,9 @@ import {
   startHealthzServer,
   EventPoller,
   readIsPaused,
+  InMemoryGenericClaimBoard,
 } from '@dvconf/shared';
-import type { Logger, NetworkConfig } from '@dvconf/shared';
+import type { Logger, NetworkConfig, QuorumClaimBoard } from '@dvconf/shared';
 import {
   ChainEventListener,
   SelfShutdownWatcher,
@@ -52,13 +53,18 @@ import { startTurnIssuer } from './turn-issuer.js';
 import { startTurnRpc } from './turn-rpc.js';
 import {
   CapTokenIssuer,
+  assembleCapTokenQuorum,
+  buildCapTokenIssueBoardConfig,
   type CapTokenIssuerOpts,
   type CpKeystore,
   type SubmitFn,
   type SubmitResult,
   type CapTokenCacheLike,
+  type CapTokenIssueClaim,
+  type CapTokenIssueAttestation,
 } from './cap-token-issuer.js';
 import { makeCapTokenSubmitter } from './cap-token-submitter.js';
+import type { CpOperator } from './sui-chain-state-reader.js';
 
 export { CapTokenIssuer } from './cap-token-issuer.js';
 export type {
@@ -108,18 +114,88 @@ export interface StartCapTokenIssuerResult {
   stop: () => void;
 }
 
+// ── Multi-CP quorum Leg 6 (collector wiring) ───────────────────────────────
+//
+// DESIGN-connection-arch.md build-seams + ROADMAP Leg 6: the `threshold>=2` branch
+// of `collectQuorumSignatures` posts the LOCAL CP's own self-attestation leg to an
+// INJECTED `QuorumClaimBoard`, polls `listOpen()` until the cell reaches `minQuorum`
+// DISTINCT attesters, then folds them with Leg-4 `assembleCapTokenQuorum` into the
+// EXACT single-CP shape the FROZEN `makeCapTokenSubmitter` consumer accepts UNCHANGED.
+//
+// The board is INJECTED (default `InMemoryGenericClaimBoard`) so Leg 7 can swap the
+// live `/quorum/claims` HTTP board behind the SAME `QuorumClaimBoard` port — a pure
+// transport substitution (the protocol core never changes). FAIL-LOUD (Fork-5): if the
+// cell never reaches `minQuorum` within the bounded poll window, the collector escalates
+// (the board's cap-token fail-loud gc fires) + throws so a blocked room-join is VISIBLE.
+
+/**
+ * Injectable multi-CP quorum collection config for `buildLocalCpKeystore`. Optional with a
+ * sensible default (a fresh `InMemoryGenericClaimBoard` + `minQuorum=2`) so the production
+ * single-CP path is unaffected; Leg 7 swaps `board` for the live HTTP carrier.
+ */
+export interface QuorumCollectorConfig {
+  /** The injected board (default: a fresh in-memory board). Leg 7 swaps the live HTTP board. */
+  board?: QuorumClaimBoard;
+  /** The discovered active-CP operator set (Leg-1 getActiveCpOperators) for the OQ-1 membership gate. */
+  discoveredCps?: CpOperator[];
+  /** M-of-N threshold (Leg-1 readMinQuorum). Hermetic tests inject; default 2 (D-B4). */
+  minQuorum?: number;
+  /** Poll cadence (ms) between `listOpen()` checks. Default 50. */
+  pollIntervalMs?: number;
+  /** Max poll rounds before fail-LOUD escalation. Default 200. */
+  maxPollRounds?: number;
+}
+
+/**
+ * The round number passed to `board.gc()` on a fail-LOUD escalation. A cell is posted at
+ * round 0; it is "expired" once `currentRound - openedRound >= wCorr`. A large constant
+ * guarantees expiry regardless of the board's configured `W_corr`, so the cap-token
+ * fail-LOUD branch fires deterministically when the poll window elapses below quorum.
+ */
+const QUORUM_FAIL_LOUD_GC_ROUND = 1_000_000;
+
+/** lowercase hex (no 0x) of bytes — the captoken-issue board cellKey. */
+function canonicalBytesToHex(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+
 /**
  * Build a local-CP keystore backed by the daemon's Ed25519 keypair. The `sign()`
- * path is fully functional; `collectQuorumSignatures()` throws when threshold ≥
- * 2 because peer-CP discovery is deferred per D-014 — the issuer's handlers
- * catch + ERROR-log so operators see the degraded state without daemon crash.
+ * path is fully functional; `collectQuorumSignatures()` at threshold ≥ 2 runs the
+ * Leg-6 board-backed collector (post-own-leg + poll + assemble) over an INJECTED
+ * `QuorumClaimBoard`, FAIL-LOUD if the M-of-N quorum is not reached in the window —
+ * the issuer's handlers catch + ERROR-log so operators see the degraded state
+ * without a daemon crash.
  */
 export function buildLocalCpKeystore(opts: {
   signer: Ed25519Keypair;
   logger: Logger;
+  quorumCollector?: QuorumCollectorConfig;
 }): CpKeystore {
   const { signer, logger: kLogger } = opts;
   const localAddr = signer.toSuiAddress();
+  const cc = opts.quorumCollector ?? {};
+  const minQuorum = cc.minQuorum ?? 2;
+  const pollIntervalMs = cc.pollIntervalMs ?? 50;
+  const maxPollRounds = cc.maxPollRounds ?? 200;
+  let escalated = false;
+  const board: QuorumClaimBoard =
+    cc.board ??
+    new InMemoryGenericClaimBoard([
+      buildCapTokenIssueBoardConfig({
+        minDistinct: minQuorum,
+        onUnquorumedExpiry: () => {
+          escalated = true;
+        },
+      }),
+    ]);
+  // The discovered active-CP operator set: when an explicit set is injected (production /
+  // hermetic E2E) it is the OQ-1 membership gate; absent it, the local CP is the only
+  // known operator (single-host hermetic default — quorum unreachable → fail-LOUD).
+  const discoveredCps: CpOperator[] =
+    cc.discoveredCps ?? [{ minerId: localAddr, operator: localAddr }];
   return {
     async sign(message: Uint8Array) {
       // RAW 64-byte ed25519 over the canonical message (NO Sui intent wrap) —
@@ -150,15 +226,70 @@ export function buildLocalCpKeystore(opts: {
           aggregateSig,
         };
       }
+
+      // ── Leg 6 — board-backed M-of-N collector (threshold >= 2) ───────────────
+      // The effective quorum is max(on-chain min_quorum, the caller's threshold) — the
+      // board must never assemble below the on-chain floor (G5 fail-closed).
+      const effectiveQuorum = Math.max(minQuorum, threshold);
+      const canonicalMsgHex = canonicalBytesToHex(canonicalMsg);
+      // The cell CLAIM: the only identifying field the collector needs is the cell key
+      // (canonicalMsgHex) — every CP that re-derived these exact bytes opens the SAME cell.
+      // The other fields are advisory (the attestations already carry the signed bytes).
+      const claim: CapTokenIssueClaim = {
+        kind: 'captoken-issue',
+        roomId: '0x' + '00'.repeat(32),
+        peerPubkey: new Array(32).fill(0),
+        role: 0,
+        expiresEpoch: 0n,
+        nonce: 1,
+        canonicalMsgHex,
+      };
+
+      // 1) POST the LOCAL CP's own self-attestation leg (RAW ed25519, single-CP shape).
+      const selfSig = await signer.sign(canonicalMsg);
+      const selfAtt: CapTokenIssueAttestation = {
+        signature: Array.from(selfSig.slice(0, 64)),
+        pubkey: Array.from(signer.getPublicKey().toRawBytes()),
+        addr: localAddr,
+      };
+      await board.post('captoken-issue', claim, selfAtt, 0);
+
+      const cellKey = `captoken-issue|${canonicalMsgHex}`;
+
+      // 2) POLL listOpen() until the cell reaches `effectiveQuorum` DISTINCT operators.
+      for (let round = 0; round < maxPollRounds; round++) {
+        const open = await board.listOpen();
+        const cell = open.find((c) => c.key === cellKey);
+        if (cell) {
+          const atts = cell.attestations as CapTokenIssueAttestation[];
+          // distinct registered operators among the accrued attestations (OQ-1 membership).
+          const assembled = assembleCapTokenQuorum(claim, atts, discoveredCps);
+          if (assembled.qs.signers.length >= effectiveQuorum) {
+            await board.markSubmitted(cellKey);
+            return assembled;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+
+      // 3) FAIL-LOUD (Fork-5): the window elapsed below quorum. Drive the board GC past the
+      // correlation window so the cap-token fail-LOUD branch escalates (a blocked room-join
+      // must be VISIBLE), then ERROR-log + throw so the caller surfaces the degraded state.
+      await board.gc(QUORUM_FAIL_LOUD_GC_ROUND);
       kLogger.error(
         {
           module: 'cap-token-bootstrap',
-          context: { threshold, local_cp: localAddr },
+          context: {
+            threshold,
+            effective_quorum: effectiveQuorum,
+            local_cp: localAddr,
+            escalated_via_board_gc: escalated,
+          },
         },
-        'peer-CP discovery not yet implemented — degraded single-CP cannot meet M-of-N',
+        'multi-CP quorum NOT reached within the bounded poll window — fail-LOUD escalation (bounded-retry w/ fresh nonce required)',
       );
       throw new Error(
-        `peer-CP discovery not implemented: threshold=${threshold} but only local CP available`,
+        `multi-CP quorum unreached: needed ${effectiveQuorum} distinct CP signatures over the canonical message but only the local CP (and any peers within the window) attested`,
       );
     },
   };
@@ -247,17 +378,28 @@ export async function startCapTokenIssuer(
 }
 
 /**
- * Select the production submitFn (W-P1 / D-W6). Single-CP (threshold<=1) with a wired
- * `client` -> the real `makeCapTokenSubmitter` PTB dispatcher (a live CP now publishes
- * `capability_events` on-chain). Multi-CP (threshold>=2), or a missing client, falls
- * back to the deferred throwing stub — peer-CP discovery stays DEFERRED (D-014).
+ * Select the production submitFn (W-P1 / D-W6; Leg 6 multi-CP wiring). With a wired
+ * `client`, BOTH single-CP (threshold<=1) and multi-CP (threshold>=2) route to the real
+ * `makeCapTokenSubmitter` PTB dispatcher — the M-of-N COLLECTION happens upstream inside
+ * the keystore's board-backed `collectQuorumSignatures` (Leg 6), so the submitter consumes
+ * the SAME assembled `{ qs, pubkeys, aggregateSig }` shape UNCHANGED whether the proof has
+ * 1 or N signers. Only a MISSING client falls back to the deferred throwing stub (D-014:
+ * a no-client daemon cannot publish on-chain).
  */
 function selectProductionSubmitFn(opts: StartCapTokenIssuerOptions): SubmitFn {
-  const threshold = opts.quorumThreshold ?? 2;
-  if (threshold <= 1 && opts.client) {
+  if (opts.client) {
     return makeCapTokenSubmitter(opts.client, opts.signer, opts.logger);
   }
   return makeDeferredSubmit(opts.logger);
+}
+
+/**
+ * Test-only accessor for {@link selectProductionSubmitFn} (the routing is otherwise
+ * module-private). Lets a unit assert that threshold>=2 WITH a client no longer routes to
+ * the deferred stub (Leg 6 — the multi-CP path is wired to the real submitter).
+ */
+export function selectProductionSubmitFnForTest(opts: StartCapTokenIssuerOptions): SubmitFn {
+  return selectProductionSubmitFn(opts);
 }
 
 /**

@@ -25,7 +25,7 @@
  *   - Errors absorbed (logger.error) — daemon must remain alive across retryable failures
  */
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import type { Logger, QuorumSig } from '@dvconf/shared';
+import type { Logger, QuorumSig, BoardKindConfig } from '@dvconf/shared';
 import type { CpOperator } from './sui-chain-state-reader.js';
 
 // ── Cache wiring (Stage 4 Item #3) ───────────────────────────────────────
@@ -651,6 +651,63 @@ export function assembleCapTokenQuorum(
     qs: { signers, signatures },
     pubkeys,
     aggregateSig,
+  };
+}
+
+// ── Multi-CP quorum Leg 6 (collector wiring) — captoken-issue board config ───
+//
+// DESIGN-connection-arch.md Fork-1 (UNIFY) + Fork-5 (fail-LOUD) + ROADMAP Leg 5/6:
+// the per-kind `BoardKindConfig` that registers a `captoken-issue` cell on the generic
+// `InMemoryGenericClaimBoard` (`@dvconf/shared`). It is built HERE (not in @dvconf/shared)
+// so the board stays type-agnostic and the cap-token concrete `CapTokenIssueClaim` /
+// `CapTokenIssueAttestation` shapes live in their owning app.
+//
+//   - cellKey      = the cell's `canonicalMsgHex` (the exact bytes every CP signs — two CPs
+//                    that re-derive the identical canonical message open the SAME cell;
+//                    the board prepends `captoken-issue|` so a canary cell never collides).
+//   - attesterKey  = the operator `addr` (F-01 dedup-by-address column, mirroring on-chain).
+//   - distinctCount= distinct operator addresses (the M-of-N quorum count).
+//   - gcFailMode   = fail-LOUD (Fork-5): an un-quorumed cell at expiry escalates so a blocked
+//                    room-join is VISIBLE (the daemon bounded-retries with a fresh nonce).
+//   - validateWireSchema = the captoken INV-C allow-list. CP operator addresses are PUBLIC,
+//                    so the allow-list only enforces well-formedness (64-byte sig + 32-byte
+//                    pubkey + a captoken-issue claim) — it NEVER carries an auditing-validator
+//                    miner_id or a salted assignmentSecret (those belong to the canary kind).
+
+/**
+ * Build the per-kind `BoardKindConfig` for a `captoken-issue` cell on the shared generic board.
+ *
+ * @param opts.minDistinct        the M-of-N threshold (sourced from on-chain `min_quorum` via
+ *                                Leg-1 `readMinQuorum`; hermetic tests inject it directly).
+ * @param opts.onUnquorumedExpiry Fork-5 fail-LOUD escalation hook fired when an un-quorumed cell
+ *                                expires (the daemon escalates + bounded-retries w/ a fresh nonce).
+ */
+export function buildCapTokenIssueBoardConfig(opts: {
+  minDistinct: number;
+  onUnquorumedExpiry: (namespacedKey: string) => void;
+}): BoardKindConfig<CapTokenIssueClaim, CapTokenIssueAttestation> {
+  return {
+    kind: 'captoken-issue',
+    cellKey: (claim) => claim.canonicalMsgHex.toLowerCase(),
+    attesterKey: (att) => att.addr,
+    distinctCount: (atts) => new Set(atts.map((a) => a.addr)).size,
+    minDistinct: opts.minDistinct,
+    gcFailMode: { kind: 'fail-loud', onUnquorumedExpiry: opts.onUnquorumedExpiry },
+    validateWireSchema: (claim, att) => {
+      // INV-C allow-list (captoken kind): CP operator addresses are PUBLIC, so this only
+      // rejects malformed payloads (fail-closed — nothing stored). NO canary-only fields.
+      if (claim.kind !== 'captoken-issue') return 'claim.kind is not captoken-issue';
+      if (!Array.isArray(att.signature) || att.signature.length !== 64) {
+        return 'attestation.signature must be a 64-byte RAW ed25519 signature';
+      }
+      if (!Array.isArray(att.pubkey) || att.pubkey.length !== 32) {
+        return 'attestation.pubkey must be a 32-byte ed25519 key';
+      }
+      if (typeof att.addr !== 'string' || att.addr.length === 0) {
+        return 'attestation.addr (operator address) must be a non-empty string';
+      }
+      return null;
+    },
   };
 }
 
