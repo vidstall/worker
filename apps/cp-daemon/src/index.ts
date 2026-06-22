@@ -67,6 +67,9 @@ import { InfraPeerPubkeyCache } from './cap-token-issuer.js';
 import { makeCapTokenSubmitter } from './cap-token-submitter.js';
 import { QuorumStateIdUnsetError } from './sui-chain-state-reader.js';
 import type { CpOperator } from './sui-chain-state-reader.js';
+import { HttpQuorumClaimBoard } from './quorum-claims-client.js';
+import { startQuorumClaimsServer } from './quorum-claims-server.js';
+import { resolveQuorumClaimsPort } from './quorum-claims-port.js';
 
 export { CapTokenIssuer } from './cap-token-issuer.js';
 export type {
@@ -139,6 +142,14 @@ export interface StartCapTokenIssuerOptions {
   getCurrentEpoch?: () => bigint;
   /** W-P2 (D-W7) — cached-epoch refresh cadence (ms). Default 60_000. */
   epochRefreshIntervalMs?: number;
+  /**
+   * Leg 7d (LIVE-mode) — the multi-CP quorum-collector board to inject into the keystore. When set
+   * (live-mode via {@link selectQuorumClaimsBoard}) it slots behind the SAME injected
+   * `quorumCollector.board` port as a PURE transport substitution (the live `HttpQuorumClaimBoard`
+   * over the loopback 7a carrier). When omitted (the HERMETIC default) the keystore keeps its
+   * in-memory `InMemoryGenericClaimBoard` BYTE-IDENTICAL — nothing about the protocol core changes.
+   */
+  quorumCollectorBoard?: QuorumClaimBoard;
 }
 
 export interface StartCapTokenIssuerResult {
@@ -278,12 +289,20 @@ export function buildLocalCpKeystore(opts: {
       // The cell CLAIM: the only identifying field the collector needs is the cell key
       // (canonicalMsgHex) — every CP that re-derived these exact bytes opens the SAME cell.
       // The other fields are advisory (the attestations already carry the signed bytes).
+      //
+      // Leg 7d (wire-safety): `expiresEpoch` is advisory + UNUSED downstream (assembleCapTokenQuorum
+      // takes `_claim`; the board cellKey is canonicalMsgHex; validateWireSchema reads only
+      // `claim.kind`). The LIVE HTTP board (`HttpQuorumClaimBoard.post`) `JSON.stringify`s this claim
+      // over the wire, and `JSON.stringify` cannot serialize a `bigint` — so the advisory expiry is
+      // carried as a JSON-safe `0` (the hermetic InMemory path is byte-identical in observable behavior:
+      // no test reads the collector cell's `expiresEpoch`, and the assembled proof is independent of it).
       const claim: CapTokenIssueClaim = {
         kind: 'captoken-issue',
         roomId: '0x' + '00'.repeat(32),
         peerPubkey: new Array(32).fill(0),
         role: 0,
-        expiresEpoch: 0n,
+        // wire-safe advisory expiry (number, not bigint) — JSON.stringify-able for the live HTTP board.
+        expiresEpoch: 0 as unknown as bigint,
         nonce: 1,
         canonicalMsgHex,
       };
@@ -347,6 +366,54 @@ export function buildLocalCpKeystore(opts: {
   };
 }
 
+// ── Multi-CP quorum Leg 7d — LIVE-mode board selection ──────────────────────
+//
+// ROADMAP Leg 7d: a small, testable selector that decides whether the daemon runs the
+// HERMETIC default (`QUORUM_CLAIMS_ENABLED` unset → `undefined`, so `buildLocalCpKeystore`
+// keeps its in-memory `InMemoryGenericClaimBoard` default BYTE-IDENTICAL) or the LIVE
+// transport (`QUORUM_CLAIMS_ENABLED` set → a `HttpQuorumClaimBoard` pointed at the LOCAL
+// loopback 7a carrier). It is PURE TRANSPORT SUBSTITUTION: the returned board slots behind the
+// SAME injected `quorumCollector.board` port — the protocol core never changes.
+//
+// FAIL-LOUD (mirrors the 7a server): live-mode with `QUORUM_CLAIMS_AUTH_TOKEN` unset throws
+// (a transport carrying quorum signatures must never run open). The port is resolved via the
+// SHIPPED `resolveQuorumClaimsPort` (fail-closed on a non-numeric/out-of-range value).
+
+/**
+ * Decide the quorum-collector board for daemon startup.
+ *
+ * @returns a `HttpQuorumClaimBoard` (live loopback carrier) when `QUORUM_CLAIMS_ENABLED` is set
+ *          (with `QUORUM_CLAIMS_AUTH_TOKEN`), or `undefined` when unset so the hermetic
+ *          `InMemoryGenericClaimBoard` default is preserved BYTE-IDENTICAL.
+ * @throws  when live-mode is enabled but `QUORUM_CLAIMS_AUTH_TOKEN` is unset (fail-LOUD).
+ */
+export function selectQuorumClaimsBoard(args: {
+  env?: Record<string, string | undefined>;
+  logger: Logger;
+}): HttpQuorumClaimBoard | undefined {
+  const env = args.env ?? process.env;
+  const enabled = env['QUORUM_CLAIMS_ENABLED'];
+  if (enabled === undefined || enabled === '' || enabled === '0' || enabled === 'false') {
+    // HERMETIC default — buildLocalCpKeystore keeps its in-memory board (byte-identical).
+    return undefined;
+  }
+  // FAIL-LOUD: a live transport carrying quorum signatures must never run without a token.
+  const token = env['QUORUM_CLAIMS_AUTH_TOKEN'];
+  if (token === undefined || token === '') {
+    throw new Error(
+      'QUORUM_CLAIMS_ENABLED is set but QUORUM_CLAIMS_AUTH_TOKEN is unset — refusing to build a ' +
+        'live /quorum/claims board (security-critical transport; set the token or unset the flag).',
+    );
+  }
+  const port = resolveQuorumClaimsPort(env);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  args.logger.info(
+    { module: 'cap-token-bootstrap', context: { baseUrl, mode: 'live-loopback' } },
+    'quorum-claims live transport ENABLED — collector board = HttpQuorumClaimBoard (loopback)',
+  );
+  return new HttpQuorumClaimBoard({ baseUrl, token, logger: args.logger });
+}
+
 /**
  * Bootstrap a `CapTokenIssuer` with production wiring (mirrors `startTurnIssuer`).
  *
@@ -380,8 +447,16 @@ export async function startCapTokenIssuer(
   // Counters (additive pino observability — Leg 7c): live reads + recovery hit/miss are
   // emitted from their call sites; the operator-set size is logged here at discovery time.
   let discoveredCps: CpOperator[] | undefined;
+  // Leg 7d (LIVE-mode): when a live board is injected, thread it through the keystore's
+  // `quorumCollector.board` port. When undefined (the HERMETIC default), pass NO `quorumCollector`
+  // so `buildLocalCpKeystore`'s in-memory default is BYTE-IDENTICAL to the pre-7d behavior.
+  const liveBoard = opts.quorumCollectorBoard;
   let buildKeystore = (): CpKeystore =>
-    buildLocalCpKeystore({ signer: opts.signer, logger: opts.logger });
+    buildLocalCpKeystore({
+      signer: opts.signer,
+      logger: opts.logger,
+      ...(liveBoard !== undefined && { quorumCollector: { board: liveBoard } }),
+    });
 
   if (isMultiCp && !opts.cpKeystore) {
     // FAIL-CLOSED gate (invariant #3): a multi-CP live issue with the quorum-state id unset
@@ -416,6 +491,8 @@ export async function startCapTokenIssuer(
           signer: opts.signer,
           logger: opts.logger,
           quorumCollector: {
+            // Leg 7d: live board (loopback 7a carrier) when injected; absent → in-memory default.
+            ...(liveBoard !== undefined && { board: liveBoard }),
             discoveredCps: resolvedCps,
             readMinQuorum: async () => {
               const q = await reader.readMinQuorum(quorumStateObjectId);
@@ -616,6 +693,13 @@ export interface CpShutdownDeps {
   stopHeartbeat: () => void;
   /** (4) LAST — the /healthz liveness server. */
   closeHealthz: () => Promise<void>;
+  /**
+   * (4) LAST — the optional Leg-7d /quorum/claims live carrier (null when QUORUM_CLAIMS_ENABLED
+   * unset). Registered in the LAST group (mirror the healthz/turn-rpc liveness teardown) so the
+   * loopback transport stays up through reactive teardown. Optional → the hermetic default never
+   * provides it (no server was started).
+   */
+  closeQuorumClaimsServer?: () => Promise<void>;
   exit: (code: number) => never;
   config: GracefulShutdownConfig;
 }
@@ -656,6 +740,9 @@ export function buildCpShutdownPlan(
     stopHeartbeatAndHealthz: async () => {
       deps.stopHeartbeat(); // C-B → LAST
       await deps.closeHealthz();
+      // Leg 7d — the live /quorum/claims carrier tears down in the LAST group (loopback transport
+      // stays up through reactive teardown). Optional: absent in the hermetic default (no server).
+      await deps.closeQuorumClaimsServer?.();
     },
     exit: deps.exit,
     drainTimeoutMs: deps.config.drainTimeoutMs,
@@ -847,6 +934,31 @@ async function main(): Promise<void> {
     process.env['CAP_TOKEN_QUORUM_THRESHOLD'] ?? '2',
     10,
   );
+
+  // ── Multi-CP quorum Leg 7d — LIVE-mode /quorum/claims carrier + board selection ──────────────
+  //
+  // ROADMAP Leg 7d: when QUORUM_CLAIMS_ENABLED is set, start the loopback Leg-7a carrier (over a
+  // shared server-side InMemoryGenericClaimBoard with the captoken-issue config) and select a
+  // HttpQuorumClaimBoard CLIENT pointed at it — injected into the keystore's quorumCollector.board
+  // as a PURE transport substitution. When unset (the HERMETIC default), `selectQuorumClaimsBoard`
+  // returns undefined → the keystore keeps its in-memory board BYTE-IDENTICAL (nothing starts, no
+  // server, no port). The server's stop() registers in the LAST shutdown group (mirror turn-rpc).
+  const quorumCollectorBoard = selectQuorumClaimsBoard({ logger });
+  let stopQuorumClaimsServer: (() => Promise<void>) | null = null;
+  if (quorumCollectorBoard) {
+    const serverBoard = new InMemoryGenericClaimBoard([
+      buildCapTokenIssueBoardConfig({
+        minDistinct: capTokenIssuerThreshold,
+        // Fail-LOUD escalation is the CLIENT-side collector closure (never serialized); the
+        // server-side board only runs state-GC, so this hook is a benign no-op here.
+        onUnquorumedExpiry: () => {},
+      }),
+    ]);
+    const quorumClaimsServer = await startQuorumClaimsServer({ board: serverBoard, logger });
+    stopQuorumClaimsServer = quorumClaimsServer.stop;
+    logger.info({ module: 'cp-daemon' }, 'quorum/claims live carrier started (loopback)');
+  }
+
   const infraPeerCache = new InfraPeerPubkeyCache();
   const { issuer: capTokenIssuer, stop: stopCapTokenIssuer } = await startCapTokenIssuer({
     client,
@@ -861,6 +973,8 @@ async function main(): Promise<void> {
     chainReader: reader, // reuse the revote-watcher's SuiChainStateReader (one instance)
     networkConfig: config,
     infraPeerCache,
+    // Leg 7d — inject the selected live board (or undefined → hermetic in-memory default).
+    ...(quorumCollectorBoard !== undefined && { quorumCollectorBoard }),
   });
   // Set up event handler with TX context for room assignment + TURN kill-switch
   // + cap-token issuance (F62 M2 W-P2 — capTokenIssuer threaded into txContext so
@@ -1102,6 +1216,9 @@ async function main(): Promise<void> {
         },
         stopHeartbeat, // C-B → LAST
         closeHealthz: () => healthz.close(),
+        // Leg 7d — the live /quorum/claims carrier (null when QUORUM_CLAIMS_ENABLED unset) tears
+        // down in the LAST group, after healthz (mirror the turn-rpc/healthz liveness teardown).
+        ...(stopQuorumClaimsServer && { closeQuorumClaimsServer: stopQuorumClaimsServer }),
         exit: (code) => process.exit(code),
         config: gracefulCfg,
       }),
