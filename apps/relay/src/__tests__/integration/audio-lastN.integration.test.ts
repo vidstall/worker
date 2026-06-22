@@ -144,3 +144,85 @@ describe('REQ-RMS-012 spike — Opus producer + AudioLevelObserver + pause zeroe
     expect(pausedDelta).toBeLessThan(activeDelta / 4);  // pause zeroed the wire
   }, 60_000);
 });
+
+// ── RED hook: AUDIO_LASTN_FORCE_ALL=1 forwards ALL N audio tiles in the
+// "optimized" scenario too (no pause) => optimized ~= baseline => ratio ~1.0 <
+// gate => the hard-gate FAILS. Proves GREEN is the last-N mechanism, not chance.
+const FORCE_ALL = process.env['AUDIO_LASTN_FORCE_ALL'] === '1';
+
+const K = parseInt(process.env['AUDIO_LASTN_K'] ?? '3', 10); // top-k loudest forwarded
+const N_AUDIO = 24; // N audio peers (Zoom-style: few active, rest audible-but-quiet)
+const SETTLE_MS = 1000;
+const WINDOW_MS = 800;
+
+/** Apply ALL-N baseline (every audio consumer unpaused). */
+async function applyAllN(tiles: Awaited<ReturnType<typeof makeAudioTile>>[]): Promise<void> {
+  for (const t of tiles) await t.consumer.resume();
+}
+
+/** Apply top-k optimized: keep tiles [0..k) flowing, pause the rest (unless RED). */
+async function applyTopK(tiles: Awaited<ReturnType<typeof makeAudioTile>>[]): Promise<void> {
+  for (const t of tiles) {
+    if (t.index < K || FORCE_ALL) await t.consumer.resume();
+    else await t.consumer.pause();
+  }
+}
+
+async function measure(tiles: Awaited<ReturnType<typeof makeAudioTile>>[]): Promise<number> {
+  await sleep(SETTLE_MS);
+  const starts = await Promise.all(tiles.map((t) => t.readForwarded()));
+  await sleep(WINDOW_MS);
+  const ends = await Promise.all(tiles.map((t) => t.readForwarded()));
+  return ends.reduce((s, e, i) => s + (e - starts[i]!), 0);
+}
+
+describe('REQ-RMS-012 GATE — audio last-N forwarded-byte reduction (REAL mediasoup)', () => {
+  it(`HARD-GATE: all-N / top-${K} forwarded-byte ratio >= ${Math.floor(N_AUDIO / K) - 1} at N=${N_AUDIO}`, async () => {
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const { resolve, dirname } = await import('node:path');
+
+    const tiles: Awaited<ReturnType<typeof makeAudioTile>>[] = [];
+    for (let i = 0; i < N_AUDIO; i++) tiles.push(await makeAudioTile(i));
+
+    await applyAllN(tiles);
+    const baselineBytes = await measure(tiles);
+    await applyTopK(tiles);
+    const optimizedBytes = await measure(tiles);
+
+    for (const t of tiles) t.close();
+
+    const ratio = optimizedBytes > 0 ? baselineBytes / optimizedBytes : Infinity;
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[bench REQ-RMS-012 N=${N_AUDIO} k=${K}] all-N=${baselineBytes}B  top-k=${optimizedBytes}B  ratio=${ratio.toFixed(2)}` +
+        (FORCE_ALL ? '  [RED HOOK: AUDIO_LASTN_FORCE_ALL=1]' : ''),
+    );
+
+    // green-only sidecar (RED run never clobbers the authoritative green numbers).
+    if (!FORCE_ALL) {
+      const sidecar = {
+        req: 'REQ-RMS-012', milestone: 'M3', title: 'audio last-N forwarded-byte reduction',
+        date: new Date().toISOString().slice(0, 10), mediasoupVersion: '3.19.17',
+        n: N_AUDIO, k: K, baselineBytes, optimizedBytes, ratio: Number(ratio.toFixed(4)),
+        honest_note:
+          'Relay-side mechanism floor on a synthetic DirectTransport Opus source. ' +
+          'Forwarded outbound-rtp byteCount = bytes mediasoup put on the wire (ground truth). ' +
+          'NOT WAN, NOT browser getStats. Top-k selection is consumer.pause() on the non-loud tiles.',
+      };
+      const p = resolve(process.cwd(), '.logs/bench/rms/audio-lastn.json');
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, JSON.stringify(sidecar, null, 2), 'utf8');
+      // eslint-disable-next-line no-console
+      console.log(`[bench] sidecar -> ${p}`);
+    }
+
+    // GUARDS: both windows carried real media (no dead-pipe false-green).
+    expect(baselineBytes).toBeGreaterThan(0);
+    expect(optimizedBytes).toBeGreaterThan(0);
+
+    // THE HARD-GATE: forwarding only k of N must reduce forwarded bytes by ~N/k.
+    // Conservative target: at least (N/k - 1)x (slack for RTCP + settle transient).
+    expect(ratio).toBeGreaterThanOrEqual(Math.floor(N_AUDIO / K) - 1);
+  }, 120_000);
+});
