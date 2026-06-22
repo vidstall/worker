@@ -14,8 +14,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
-      '**/apps/relay/**/__tests__/integration/audio-spike.integration.test.ts',
-      '**/apps/relay/**/__tests__/integration/single-worker-saturation-bench.integration.test.ts',
+      '**/apps/relay/**/__tests__/integration/audio-spike.integration.test.ts',                    // M1 (keep)
+      '**/apps/relay/**/__tests__/integration/single-worker-saturation-bench.integration.test.ts',  // M1 (keep)
+      // REQ-RMS-014/012 (M3): the heavy mesh-demo capstone + audio last-N benches run ONLY here
+      // (forks/singleFork). `pnpm bench:rms` sets RMS_BENCH=1 SAT_BENCH=1 so all 4 run one-shot.
+      '**/apps/relay/**/__tests__/integration/mesh-placement-demo.integration.test.ts',             // M3 (add)
+      '**/apps/relay/**/__tests__/integration/audio-lastN.integration.test.ts',                     // M3 (add)
     ],
     globals: false,
     testTimeout: 60_000,

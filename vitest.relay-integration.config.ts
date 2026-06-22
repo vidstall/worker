@@ -29,6 +29,11 @@ export default defineConfig({
       // F1 Tier-3 live-link gate runs under its OWN config (vitest.relay-livelink.config.ts):
       // it binds a metrics port + ws server, so keep it OUT of the heavy-bench run.
       '**/apps/relay/**/__tests__/integration/live/**',
+      // REQ-RMS-014/012 (M3): the mesh-demo capstone + audio last-N benches run ONLY under
+      // vitest.rms-bench.config.ts (forks/singleFork). Keep them OUT of this broad heavy-bench
+      // config so they don't double-run / race the relay-overlap benches.
+      '**/apps/relay/**/__tests__/integration/mesh-placement-demo.integration.test.ts',
+      '**/apps/relay/**/__tests__/integration/audio-lastN.integration.test.ts',
     ],
     globals: false,
     testTimeout: 30_000,
