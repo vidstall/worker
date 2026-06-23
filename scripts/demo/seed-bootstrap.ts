@@ -88,13 +88,13 @@ const FAUCET_URL = process.env['FAUCET_URL'] ?? getFaucetHost('localnet');
 const KEYS_OUTPUT_PATH = process.env['KEYS_OUTPUT_PATH'] ?? '/shared/daemon-keys.json';
 
 /** A seeded node's persisted secret + on-chain handles (one entry per daemon). */
-interface SeededKey {
+export interface SeededKey {
   secretKey: string;
   capId: string;
   stakeId: string;
 }
 
-type DaemonRole = 'cp' | 'relay' | 'relay-standby' | 'validator' | 'signaling';
+type DaemonRole = 'cp' | 'relay' | 'relay-standby' | 'validator' | 'validator-2' | 'signaling';
 
 /**
  * Faucet-fund an address then settle for gas-coin indexing. FAUCET_URL is env-
@@ -387,7 +387,10 @@ async function enrollInRegistry(
       'register_relay',
       logger,
     );
-  } else if (role === 'validator') {
+  } else if (role === 'validator' || role === 'validator-2') {
+    // validator-2 IS a validator on-chain — same registry enrollment (register_validator).
+    // The 2nd validator gives the on-chain VecSet two DISTINCT miner_ids so the
+    // >=2-distinct canary attestation quorum can form on one host (spec §0.2 co-homing).
     await execOrThrow(
       client,
       minerKp,
@@ -462,6 +465,7 @@ function roleCodeFor(role: DaemonRole): number {
     case 'relay-standby': // standby IS a relay on-chain — same role code (2)
       return MinerRole.Relay; // 2
     case 'validator':
+    case 'validator-2': // validator-2 IS a validator on-chain — same role code as validator
       return MinerRole.Validator; // 1
     case 'signaling':
       return MinerRole.Signaling; // 4
@@ -503,6 +507,11 @@ async function voteAndApplyMiner(
   return { secretKey: minerKp.getSecretKey(), capId: minerCapId, stakeId: reg.stakeId };
 }
 
+/** Assemble the keys-file record (pure — unit-testable). One slot per seeded daemon role. */
+export function buildKeysRecord(seeded: Record<DaemonRole, SeededKey>): Record<DaemonRole, SeededKey> {
+  return seeded;
+}
+
 async function main(): Promise<void> {
   const logger = createLogger(MODULE);
   // loadNetworkConfig() reads PACKAGE_ID + all *_REGISTRY_ID / MINER_STORE_ID /
@@ -527,17 +536,29 @@ async function main(): Promise<void> {
   // 2. relay / validator / signaling / relay-standby via the generalised CP-voted lifecycle.
   const relay = await voteAndApplyMiner(client, cp, 'relay', config, logger);
   const validator = await voteAndApplyMiner(client, cp, 'validator', config, logger);
+  // A 2nd DISTINCT validator (own funded keypair -> own miner_id). On-chain it is a
+  // plain validator (same role code + register_validator); the keys-file slot key is
+  // the only thing that differs. Gives the canary VecSet >=2 distinct attesters so
+  // CanaryDivergenceSlashed can form on ONE host (spec §0.2 co-homing, REQ-CMD-1).
+  const validator2 = await voteAndApplyMiner(client, cp, 'validator-2', config, logger);
   const signaling = await voteAndApplyMiner(client, cp, 'signaling', config, logger);
   // 3. relay-standby: 5th funded keypair — a second relay enrolled at ws://relay-standby:4002
   //    (REQ-RO-021 Phase 5.3 bench; matches the relay-standby service in the relay-overlap compose override).
   const relayStandby = await voteAndApplyMiner(client, cp, 'relay-standby', config, logger);
 
-  const keys: Record<DaemonRole, SeededKey> = { cp: cpKey, relay, 'relay-standby': relayStandby, validator, signaling };
+  const keys = buildKeysRecord({
+    cp: cpKey,
+    relay,
+    'relay-standby': relayStandby,
+    validator,
+    'validator-2': validator2,
+    signaling,
+  });
   writeFileSync(KEYS_OUTPUT_PATH, `${JSON.stringify(keys, null, 2)}\n`, 'utf8');
 
   logger.info(
     { module: MODULE, action: 'done', context: { keysOut: KEYS_OUTPUT_PATH, roles: Object.keys(keys) } },
-    'seed-bootstrap complete — keys written, 5 daemons registered',
+    'seed-bootstrap complete — keys written, 6 daemons registered',
   );
 }
 

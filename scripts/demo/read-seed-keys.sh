@@ -13,10 +13,11 @@
 #   environment: { SEED_ROLE: cp }
 #
 # Per-role env-name mapping (the names each auto-register.ts early-returns on):
-#   cp        -> CP_KEYPAIR        + CP_CAP_ID
-#   relay     -> PRIVATE_KEY       + MINER_CAP_ID
-#   validator -> SUI_PRIVATE_KEY   + VALIDATOR_CAP_ID
-#   signaling -> SIGNALING_KEYPAIR + MINER_CAP_ID
+#   cp          -> CP_KEYPAIR        + CP_CAP_ID
+#   relay       -> PRIVATE_KEY       + MINER_CAP_ID
+#   validator   -> SUI_PRIVATE_KEY   + VALIDATOR_CAP_ID
+#   validator-2 -> SUI_PRIVATE_KEY   + VALIDATOR_CAP_ID  (2nd distinct validator; same env names)
+#   signaling   -> SIGNALING_KEYPAIR + MINER_CAP_ID
 #
 # Requires: jq (present in the daemon image) OR node fallback, mirroring
 # read-publish-output.sh's jq/node detection.
@@ -28,7 +29,7 @@ KEYS_OUTPUT_PATH="${KEYS_OUTPUT_PATH:-/shared/daemon-keys.json}"
 READ_PUBLISH="${READ_PUBLISH:-/entrypoint/read-publish-output.sh}"
 
 if [ -z "$SEED_ROLE" ]; then
-  echo "[read-seed-keys] FATAL: SEED_ROLE unset (expected one of cp|relay|validator|signaling)" >&2
+  echo "[read-seed-keys] FATAL: SEED_ROLE unset (expected one of cp|relay|validator|validator-2|signaling)" >&2
   exit 1
 fi
 
@@ -79,6 +80,12 @@ case "$SEED_ROLE" in
     export MINER_CAP_ID="$CAP_ID"
     ;;
   validator)
+    export SUI_PRIVATE_KEY="$SECRET_KEY"
+    export VALIDATOR_CAP_ID="$CAP_ID"
+    ;;
+  validator-2)
+    # 2nd distinct validator — SAME env names as validator (validator-daemon/auto-register.ts
+    # early-returns on SUI_PRIVATE_KEY+VALIDATOR_CAP_ID regardless of which seed slot it came from).
     export SUI_PRIVATE_KEY="$SECRET_KEY"
     export VALIDATOR_CAP_ID="$CAP_ID"
     ;;
