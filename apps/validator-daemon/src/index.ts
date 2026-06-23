@@ -80,6 +80,7 @@ import {
   type CanaryForwardCaptureResult,
 } from './canary/verify-loop.js';
 import { InMemoryClaimBoard } from './canary/claim-board.js';
+import { buildLiveSeams } from './canary/live-seams.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -483,19 +484,25 @@ export async function startDaemon(overrides?: {
     const verifyK = parseInt(process.env['CANARY_VERIFY_K'] ?? '2', 10);
     const verifyDeltaBps = BigInt(process.env['CANARY_VERIFY_DELTA_BPS'] ?? '500');
     const verifyLog = log.child({ component: 'canary-verify' });
+    // Stage 4 (multi-cp-quorum): when the master flag CANARY_LIVE_SEAMS_ENABLED is set, build the
+    // LIVE { submit, coObserverBoards, capture, getRelayRoomScopes } from env + the Stage-3 artifacts
+    // (manifest bundle, daemon keys, host PEM) and swap them into the deps below. Default UNSET ->
+    // `liveSeams` is null and the EXACT no-op seams below are used (byte-identical vanilla). The live
+    // seams are an INJECTED/CONTROLLED divergence + W-E9 self-slash (HONESTY on record in live-seams.ts).
+    const liveSeams = await buildLiveSeams(process.env);
     state.canaryVerifyLoop = startCanaryVerifyLoop({
       intervalMs: verifyIntervalMs,
       logger: verifyLog,
       deps: {
         // Reuse chunk-1's per-(relay,room) scopes so the SECONDARY >=k denominator is truthful.
-        getRelayRoomScopes: () => {
+        getRelayRoomScopes: liveSeams?.getRelayRoomScopes ?? (() => {
           const scopes: RelayRoomScope[] = [];
           for (const [roomId, room] of state.activeRooms.entries()) {
             if (room.primaryRelayId) scopes.push({ relayId: room.primaryRelayId, roomId });
             if (room.standbyRelayId) scopes.push({ relayId: room.standbyRelayId, roomId });
           }
           return scopes;
-        },
+        }),
         // The room-scoped co-auditor pool (chunk 1) — NOT the cross-room union (W-M3-OVERCOUNT).
         getValidators: (scope: RelayRoomScope): CanaryValidator[] => {
           const self: CanaryValidator = { minerId: validatorMinerId, sessionWallet: sessionAddress };
@@ -518,18 +525,20 @@ export async function startDaemon(overrides?: {
         // PRODUCTION capture seam: NO live media this session (M4b). Yield an EMPTY per-receiver
         // map so the loop runs hermetically (reads STUN, persists the accumulator) without a
         // producer/SFU/consumer plane. The live capture lands in M4b (port-locked here, INV-B).
-        capture: async (scope): Promise<CanaryForwardCaptureResult> => ({
-          relayId: scope.relayId,
-          roomId: scope.roomId,
-          canaryKid: state.canaryCellLoop?.latest()?.round ?? 0,
-          // No live frames this session (M4b): an EMPTY perReceiver map means the verifier is
-          // never invoked, so kRoom/cellSecret/expectedCtrs are inert placeholders (the loop
-          // still reads STUN + folds an empty round into the accumulator). No secret on a wire.
-          expectedCtrs: [],
-          kRoom: new Uint8Array(0),
-          cellSecret: new Uint8Array(0),
-          perReceiver: new Map(),
-        }),
+        capture:
+          liveSeams?.capture ??
+          (async (scope): Promise<CanaryForwardCaptureResult> => ({
+            relayId: scope.relayId,
+            roomId: scope.roomId,
+            canaryKid: state.canaryCellLoop?.latest()?.round ?? 0,
+            // No live frames this session (M4b): an EMPTY perReceiver map means the verifier is
+            // never invoked, so kRoom/cellSecret/expectedCtrs are inert placeholders (the loop
+            // still reads STUN + folds an empty round into the accumulator). No secret on a wire.
+            expectedCtrs: [],
+            kRoom: new Uint8Array(0),
+            cellSecret: new Uint8Array(0),
+            perReceiver: new Map(),
+          })),
         // W-M4-COSIGN pull-corroboration claim board (D-CFA-42/43). In-memory fake this session
         // (the live OFF-MEDIA-PATH cp-daemon `/canary/claims` carrier is M4b, D-CFA-47); the
         // production capture yields no promotions, so nothing is published until the live plane
@@ -538,15 +547,21 @@ export async function startDaemon(overrides?: {
         // (OOB-manifest-discovered cross-validator carriers) are M4b — coObserverBoards defaults to
         // [] here (no fan-out, byte-identical to the pre-C1 single-board path) until the WAN gate.
         localBoard: new InMemoryClaimBoard(),
+        // Stage 4: live OOB-manifest-discovered co-observer boards (C1 fan-out) when the master flag
+        // is set; default [] (no fan-out, byte-identical to the pre-Stage-4 single-board path).
+        coObserverBoards: liveSeams?.coObserverBoards ?? [],
         selfSessionKeypair: sessionKeypair,
-        // Submit seam — no live PTB this session (M4b). The production capture yields no
-        // promotions, so this is never invoked until the live plane lands; logged if it ever is.
-        submit: async (proof): Promise<void> => {
-          verifyLog.info(
-            { roomId: proof.roomId, relayMinerId: proof.relayMinerId, frameSeq: proof.frameSeq },
-            'canary divergence proof built (submit deferred to M4b live plane)',
-          );
-        },
+        // Submit seam. Stage 4: live PTB slash (relay self-slashes its OWN bond, W-E9) when the master
+        // flag is set; default = the no-op log below (M4b — the production capture yields no
+        // promotions, so this is never invoked until the live plane lands; logged if it ever is).
+        submit:
+          liveSeams?.submit ??
+          (async (proof): Promise<void> => {
+            verifyLog.info(
+              { roomId: proof.roomId, relayMinerId: proof.relayMinerId, frameSeq: proof.frameSeq },
+              'canary divergence proof built (submit deferred to M4b live plane)',
+            );
+          }),
         config: { k: verifyK, deltaBps: verifyDeltaBps, sendRate: verifyK },
       },
     });
