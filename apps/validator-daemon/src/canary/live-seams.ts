@@ -183,19 +183,42 @@ function buildInjectedCapture(opts: {
  * PRESENTS this host's own cert/key (the peer pins it). `baseUrl` is env-overridable per peer
  * (`CANARY_COOBSERVER_<n>_URL`) so an SSH-tunnelled localhost works (SPKI pin is address-agnostic).
  */
+/** This host's mTLS material — own cert/key + the trusted-peer SPKI set distilled from the OOB bundle. */
+export interface CanaryTls {
+  key: string;
+  cert: string;
+  /** The pinned-peer SPKI set (== `trustedClientSpki` for the server, `trustedServerSpki` for a client). */
+  trustedSpki: Set<string>;
+}
+
+/**
+ * Load this host's mTLS material from the Stage-3 env paths: own PEM (`CANARY_TLS_{CERT,KEY}_PATH`) +
+ * the trusted-peer SPKI set distilled from the OOB manifest bundle (`CANARY_MANIFEST_BUNDLE_PATH`).
+ * SHARED by BOTH the co-observer CLIENT boards (`buildCoObserverBoards`) and the local `/canary/claims`
+ * SERVER (`index.ts`) — same pin set both directions, single-sourced (no security copy-paste).
+ */
+export async function loadCanaryTls(env: Record<string, string | undefined>): Promise<CanaryTls> {
+  const cert = readFileSync(requireEnv(env, 'CANARY_TLS_CERT_PATH'), 'utf8');
+  const key = readFileSync(requireEnv(env, 'CANARY_TLS_KEY_PATH'), 'utf8');
+  const bundle = JSON.parse(
+    readFileSync(requireEnv(env, 'CANARY_MANIFEST_BUNDLE_PATH'), 'utf8'),
+  ) as SignedManifest[];
+  const trustedSpki = manifestsToTrustedSpki(await loadManifests(bundle));
+  return { key, cert, trustedSpki };
+}
+
 async function buildCoObserverBoards(
   env: Record<string, string | undefined>,
   log: Logger,
 ): Promise<ClaimBoard[]> {
-  const bundlePath = requireEnv(env, 'CANARY_MANIFEST_BUNDLE_PATH');
   const selfPubkey = requireEnv(env, 'CANARY_SELF_OPERATOR_PUBKEY');
   const token = requireEnv(env, 'CANARY_CLAIMS_AUTH_TOKEN');
-  const cert = readFileSync(requireEnv(env, 'CANARY_TLS_CERT_PATH'), 'utf8');
-  const key = readFileSync(requireEnv(env, 'CANARY_TLS_KEY_PATH'), 'utf8');
+  const { cert, key, trustedSpki } = await loadCanaryTls(env);
 
-  const bundle = JSON.parse(readFileSync(bundlePath, 'utf8')) as SignedManifest[];
+  const bundle = JSON.parse(
+    readFileSync(requireEnv(env, 'CANARY_MANIFEST_BUNDLE_PATH'), 'utf8'),
+  ) as SignedManifest[];
   const manifests = await loadManifests(bundle);
-  const trustedServerSpki = manifestsToTrustedSpki(manifests);
 
   const boards: ClaimBoard[] = [];
   let n = 0;
@@ -205,7 +228,7 @@ async function buildCoObserverBoards(
     const override = env[`CANARY_COOBSERVER_${n}_URL`];
     const baseUrl = override ?? `https://${m.boardEndpoint}`;
     boards.push(
-      new HttpClaimBoard({ baseUrl, token, tls: { cert, key, trustedServerSpki } }),
+      new HttpClaimBoard({ baseUrl, token, tls: { cert, key, trustedServerSpki: trustedSpki } }),
     );
     log.info({ module: MOD, peerEndpoint: m.boardEndpoint, baseUrl }, 'co-observer HttpClaimBoard wired');
   }

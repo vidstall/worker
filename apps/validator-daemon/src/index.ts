@@ -80,7 +80,12 @@ import {
   type CanaryForwardCaptureResult,
 } from './canary/verify-loop.js';
 import { InMemoryClaimBoard } from './canary/claim-board.js';
-import { buildLiveSeams } from './canary/live-seams.js';
+import { buildLiveSeams, loadCanaryTls } from './canary/live-seams.js';
+import {
+  startCanaryClaimsServer,
+  isCanaryClaimsTlsEnabled,
+  type StartCanaryClaimsResult,
+} from './canary/claims-server.js';
 
 const logger = createLogger('validator-daemon');
 
@@ -179,6 +184,14 @@ export interface DaemonState {
    * (W-M3-SIM narrowed; this loop AMPLIFIES the off-chain gate W-M3-OFFCHAIN — on record).
    */
   canaryVerifyLoop: CanaryVerifyLoopHandle | null;
+  /**
+   * Stage 4.5 (multi-cp-quorum, C1 cross-host): the local `/canary/claims` mTLS SERVER, started ONLY
+   * when the live seams are active (master flag CANARY_LIVE_SEAMS_ENABLED). It shares the verify-loop's
+   * `localBoard` instance so a PEER's POSTed self-attestation accrues onto the SAME board this daemon
+   * assembles from -> the >=2-distinct quorum can form cross-host (PLAN-m4b-hermetic §3.2). Null in
+   * vanilla mode (flag off) -> no server, byte-identical to the pre-Stage-4 daemon.
+   */
+  canaryClaimsServer: StartCanaryClaimsResult | null;
   /**
    * M2 chunk 2 (REQ-CFA-019/020): the latest live-discovered active-validator miner_ids
    * (Wallet-A ids from validator_registry::get_active_validators), refreshed each canary
@@ -325,6 +338,7 @@ export async function startDaemon(overrides?: {
     healthMonitorStop: null,
     canaryCellLoop: null,
     canaryVerifyLoop: null,
+    canaryClaimsServer: null,
     discoveredValidatorMinerIds: undefined,
     coverageServer: null,
     running: true,
@@ -490,6 +504,10 @@ export async function startDaemon(overrides?: {
     // `liveSeams` is null and the EXACT no-op seams below are used (byte-identical vanilla). The live
     // seams are an INJECTED/CONTROLLED divergence + W-E9 self-slash (HONESTY on record in live-seams.ts).
     const liveSeams = await buildLiveSeams(process.env);
+    // Stage 4.5 (C1 cross-host): HOIST the verify-loop's OWN board so the local `/canary/claims` mTLS
+    // server (started below in live mode) can share the SAME instance — a peer's POSTed self-attestation
+    // then accrues onto the board THIS daemon assembles from, so the >=2-distinct quorum forms cross-host.
+    const canaryLocalBoard = new InMemoryClaimBoard();
     state.canaryVerifyLoop = startCanaryVerifyLoop({
       intervalMs: verifyIntervalMs,
       logger: verifyLog,
@@ -546,7 +564,7 @@ export async function startDaemon(overrides?: {
         // C1 (PLAN-m4b-hermetic §3.2): this daemon's OWN local board. The live co-observer boards
         // (OOB-manifest-discovered cross-validator carriers) are M4b — coObserverBoards defaults to
         // [] here (no fan-out, byte-identical to the pre-C1 single-board path) until the WAN gate.
-        localBoard: new InMemoryClaimBoard(),
+        localBoard: canaryLocalBoard,
         // Stage 4: live OOB-manifest-discovered co-observer boards (C1 fan-out) when the master flag
         // is set; default [] (no fan-out, byte-identical to the pre-Stage-4 single-board path).
         coObserverBoards: liveSeams?.coObserverBoards ?? [],
@@ -565,6 +583,21 @@ export async function startDaemon(overrides?: {
         config: { k: verifyK, deltaBps: verifyDeltaBps, sendRate: verifyK },
       },
     });
+
+    // Stage 4.5 (C1 cross-host): in LIVE mode start THIS host's local `/canary/claims` mTLS server,
+    // sharing `canaryLocalBoard` so a PEER can POST its self-attestation onto the board this daemon
+    // assembles from (the >=2-distinct quorum forms cross-host). Gated on the master flag (liveSeams
+    // != null) AND the TLS fork; vanilla mode (flag off) starts NO server -> byte-identical.
+    if (liveSeams && isCanaryClaimsTlsEnabled(process.env)) {
+      const tls = await loadCanaryTls(process.env);
+      state.canaryClaimsServer = await startCanaryClaimsServer({
+        board: canaryLocalBoard,
+        logger: verifyLog,
+        env: process.env,
+        tls,
+      });
+      verifyLog.info('canary /canary/claims mTLS server started (shared localBoard, C1 cross-host accrual)');
+    }
   } catch (err) {
     log.error({ err }, 'canary verify loop failed to start (daemon continues)');
   }
@@ -1060,6 +1093,14 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
     l.info('Canary verify loop stopped');
   }
 
+  // Stage 4.5 (C1 cross-host): stop the local /canary/claims mTLS server (live mode only). stopDaemon
+  // is sync -> fire-and-forget the graceful close (the process is exiting); errors are swallowed.
+  if (state.canaryClaimsServer) {
+    void state.canaryClaimsServer.stop().catch(() => {});
+    state.canaryClaimsServer = null;
+    l.info('Canary claims mTLS server stopped');
+  }
+
   // M2 chunk 1 (REQ-CFA-015): close the off-chain coverage feed server.
   if (state.coverageServer) {
     state.coverageServer.close();
@@ -1274,6 +1315,12 @@ async function main(): Promise<void> {
           if (s.coverageServer) {
             s.coverageServer.close();
             s.coverageServer = null;
+          }
+          // Stage 4.5 (C1 cross-host): tear down the local /canary/claims mTLS server (live mode only),
+          // alongside the other loopback HTTP servers in the LAST group.
+          if (s.canaryClaimsServer) {
+            await s.canaryClaimsServer.stop();
+            s.canaryClaimsServer = null;
           }
           await (healthz?.close() ?? Promise.resolve());
         },

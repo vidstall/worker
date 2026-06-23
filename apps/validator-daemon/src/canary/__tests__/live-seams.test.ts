@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { signManifest, type OperatorManifest, type SignedManifest } from '@dvconf/shared';
-import { buildLiveSeams } from '../live-seams.js';
+import { buildLiveSeams, loadCanaryTls } from '../live-seams.js';
 import {
   runCanaryVerifyRound,
   type CanaryVerifyDeps,
@@ -252,5 +252,29 @@ describe('(d) INV-C — the wire payload leaks no salt and no Wallet-A<->Wallet-
       expect(claimJson.includes(CELL_SECRET_HEX)).toBe(false);
       expect(claimJson.includes(Buffer.from(selfKp.getPublicKey().toRawBytes()).toString('hex'))).toBe(false);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// (e) Stage 4.5 — loadCanaryTls: own PEM + the trusted-peer SPKI set, SHARED by the client boards
+//     AND the local /canary/claims SERVER (index.ts) so the same pin set guards BOTH directions.
+// ─────────────────────────────────────────────────────────────────────────────────
+describe('(e) loadCanaryTls — own cert/key + trusted-peer SPKI set from the OOB bundle', () => {
+  it('reads this host PEM and distills the 2-entry trusted SPKI set (both manifests certFingerprint)', async () => {
+    const tls = await loadCanaryTls(fixtureEnv());
+    expect(tls.cert).toContain('BEGIN CERTIFICATE');
+    expect(tls.key).toContain('BEGIN PRIVATE KEY');
+    // The set the SERVER pins as trustedClientSpki == what the CLIENT pins as trustedServerSpki:
+    // every manifest's certFingerprint (self 'aa'*32 + peer 'bb'*32) — single-sourced, both directions.
+    expect(tls.trustedSpki instanceof Set).toBe(true);
+    expect(tls.trustedSpki.size).toBe(2);
+    expect(tls.trustedSpki.has('aa'.repeat(32))).toBe(true);
+    expect(tls.trustedSpki.has('bb'.repeat(32))).toBe(true);
+  });
+
+  it('throws fail-loud when a required TLS path is unset', async () => {
+    const env = fixtureEnv();
+    delete env.CANARY_TLS_CERT_PATH;
+    await expect(loadCanaryTls(env)).rejects.toThrow(/CANARY_TLS_CERT_PATH/);
   });
 });
