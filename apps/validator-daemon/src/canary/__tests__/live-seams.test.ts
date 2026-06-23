@@ -21,6 +21,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import type { SuiClient } from '@mysten/sui/client';
 import { signManifest, type OperatorManifest, type SignedManifest } from '@dvconf/shared';
 import { buildLiveSeams, loadCanaryTls } from '../live-seams.js';
 import {
@@ -29,7 +30,7 @@ import {
   type CanarySlashSubmit,
 } from '../verify-loop.js';
 import { type CanaryValidator } from '../cell.js';
-import { OBSERVED_HASH_MISSING, type DivergenceProof } from '../proof.js';
+import { OBSERVED_HASH_MISSING, buildDivergenceProof, type DivergenceProof } from '../proof.js';
 import { InMemoryClaimBoard } from '../claim-board.js';
 
 // ── fixture constants (the demo config the helper sources, NOT test literals on the wire) ──
@@ -42,6 +43,9 @@ const CELL_SECRET_HEX = '5a'.repeat(16);
 let dir: string;
 let selfKp: Ed25519Keypair;
 let peerKp: Ed25519Keypair;
+// The relay (bondOwner) keypair written into the temp keys file — hoisted so case (f) can
+// assert the constructed `submit` seam SIGNS with exactly this key (W-E9 self-slash).
+let relayKp: Ed25519Keypair;
 
 /** Build a signed manifest for `kp` over `endpoint` with a synthetic cert fingerprint. */
 async function makeSigned(kp: Ed25519Keypair, endpoint: string, certFp: string): Promise<SignedManifest> {
@@ -67,7 +71,7 @@ beforeEach(async () => {
   writeFileSync(join(dir, 'manifest-bundle.json'), JSON.stringify(bundle));
 
   // Temp keys file (.scratch-daemon-keys.json shape): the relay entry = bondOwner (W-E9 self-slash).
-  const relayKp = new Ed25519Keypair();
+  relayKp = new Ed25519Keypair();
   const keys = {
     relay: {
       secretKey: relayKp.getSecretKey(), // bech32 'suiprivkey1...'
@@ -276,5 +280,88 @@ describe('(e) loadCanaryTls — own cert/key + trusted-peer SPKI set from the OO
     const env = fixtureEnv();
     delete env.CANARY_TLS_CERT_PATH;
     await expect(loadCanaryTls(env)).rejects.toThrow(/CANARY_TLS_CERT_PATH/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// (f) CARRY (multi-cp-quorum step-3) — the constructed `submit` seam, INVOKED via the
+//     `createClient` hook. The WAN run exercised this path live, but no automated test
+//     drove the REAL seam (cases a-e use a FAKE submit). This pins the 4a wiring without a
+//     socket: lazy single-client, the W-E9 relay-self-slash signer, and the fail-loud path.
+// ─────────────────────────────────────────────────────────────────────────────────
+describe('(f) the constructed submit seam invokes createClient + signs with the relay key (W-E9)', () => {
+  /**
+   * A real >=2-distinct proof (buildDivergenceProof). roomId/relayMinerId MUST be valid 32-byte
+   * Sui addresses — the PTB `tx.pure.id(...)` validates them strictly (unlike the proof builder,
+   * which zero-fills non-hex). The seam hands this to the (mock) client.
+   */
+  async function makeProof(): Promise<DivergenceProof> {
+    return buildDivergenceProof({
+      roomId: `0x${'11'.repeat(32)}`,
+      relayMinerId: `0x${'22'.repeat(32)}`,
+      canaryId: 7,
+      frameSeq: 2,
+      expectedHash: 'aa'.repeat(32),
+      observedHash: 'bb'.repeat(32),
+      sessionKeypairs: [new Ed25519Keypair(), new Ed25519Keypair()],
+    });
+  }
+
+  /** A mock SuiClient that records the signer/tx and returns a successful (or failing) result. */
+  function mockClient(status: 'success' | 'failure') {
+    const calls = { sign: [] as Array<{ signer: unknown; transaction: unknown }>, wait: [] as string[] };
+    const client = {
+      signAndExecuteTransaction: async (args: { signer: unknown; transaction: unknown }) => {
+        calls.sign.push(args);
+        return { digest: '0xdeadbeef', effects: { status: { status, error: 'E_DEMO' } } };
+      },
+      waitForTransaction: async (args: { digest: string }) => {
+        calls.wait.push(args.digest);
+        return {};
+      },
+    } as unknown as SuiClient;
+    return { client, calls };
+  }
+
+  it('lazily creates ONE client (SUI_RPC_URL), reuses it, and signs with the relay bond owner', async () => {
+    const rpcUrls: string[] = [];
+    const { client, calls } = mockClient('success');
+    const seams = await buildLiveSeams(fixtureEnv(), {
+      createClient: (rpcUrl: string) => {
+        rpcUrls.push(rpcUrl);
+        return client;
+      },
+    });
+    expect(seams).not.toBeNull();
+
+    // LAZY: construction opens no socket — createClient untouched until the first submit.
+    expect(rpcUrls).toEqual([]);
+
+    const proof = await makeProof();
+    await seams!.submit(proof);
+
+    // First submit created exactly one client, pointed at the env RPC url.
+    expect(rpcUrls).toEqual(['http://127.0.0.1:9000']);
+    expect(calls.sign.length).toBe(1);
+    expect(calls.wait).toEqual(['0xdeadbeef']);
+
+    // W-E9: the slash tx is SIGNED BY THE RELAY (bond owner) — the keypair from the keys file,
+    // NOT a validator key. Address-compare the recorded signer to the hoisted relay keypair.
+    const signer = calls.sign[0]!.signer as Ed25519Keypair;
+    expect(signer.toSuiAddress()).toBe(relayKp.toSuiAddress());
+    // A Transaction was handed in (PTB content is pinned by slash-submitter + the localnet E2E).
+    expect(calls.sign[0]!.transaction).toBeDefined();
+
+    // Second submit REUSES the cached client (lazy single-client) — no new createClient call.
+    await seams!.submit(proof);
+    expect(rpcUrls).toEqual(['http://127.0.0.1:9000']);
+    expect(calls.sign.length).toBe(2);
+  });
+
+  it('propagates a fail-loud error when the chain reports a non-success status', async () => {
+    const { client } = mockClient('failure');
+    const seams = await buildLiveSeams(fixtureEnv(), { createClient: () => client });
+    const proof = await makeProof();
+    await expect(seams!.submit(proof)).rejects.toThrow(/failed on-chain/);
   });
 });
