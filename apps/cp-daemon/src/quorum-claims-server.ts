@@ -22,9 +22,10 @@
  *     surface (INV-A): the codec WRAPS the pre-signed bytes, never alters them. The server is
  *     transport-agnostic about the rest of the attestation shape; it round-trips `pubkey`/`sig`
  *     base64 fields verbatim if present.
- *   - Fresh `isQuorumClaimsAuthorized()` — length short-circuit → `Buffer.from(utf8)`×2 → re-check
- *     length → `crypto.timingSafeEqual` (metrics-server.ts:111-124 SHAPE; `timingSafeEqual` imported
- *     FRESH from node:crypto; NEVER turn-rpc `===`; NEVER imported from apps/relay — INV-B).
+ *   - Bearer auth = shared `isBearerAuthorized` (DRY review D2) — length short-circuit →
+ *     `Buffer.from(utf8)`×2 → re-check length → `crypto.timingSafeEqual` (metrics-server.ts:111-124
+ *     SHAPE; `timingSafeEqual` FRESH from node:crypto in `@dvconf/shared/bearer-auth.ts`; NEVER the
+ *     turn-rpc `===`; NEVER imported from apps/relay — INV-B).
  *
  * Auth = FAIL-LOUD: `QUORUM_CLAIMS_AUTH_TOKEN` is read once at factory time; an unset token throws
  * (refuse-to-start). A test-only `opts.authTokenOverride` injects a token without the env. Port is
@@ -36,9 +37,8 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
 import type { Logger } from '@dvconf/shared';
-import { type QuorumClaimBoard, type ClaimKind } from '@dvconf/shared';
+import { type QuorumClaimBoard, type ClaimKind, isBearerAuthorized } from '@dvconf/shared';
 import {
   resolveQuorumClaimsPort,
   assertQuorumPortFree,
@@ -108,25 +108,9 @@ export interface StartQuorumClaimsResult {
   getMetrics: () => QuorumClaimsMetrics;
 }
 
-/**
- * Fresh constant-time bearer check (metrics-server.ts:111-124 SHAPE). NOT the turn-rpc `===`; NOT
- * imported from apps/relay (INV-B). FAIL-CLOSED when no token configured (a transport carrying
- * quorum signatures must never run open) — `expectedToken` is guaranteed non-empty by the factory's
- * fail-LOUD construction, but the guard is defensive.
- */
-function isQuorumClaimsAuthorized(req: IncomingMessage, expectedToken: string): boolean {
-  if (expectedToken === '') return false; // FAIL-CLOSED (security-critical transport)
-  const authHeader = req.headers['authorization'];
-  if (typeof authHeader !== 'string') return false;
-  const prefix = 'Bearer ';
-  if (!authHeader.startsWith(prefix)) return false;
-  const presented = authHeader.slice(prefix.length);
-  if (presented.length === 0) return false;
-  const a = Buffer.from(presented, 'utf8');
-  const b = Buffer.from(expectedToken, 'utf8');
-  if (a.length !== b.length) return false; // length is not secret; short-circuit before the call
-  return timingSafeEqual(a, b);
-}
+// Bearer auth = the shared constant-time `isBearerAuthorized` (DRY review D2): the byte-identical
+// per-carrier check is single-sourced in `@dvconf/shared/bearer-auth.ts` (FAIL-CLOSED on empty token;
+// node:crypto timingSafeEqual; NOT imported from apps/relay — INV-B).
 
 interface PostBody {
   kind: ClaimKind;
@@ -310,7 +294,7 @@ export async function startQuorumClaimsServer(
       }
 
       // Auth gate (all routes; constant-time).
-      if (!isQuorumClaimsAuthorized(req, token!)) {
+      if (!isBearerAuthorized(req, token!)) {
         return send(res, 401, { error: 'unauthorized' });
       }
 

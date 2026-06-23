@@ -39,8 +39,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
-import { type Logger, createMtlsServer } from '@dvconf/shared';
+import { type Logger, createMtlsServer, isBearerAuthorized } from '@dvconf/shared';
 import type { RequestListener } from 'node:http';
 import type { ClaimBoard, OpenClaimCell } from './claim-board.js';
 import type { DivergenceClaim, DivergenceAttestation } from './proof.js';
@@ -122,24 +121,9 @@ export function isCanaryClaimsTlsEnabled(env: Record<string, string | undefined>
   return raw === '1' || raw === 'true';
 }
 
-/**
- * Fresh constant-time bearer check. NOT a `===`; NOT imported from apps/relay (INV-B). FAIL-CLOSED
- * when no token configured — `expectedToken` is guaranteed non-empty by the factory's fail-LOUD
- * construction, but the guard is defensive.
- */
-function isCanaryClaimsAuthorized(req: IncomingMessage, expectedToken: string): boolean {
-  if (expectedToken === '') return false; // FAIL-CLOSED (security-critical transport)
-  const authHeader = req.headers['authorization'];
-  if (typeof authHeader !== 'string') return false;
-  const prefix = 'Bearer ';
-  if (!authHeader.startsWith(prefix)) return false;
-  const presented = authHeader.slice(prefix.length);
-  if (presented.length === 0) return false;
-  const a = Buffer.from(presented, 'utf8');
-  const b = Buffer.from(expectedToken, 'utf8');
-  if (a.length !== b.length) return false; // length is not secret; short-circuit before the call
-  return timingSafeEqual(a, b);
-}
+// Bearer auth = the shared constant-time `isBearerAuthorized` (DRY review D2): the byte-identical
+// per-carrier check is single-sourced in `@dvconf/shared/bearer-auth.ts` (FAIL-CLOSED on empty token;
+// node:crypto timingSafeEqual; NOT imported from apps/relay — INV-B).
 
 /** The on-the-wire attestation shape: Wallet-B `{pubkey,sig}` base64 ONLY (INV-C). */
 interface WireAttestation {
@@ -366,7 +350,7 @@ export async function startCanaryClaimsServer(
       }
 
       // Auth gate (all routes; constant-time).
-      if (!isCanaryClaimsAuthorized(req, token!)) {
+      if (!isBearerAuthorized(req, token!)) {
         return send(res, 401, { error: 'unauthorized' });
       }
 

@@ -13,58 +13,42 @@
  * carrier. Additive — no existing surface is touched.
  */
 
+import {
+  DAEMON_PORTS_IN_USE,
+  assertClaimsPortFree,
+  resolveClaimsPort,
+} from '@dvconf/shared';
+
 /** The carrier's canonical default port (free vs the in-use daemon set). */
 export const DEFAULT_QUORUM_CLAIMS_PORT = 8092 as const;
 
 /**
- * The ports already bound by the daemon set (ROADMAP §9):
- *   8090 TURN_RPC · 8091 CP_HEALTHZ · 8082 SIGNALING_HEALTHZ · 8080 SIGNALING ·
- *   8081 BENCH · 4000 relay WS · 4001 relay METRICS · 8101 VALIDATOR_HEALTHZ ·
- *   8102 VALIDATOR_CANARY_COVERAGE.
+ * The ports already bound by the daemon set (ROADMAP §9). Re-exported from the
+ * single canonical `@dvconf/shared` set (DRY review D1) so the cap-token + canary
+ * carriers can no longer drift their in-use lists. Kept exported for the existing
+ * callers/tests.
  */
-export const DAEMON_PORTS_IN_USE: readonly number[] = [
-  8090, 8091, 8082, 8080, 8081, 4000, 4001, 8101, 8102,
-];
-
-const MIN_PORT = 1;
-const MAX_PORT = 65535;
+export { DAEMON_PORTS_IN_USE };
 
 /**
- * Fail-closed pre-flight assert: throws if `port` collides with a port already
- * in use by the daemon set. The error names the offending port so an operator
- * can debug the mis-config. Mirrors the EADDRINUSE failure mode without binding.
+ * Fail-closed pre-flight assert (delegates to the shared generic): throws if
+ * `port` collides with a port already in use by the daemon set. Mirrors the
+ * EADDRINUSE failure mode without binding.
  */
 export function assertQuorumPortFree(
   port: number,
   inUse: readonly number[] = DAEMON_PORTS_IN_USE,
 ): void {
-  if (inUse.includes(port)) {
-    throw new Error(
-      `quorum-claims port ${port} is in use (EADDRINUSE-style collision) — ` +
-        `it conflicts with the daemon port set [${[...inUse].join(', ')}]. ` +
-        `Set QUORUM_CLAIMS_PORT to a free port.`,
-    );
-  }
+  assertClaimsPortFree(port, 'quorum-claims', 'QUORUM_CLAIMS_PORT', inUse);
 }
 
 /**
  * Resolve the carrier port from env `QUORUM_CLAIMS_PORT`, defaulting to
- * {@link DEFAULT_QUORUM_CLAIMS_PORT}. Fail-closed on a non-numeric or
- * out-of-range value (no silent fallback to the default, which would mask a
- * typo and hand the carrier a wrong port).
+ * {@link DEFAULT_QUORUM_CLAIMS_PORT}. Fail-closed on a non-numeric / out-of-range
+ * value (delegates to the shared generic).
  */
 export function resolveQuorumClaimsPort(
   env: Record<string, string | undefined> = process.env,
 ): number {
-  const raw = env['QUORUM_CLAIMS_PORT'];
-  if (raw === undefined || raw === '') {
-    return DEFAULT_QUORUM_CLAIMS_PORT;
-  }
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < MIN_PORT || parsed > MAX_PORT) {
-    throw new Error(
-      `QUORUM_CLAIMS_PORT="${raw}" is not a valid TCP port (${MIN_PORT}-${MAX_PORT}).`,
-    );
-  }
-  return parsed;
+  return resolveClaimsPort(env, 'QUORUM_CLAIMS_PORT', DEFAULT_QUORUM_CLAIMS_PORT);
 }

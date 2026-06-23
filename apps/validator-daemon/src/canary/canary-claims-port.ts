@@ -20,58 +20,41 @@
  * caught.
  */
 
+import {
+  DAEMON_PORTS_IN_USE,
+  assertClaimsPortFree,
+  resolveClaimsPort,
+} from '@dvconf/shared';
+
 /** The canary carrier's canonical default port (DESIGN; per-host distinct from cp-daemon in prod). */
 export const DEFAULT_CANARY_CLAIMS_PORT = 8092 as const;
 
 /**
- * The ports already bound by the daemon set on a single host (mirrors quorum-claims-port.ts):
- *   8090 TURN_RPC · 8091 CP_HEALTHZ · 8082 SIGNALING_HEALTHZ · 8080 SIGNALING ·
- *   8081 BENCH · 4000 relay WS · 4001 relay METRICS · 8101 VALIDATOR_HEALTHZ ·
- *   8102 VALIDATOR_CANARY_COVERAGE.
- * (8092 — this carrier's own default — is intentionally NOT here; see the module header.)
+ * The ports already bound by the daemon set on a single host. Re-exported from the single canonical
+ * `@dvconf/shared` set (DRY review D1) under the carrier-local name, so the cap-token + canary
+ * carriers can no longer drift their in-use lists. (8092 — this carrier's own default — is NOT in the
+ * set; see the module header.) Kept exported under this name for the existing callers/tests.
  */
-export const CANARY_DAEMON_PORTS_IN_USE: readonly number[] = [
-  8090, 8091, 8082, 8080, 8081, 4000, 4001, 8101, 8102,
-];
-
-const MIN_PORT = 1;
-const MAX_PORT = 65535;
+export const CANARY_DAEMON_PORTS_IN_USE: readonly number[] = DAEMON_PORTS_IN_USE;
 
 /**
- * Fail-closed pre-flight assert: throws if `port` collides with a port already in use by the daemon
- * set. The error names the offending port so an operator can debug the mis-config. Mirrors the
- * EADDRINUSE failure mode without binding.
+ * Fail-closed pre-flight assert (delegates to the shared generic): throws if `port` collides with a
+ * port already in use by the daemon set. Mirrors the EADDRINUSE failure mode without binding.
  */
 export function assertCanaryClaimsPortFree(
   port: number,
   inUse: readonly number[] = CANARY_DAEMON_PORTS_IN_USE,
 ): void {
-  if (inUse.includes(port)) {
-    throw new Error(
-      `canary-claims port ${port} is in use (EADDRINUSE-style collision) — ` +
-        `it conflicts with the daemon port set [${[...inUse].join(', ')}]. ` +
-        `Set CANARY_CLAIMS_PORT to a free port.`,
-    );
-  }
+  assertClaimsPortFree(port, 'canary-claims', 'CANARY_CLAIMS_PORT', inUse);
 }
 
 /**
  * Resolve the carrier port from env `CANARY_CLAIMS_PORT`, defaulting to
- * {@link DEFAULT_CANARY_CLAIMS_PORT}. Fail-closed on a non-numeric or out-of-range value (no silent
- * fallback to the default, which would mask a typo and hand the carrier a wrong port).
+ * {@link DEFAULT_CANARY_CLAIMS_PORT}. Fail-closed on a non-numeric / out-of-range value (delegates to
+ * the shared generic).
  */
 export function resolveCanaryClaimsPort(
   env: Record<string, string | undefined> = process.env,
 ): number {
-  const raw = env['CANARY_CLAIMS_PORT'];
-  if (raw === undefined || raw === '') {
-    return DEFAULT_CANARY_CLAIMS_PORT;
-  }
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < MIN_PORT || parsed > MAX_PORT) {
-    throw new Error(
-      `CANARY_CLAIMS_PORT="${raw}" is not a valid TCP port (${MIN_PORT}-${MAX_PORT}).`,
-    );
-  }
-  return parsed;
+  return resolveClaimsPort(env, 'CANARY_CLAIMS_PORT', DEFAULT_CANARY_CLAIMS_PORT);
 }

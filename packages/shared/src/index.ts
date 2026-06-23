@@ -182,3 +182,11 @@ export type {
   MtlsServerConfig,
   PinnedDispatcherConfig,
 } from './mtls-carrier.js';
+
+// OQ-7 / ADR-0021 carrier — DRY extraction (2026-06-23 review D1+D2). The two per-carrier claim
+// servers (cap-token /quorum/claims + canary /canary/claims) shared a near-identical port-collision
+// guard (incl. the drift-prone in-use daemon-port SET) and a byte-identical constant-time bearer
+// check. Single-sourced here; each carrier keeps only its own DEFAULT_*_PORT + *_AUTH_TOKEN env name
+// and delegates. PURE (no transport) — the per-carrier modules stay behavior-preserving wrappers.
+export { DAEMON_PORTS_IN_USE, assertClaimsPortFree, resolveClaimsPort } from './claims-port.js';
+export { isBearerAuthorized } from './bearer-auth.js';

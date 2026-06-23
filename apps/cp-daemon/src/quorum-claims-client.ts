@@ -68,8 +68,10 @@ type WireMethod = keyof HttpQuorumClaimMetrics['requests'];
  *
  * NO CA / NO central PKI (DESIGN-cross-host-oq7.md): trust is the SPKI pin, NOT chain-of-trust cert
  * validation — hence `rejectUnauthorized:false` (the self-signed cert is NOT rejected by the default
- * CA path) with the SPKI check enforced in `checkServerIdentity` instead. The SPKI is pinned to the
- * KEY (`sha256(SubjectPublicKeyInfo DER)`), so it survives a same-key cert re-issue.
+ * CA path). NOTE (ADR-0021 deviation): undici does NOT fire `connect.checkServerIdentity` under
+ * `rejectUnauthorized:false`, so the SPKI pin is enforced by the shared `buildPinnedDispatcher`
+ * single-gate `buildConnector` handback instead. The SPKI is pinned to the KEY
+ * (`sha256(SubjectPublicKeyInfo DER)`), so it survives a same-key cert re-issue.
  */
 export interface HttpQuorumClaimTlsConfig {
   /** The client's self-signed TLS cert (PEM) — its SPKI is what the server pins. */
