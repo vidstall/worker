@@ -167,3 +167,18 @@ export type {
   SignedManifest,
   ManifestVerifyResult,
 } from './operator-manifest.js';
+
+// OQ-7 / ADR-0021 cross-host mTLS carrier — Phase D-1 PROMOTE. The GENERIC (carrier-agnostic)
+// SPKI-pin primitives single-sourced out of apps/cp-daemon so the canary carrier (validator-daemon)
+// reuses the SAME security-critical pin code WITHOUT a cross-app import. The cap-token-specific thin
+// wrappers (flag name, route, config) stay in apps/cp-daemon and re-point to these.
+export {
+  isPeerSpkiTrusted,
+  createMtlsServer,
+  buildPinnedDispatcher,
+  manifestsToTrustedSpki,
+} from './mtls-carrier.js';
+export type {
+  MtlsServerConfig,
+  PinnedDispatcherConfig,
+} from './mtls-carrier.js';

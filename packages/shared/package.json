@@ -16,7 +16,8 @@
   "dependencies": {
     "@mysten/sui": "^1.0.0",
     "dotenv": "^16.0.0",
-    "pino": "^9.0.0"
+    "pino": "^9.0.0",
+    "undici": "^6.27.0"
   },
   "devDependencies": {
     "pino-pretty": "^13.0.0"
