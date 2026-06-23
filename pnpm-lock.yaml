@@ -65,6 +65,9 @@ importers:
       dotenv:
         specifier: ^16.0.0
         version: 16.6.1
+      undici:
+        specifier: ^6.27.0
+        version: 6.27.0
 
   apps/forensic-cli:
     dependencies:
@@ -1316,6 +1319,10 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
+  undici@6.27.0:
+    resolution: {integrity: sha512-YmfV3YnEDzXRC5lZ2jWtWWHKGUm1zIt8AhesR1tens+HTNv+YZlN/dp6G727LOvMJ8xjP9Be7Y2Sdr96LDm+pg==}
+    engines: {node: '>=18.17'}
+
   valibot@1.2.0:
     resolution: {integrity: sha512-mm1rxUsmOxzrwnX5arGS+U4T25RdvpPjPN4yR0u9pUBov9+zGVtO84tif1eY4r6zWxVxu3KzIyknJy3rxfRZZg==}
     peerDependencies:
@@ -2440,6 +2447,8 @@ snapshots:
   ufo@1.6.3: {}
 
   undici-types@6.21.0: {}
+
+  undici@6.27.0: {}
 
   valibot@1.2.0(typescript@5.9.3):
     optionalDependencies:

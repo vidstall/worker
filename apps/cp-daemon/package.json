@@ -11,10 +11,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dvconf/shared": "workspace:*",
     "@dvconf/chain-event-listener": "workspace:*",
     "@dvconf/health-monitor": "workspace:*",
+    "@dvconf/shared": "workspace:*",
     "@mysten/sui": "^1.0.0",
-    "dotenv": "^16.0.0"
+    "dotenv": "^16.0.0",
+    "undici": "^6.27.0"
   }
 }

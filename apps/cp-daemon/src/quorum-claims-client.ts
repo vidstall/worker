@@ -29,11 +29,14 @@
  * Observability: additive client-side pino counters (requests by method + non-2xx + latency) +
  * `getMetrics()`. Zero raw `console.*`.
  */
-import { createLogger, type Logger } from '@dvconf/shared';
+import { Agent, buildConnector } from 'undici';
+import type { TLSSocket } from 'node:tls';
+import { createLogger, type Logger, spkiFingerprint } from '@dvconf/shared';
 import {
   type QuorumClaimBoard,
   type ClaimKind,
   type OpenGenericCell,
+  type OperatorManifest,
 } from '@dvconf/shared';
 
 /** Per-method request tally exposed for observability (additive — zero consumer change). */
@@ -53,8 +56,28 @@ export interface HttpQuorumClaimMetrics {
 
 type WireMethod = keyof HttpQuorumClaimMetrics['requests'];
 
+/**
+ * OQ-7 / ADR-0021 cross-host mTLS CLIENT material. When supplied, `baseUrl` MUST be `https://…` and
+ * every request rides a mutually-authenticated TLS channel: the client PRESENTS `{cert,key}` (its own
+ * SPKI is what the Phase-B server pins) and PINS the server's SPKI — the peer cert's
+ * `spkiFingerprint(peerCert)` MUST be in `trustedServerSpki`, else the TLS handshake fails-closed.
+ *
+ * NO CA / NO central PKI (DESIGN-cross-host-oq7.md): trust is the SPKI pin, NOT chain-of-trust cert
+ * validation — hence `rejectUnauthorized:false` (the self-signed cert is NOT rejected by the default
+ * CA path) with the SPKI check enforced in `checkServerIdentity` instead. The SPKI is pinned to the
+ * KEY (`sha256(SubjectPublicKeyInfo DER)`), so it survives a same-key cert re-issue.
+ */
+export interface HttpQuorumClaimTlsConfig {
+  /** The client's self-signed TLS cert (PEM) — its SPKI is what the server pins. */
+  cert: string;
+  /** The client's self-signed TLS private key (PEM). */
+  key: string;
+  /** Trusted server SPKI fingerprints (`spkiFingerprint` lowercase hex). The peer must be in this set. */
+  trustedServerSpki: ReadonlySet<string>;
+}
+
 export interface HttpQuorumClaimBoardOptions {
-  /** Base URL of the live 7a carrier, e.g. `http://127.0.0.1:8092`. */
+  /** Base URL of the live 7a carrier, e.g. `http://127.0.0.1:8092` (or `https://…` in TLS mode). */
   baseUrl: string;
   /** Bearer token mirroring the server's `QUORUM_CLAIMS_AUTH_TOKEN`. */
   token: string;
@@ -62,6 +85,27 @@ export interface HttpQuorumClaimBoardOptions {
   fetch?: typeof fetch;
   /** Optional logger (defaults to a fresh `quorum/claims-client` pino logger). */
   logger?: Logger;
+  /**
+   * OQ-7 Phase C cross-host mTLS material + the pinned server trust set. When supplied, the client
+   * builds an undici `Agent` dispatcher (presents the cert, pins the server SPKI) and rides it on
+   * every request. When ABSENT the existing plain-`fetch` path is byte-identical (zero behavior change).
+   */
+  tls?: HttpQuorumClaimTlsConfig;
+}
+
+/**
+ * OQ-7 Phase C — MANIFEST-DERIVED trust. Distill the `certFingerprint` (SPKI) column from a verified
+ * `loadManifests(...)` map into the trusted-SPKI `Set` consumed by BOTH the Phase-B server's
+ * `trustedSpki` and this client's `trustedServerSpki`. This CLOSES the Phase-B "trustedSpki injected
+ * in tests" caveat: trust now flows from the signed {operatorPubkey → certFingerprint} bindings the
+ * operator manifests carry, with NO injected set and NO CA.
+ */
+export function manifestsToTrustedSpki(
+  manifests: ReadonlyMap<string, OperatorManifest>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const m of manifests.values()) out.add(m.certFingerprint);
+  return out;
 }
 
 /**
@@ -73,6 +117,13 @@ export class HttpQuorumClaimBoard implements QuorumClaimBoard {
   private readonly token: string;
   private readonly doFetch: typeof fetch;
   private readonly log: Logger;
+  /**
+   * OQ-7 Phase C: the undici `Agent` dispatcher carrying the client cert + the server-SPKI pin. Set
+   * only in TLS mode; `undefined` on the plain-fetch path (so that path stays byte-identical).
+   * `globalThis.fetch` is undici and IGNORES a `node:https` Agent — the cert/trust MUST ride on the
+   * non-standard `dispatcher` init field (needs an as-cast for the `RequestInit` type gap).
+   */
+  private readonly dispatcher: Agent | undefined;
   private readonly metrics: HttpQuorumClaimMetrics = {
     requests: { post: 0, listOpen: 0, get: 0, markSubmitted: 0, gc: 0 },
     non2xx: 0,
@@ -85,6 +136,88 @@ export class HttpQuorumClaimBoard implements QuorumClaimBoard {
     this.token = opts.token;
     this.doFetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this.log = opts.logger ?? createLogger('quorum/claims-client');
+
+    // OQ-7 Phase C: in TLS mode, build the undici Agent dispatcher ONCE. It PRESENTS the client
+    // {cert,key} and PINS the server SPKI fail-closed (an untrusted carrier is REFUSED — the socket
+    // is destroyed before any application byte is exchanged).
+    //
+    // NO CA / NO central PKI (DESIGN-cross-host-oq7.md) → `rejectUnauthorized:false` to skip the CA
+    // chain check on the self-signed server cert. IMPORTANT DEVIATION FROM THE DESIGN PROSE: Node's
+    // `tls.connect` only invokes `checkServerIdentity` when `rejectUnauthorized !== false`, so a
+    // `checkServerIdentity` pin would NEVER FIRE under `rejectUnauthorized:false` (verified by probe:
+    // the handshake silently succeeds). We therefore enforce the SPKI pin in a `buildConnector`
+    // wrapper that inspects the negotiated TLS socket's peer cert AFTER connect and destroys the
+    // socket on a non-match. This makes the SPKI pin the ENTIRE, ALWAYS-RUN trust decision.
+    if (opts.tls !== undefined) {
+      const { cert, key, trustedServerSpki } = opts.tls;
+      // `maxCachedSessions:0` DISABLES TLS session resumption: when the client presents a cert, a
+      // resumed session returns an EMPTY peer certificate (verified by probe), which would make the
+      // SPKI pin spuriously fail-closed on the 2nd+ connection. With resumption off, the full peer
+      // cert is presented on every fresh secure connection so the pin always has a cert to check.
+      const baseConnect = buildConnector({ cert, key, rejectUnauthorized: false, maxCachedSessions: 0 });
+
+      // RACE FIX (by construction): the SPKI pin BLOCKS socket handback. undici's `buildConnector`
+      // fires this callback on the `secureConnect` event, at which point the peer cert is available.
+      // We compute a single boolean `pinned` from the peer SPKI and hand the live socket to undici
+      // ONLY on `pinned === true`; on ANY other path (read error / empty cert / SPKI mismatch /
+      // unexpected throw) we DESTROY the socket and call `callback(error)`. There is exactly ONE
+      // `callback(null, socket)` site and it is dominated by `pinned === true`, so a request can NEVER
+      // flow on a not-yet-pinned or untrusted socket — the pin is the ENTIRE, ALWAYS-RUN trust gate.
+      const pinnedConnect: buildConnector.connector = (connectOpts, callback) => {
+        baseConnect(connectOpts, (err, socket) => {
+          if (err) return callback(err, null);
+          const tlsSocket = socket as TLSSocket;
+          // `pinned` starts false and is set true ONLY after a positive trusted-set membership check.
+          // The sole handback (`callback(null, tlsSocket)`) is guarded on it — fail-closed by default.
+          let pinned = false;
+          let failReason = 'quorum/claims-client: server SPKI pin did not pass (fail-closed)';
+          try {
+            const peer = tlsSocket.getPeerCertificate(true) as { raw?: Buffer } | undefined;
+            if (peer === undefined || peer.raw === undefined || peer.raw.length === 0) {
+              failReason = 'quorum/claims-client: server presented no certificate (fail-closed)';
+            } else {
+              // Re-encode the DER peer cert to PEM so the shared SPKI helper can read its public key.
+              const pem =
+                '-----BEGIN CERTIFICATE-----\n' +
+                peer.raw.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, '') +
+                '\n-----END CERTIFICATE-----\n';
+              const fp = spkiFingerprint(pem);
+              if (trustedServerSpki.has(fp)) {
+                pinned = true;
+              } else {
+                failReason =
+                  'quorum/claims-client: server SPKI not in the trusted set (fail-closed pin)';
+              }
+            }
+          } catch (e) {
+            // Any read/encode/fingerprint error → stay fail-closed; surface the cause.
+            failReason =
+              e instanceof Error
+                ? `quorum/claims-client: SPKI pin error — ${e.message} (fail-closed)`
+                : 'quorum/claims-client: SPKI pin error (fail-closed)';
+            pinned = false;
+          }
+          if (!pinned) {
+            // Destroy BEFORE the error callback so undici can never hand this socket to a request.
+            tlsSocket.destroy();
+            return callback(new Error(failReason), null);
+          }
+          // Trusted — and ONLY now — hand the live, pinned socket back to undici.
+          return callback(null, tlsSocket);
+        });
+      };
+
+      // No pooled/keep-alive socket may skip the pin. `pipelining:0` forbids request pipelining on a
+      // connection, and `connections:` is left at undici's default; the load-bearing guarantee is that
+      // the pin runs inside `connect` for EVERY fresh secure connection and the handback is gated on
+      // `pinned`. Keep-alive REUSE of an already-pinned socket is sound (that socket passed the pin at
+      // connect time and TLS resumption is OFF via `maxCachedSessions:0`, so no un-pinned resumed
+      // socket can appear); `pipelining:0` additionally prevents an in-flight request from sharing a
+      // connection whose pin context could differ.
+      this.dispatcher = new Agent({ connect: pinnedConnect, pipelining: 0 });
+    } else {
+      this.dispatcher = undefined;
+    }
   }
 
   private authHeaders(json: boolean): Record<string, string> {
@@ -108,11 +241,15 @@ export class HttpQuorumClaimBoard implements QuorumClaimBoard {
     const t0 = Date.now();
     let res: Response;
     try {
-      res = await this.doFetch(`${this.baseUrl}${path}`, {
+      // The `dispatcher` field is undici-specific (NOT in the DOM `RequestInit`) — as-cast the gap.
+      // Plain-fetch path: `dispatcher` is undefined, so this object is byte-identical to the original.
+      const init = {
         method: httpMethod,
         headers: this.authHeaders(body !== undefined),
         body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
+        ...(this.dispatcher !== undefined ? { dispatcher: this.dispatcher } : {}),
+      } as RequestInit;
+      res = await this.doFetch(`${this.baseUrl}${path}`, init);
     } catch (err) {
       this.metrics.latency.count += 1;
       this.metrics.latency.totalMs += Date.now() - t0;
