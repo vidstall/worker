@@ -60,6 +60,7 @@ import {
   MIN_ATTESTERS,
   type DivergenceProof,
   type DivergenceClaim,
+  type DivergenceAttestation,
 } from './proof.js';
 import { attestIfIndependentlyObserved, type ClaimBoard } from './claim-board.js';
 import type { CanaryValidator, RelayRoomScope } from './cell.js';
@@ -124,18 +125,68 @@ export interface CanaryVerifyDeps {
   /** Capture the forwarded canary frames per receiver (injectable; synthetic in tests). */
   capture: CanaryForwardCapture;
   /**
-   * The pull-corroboration claim board (W-M4-COSIGN, D-CFA-42/43): this validator PUBLISHES its own
-   * Wallet-B self-attestation here and POLL-CORROBORATEs open cells against it. In-memory fake in
-   * tests; the live OFF-MEDIA-PATH cp-daemon carrier is M4b (D-CFA-47). REPLACES the M4a
-   * synthetic-peer-keypair seam — a real >=2-distinct quorum now forms from independent attestations.
+   * This validator's OWN pull-corroboration claim board (W-M4-COSIGN, D-CFA-42/43): it PUBLISHES its
+   * own Wallet-B self-attestation here, POLL-CORROBORATEs open cells against it, and ASSEMBLES+SUBMITS
+   * from it (step 7). In-memory fake in tests; the live OFF-MEDIA-PATH cp-daemon carrier is M4b
+   * (D-CFA-47). REPLACES the M4a synthetic-peer-keypair seam.
+   *
+   * C1 (ADR-0021, PLAN-m4b-hermetic §3.2): assemble+submit reads from THIS board only — there is no
+   * designated assembler. Every co-observer is an equal assembler+submitter over its OWN board.
    */
-  claimBoard: ClaimBoard;
+  localBoard: ClaimBoard;
+  /**
+   * C1 censorship-resistance fan-out (ADR-0021, PLAN-m4b-hermetic §3.2). When this validator
+   * self-attests (step 5) or corroborates (step 6), it cross-posts the attestation to EVERY board in
+   * this list (in addition to `localBoard`) so each honest co-observer independently accrues >=2 on
+   * its OWN board. DEFAULT `[]` -> the fan-out is a no-op and the singleton path is BYTE-IDENTICAL to
+   * the pre-C1 single-board behavior. Cross-post is FAIL-OPEN per board (a failing co-observer board
+   * must NEVER abort the round — redundancy IS the safety net here, the deliberate OPPOSITE of the
+   * fail-CLOSED carrier-store discipline). The live OOB-manifest-discovered boards are M4b.
+   */
+  coObserverBoards?: ClaimBoard[];
+  /**
+   * C1 jittered self-submit (ADR-0021, PLAN-m4b-hermetic §3.2): awaited immediately BEFORE
+   * `deps.submit(proof)` to de-synchronize the now-redundant submitters across co-observers (the
+   * on-chain VecSet + `markSubmitted` + the already-slashed abort absorb any double-submit race).
+   * DEFAULT no-op -> deterministic in tests + byte-identical timing for the singleton path.
+   */
+  jitter?: () => Promise<void>;
   /** This validator's Wallet-B SESSION keypair — signs its OWN single attestation only (INV-C). */
   selfSessionKeypair: Ed25519Keypair;
   /** Submit a built proof (injectable; the live PTB submit is M4b). */
   submit: CanarySlashSubmit;
   /** Gate tuning. */
   config: CanaryVerifyConfig;
+}
+
+/**
+ * C1 cross-post fan-out (PLAN-m4b-hermetic §3.2). Post `attestation` for `claim` to the validator's
+ * OWN `localBoard` AND every co-observer board, FAIL-OPEN per board: a single failing co-observer
+ * board is logged and skipped, NEVER aborting the round. The redundancy across boards — not any one
+ * board — is the censorship-resistance safety net, so a fail-CLOSED here would re-introduce the very
+ * censorship lever C1 removes. The `localBoard` post is also wrapped so a transient local failure
+ * cannot deny a peer's accrual on the other boards.
+ */
+async function fanOutPost(
+  deps: CanaryVerifyDeps,
+  claim: DivergenceClaim,
+  attestation: DivergenceAttestation,
+  round: number,
+  log: Logger,
+): Promise<void> {
+  const boards: ClaimBoard[] = [deps.localBoard, ...(deps.coObserverBoards ?? [])];
+  for (const board of boards) {
+    try {
+      await board.post(claim, attestation, round);
+    } catch (err) {
+      // FAIL-OPEN: redundancy is the safety net; one censoring/unreachable co-observer board must not
+      // abort the round (that would BE the censorship lever C1 closes). Logged, then skipped.
+      log.warn(
+        { err, round, relayMinerId: claim.relayMinerId, frameSeq: claim.frameSeq },
+        'C1 cross-post to a co-observer board failed (fail-open — redundancy is the safety net)',
+      );
+    }
+  }
 }
 
 /** The result of ONE verify round — the NEW accumulator + what was promoted/absorbed. */
@@ -253,7 +304,10 @@ export async function runCanaryVerifyRound(
         canonicalProofMessage({ ...claim, sessionKeypairs: [] }),
         deps.selfSessionKeypair,
       );
-      await deps.claimBoard.post(claim, selfAtt, round);
+      // C1 cross-post (PLAN §3.2): fan the self-attestation out to localBoard + every co-observer
+      // board so each honest co-observer independently accrues >=2. coObserverBoards defaults to []
+      // (no fan-out) -> byte-identical to the pre-C1 single-board post.
+      await fanOutPost(deps, claim, selfAtt, round, log);
       promoted.push(d);
     }
     absorbed.push(...result.absorbed);
@@ -282,25 +336,34 @@ export async function runCanaryVerifyRound(
   // (6) POLL-CORROBORATE (D-CFA-41): append THIS daemon's attestation to any OPEN cell it can
   // INDEPENDENTLY re-observe — only on a local byte-match, so it can never be coerced into
   // attesting a divergence it did not observe. Keyed by the cell's (roomId, relayMinerId) scope.
-  for (const open of await deps.claimBoard.listOpen()) {
+  for (const open of await deps.localBoard.listOpen()) {
     const localDivs = localByScope.get(`${open.claim.roomId}|${open.claim.relayMinerId}`) ?? [];
     const att = await attestIfIndependentlyObserved(open.claim, localDivs, deps.selfSessionKeypair);
-    if (att) await deps.claimBoard.post(open.claim, att, round);
+    // C1 cross-post (PLAN §3.2): a corroborating attestation also fans out to every co-observer board
+    // so a peer's cell on ANOTHER board accrues this validator's independent observation. FAIL-OPEN.
+    if (att) await fanOutPost(deps, open.claim, att, round, log);
   }
 
   // (7) ASSEMBLE + SUBMIT (D-CFA-40/44): any cell that reached >= MIN_ATTESTERS DISTINCT Wallet-B
   // attesters is assembled from the accrued REMOTE attestations and submitted ONCE (markSubmitted).
   // Sub-quorum cells never submit (FAIL CLOSED). The chain re-verifies + dedups by miner_id.
-  for (const open of await deps.claimBoard.listOpen()) {
+  // C1 (PLAN §3.2): assemble+submit reads from THIS validator's OWN board (no designated assembler).
+  // Each co-observer is an equal assembler+submitter over its own board, so censoring requires
+  // compromising ALL >=2 honest boards = exactly the on-chain >=2-distinct threshold.
+  for (const open of await deps.localBoard.listOpen()) {
     if (distinctAttesterCount(open.attestations) >= MIN_ATTESTERS) {
       const proof = assembleProofFromAttestations(open.claim, open.attestations);
+      // C1 jittered self-submit: de-synchronize the now-redundant submitters before the submit. The
+      // on-chain VecSet + markSubmitted below + the already-slashed abort absorb any double-submit
+      // race. DEFAULT no-op -> deterministic + byte-identical timing for the singleton path.
+      if (deps.jitter) await deps.jitter();
       await deps.submit(proof);
-      await deps.claimBoard.markSubmitted(open.key);
+      await deps.localBoard.markSubmitted(open.key);
     }
   }
 
   // (8) GC stale un-quorumed cells (fail-closed after W_corr) + drop submitted cells past the window.
-  await deps.claimBoard.gc(round);
+  await deps.localBoard.gc(round);
 
   return { accumulator: acc, promoted, absorbed, perReceiverCount };
 }

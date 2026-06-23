@@ -534,7 +534,10 @@ export async function startDaemon(overrides?: {
         // (the live OFF-MEDIA-PATH cp-daemon `/canary/claims` carrier is M4b, D-CFA-47); the
         // production capture yields no promotions, so nothing is published until the live plane
         // lands. selfSessionKeypair = this daemon's Wallet-B session keypair (signs its OWN leg only).
-        claimBoard: new InMemoryClaimBoard(),
+        // C1 (PLAN-m4b-hermetic §3.2): this daemon's OWN local board. The live co-observer boards
+        // (OOB-manifest-discovered cross-validator carriers) are M4b — coObserverBoards defaults to
+        // [] here (no fan-out, byte-identical to the pre-C1 single-board path) until the WAN gate.
+        localBoard: new InMemoryClaimBoard(),
         selfSessionKeypair: sessionKeypair,
         // Submit seam — no live PTB this session (M4b). The production capture yields no
         // promotions, so this is never invoked until the live plane lands; logged if it ever is.

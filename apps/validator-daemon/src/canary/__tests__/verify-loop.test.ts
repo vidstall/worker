@@ -5,8 +5,9 @@
  * Closes W-M3-STUN-PATH; NARROWS (does NOT close) W-M3-SIM; AMPLIFIES W-M3-OFFCHAIN.
  *
  * SEAM SWAP (D-CFA-42): `CanaryVerifyDeps` dropped `syntheticPeerKeypairs` and gained
- * `claimBoard: ClaimBoard` + `selfSessionKeypair`. The promote block is now
- *   publish-own (signSelfAttestation -> claimBoard.post)
+ * `localBoard: ClaimBoard` + `selfSessionKeypair` (the field was renamed `claimBoard -> localBoard`
+ * by C1, PLAN-m4b-hermetic.md Leg 1). The promote block is now
+ *   publish-own (signSelfAttestation -> localBoard.post)
  *     -> poll-corroborate (attestIfIndependentlyObserved on open cells)
  *       -> assemble+submit ONLY when a cell holds >=2 DISTINCT sessionPublicKeys.
  * A >=2-distinct quorum is modelled HERMETICALLY by running TWO in-process validator loops (distinct
@@ -143,7 +144,7 @@ function makeDeps(opts: {
     getValidators: () => [SELF, PEER],
     getStunLossBps: (relayId) => (relayId === RELAY_MINER ? opts.stunLossBps : 0n),
     capture,
-    claimBoard: board,
+    localBoard: board,
     selfSessionKeypair,
     submit,
     config: { k: opts.k ?? 2, deltaBps: opts.deltaBps ?? 0n, sendRate: opts.ctrs.length },
@@ -327,7 +328,7 @@ describe('REQ-CFA-042 — startCanaryVerifyLoop survives a thrown round (crash-s
         return 0n;
       },
       capture,
-      claimBoard: new InMemoryClaimBoard({ wCorr: 100 }),
+      localBoard: new InMemoryClaimBoard({ wCorr: 100 }),
       selfSessionKeypair: new Ed25519Keypair(),
       submit: async () => {},
       config: { k: 2, deltaBps: 0n, sendRate: ctrs.length },

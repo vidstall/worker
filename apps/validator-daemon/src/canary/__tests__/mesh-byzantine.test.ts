@@ -67,7 +67,7 @@ function makeMeshDeps(board: ClaimBoard, submitted: DivergenceProof[], self: Ed2
     getValidators: () => [SELF, PEER],
     getStunLossBps: () => 0n,
     capture: meshCapture(),
-    claimBoard: board,
+    localBoard: board,
     selfSessionKeypair: self,
     submit: async (proof) => { submitted.push(proof); },
     config: { k: 2, deltaBps: 0n, sendRate: 8 },
