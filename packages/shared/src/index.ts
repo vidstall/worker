@@ -190,3 +190,9 @@ export type {
 // and delegates. PURE (no transport) — the per-carrier modules stay behavior-preserving wrappers.
 export { DAEMON_PORTS_IN_USE, assertClaimsPortFree, resolveClaimsPort } from './claims-port.js';
 export { isBearerAuthorized } from './bearer-auth.js';
+
+// Committed room-provisioning lifecycle (register_user → create_room → assign_relay_and_signaling),
+// extracted from validator-daemon __tests__ so the test helper + scripts/demo/provision-room.ts share
+// ONE source. fundAddress is injected so this stays test-free.
+export { createRoomWithRelay, extractRoomId, signAndAssert } from './chain/provision-room.js';
+export type { TxStatusLike } from './chain/provision-room.js';

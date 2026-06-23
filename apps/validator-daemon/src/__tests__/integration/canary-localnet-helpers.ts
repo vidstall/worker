@@ -29,6 +29,25 @@ import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { MinerRole, type NetworkConfig, type Logger } from '@dvconf/shared';
 import { fundAddress } from './localnet-fixture.js';
+import {
+  createRoomWithRelay as createRoomWithRelayShared,
+  signAndAssert,
+  type TxStatusLike,
+} from '@dvconf/shared';
+
+// Re-export the shared lifecycle bound to this fixture's faucet so callers (canary-slash-e2e)
+// keep the SAME 7-arg signature; the 8th injected fundAddress is supplied here.
+export async function createRoomWithRelay(
+  client: import('@mysten/sui/client').SuiClient,
+  userKp: import('@mysten/sui/keypairs/ed25519').Ed25519Keypair,
+  deployer: import('@mysten/sui/keypairs/ed25519').Ed25519Keypair,
+  adminCapId: string,
+  relayMinerId: string,
+  config: NetworkConfig,
+  logger: Logger,
+): Promise<string> {
+  return createRoomWithRelayShared(client, userKp, deployer, adminCapId, relayMinerId, config, logger, fundAddress);
+}
 
 const MODULE = 'canary-localnet-helpers';
 const GAS_BUDGET = 100_000_000;
@@ -44,49 +63,6 @@ interface SuiObjectChange {
   type: string;
   objectId?: string;
   objectType?: string;
-}
-
-export interface TxStatusLike {
-  effects?: { status?: { status?: string; error?: string } };
-  objectChanges?: SuiObjectChange[];
-  events?: Array<{ type?: string; parsedJson?: unknown }>;
-  digest: string;
-}
-
-/**
- * Sign + execute a built TX with the given keypair, wait for finality with effects +
- * object changes, and assert success. Returns the full result so callers can mine
- * object ids / events out of it.
- */
-async function signAndAssert(
-  client: SuiClient,
-  signer: Ed25519Keypair,
-  build: (tx: Transaction) => void,
-  label: string,
-  logger: Logger,
-): Promise<TxStatusLike> {
-  const tx = new Transaction();
-  build(tx);
-  tx.setGasBudget(GAS_BUDGET);
-  const result = (await client.signAndExecuteTransaction({
-    signer,
-    transaction: tx,
-    options: { showEffects: true, showObjectChanges: true, showEvents: true },
-  })) as unknown as TxStatusLike;
-  await client.waitForTransaction({
-    digest: result.digest,
-    options: { showEffects: true, showObjectChanges: true },
-  });
-  const status = result.effects?.status?.status;
-  if (status !== 'success') {
-    const err = result.effects?.status?.error ?? '(no error string)';
-    throw new Error(`${label} failed on-chain: status=${status ?? 'unknown'} error=${err}`);
-  }
-  logger.info(
-    { module: MODULE, action: label, context: { digest: result.digest } },
-    `${label} succeeded on-chain`,
-  );
-  return result;
 }
 
 /**
@@ -443,102 +419,6 @@ export async function registerValidatorWithSession(
     'validator registered + session-wallet bound',
   );
   return { minerId: reg.minerId, sessionKp };
-}
-
-/**
- * Register a USER, create a room, and AdminCap-assign `relayMinerId` to it. Returns the
- * room ID. `create_room` requires the sender be a registered user; the slashed coin is
- * sent to the room creator. assign_relay_and_signaling (room_manager.move:621) is
- * AdminCap-gated → signed by the deployer.
- */
-export async function createRoomWithRelay(
-  client: SuiClient,
-  userKp: Ed25519Keypair,
-  deployer: Ed25519Keypair,
-  adminCapId: string,
-  relayMinerId: string,
-  config: NetworkConfig,
-  logger: Logger,
-): Promise<string> {
-  await fundAddress(userKp.getPublicKey().toSuiAddress());
-  await new Promise((r) => setTimeout(r, 1500));
-
-  // register_user (user_registry.move:63).
-  await signAndAssert(
-    client,
-    userKp,
-    (tx) => {
-      tx.moveCall({
-        target: `${config.packageId}::user_registry::register_user`,
-        arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.userRegistryId),
-          tx.pure.vector('u8', [99]), // display_name
-        ],
-      });
-    },
-    'register_user',
-    logger,
-  );
-
-  // create_room (room_manager.move:230): relay_mode SFU(0), expected_participants.
-  const roomResult = await signAndAssert(
-    client,
-    userKp,
-    (tx) => {
-      tx.moveCall({
-        target: `${config.packageId}::room_manager::create_room`,
-        arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.roomManagerId),
-          tx.object(config.userRegistryId),
-          tx.pure.u8(0), // relay_mode SFU
-          tx.pure.u64(2), // expected_participants
-          tx.pure.u8(0), // room_class_hint = small (NEW REQ-RMS-016)
-        ],
-      });
-    },
-    'create_room',
-    logger,
-  );
-  const roomId = extractRoomId(roomResult);
-
-  // assign_relay_and_signaling (AdminCap-gated): sets assigned_relays = [relayMinerId].
-  // signaling_id is unused by the slash path; reuse relayMinerId as a placeholder ID.
-  await signAndAssert(
-    client,
-    deployer,
-    (tx) => {
-      tx.moveCall({
-        target: `${config.packageId}::room_manager::assign_relay_and_signaling`,
-        arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.roomManagerId),
-          tx.object(adminCapId),
-          tx.pure.id(roomId),
-          tx.pure.id(relayMinerId),
-          tx.pure.id(relayMinerId), // signaling_id placeholder (irrelevant to slash)
-        ],
-      });
-    },
-    'assign_relay_and_signaling',
-    logger,
-  );
-  logger.info(
-    { module: MODULE, action: 'create_room_with_relay', context: { roomId, relayMinerId } },
-    'room created + relay assigned',
-  );
-  return roomId;
-}
-
-/** Read the RoomCreated event's room_id (room_manager emits RoomCreated { room_id, .. }). */
-function extractRoomId(result: TxStatusLike): string {
-  const evt = (result.events ?? []).find((e) => (e.type ?? '').includes('::room_manager::RoomCreated'));
-  const roomId = (evt?.parsedJson as { room_id?: unknown })?.room_id;
-  if (typeof roomId !== 'string') {
-    throw new Error('extractRoomId: RoomCreated event missing or malformed');
-  }
-  return normalizeSuiAddress(roomId);
 }
 
 /** Read the current bond value (MIST) of a StakePosition via staking::amount (devInspect). */
