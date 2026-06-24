@@ -156,7 +156,7 @@ async function forwardToTwoConsumers(
   const srcTransport = await router.createDirectTransport();
   const producer = await srcTransport.produce({ kind: 'video', rtpParameters });
 
-  const mkSink = async (): Promise<{ consumer: msTypes.Consumer; captured: Buffer[] }> => {
+  const mkSink = async (): Promise<{ consumer: msTypes.Consumer; transport: msTypes.DirectTransport; captured: Buffer[] }> => {
     const t = await router.createDirectTransport();
     const consumer = await t.consume({
       producerId: producer.id,
@@ -173,7 +173,7 @@ async function forwardToTwoConsumers(
       captured.push(copy);
       if (captured.length > 1024) captured.shift();
     });
-    return { consumer, captured };
+    return { consumer, transport: t, captured };
   };
   const a = await mkSink();
   const b = await mkSink();
@@ -189,12 +189,17 @@ async function forwardToTwoConsumers(
     if (frame % 10 === 0) srcTransport.sendRtcp(makeRtcpSenderReport(ssrc, ts, pktCount, octetCount));
     ts += 3000; frame++;
   }, 10);
+  // Request a keyframe on BOTH sinks so each consumer's forward window opens promptly
+  // (shrinks the honest-case tail risk of one receiver missing a ctr in the 900ms window).
   await a.consumer.requestKeyFrame();
+  await b.consumer.requestKeyFrame();
   await sleep(900);
   clearInterval(interval);
   await sleep(50);
   try {
-    a.consumer.close(); b.consumer.close(); producer.close(); srcTransport.close();
+    a.consumer.close(); b.consumer.close();
+    a.transport.close(); b.transport.close(); // close the sink DirectTransports (template parity)
+    producer.close(); srcTransport.close();
   } catch {
     /* best-effort */
   }
@@ -237,6 +242,8 @@ function makeDeps(
     localBoard: board,
     selfSessionKeypair: self,
     submit: async (proof) => { submitted.push(proof); },
+    // Zero-tolerance benign budget (deltaBps:0n + getStunLossBps:0n) BY DESIGN: TAMPER is
+    // promoted p=1 regardless, and honest media is byte-exact, so any divergence is real.
     config: { k: 2, deltaBps: 0n, sendRate: CTRS.length },
   };
 }
