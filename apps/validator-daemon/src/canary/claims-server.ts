@@ -46,6 +46,7 @@ import type { DivergenceClaim, DivergenceAttestation } from './proof.js';
 import {
   resolveCanaryClaimsPort,
   assertCanaryClaimsPortFree,
+  resolveCanaryClaimsBindHost,
 } from './canary-claims-port.js';
 
 /** Body-size cap — rejects with 400 'body too large'. */
@@ -455,15 +456,19 @@ export async function startCanaryClaimsServer(
     }
   }
 
-  // ── LOOPBACK bind (127.0.0.1) — off-media-path, unreachable by a remote host in the single-host slice. ──
+  // ── Bind host: LOOPBACK (127.0.0.1) by DEFAULT — off-media-path, the single-host slice. A
+  // multi-CONTAINER demo (val-1 + val-2 as distinct containers on one bridge network, no SSH tunnel)
+  // sets CANARY_CLAIMS_BIND_HOST=0.0.0.0 so the PEER container reaches the board at the container IP;
+  // the SPKI pin stays the trust anchor (address-agnostic). Default is byte-identical to the prior bind.
+  const bindHost = resolveCanaryClaimsBindHost(env);
   await new Promise<void>((resolve) => {
-    server.listen(port, '127.0.0.1', () => resolve());
+    server.listen(port, bindHost, () => resolve());
   });
 
   const boundPort = (server.address() as { port: number } | null)?.port ?? port;
   logger.info(
-    { port: boundPort, host: '127.0.0.1', corsOrigin, scheme: tlsEnabled ? 'https-mtls' : 'http' },
-    'canary/claims carrier listening (loopback)',
+    { port: boundPort, host: bindHost, corsOrigin, scheme: tlsEnabled ? 'https-mtls' : 'http' },
+    'canary/claims carrier listening',
   );
 
   return {

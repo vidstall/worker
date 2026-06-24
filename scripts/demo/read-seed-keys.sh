@@ -15,6 +15,7 @@
 # Per-role env-name mapping (the names each auto-register.ts early-returns on):
 #   cp          -> CP_KEYPAIR        + CP_CAP_ID
 #   relay       -> PRIVATE_KEY       + MINER_CAP_ID
+#   relay-standby -> PRIVATE_KEY     + MINER_CAP_ID  (2nd relay; same env names as relay)
 #   validator   -> SUI_PRIVATE_KEY   + VALIDATOR_CAP_ID
 #   validator-2 -> SUI_PRIVATE_KEY   + VALIDATOR_CAP_ID  (2nd distinct validator; same env names)
 #   signaling   -> SIGNALING_KEYPAIR + MINER_CAP_ID
@@ -29,7 +30,7 @@ KEYS_OUTPUT_PATH="${KEYS_OUTPUT_PATH:-/shared/daemon-keys.json}"
 READ_PUBLISH="${READ_PUBLISH:-/entrypoint/read-publish-output.sh}"
 
 if [ -z "$SEED_ROLE" ]; then
-  echo "[read-seed-keys] FATAL: SEED_ROLE unset (expected one of cp|relay|validator|validator-2|signaling)" >&2
+  echo "[read-seed-keys] FATAL: SEED_ROLE unset (expected one of cp|relay|relay-standby|validator|validator-2|signaling)" >&2
   exit 1
 fi
 
@@ -76,6 +77,14 @@ case "$SEED_ROLE" in
     export CP_CAP_ID="$CAP_ID"
     ;;
   relay)
+    export PRIVATE_KEY="$SECRET_KEY"
+    export MINER_CAP_ID="$CAP_ID"
+    ;;
+  relay-standby)
+    # 2nd relay (relay-overlap warm-pipe standby, ws://relay-standby:4002) — SAME env names as
+    # relay (apps/relay/auto-register.ts early-returns on PRIVATE_KEY+MINER_CAP_ID); only the seed
+    # slot key differs. seed-bootstrap writes a 'relay-standby' slot, so this case must exist or the
+    # standby crashes the consolidated stack's `up --wait` at boot (gap #3 live-run finding).
     export PRIVATE_KEY="$SECRET_KEY"
     export MINER_CAP_ID="$CAP_ID"
     ;;

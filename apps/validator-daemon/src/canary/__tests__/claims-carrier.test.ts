@@ -46,6 +46,8 @@ import {
   resolveCanaryClaimsPort,
   assertCanaryClaimsPortFree,
   CANARY_DAEMON_PORTS_IN_USE,
+  DEFAULT_CANARY_CLAIMS_BIND_HOST,
+  resolveCanaryClaimsBindHost,
 } from '../canary-claims-port.js';
 import {
   SERVER_KEY_PEM,
@@ -142,6 +144,16 @@ describe('canary-claims-port — resolve + collision assert', () => {
   it('assertCanaryClaimsPortFree throws on an in-use daemon port', () => {
     const inUse = CANARY_DAEMON_PORTS_IN_USE[0]!;
     expect(() => assertCanaryClaimsPortFree(inUse)).toThrow(/in use|collision|EADDRINUSE/i);
+  });
+
+  it('bind host defaults to loopback; env overrides it (0.0.0.0 for the multi-container demo)', () => {
+    // Default preserves the single-host slice (loopback, byte-identical). A multi-CONTAINER demo
+    // (val-1 + val-2 distinct containers on one bridge net) sets 0.0.0.0 so the PEER can reach it.
+    expect(DEFAULT_CANARY_CLAIMS_BIND_HOST).toBe('127.0.0.1');
+    expect(resolveCanaryClaimsBindHost({})).toBe('127.0.0.1');
+    expect(resolveCanaryClaimsBindHost({ CANARY_CLAIMS_BIND_HOST: '' })).toBe('127.0.0.1');
+    expect(resolveCanaryClaimsBindHost({ CANARY_CLAIMS_BIND_HOST: '  ' })).toBe('127.0.0.1');
+    expect(resolveCanaryClaimsBindHost({ CANARY_CLAIMS_BIND_HOST: '0.0.0.0' })).toBe('0.0.0.0');
   });
 });
 

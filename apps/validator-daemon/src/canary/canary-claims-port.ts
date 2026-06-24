@@ -58,3 +58,23 @@ export function resolveCanaryClaimsPort(
 ): number {
   return resolveClaimsPort(env, 'CANARY_CLAIMS_PORT', DEFAULT_CANARY_CLAIMS_PORT);
 }
+
+/**
+ * The carrier's default bind host — LOOPBACK (off-media-path, the single-host slice). The cross-host
+ * WAN run bridged peer↔peer over SSH tunnels to loopback, so 127.0.0.1 is byte-identical there.
+ */
+export const DEFAULT_CANARY_CLAIMS_BIND_HOST = '127.0.0.1' as const;
+
+/**
+ * Resolve the carrier bind host from env `CANARY_CLAIMS_BIND_HOST`, defaulting to
+ * {@link DEFAULT_CANARY_CLAIMS_BIND_HOST} (loopback). A multi-CONTAINER demo (val-1 + val-2 as DISTINCT
+ * containers on ONE bridge network — no SSH tunnel) sets `0.0.0.0` so the PEER container can reach the
+ * board at the container IP; the SPKI pin (not the address) remains the trust anchor. Empty/whitespace
+ * falls back to the loopback default (fail-safe to the byte-identical single-host behavior).
+ */
+export function resolveCanaryClaimsBindHost(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const v = env['CANARY_CLAIMS_BIND_HOST']?.trim();
+  return v ? v : DEFAULT_CANARY_CLAIMS_BIND_HOST;
+}

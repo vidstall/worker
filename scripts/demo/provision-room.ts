@@ -12,7 +12,7 @@
  *   pnpm exec tsx scripts/demo/provision-room.ts
  * (object IDs resolved by loadNetworkConfig() from the read-publish-output.sh env, like seed-bootstrap.)
  */
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
 import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
@@ -51,6 +51,20 @@ async function main(): Promise<void> {
   const config = loadNetworkConfig();
   const client = createSuiClient(config.rpcUrl);
   const log = createLogger('provision-room');
+
+  // Idempotent (gap #3): if a room manifest already exists — e.g. the gen-canary-material one-shot
+  // provisioned it pre-boot so the validators could boot with CANARY_DEMO_ROOM_ID — REUSE that roomId
+  // instead of creating a SECOND room. The runner's Stage-2 re-run then stays consistent with the
+  // room the validators (and Stage 5b) audit. Checked BEFORE the need()s below so an unwired
+  // DEPLOYER_SECRET/ADMIN_CAP_ID does not abort the read path.
+  if (existsSync(ROOM_OUTPUT_PATH)) {
+    const existing = JSON.parse(readFileSync(ROOM_OUTPUT_PATH, 'utf8')) as Partial<RoomManifest>;
+    if (existing.roomId) {
+      log.info({ roomId: existing.roomId, path: ROOM_OUTPUT_PATH }, 'room already provisioned — reusing (idempotent)');
+      process.stdout.write(`\nROOM_ID=${existing.roomId}\n`);
+      return;
+    }
+  }
 
   const deployer = Ed25519Keypair.fromSecretKey(decodeSuiPrivateKey(need('DEPLOYER_SECRET')).secretKey);
   const userKp = new Ed25519Keypair(); // fresh user; funded by the injected faucet callback

@@ -92,6 +92,13 @@ export interface SeededKey {
   secretKey: string;
   capId: string;
   stakeId: string;
+  /**
+   * The node's on-chain miner_id (= its main address). REQUIRED for gap #3: canary
+   * live-seams `loadRelayBondKeys` reads `relay.minerId` for the W-E9 self-slash (it throws
+   * without it), and provision-room assigns `relay.minerId` to the room. `read-seed-keys.sh`
+   * ignores it (reads only secretKey+capId), so adding it is backward-safe.
+   */
+  minerId: string;
 }
 
 type DaemonRole = 'cp' | 'relay' | 'relay-standby' | 'validator' | 'validator-2' | 'signaling';
@@ -504,7 +511,7 @@ async function voteAndApplyMiner(
     { module: MODULE, action: 'seed_role', context: { role, minerId: reg.minerId, capId: minerCapId } },
     `seeded ${role} node (registered + enrolled)`,
   );
-  return { secretKey: minerKp.getSecretKey(), capId: minerCapId, stakeId: reg.stakeId };
+  return { secretKey: minerKp.getSecretKey(), capId: minerCapId, stakeId: reg.stakeId, minerId: reg.minerId };
 }
 
 /** Assemble the keys-file record (pure — unit-testable). One slot per seeded daemon role. */
@@ -531,7 +538,7 @@ async function main(): Promise<void> {
 
   // 1. CP directly (it is the voter for everyone else).
   const cp = await bootstrapCp(client, config, logger);
-  const cpKey: SeededKey = { secretKey: cp.kp.getSecretKey(), capId: cp.cpCapId, stakeId: cp.stakeId };
+  const cpKey: SeededKey = { secretKey: cp.kp.getSecretKey(), capId: cp.cpCapId, stakeId: cp.stakeId, minerId: cp.minerId };
 
   // 2. relay / validator / signaling / relay-standby via the generalised CP-voted lifecycle.
   const relay = await voteAndApplyMiner(client, cp, 'relay', config, logger);
