@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { PipeTapCollector, type RtpTapConsumer } from '../pipe-tap-capture.js';
+import { PipeTapCollector, createPipeTapCapture, type RtpTapConsumer } from '../pipe-tap-capture.js';
 
 // A fake mediasoup consumer: emits 'rtp' Buffers, matching consumer.on('rtp', cb).
 function fakeConsumer(): RtpTapConsumer & EventEmitter {
@@ -36,5 +36,33 @@ describe('PipeTapCollector — captures forwarded RTP per receiver', () => {
     a.emit('rtp', Buffer.from([2]));
     a.emit('rtp', Buffer.from([3]));
     expect(collector.snapshot().get('val-A')!.map((x) => [...x])).toEqual([[2], [3]]);
+  });
+});
+
+describe('createPipeTapCapture — conforms to the verify-loop capture seam', () => {
+  it('returns a CanaryForwardCaptureResult carrying the snapshot + scope + meta', async () => {
+    const a = fakeConsumer();
+    const b = fakeConsumer();
+    const collector = new PipeTapCollector([
+      { receiverMinerId: 'val-A', consumer: a },
+      { receiverMinerId: 'val-B', consumer: b },
+    ]);
+    a.emit('rtp', Buffer.from([7, 7]));
+    b.emit('rtp', Buffer.from([7, 7]));
+
+    const capture = createPipeTapCapture(collector, {
+      canaryKid: 9,
+      expectedCtrs: [0, 1, 2],
+      kRoom: new Uint8Array(32).fill(1),
+      cellSecret: new Uint8Array(16).fill(2),
+    });
+
+    const res = await capture({ relayId: 'relay-X', roomId: 'room-Y' });
+    expect(res.relayId).toBe('relay-X');
+    expect(res.roomId).toBe('room-Y');
+    expect(res.canaryKid).toBe(9);
+    expect(res.expectedCtrs).toEqual([0, 1, 2]);
+    expect([...res.perReceiver.keys()].sort()).toEqual(['val-A', 'val-B']);
+    expect(res.perReceiver.get('val-A')!.map((x) => [...x])).toEqual([[7, 7]]);
   });
 });
