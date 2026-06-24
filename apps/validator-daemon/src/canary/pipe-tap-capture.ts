@@ -17,6 +17,8 @@ import type { CanaryForwardCapture, CanaryForwardCaptureResult } from './verify-
 /** The slice of mediasoup's Consumer we depend on: `consumer.on('rtp', (pkt: Buffer) => …)`. */
 export interface RtpTapConsumer {
   on(event: 'rtp', listener: (pkt: Buffer) => void): unknown;
+  off?(event: 'rtp', listener: (pkt: Buffer) => void): unknown;
+  removeListener?(event: 'rtp', listener: (pkt: Buffer) => void): unknown;
 }
 
 export interface PipeTapReceiver {
@@ -27,34 +29,66 @@ export interface PipeTapReceiver {
 
 const DEFAULT_RING = 1024;
 
+/** A fixed-capacity FIFO ring of Buffers (head/tail, O(1) push + overflow-drop). */
+class BufferRing {
+  private readonly buf: (Buffer | undefined)[];
+  private head = 0;
+  private size = 0;
+  constructor(private readonly cap: number) {
+    this.buf = new Array<Buffer | undefined>(cap);
+  }
+  push(b: Buffer): void {
+    const tail = (this.head + this.size) % this.cap;
+    if (this.size < this.cap) {
+      this.buf[tail] = b;
+      this.size += 1;
+    } else {
+      // full: overwrite the oldest and advance head (drop-oldest FIFO).
+      this.buf[this.head] = b;
+      this.head = (this.head + 1) % this.cap;
+    }
+  }
+  toArray(): Buffer[] {
+    const out: Buffer[] = [];
+    for (let i = 0; i < this.size; i++) out.push(this.buf[(this.head + i) % this.cap]!);
+    return out;
+  }
+}
+
 /**
  * Attaches an `rtp` listener to each receiver's consumer ONCE and accumulates the
- * forwarded packets into a per-receiver ring buffer. `snapshot()` returns a deep
- * copy so a verify round never races the live capture.
+ * forwarded packets into a per-receiver ring. `snapshot()` returns a deep copy so a
+ * verify round never races the live capture. `dispose()` removes the listeners
+ * (long-lived collector teardown — call at consumer-close).
  */
 export class PipeTapCollector {
-  private readonly buffers = new Map<string, Buffer[]>();
+  private readonly rings = new Map<string, BufferRing>();
+  private readonly listeners: Array<{ consumer: RtpTapConsumer; fn: (pkt: Buffer) => void }> = [];
 
   constructor(receivers: PipeTapReceiver[], private readonly maxPerReceiver = DEFAULT_RING) {
     for (const r of receivers) {
-      this.buffers.set(r.receiverMinerId, []);
-      // M2b: this listener is never removed — fine for a per-round, short-lived collector
-      // (discarded after the round). A long-lived collector over a live WebRtcTransport
-      // should add a dispose() that calls consumer.off('rtp', …) to avoid listener buildup.
-      r.consumer.on('rtp', (pkt: Buffer) => {
-        const arr = this.buffers.get(r.receiverMinerId)!;
-        arr.push(Buffer.from(pkt)); // copy off mediasoup's reused buffer
-        // M2b: shift() is O(n) once the ring is full — fine at this cap for a per-round
-        // collector; replace with a head/tail circular buffer if it outlives a round.
-        if (arr.length > this.maxPerReceiver) arr.shift();
-      });
+      const ring = new BufferRing(this.maxPerReceiver);
+      this.rings.set(r.receiverMinerId, ring);
+      const fn = (pkt: Buffer): void => { ring.push(Buffer.from(pkt)); }; // copy off mediasoup's reused buffer
+      r.consumer.on('rtp', fn);
+      this.listeners.push({ consumer: r.consumer, fn });
     }
   }
 
   snapshot(): Map<string, Buffer[]> {
     const out = new Map<string, Buffer[]>();
-    for (const [k, v] of this.buffers) out.set(k, v.map((b) => Buffer.from(b)));
+    for (const [k, ring] of this.rings) out.set(k, ring.toArray().map((b) => Buffer.from(b)));
     return out;
+  }
+
+  /** Long-lived teardown: remove every `rtp` listener (no buildup over a live stream). */
+  dispose(): void {
+    for (const { consumer, fn } of this.listeners) {
+      const c = consumer as { off?: (e: 'rtp', fn: (pkt: Buffer) => void) => void; removeListener?: (e: 'rtp', fn: (pkt: Buffer) => void) => void };
+      if (typeof c.off === 'function') c.off('rtp', fn);
+      else if (typeof c.removeListener === 'function') c.removeListener('rtp', fn);
+    }
+    this.listeners.length = 0;
   }
 }
 

@@ -66,3 +66,35 @@ describe('createPipeTapCapture — conforms to the verify-loop capture seam', ()
     expect(res.perReceiver.get('val-A')!.map((x) => [...x])).toEqual([[7, 7]]);
   });
 });
+
+describe('PipeTapCollector hardening (M2b B-4/B-6)', () => {
+  it('dispose() removes the rtp listener so post-dispose packets are NOT captured', () => {
+    const em = new EventEmitter();
+    const c = new PipeTapCollector([{ receiverMinerId: 'r1', consumer: em }]);
+    em.emit('rtp', Buffer.from([1, 2, 3]));
+    expect(c.snapshot().get('r1')!.length).toBe(1);
+    c.dispose();
+    expect(em.listenerCount('rtp')).toBe(0);
+    em.emit('rtp', Buffer.from([4, 5, 6]));
+    expect(c.snapshot().get('r1')!.length).toBe(1); // unchanged after dispose
+  });
+
+  it('ring drops the OLDEST packet when over cap (head/tail, not O(n) shift)', () => {
+    const em = new EventEmitter();
+    const c = new PipeTapCollector([{ receiverMinerId: 'r1', consumer: em }], 2);
+    em.emit('rtp', Buffer.from([1])); em.emit('rtp', Buffer.from([2])); em.emit('rtp', Buffer.from([3]));
+    const snap = c.snapshot().get('r1')!;
+    expect(snap.length).toBe(2);
+    expect(snap[0]![0]).toBe(2); // oldest (1) dropped, FIFO order preserved
+    expect(snap[1]![0]).toBe(3);
+  });
+
+  it('a per-scope collector only sees its own receivers', () => {
+    const emA = new EventEmitter(); const emB = new EventEmitter();
+    const cA = new PipeTapCollector([{ receiverMinerId: 'rxA', consumer: emA }]);
+    const cB = new PipeTapCollector([{ receiverMinerId: 'rxB', consumer: emB }]);
+    emA.emit('rtp', Buffer.from([1]));
+    expect(cA.snapshot().has('rxA')).toBe(true);
+    expect(cB.snapshot().has('rxA')).toBe(false);
+  });
+});
