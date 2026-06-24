@@ -19,6 +19,8 @@
     "dotenv": "^16.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@dvconf/inter-relay-client": "workspace:*",
+    "@types/node": "^22.0.0",
+    "mediasoup": "^3.14.0"
   }
 }

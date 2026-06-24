@@ -167,9 +167,15 @@ importers:
         specifier: ^16.0.0
         version: 16.6.1
     devDependencies:
+      '@dvconf/inter-relay-client':
+        specifier: workspace:*
+        version: link:../../packages/inter-relay-client
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.13
+      mediasoup:
+        specifier: ^3.14.0
+        version: 3.19.17
 
   packages/chain-event-listener:
     dependencies:
