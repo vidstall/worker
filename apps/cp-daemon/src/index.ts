@@ -63,7 +63,7 @@ import {
   type CapTokenIssueClaim,
   type CapTokenIssueAttestation,
 } from './cap-token-issuer.js';
-import { InfraPeerPubkeyCache } from './cap-token-issuer.js';
+import { InfraPeerPubkeyCache, shouldWireInfraPeerRecovery } from './cap-token-issuer.js';
 import { makeCapTokenSubmitter } from './cap-token-submitter.js';
 import { QuorumStateIdUnsetError } from './sui-chain-state-reader.js';
 import type { CpOperator } from './sui-chain-state-reader.js';
@@ -959,7 +959,13 @@ async function main(): Promise<void> {
     logger.info({ module: 'cp-daemon' }, 'quorum/claims live carrier started (loopback)');
   }
 
-  const infraPeerCache = new InfraPeerPubkeyCache();
+  // Leg 7c (G3) recovery is a MULTI-CP mechanism (threshold>=2): it recovers the real 32-byte
+  // peer_pubkey from a PRIOR CapabilityIssued event. A single-CP issuer (threshold<=1) has no seed
+  // path, so wiring the cache fail-closed-SKIPs the first infra mint forever (no CapabilityIssued
+  // ever emitted) — single-CP must fall back to the legacy resolvePeerPubkey mint (F62-proven).
+  const infraPeerCache = shouldWireInfraPeerRecovery(capTokenIssuerThreshold)
+    ? new InfraPeerPubkeyCache()
+    : undefined;
   const { issuer: capTokenIssuer, stop: stopCapTokenIssuer } = await startCapTokenIssuer({
     client,
     signer,

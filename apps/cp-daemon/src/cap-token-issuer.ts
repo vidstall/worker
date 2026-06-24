@@ -460,6 +460,20 @@ export async function rebuildCanonicalAndSignIfMatches(
 // is called VERBATIM for the G4 hex.
 
 /**
+ * Single-CP gate (consolidated-demo root cause C, 2026-06-24). G3 infra-peer recovery is a
+ * MULTI-CP mechanism: it recovers the real 32-byte key from a PRIOR `CapabilityIssued` event, so
+ * the recovery cache only ever holds content once a token was already issued for the (room, peer).
+ * A single-CP issuer (threshold <= 1) has no second CP and no seed path, so wiring the cache makes
+ * `submitIssue` fail-closed-SKIP the FIRST infra mint forever — no `CapabilityIssued` is ever
+ * emitted (chicken-and-egg). Single-CP must therefore fall back to the legacy `resolvePeerPubkey`
+ * mint (the F62-proven path). This mirrors the issuer's own documented contract: `onCapabilityIssued`
+ * is a no-op "when no recovery cache is configured (single-CP / legacy)".
+ */
+export function shouldWireInfraPeerRecovery(quorumThreshold: number): boolean {
+  return quorumThreshold >= 2;
+}
+
+/**
  * Loose-coupling shape of the on-chain `CapabilityIssued` event payload the cp-daemon
  * observes (capability_events.move:67-74 / `@dvconf/shared` `CapabilityIssuedEvent`). Only
  * the fields the recovery cache needs are declared so the issuer module does not import

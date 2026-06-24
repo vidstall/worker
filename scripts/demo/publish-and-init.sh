@@ -25,7 +25,21 @@ set -euo pipefail
 RPC="${SUI_RPC_URL:-http://127.0.0.1:9000}"
 FAUCET="${FAUCET_URL:-http://127.0.0.1:9123/gas}"
 export PUBLISH_OUTPUT="${PUBLISH_OUTPUT:-/shared/publish-output.json}"
+export SUI_RPC_URL="$RPC"   # make the resolved RPC visible to the idempotency gate (node, below)
 CONTRACTS_DIR="${CONTRACTS_DIR:-/work/dvconf-contracts}"
+
+# 0. IDEMPOTENCY GATE (root cause A, 2026-06-24). The consolidated runner runs `docker compose run
+#    --rm <scenario>` WITHOUT --no-deps, so EVERY scenario (1b/2/2a/5) re-triggers this
+#    `service_completed_successfully` one-shot. `sui client test-publish` is non-idempotent, so each
+#    re-trigger minted a BRAND-NEW package (5 in one boot) → cp-daemon latched the 1st while
+#    validators/host latched the last → role-vote/cap-token/canary desync. If PUBLISH_OUTPUT already
+#    holds a package LIVE on THIS chain, skip re-publish so every consumer converges on ONE package.
+#    Pure decision logic is unit-tested (check-publish-fresh.test.ts); the .mjs runs with bare `node`
+#    (no tsx) from the bind-mounted /entrypoint — no image rebuild. fail-safe: any doubt → publish.
+if node /entrypoint/demo/check-publish-fresh.mjs; then
+  echo "[publish-init] PUBLISH_OUTPUT already holds a package live on $RPC -- skipping re-publish (idempotent no-op)"
+  exit 0
+fi
 
 # 1. Point the sui client at the localnet RPC (no faucet url needed in config; we pass --url).
 echo "[publish-init] configuring sui client for $RPC"
