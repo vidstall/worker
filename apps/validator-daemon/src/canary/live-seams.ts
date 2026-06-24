@@ -16,7 +16,8 @@
  * INVARIANTS (HARD):
  *   - INV-A: `proof.ts` is untouched (145-byte msg / MIN_ATTESTERS=2). This module only CALLS the
  *     verify-loop with live deps; it never re-implements the proof / attestation chain.
- *   - INV-B: NOTHING here touches `apps/relay/**`. The capture is validator-daemon-side only.
+ *   - INV-B (ADR-0022): no relay media-path BEHAVIOR change. The capture is validator-daemon-side;
+ *     the M2b inter-relay-client extraction is import-only + verbatim (relay byte-identity suites GREEN).
  *   - INV-C: the only bytes that ever reach a wire are a Wallet-B `{pubkey,sig}` attestation (carried
  *     by `HttpClaimBoard`, whose schema allow-list rejects everything else fail-closed). This module
  *     NEVER puts `CANARY_CELL_SECRET` nor a Wallet-A<->Wallet-B mapping on a wire — the cellSecret is
