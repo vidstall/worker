@@ -25,7 +25,7 @@
  */
 
 import type { types as msTypes } from 'mediasoup';
-import type { RelayRole } from './relay-role-manager.js';
+import type { RelayRole } from '@dvconf/inter-relay-client';
 
 // ── Types ──────────────────────────────────────────────────────────────
 

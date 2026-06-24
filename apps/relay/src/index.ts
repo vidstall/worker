@@ -61,15 +61,15 @@ import {
   buildPipeConnectFrame,
   type InterRelaySocketLike,
   type PipeConnectParams,
-} from './inter-relay.js';
-import { openInterRelayLink, createStandbyLinkManager } from './inter-relay-link.js';
+} from '@dvconf/inter-relay-client';
+import { openInterRelayLink, createStandbyLinkManager } from '@dvconf/inter-relay-client';
 import {
   determineRole,
   parsePipePortRange,
   createPipePortAllocator,
   createPipeLivenessObserver,
   type RoomTopology,
-} from './relay-role-manager.js';
+} from '@dvconf/inter-relay-client';
 import { resolvePrimaryEndpoint } from './relay-endpoint-resolver.js';
 
 const logger = createLogger('relay-daemon');

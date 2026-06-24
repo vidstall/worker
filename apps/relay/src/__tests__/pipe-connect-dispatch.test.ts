@@ -17,7 +17,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { MetricsTracker } from '../metrics.js';
 import { createSignalingServer, type InterRelayContext } from '../signaling.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
-import { InterRelayProducerRegistry, INTER_RELAY_SUBPROTOCOL } from '../inter-relay.js';
+import { InterRelayProducerRegistry, INTER_RELAY_SUBPROTOCOL } from '@dvconf/inter-relay-client';
 
 function mockRouter() {
   return {

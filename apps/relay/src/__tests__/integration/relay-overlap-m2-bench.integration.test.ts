@@ -55,8 +55,8 @@ import { createLogger } from '@dvconf/shared';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
-} from '../../inter-relay.js';
-import { ensureWarmPipe, type RoomTopology } from '../../relay-role-manager.js';
+} from '@dvconf/inter-relay-client';
+import { ensureWarmPipe, type RoomTopology } from '@dvconf/inter-relay-client';
 import { McuPipeline } from '../../mcu-pipeline.js';
 import { notifyNewProducer, type RoomState } from '../../room-handler.js';
 

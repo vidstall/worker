@@ -14,7 +14,7 @@ import {
   InterRelayProducerRegistry,
   buildPipeConnectFrame,
   type PipeConnectParams,
-} from '../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 
 describe('handleInboundInterRelayFrame — inbound pipe-connect (REQ-RO-006 standby half)', () => {
   it('routes an inbound pipe-connect frame to onConnectParams(roomId, params)', async () => {

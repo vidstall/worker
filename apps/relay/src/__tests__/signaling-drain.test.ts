@@ -20,8 +20,8 @@ import {
   type InterRelayContext,
 } from '../signaling.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
-import { InterRelayProducerRegistry } from '../inter-relay.js';
-import { INTER_RELAY_SUBPROTOCOL } from '../inter-relay.js';
+import { InterRelayProducerRegistry } from '@dvconf/inter-relay-client';
+import { INTER_RELAY_SUBPROTOCOL } from '@dvconf/inter-relay-client';
 
 function mockRouter() {
   return {

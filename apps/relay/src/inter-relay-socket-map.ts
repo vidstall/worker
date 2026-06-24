@@ -11,7 +11,7 @@
  * — we REUSE it (import, do NOT redefine) so there is no Duplicate-identifier tsc
  * error when signaling.ts imports both this module and inter-relay.ts.
  */
-import type { InterRelaySocketLike } from './inter-relay.js';
+import type { InterRelaySocketLike } from '@dvconf/inter-relay-client';
 
 export interface InterRelaySocketMap {
   attach(peerRelayId: string, socket: InterRelaySocketLike): void;

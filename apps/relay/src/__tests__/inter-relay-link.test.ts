@@ -11,8 +11,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { WebSocketServer, type WebSocket as WsServerSocket } from 'ws';
 import type { IncomingHttpHeaders } from 'node:http';
-import { openInterRelayLink, createStandbyLinkManager } from '../inter-relay-link.js';
-import { INTER_RELAY_SUBPROTOCOL } from '../inter-relay.js';
+import { openInterRelayLink, createStandbyLinkManager } from '@dvconf/inter-relay-client';
+import { INTER_RELAY_SUBPROTOCOL } from '@dvconf/inter-relay-client';
 
 function mockLogger() {
   return {

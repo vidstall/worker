@@ -22,7 +22,7 @@ import {
   handleInboundInterRelayFrame,
   INTER_RELAY_SUBPROTOCOL,
   InterRelayProducerRegistry,
-} from '../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 
 // ── INTER_RELAY_SUBPROTOCOL ────────────────────────────────────────────
 

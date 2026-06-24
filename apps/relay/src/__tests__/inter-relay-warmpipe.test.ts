@@ -32,8 +32,8 @@ import {
   StandbyWarmPipeCoordinator,
   createWsInterRelaySender,
   createInterRelayAnnouncer,
-} from '../inter-relay.js';
-import type { RoomTopology } from '../relay-role-manager.js';
+} from '@dvconf/inter-relay-client';
+import type { RoomTopology } from '@dvconf/inter-relay-client';
 
 // ── mediasoup mock factories (mirror relay-role-manager.test.ts) ─────────
 

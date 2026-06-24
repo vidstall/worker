@@ -29,8 +29,8 @@ import {
   handleInboundInterRelayFrame,
   INTER_RELAY_SUBPROTOCOL,
   type InterRelaySocketLike,
-} from '../inter-relay.js';
-import { openInterRelayLink } from '../inter-relay-link.js';
+} from '@dvconf/inter-relay-client';
+import { openInterRelayLink } from '@dvconf/inter-relay-client';
 
 function mockRouter() {
   return {

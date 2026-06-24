@@ -17,13 +17,13 @@ import {
   type InterRelaySender,
   type PipeConnectParams,
   type PipePortAllocatorLike,
-} from '../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 import {
   createInterRelaySocketMap,
   resolveInterRelayPeerId,
   shouldRecordPath,
 } from '../inter-relay-socket-map.js';
-import type { RoomTopology } from '../relay-role-manager.js';
+import type { RoomTopology } from '@dvconf/inter-relay-client';
 
 // ── REQ-RMS-008 — per-peer inter-relay socket map (multi-peer cascade) ───────
 

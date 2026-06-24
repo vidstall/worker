@@ -12,7 +12,7 @@ import {
   PrimaryPipeCoordinator,
   type PipeConnectParams,
   type PipePortAllocatorLike,
-} from '../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 
 // ── mediasoup mock factories (mirror inter-relay-warmpipe.test.ts) ───────
 

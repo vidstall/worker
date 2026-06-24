@@ -30,7 +30,7 @@ import {
   type InterRelaySender,
   type PipeConnectFrame,
   type PipeConnectParams,
-} from '../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 
 // ── isPipeProducerAnnounce ─────────────────────────────────────────────
 

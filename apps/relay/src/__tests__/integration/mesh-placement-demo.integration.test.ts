@@ -23,7 +23,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
-import { createPrimaryPipeTransport, pipeProducerOntoPrimaryTransport } from '../../inter-relay.js';
+import { createPrimaryPipeTransport, pipeProducerOntoPrimaryTransport } from '@dvconf/inter-relay-client';
 // Cross-app reuse of the SHIPPED canary pipeline (Task 5b) — same 4-level depth as the
 // established canary-forward.integration.test.ts:48 precedent (apps/relay -> apps/validator-daemon).
 import { runCanaryVerifyRound, isRelayFlaggedByCanary, type CanaryForwardCapture, type CanaryVerifyDeps } from '../../../../validator-daemon/src/canary/verify-loop.js';

@@ -13,7 +13,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
 import { createMediasoupManager } from '../../mediasoup-manager.js';
-import { pipeRoomToSecondWorker } from '../../relay-role-manager.js';
+import { pipeRoomToSecondWorker } from '@dvconf/inter-relay-client';
 import { createLogger } from '@dvconf/shared';
 
 const VP8_PT = 101;

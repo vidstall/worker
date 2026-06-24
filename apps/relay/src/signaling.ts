@@ -32,14 +32,14 @@ import {
   isValidInterRelayToken,
   INTER_RELAY_SUBPROTOCOL,
   DEFAULT_PEER_RELAY_ID,
-} from './inter-relay.js';
+} from '@dvconf/inter-relay-client';
 import {
   createInterRelaySocketMap,
   resolveInterRelayPeerId,
   shouldRecordPath,
 } from './inter-relay-socket-map.js';
 import { createSpillTrigger, type SpillTrigger } from './spill-trigger.js';
-import type { RelayRole } from './relay-role-manager.js';
+import type { RelayRole } from '@dvconf/inter-relay-client';
 
 // ── Protocol message types ──────────────────────────────────────────
 

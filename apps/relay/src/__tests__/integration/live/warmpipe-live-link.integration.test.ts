@@ -25,15 +25,15 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
 import { WebSocketServer, type WebSocket as WsServerSocket } from 'ws';
-import { openInterRelayLink } from '../../../inter-relay-link.js';
+import { openInterRelayLink } from '@dvconf/inter-relay-client';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
   buildPipeConnectFrame,
   isPipeConnectFrame,
   type PipeConnectParams,
-} from '../../../inter-relay.js';
-import { createStandbyPipeTransport, createPipeLivenessObserver } from '../../../relay-role-manager.js';
+} from '@dvconf/inter-relay-client';
+import { createStandbyPipeTransport, createPipeLivenessObserver } from '@dvconf/inter-relay-client';
 import { startMetricsServer, type ProbeState } from '../../../metrics-server.js';
 import { MetricsTracker } from '../../../metrics.js'; // CONSISTENCY-FIX MEDIUM: real export is the class MetricsTracker (no-arg ctor); createMetricsTracker does not exist
 

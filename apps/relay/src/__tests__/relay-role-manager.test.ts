@@ -21,7 +21,7 @@ import {
   createPipeLivenessObserver,
   pipeRoomToSecondWorker,
   type RoomTopology,
-} from '../relay-role-manager.js';
+} from '@dvconf/inter-relay-client';
 
 // ── mediasoup mock factories ──────────────────────────────────────────
 

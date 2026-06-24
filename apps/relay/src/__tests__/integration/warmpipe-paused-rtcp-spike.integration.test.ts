@@ -29,7 +29,7 @@ import type { types as msTypes } from 'mediasoup';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
-} from '../../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 
 const mediaCodecs: msTypes.RtpCodecCapability[] = [
   {

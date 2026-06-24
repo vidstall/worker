@@ -19,7 +19,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { MetricsTracker } from '../metrics.js';
 import { createSignalingServer, type InterRelayContext } from '../signaling.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
-import { InterRelayProducerRegistry } from '../inter-relay.js';
+import { InterRelayProducerRegistry } from '@dvconf/inter-relay-client';
 
 // ── Mocks (mirror signaling.test.ts) ──────────────────────────────────
 

@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
-import { pipeRoomToSecondWorker } from '../../relay-role-manager.js';
+import { pipeRoomToSecondWorker } from '@dvconf/inter-relay-client';
 
 const VP8_PT = 101;
 const mediaCodecs: msTypes.RtpCodecCapability[] = [

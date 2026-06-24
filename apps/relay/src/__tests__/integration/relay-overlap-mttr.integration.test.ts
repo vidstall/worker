@@ -55,8 +55,8 @@ import { dirname, resolve } from 'node:path';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
-} from '../../inter-relay.js';
-import { ensureWarmPipe, type RoomTopology } from '../../relay-role-manager.js';
+} from '@dvconf/inter-relay-client';
+import { ensureWarmPipe, type RoomTopology } from '@dvconf/inter-relay-client';
 import { LatencyWriter } from '@dvconf/shared';
 
 // ── Env knobs ─────────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ import {
   createInterRelayAnnouncer,
   type PipeProducerAnnounce,
   type InterRelaySender,
-} from '../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 
 describe('producerPeerId identity chain (REQ-RO-018)', () => {
   it('RED-ID-1: builder carries producerPeerId when supplied', () => {

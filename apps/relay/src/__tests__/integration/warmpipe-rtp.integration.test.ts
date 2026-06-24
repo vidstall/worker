@@ -44,14 +44,14 @@ import {
   createStandbyPipeTransport,
   createPipePortAllocator,
   type RoomTopology,
-} from '../../relay-role-manager.js';
+} from '@dvconf/inter-relay-client';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
   PrimaryPipeCoordinator,
   buildPipeConnectFrame,
   type PipeConnectParams,
-} from '../../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 // REAL client crypto (cross-repo, 6× ../ to dvconf-client) — NOTHING reimplemented.
 import {
   encryptFrame,

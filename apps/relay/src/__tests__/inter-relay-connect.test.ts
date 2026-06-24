@@ -14,7 +14,7 @@ import {
   buildPipeConnectFrame,
   type PipeConnectFrame,
   type PipeConnectParams,
-} from '../inter-relay.js';
+} from '@dvconf/inter-relay-client';
 
 describe('isPipeConnectFrame', () => {
   it('accepts a valid pipe-connect frame (srtp absent)', () => {
