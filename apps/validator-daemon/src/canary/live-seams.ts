@@ -18,6 +18,8 @@
  *     verify-loop with live deps; it never re-implements the proof / attestation chain.
  *   - INV-B (ADR-0022): no relay media-path BEHAVIOR change. The capture is validator-daemon-side;
  *     the M2b inter-relay-client extraction is import-only + verbatim (relay byte-identity suites GREEN).
+ *     M2b-live (REQ-MLL-09): the `CANARY_LIVE_CAPTURE=pipe` mode moves the mediasoup runtime dep onto
+ *     the VALIDATOR (not the relay) -> INV-B unaffected; the byzantine-relay variant is demo/test-only.
  *   - INV-C: the only bytes that ever reach a wire are a Wallet-B `{pubkey,sig}` attestation (carried
  *     by `HttpClaimBoard`, whose schema allow-list rejects everything else fail-closed). This module
  *     NEVER puts `CANARY_CELL_SECRET` nor a Wallet-A<->Wallet-B mapping on a wire — the cellSecret is
@@ -87,6 +89,12 @@ export interface BuildLiveSeamsHooks {
 function isEnabled(env: Record<string, string | undefined>): boolean {
   const v = env['CANARY_LIVE_SEAMS_ENABLED'];
   return v === '1' || v === 'true';
+}
+
+/** REQ-MLL-09: the capture mode. 'injected' (default, byte-identical M2b path) vs 'pipe' (M2b-live
+ * real cross-process consumer). Additive: an unset/any-other value keeps the injected behavior. */
+export function selectCaptureMode(env: Record<string, string | undefined>): 'injected' | 'pipe' {
+  return env['CANARY_LIVE_CAPTURE'] === 'pipe' ? 'pipe' : 'injected';
 }
 
 function requireEnv(env: Record<string, string | undefined>, key: string): string {
@@ -289,6 +297,10 @@ export async function buildLiveSeams(
   // (carried through the capture result exactly like cellSecret). Demo-fixed 32 bytes.
   const kRoom = new Uint8Array(32).fill(0xab);
 
+  // REQ-MLL-09: capture mode. The bare-daemon live-seams keeps the INJECTED capture (it has no
+  // relay pipe params); the 'pipe' mode is wired by the M2b-live runtime entrypoint
+  // (live-consumer-runtime.bringUpLiveConsumer), which supplies the real cross-process capture.
+  const captureMode = selectCaptureMode(env);
   const capture = buildInjectedCapture({
     kRoom,
     cellSecret: new Uint8Array(cellSecret),
@@ -298,6 +310,8 @@ export async function buildLiveSeams(
     receiverA: `${relayMinerId}-rx-a`,
     receiverB: `${relayMinerId}-rx-b`,
   });
+  // captureMode is surfaced for the runtime entrypoint + observability; 'pipe' swaps capture upstream.
+  void captureMode;
 
   const getRelayRoomScopes = (): RelayRoomScope[] => [{ relayId: relayMinerId, roomId }];
 

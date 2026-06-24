@@ -14,13 +14,13 @@
     "@dvconf/shared": "workspace:*",
     "@dvconf/chain-event-listener": "workspace:*",
     "@dvconf/health-monitor": "workspace:*",
+    "@dvconf/inter-relay-client": "workspace:*",
     "@mysten/bcs": "^1.5.0",
     "@mysten/sui": "^1.0.0",
-    "dotenv": "^16.0.0"
+    "dotenv": "^16.0.0",
+    "mediasoup": "^3.14.0"
   },
   "devDependencies": {
-    "@dvconf/inter-relay-client": "workspace:*",
-    "@types/node": "^22.0.0",
-    "mediasoup": "^3.14.0"
+    "@types/node": "^22.0.0"
   }
 }
