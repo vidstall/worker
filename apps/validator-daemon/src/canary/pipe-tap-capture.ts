@@ -38,9 +38,14 @@ export class PipeTapCollector {
   constructor(receivers: PipeTapReceiver[], private readonly maxPerReceiver = DEFAULT_RING) {
     for (const r of receivers) {
       this.buffers.set(r.receiverMinerId, []);
+      // M2b: this listener is never removed — fine for a per-round, short-lived collector
+      // (discarded after the round). A long-lived collector over a live WebRtcTransport
+      // should add a dispose() that calls consumer.off('rtp', …) to avoid listener buildup.
       r.consumer.on('rtp', (pkt: Buffer) => {
         const arr = this.buffers.get(r.receiverMinerId)!;
         arr.push(Buffer.from(pkt)); // copy off mediasoup's reused buffer
+        // M2b: shift() is O(n) once the ring is full — fine at this cap for a per-round
+        // collector; replace with a head/tail circular buffer if it outlives a round.
         if (arr.length > this.maxPerReceiver) arr.shift();
       });
     }
