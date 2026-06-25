@@ -38,68 +38,11 @@
  */
 
 import { Device } from 'mediasoup-client';
-// REUSE VERBATIM — the SAME modules verifier.ts cross-imports (byte-equivalence by construction).
-import {
-  encryptFrame,
-  codecOffsetForFrameType,
-} from '../../../../dvconf-client/src/lib/webrtc/sframe-transform.ts';
-import { PathCKeyDerivation } from '../../../../dvconf-client/src/lib/crypto/e2ee-spike.ts';
-
-// ── Pinned canary constants (load-bearing; any divergence → byteId < 8) ───────────────
-const CANARY_SENDER_ID = 'dvconf-canary/v1'; // keying.ts:44 — load-bearing for the HKDF info
-const CANARY_SEED_LABEL = 'dvconf-canary/seed/v1'; // verifier.ts:60
-const CANARY_FRAME_LEN = 32; // verifier.ts:68 (HMAC-SHA256 is 32B; no truncation)
-
-const te = new TextEncoder();
-const u32be = (n) => {
-  const b = new Uint8Array(4);
-  new DataView(b.buffer).setUint32(0, n >>> 0, false); // BIG-ENDIAN — pin #2
-  return b;
-};
-const concat = (...a) => {
-  const t = new Uint8Array(a.reduce((s, x) => s + x.length, 0));
-  let o = 0;
-  for (const x of a) {
-    t.set(x, o);
-    o += x.length;
-  }
-  return t;
-};
-
-// REIMPLEMENT (WebCrypto) — match verifier.ts:112-117 (SHA-256, no length-prefix/separator).
-async function canarySeed(cellSecret) {
-  return new Uint8Array(
-    await crypto.subtle.digest('SHA-256', concat(te.encode(CANARY_SEED_LABEL), cellSecret)),
-  );
-}
-// REIMPLEMENT (WebCrypto) — match verifier.ts:124-129 (HMAC-SHA256(seed, u32BE(ctr))[0:32]).
-async function canaryPlaintext(seed, ctr) {
-  const k = await crypto.subtle.importKey('raw', seed, { name: 'HMAC', hash: 'SHA-256' }, false, [
-    'sign',
-  ]);
-  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', k, u32be(ctr)));
-  return mac.subarray(0, CANARY_FRAME_LEN);
-}
-// The 4-step pinned canary (inline throwaway for Task 0; Task 1 extracts it to a module).
-async function buildCanaryFrame({ kRoom, roomId, cellSecret, canaryKid, ctr }) {
-  const seed = await canarySeed(cellSecret); // step 1
-  const pi = await canaryPlaintext(seed, ctr); // step 2  (32B P_i)
-  const kCanary = await new PathCKeyDerivation().deriveContentKey({
-    // step 3  — REUSED client class
-    kRoom,
-    roomId,
-    kid: canaryKid,
-    senderId: CANARY_SENDER_ID,
-    oobSecret: cellSecret,
-  });
-  // step 4 — REUSED client encryptFrame; codecOffsetForFrameType('key',32) = 10.
-  return await encryptFrame(
-    pi,
-    { kid: canaryKid, ctr },
-    kCanary,
-    codecOffsetForFrameType('key', CANARY_FRAME_LEN),
-  );
-}
+// REUSE the EXTRACTED browser canary-core (Task 1) — the 4-step pinned pipeline now lives in
+// one module that itself reuses the SHIPPED client encryptFrame/PathCKeyDerivation VERBATIM and
+// is byte-identity-locked vs recomputeCanaryFrame by canary-frame-browser.byteid.test.ts. esbuild
+// resolves this sibling `.ts` under its loader (same dir as this harness).
+import { buildCanaryFrameBrowser } from './canary-frame-browser.ts';
 
 /** Tiny request/response client over the relay WS (mirrors RelayClient; verbatim from p10). */
 function makeRelayClient(url) {
@@ -241,7 +184,7 @@ async function run(opts) {
   const canaryStream = new TransformStream({
     async transform(frame, controller) {
       const ctr = OPTS.ctrs[idx % OPTS.ctrs.length];
-      const sframe = await buildCanaryFrame({
+      const sframe = await buildCanaryFrameBrowser({
         kRoom: OPTS.kRoom,
         roomId: OPTS.roomId,
         cellSecret: OPTS.cellSecret,
