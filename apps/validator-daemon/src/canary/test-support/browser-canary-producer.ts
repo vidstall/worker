@@ -86,6 +86,38 @@ async function bundleEntry(): Promise<string> {
 }
 
 /**
+ * Stand up ONLY the static harness page + /bundle.js over loopback http (A4-live mode). The real
+ * production signaling daemon is WS-only (it does NOT serve the harness HTML), so the headless page
+ * is still served here while `__canaryOpts.relayUrl` points the in-page WS client at the real
+ * signaling daemon. (The A3b `standUpBrowserIngest` keeps its OWN http server unchanged so the
+ * proven Sub-lane A path is byte-identical.)
+ */
+async function standUpPageServer(bundleJs: string): Promise<{ pageUrl: string; close: () => void }> {
+  const httpServer = http.createServer((req, res) => {
+    const url = req.url ?? '/';
+    if (url === '/' || url.startsWith('/index') || url.startsWith('/harness') || url.startsWith('/canary')) {
+      const html = readFileSync(HARNESS_PAGE, 'utf8');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(html);
+      return;
+    }
+    if (url.startsWith('/bundle.js')) {
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+      res.end(bundleJs);
+      return;
+    }
+    res.writeHead(404);
+    res.end('not found');
+  });
+  await new Promise<void>((r) => httpServer.listen(0, '127.0.0.1', r));
+  const httpPort = (httpServer.address() as { port: number }).port;
+  return {
+    pageUrl: `http://127.0.0.1:${httpPort}/`,
+    close: () => { try { httpServer.close(); } catch { /* */ } },
+  };
+}
+
+/**
  * Stand up the in-process page/WS server for the browser source. UNLIKE the spike's
  * `standUpRelay`, this does NOT create its own mediasoup worker/router — it lands the produced
  * producer on the INJECTED `relayRouter` so the test's evil-relay + F1 pipe can find it. The WS
@@ -201,9 +233,19 @@ async function standUpBrowserIngest(
 }
 
 /**
- * Launch a headless-Chromium browser canary producer whose media lands on the test's INJECTED
- * `relayRouter`. Resolves ONLY AFTER the page's `produced` reply (i.e. the real producer EXISTS on
- * relayRouter) so the caller can immediately `startEvilRelayForward({ sourceProducerId })`.
+ * Launch a headless-Chromium browser canary producer. TWO modes (additive):
+ *
+ *  • A3b mock-ingest (`relayRouter` given, no `signalingUrl`): the browser joins an in-process WS
+ *    whose `produce` handler creates the WebRtcTransport + producer on the TEST's INJECTED
+ *    `relayRouter`. Resolves AFTER the page's `produced` reply so the caller can immediately
+ *    `startEvilRelayForward({ sourceProducerId })`. (UNCHANGED — the proven Sub-lane A path.)
+ *
+ *  • A4-live (`signalingUrl` given, no `relayRouter`): the browser joins the REAL production relay
+ *    `createSignalingServer` (covert no-password path) over a REAL WebRtcTransport/DTLS produce.
+ *    The producer lands on the real relay's room router (which the harness's injected manager has
+ *    made === the caller's test-owned router — the "router-handle bridge"). Here there is no
+ *    in-process `onProducer` hook, so the producer id comes from the page's resolved
+ *    `window.__canaryResult.producerId` (the relay's `produced` reply).
  *
  * Shape MIRRORS `startNodeCanaryProducer`: { producerId, start, stop, close }. Here the headless
  * Chrome fake-VP8 device produces RTP CONTINUOUSLY once the createEncodedStreams canary transform
@@ -211,7 +253,10 @@ async function standUpBrowserIngest(
  * resolves) and `stop()`/`close()` tear the browser + ingest down.
  */
 export async function startBrowserCanaryProducer(args: {
-  relayRouter: msTypes.Router;
+  /** A3b mode: produce onto this INJECTED router. Mutually exclusive with `signalingUrl`. */
+  relayRouter?: msTypes.Router;
+  /** A4-live mode: join this REAL signaling daemon URL. Mutually exclusive with `relayRouter`. */
+  signalingUrl?: string;
   kRoom: Uint8Array;
   roomId: string;
   cellSecret: Uint8Array;
@@ -220,11 +265,33 @@ export async function startBrowserCanaryProducer(args: {
 }): Promise<BrowserCanaryProducer> {
   const bundleJs = await bundleEntry();
 
-  // The real relayRouter producer the browser lands (set by the WS `produce` handler).
+  // The relayRouter producer the in-process A3b WS handler lands (live mode leaves this null and
+  // reads the producer id from the page result instead).
   let relayProducer: msTypes.Producer | null = null;
-  const ingest = await standUpBrowserIngest(args.relayRouter, bundleJs, (p) => {
-    relayProducer = p;
-  });
+  let closeIngest: () => void = () => {};
+  let relayUrl: string;
+  let pageUrl: string;
+  const liveMode = Boolean(args.signalingUrl);
+  if (args.signalingUrl) {
+    // A4-live: point the page at the REAL production signaling daemon (WS only); serve the static
+    // harness page over a separate loopback http server.
+    relayUrl = args.signalingUrl;
+    const pageServer = await standUpPageServer(bundleJs);
+    pageUrl = pageServer.pageUrl;
+    closeIngest = () => pageServer.close();
+  } else {
+    if (!args.relayRouter) {
+      throw new Error(
+        'browser-canary-producer: pass relayRouter (A3b mock-ingest) OR signalingUrl (A4-live)',
+      );
+    }
+    const ingest = await standUpBrowserIngest(args.relayRouter, bundleJs, (p) => {
+      relayProducer = p;
+    });
+    closeIngest = () => ingest.close();
+    relayUrl = ingest.wsUrl;
+    pageUrl = ingest.pageUrl;
+  }
 
   log('launching headless Chromium (fake VP8 device)…');
   const browser: Browser = await chromium.launch({
@@ -234,15 +301,18 @@ export async function startBrowserCanaryProducer(args: {
   const page: Page = await browser.newPage();
   page.on('console', (m) => log(`PAGE> ${m.text()}`));
   page.on('pageerror', (e) => log(`PAGE-ERROR> ${String(e)}`));
-  await page.goto(ingest.pageUrl, { waitUntil: 'load' });
+  await page.goto(pageUrl, { waitUntil: 'load' });
 
   // Pass the pinned canary inputs to the page (Uint8Arrays serialize as number[]; rebuilt in-page).
+  // `relayUrl` is the in-process A3b WS OR the REAL signaling daemon WS (live mode) — the page's WS
+  // client (`canary-harness-entry.js`) is identical for both: it sends {type:'join',roomId}, then
+  // createTransport/connectTransport/produce, and reports producerId in window.__canaryResult.
   await page.evaluate(
     (o) => {
       (window as unknown as { __canaryOpts: unknown }).__canaryOpts = o;
     },
     {
-      relayUrl: ingest.wsUrl,
+      relayUrl,
       roomId: args.roomId,
       kRoom: Array.from(args.kRoom),
       cellSecret: Array.from(args.cellSecret),
@@ -251,33 +321,60 @@ export async function startBrowserCanaryProducer(args: {
     },
   );
 
-  // Kick off the page's produce path WITHOUT awaiting its full run() (run() sleeps a window then
-  // returns; the fake device keeps producing until we close the page). We instead poll for the
-  // relayRouter producer the WS handler lands — that is the `produced`-reply gate the contract
-  // requires (producer EXISTS on relayRouter before this resolves → evil-relay can consume it).
+  // Kick off the page's produce path. run() sleeps a window then returns; the fake device keeps
+  // producing until the page closes. `window.__canaryRun()` ASSIGNS window.__canaryResult to the
+  // run() Promise — we await that resolution below.
   await page.evaluate(() =>
     void (window as unknown as { __canaryRun: () => Promise<unknown> }).__canaryRun(),
   );
 
-  // Gate on the producer existing on relayRouter (the `produced` reply landed it via onProducer).
-  const deadline = Date.now() + 60_000;
-  while (relayProducer === null && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 100));
+  // Resolve the producer id per mode:
+  //  • A4-live — no in-process onProducer hook (the real relay owns the producer). The id comes
+  //    from the page's RESOLVED window.__canaryResult.producerId (the relay's `produced` reply).
+  //    NOTE window.__canaryResult is a Promise (canary-harness-entry.js:234) → we AWAIT it.
+  //  • A3b — the in-process WS `produce` handler landed the producer on the injected relayRouter
+  //    via onProducer; poll for that (the proven Sub-lane A gate; unchanged behavior).
+  let producerId: string;
+  if (liveMode) {
+    const result = await page.evaluate(async () => {
+      const w = window as unknown as { __canaryResult?: Promise<unknown> | { producerId?: string } };
+      const deadline = Date.now() + 60_000;
+      // __canaryResult is the run() Promise; await it (with a timeout guard) and return the object.
+      const settled = await Promise.race([
+        Promise.resolve(w.__canaryResult).catch((e) => ({ ok: false, error: String(e) })),
+        new Promise((r) => setTimeout(() => r(null), Math.max(0, deadline - Date.now()))),
+      ]);
+      return (settled ?? null) as { ok?: boolean; producerId?: string; error?: string } | null;
+    });
+    if (!result?.producerId) {
+      try { await browser.close(); } catch { /* */ }
+      closeIngest();
+      throw new Error(
+        `browser-canary-producer: no producerId from real signaling within 60s (${result?.error ?? 'no result'})`,
+      );
+    }
+    producerId = result.producerId;
+    log(`source-leg ready: producerId=${producerId} (live on the REAL relay via real signaling)`);
+  } else {
+    const deadline = Date.now() + 60_000;
+    while (relayProducer === null && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (relayProducer === null) {
+      try { await browser.close(); } catch { /* */ }
+      closeIngest();
+      throw new Error('browser-canary-producer: timed out waiting for the browser to produce on relayRouter');
+    }
+    producerId = (relayProducer as msTypes.Producer).id;
+    log(`source-leg ready: producerId=${producerId} (live on the injected relayRouter)`);
   }
-  if (relayProducer === null) {
-    try { await browser.close(); } catch { /* */ }
-    ingest.close();
-    throw new Error('browser-canary-producer: timed out waiting for the browser to produce on relayRouter');
-  }
-  const producerId = (relayProducer as msTypes.Producer).id;
-  log(`source-leg ready: producerId=${producerId} (live on the injected relayRouter)`);
 
   let torn = false;
   const teardown = (): void => {
     if (torn) return;
     torn = true;
     void browser.close().catch(() => { /* best-effort */ });
-    ingest.close();
+    closeIngest();
   };
 
   return {
