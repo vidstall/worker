@@ -259,79 +259,104 @@ interface CaptureResult {
  * attester set, not from 2 capture procs). Returns the captured forwarded bytes.
  */
 async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: Logger): Promise<CaptureResult> {
-  const worker = await mediasoup.createWorker({ logLevel: 'warn' });
-  const relayRouter = await worker.createRouter({ mediaCodecs });
-  const validatorWorker = await mediasoup.createWorker({ logLevel: 'warn' });
-  const validatorRouter = await validatorWorker.createRouter({ mediaCodecs });
+  // I1: declare every resource handle ABOVE the try so the finally can null-guard-close it. Any
+  // rejecting await between worker-create and the (previously success-only) teardown would otherwise
+  // leak 2 mediasoup workers (native subprocesses) + the signaling WS port + the Chromium process,
+  // accumulating orphans across re-runs. The finally runs on BOTH success and error paths.
+  let worker: msTypes.Worker | undefined;
+  let validatorWorker: msTypes.Worker | undefined;
+  let relayRouter: msTypes.Router | undefined;
+  let validatorRouter: msTypes.Router | undefined;
+  let signaling: Awaited<ReturnType<typeof startRealSignaling>> | undefined;
+  let producer: Awaited<ReturnType<typeof startBrowserCanaryProducer>> | undefined;
+  let evil: Awaited<ReturnType<typeof startEvilRelayForward>> | undefined;
+  let sink: Awaited<ReturnType<typeof attachValidatorSink>> | undefined;
+  let primaryPipe: msTypes.PipeTransport | undefined;
+  let standbyPipe: msTypes.PipeTransport | undefined;
 
-  // The REAL production signaling server over the test-owned relayRouter (router-handle bridge).
-  const signaling = await startRealSignaling({ relayRouter, roomId });
-  // A4-live: a REAL headless-Chromium canary joins via real signaling + produces on relayRouter.
-  const producer = await startBrowserCanaryProducer({
-    signalingUrl: signaling.wsUrl,
-    roomId,
-    kRoom: K_ROOM,
-    cellSecret: CELL_SECRET,
-    canaryKid: CANARY_KID,
-    ctrs: CTRS,
-  });
-
-  // F1: a primary pipe on the relay router connected to a standby pipe on the validator router.
-  const standbyPipe = await createStandbyPipeTransport(validatorRouter, 0);
-  const primaryPipe = await createPrimaryPipeTransport(relayRouter, 0);
-  await primaryPipe.connect({ ip: '127.0.0.1', port: standbyPipe.tuple.localPort } as Parameters<
-    msTypes.PipeTransport['connect']
-  >[0]);
-  await standbyPipe.connect({ ip: '127.0.0.1', port: primaryPipe.tuple.localPort } as Parameters<
-    msTypes.PipeTransport['connect']
-  >[0]);
-
-  // The demo-only byzantine evil-relay taps the real producer → pipes onto the primary (INV-B reuse).
-  const evil = await startEvilRelayForward({
-    relayRouter,
-    sourceProducerId: producer.producerId,
-    byzantine,
-    pipeTransport: primaryPipe,
-  });
-  // Re-produce the piped descriptor on the validator side, then attach an UNPAUSED sink consumer.
-  const pipedProducer = await standbyPipe.produce({
-    id: evil.pipedProducerId,
-    kind: evil.kind,
-    rtpParameters: evil.rtpParameters,
-    paused: evil.producerPaused,
-  } as Parameters<msTypes.PipeTransport['produce']>[0]);
-  const sink = await attachValidatorSink(validatorRouter, pipedProducer.id);
-
-  // Capture forwarded bytes off the sink's DirectTransport-fed consumer (copy off the reused buffer).
   const captured: Buffer[] = [];
-  const onRtp = (pkt: Buffer): void => { captured.push(Buffer.from(pkt)); };
-  sink.consumer.on('rtp', onRtp);
+  let onRtp: ((pkt: Buffer) => void) | undefined;
 
-  producer.start();
-  // Let real RTP flow long enough to capture the tampered ctr(s). The fake-VP8 device + the synthetic
-  // canary transform produce continuously; a few seconds is ample for the 8-frame canary set to recur.
-  await sleep(byzantine ? 6000 : 4000);
-
-  logger.info({ module: MOD, action: 'capture_done', context: { byzantine, packets: captured.length } },
-    `captured ${captured.length} forwarded packets (byzantine=${byzantine})`);
-
-  // Teardown — signaling first in its own guard (it holds an OS port + a worker), then the rest.
-  producer.stop();
-  try { await signaling.stop(); } catch { /* best-effort */ }
   try {
-    sink.consumer.off?.('rtp', onRtp);
-    sink.close();
-    evil.close();
-    primaryPipe.close();
-    standbyPipe.close();
-    producer.close();
-    relayRouter.close();
-    validatorRouter.close();
-    worker.close();
-    validatorWorker.close();
-  } catch { /* best-effort */ }
+    worker = await mediasoup.createWorker({ logLevel: 'warn' });
+    relayRouter = await worker.createRouter({ mediaCodecs });
+    validatorWorker = await mediasoup.createWorker({ logLevel: 'warn' });
+    validatorRouter = await validatorWorker.createRouter({ mediaCodecs });
 
-  return { captured, roomId };
+    // The REAL production signaling server over the test-owned relayRouter (router-handle bridge).
+    signaling = await startRealSignaling({ relayRouter, roomId });
+    // A4-live: a REAL headless-Chromium canary joins via real signaling + produces on relayRouter.
+    producer = await startBrowserCanaryProducer({
+      signalingUrl: signaling.wsUrl,
+      roomId,
+      kRoom: K_ROOM,
+      cellSecret: CELL_SECRET,
+      canaryKid: CANARY_KID,
+      ctrs: CTRS,
+    });
+
+    // F1: a primary pipe on the relay router connected to a standby pipe on the validator router.
+    standbyPipe = await createStandbyPipeTransport(validatorRouter, 0);
+    primaryPipe = await createPrimaryPipeTransport(relayRouter, 0);
+    await primaryPipe.connect({ ip: '127.0.0.1', port: standbyPipe.tuple.localPort } as Parameters<
+      msTypes.PipeTransport['connect']
+    >[0]);
+    await standbyPipe.connect({ ip: '127.0.0.1', port: primaryPipe.tuple.localPort } as Parameters<
+      msTypes.PipeTransport['connect']
+    >[0]);
+
+    // The demo-only byzantine evil-relay taps the real producer → pipes onto the primary (INV-B reuse).
+    evil = await startEvilRelayForward({
+      relayRouter,
+      sourceProducerId: producer.producerId,
+      byzantine,
+      pipeTransport: primaryPipe,
+    });
+    // Re-produce the piped descriptor on the validator side, then attach an UNPAUSED sink consumer.
+    const pipedProducer = await standbyPipe.produce({
+      id: evil.pipedProducerId,
+      kind: evil.kind,
+      rtpParameters: evil.rtpParameters,
+      paused: evil.producerPaused,
+    } as Parameters<msTypes.PipeTransport['produce']>[0]);
+    sink = await attachValidatorSink(validatorRouter, pipedProducer.id);
+
+    // Capture forwarded bytes off the sink's DirectTransport-fed consumer (copy off the reused buffer).
+    onRtp = (pkt: Buffer): void => { captured.push(Buffer.from(pkt)); };
+    sink.consumer.on('rtp', onRtp);
+
+    producer.start();
+    // Let real RTP flow long enough to capture the tampered ctr(s). The fake-VP8 device + the synthetic
+    // canary transform produce continuously; a few seconds is ample for the 8-frame canary set to recur.
+    // The BYZANTINE leg gets +2s so MORE frames flow → a corrupted ctr reliably lands in the capture
+    // window (a thin window could miss the tampered frame and look like a false negative).
+    await sleep(byzantine ? 6000 : 4000);
+
+    logger.info({ module: MOD, action: 'capture_done', context: { byzantine, packets: captured.length } },
+      `captured ${captured.length} forwarded packets (byzantine=${byzantine})`);
+
+    return { captured, roomId };
+  } finally {
+    // Teardown runs on BOTH the success and the error path (I1). signaling first in its own guard (it
+    // holds an OS port + a worker); the rest best-effort + null-guarded. producer.close() tears down
+    // the Chromium process, so closing the producer here also covers the browser on the error path.
+    if (sink && onRtp) { try { sink.consumer.off?.('rtp', onRtp); } catch { /* best-effort */ } }
+    // M1: producer.stop() is a formal no-op (the browser fake-VP8 device keeps producing); close()
+    // below is what tears down the Chromium browser process.
+    producer?.stop();
+    try { await signaling?.stop(); } catch { /* best-effort */ }
+    try {
+      sink?.close();
+      evil?.close();
+      primaryPipe?.close();
+      standbyPipe?.close();
+      producer?.close();
+      relayRouter?.close();
+      validatorRouter?.close();
+      worker?.close();
+      validatorWorker?.close();
+    } catch { /* best-effort */ }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -633,6 +658,9 @@ async function queryLatestSlash(client: SuiClient, packageId: string, roomId: st
   const page = await client.queryEvents({
     query: { MoveEventType: `${packageId}::canary_audit::CanaryDivergenceSlashed` },
     order: 'descending',
+    // M4: limit:50 is safe because we slash a FRESH per-run room — at most ONE matching event exists
+    // for `roomId`, and it is among the 50 newest descending (the live stack only auto-slashes its OWN
+    // seed room, never these fresh rooms), so the scan reliably finds (or rules out) our event.
     limit: 50,
   });
   for (const e of page.data) {
@@ -729,6 +757,11 @@ async function main(): Promise<void> {
   logLine('[byzantine] capturing real forwarded (tampered) browser media on the fresh room…');
   const byz = await captureForwardedLeg(byzRoomId, true, logger);
   logLine(`[byzantine] captured ${byz.captured.length} forwarded packets`);
+  // M2: distinguish a capture/ICE failure (0 packets) from a real "no divergence" — don't let an
+  // empty capture be misattributed to the verifier below (which would also yield 0 divergences).
+  if (byz.captured.length === 0) {
+    throw new Error(`${MOD}: BYZANTINE leg captured 0 packets — a capture/ICE/forward failure, NOT a divergence issue. Investigate the browser→evil-relay→pipe→sink path (do NOT proceed).`);
+  }
 
   const verifyInput: VerifyInput = {
     kRoom: K_ROOM, roomId: byzRoomId, cellSecret: CELL_SECRET, canaryKid: CANARY_KID, expectedCtrs: CTRS,
@@ -839,7 +872,7 @@ async function main(): Promise<void> {
     logLine('[honest] PASS — 0 divergences (host-side honest-capture proof; on-chain fresh-room check skipped, see fallback note above).');
   }
 
-  // ── 6. write the run log (gitignored under .evidence/) ─────────────────────────────────────────
+  // ── 7. write the run log (gitignored under .evidence/) ─────────────────────────────────────────
   logLine('');
   logLine('=== RESULT: B-hermetic CHAIN-BACKED walkthrough COMPLETE ===');
   logLine(`  BYZANTINE → real on-chain CanaryDivergenceSlashed digest=${digest} (2 distinct attesters, observed_present=${queried.observed_present})`);
@@ -849,7 +882,9 @@ async function main(): Promise<void> {
   const logPath = join(EVIDENCE_DIR, `m2b-live-wan-B-hermetic-run-${stamp}.log`);
   writeFileSync(logPath, runLog.join('\n') + '\n', 'utf8');
   process.stdout.write(`\n[run-log] written to ${logPath}\n`);
-  process.stdout.write(`CANARY_SLASH_OK digest=${digest} room=${roomId} distinct=${distinctIds.length} observed_present=${queried.observed_present}\n`);
+  // M6: print byzRoomId — the room that was ACTUALLY slashed (a demo viewer reads this line), NOT the
+  // booted-stack seed room.
+  process.stdout.write(`CANARY_SLASH_OK digest=${digest} room=${byzRoomId} distinct=${distinctIds.length} observed_present=${queried.observed_present}\n`);
 }
 
 // Run only when invoked directly (import-safe for any future unit test of the pure helpers).
