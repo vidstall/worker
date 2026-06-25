@@ -200,6 +200,8 @@ async function runXProc(byzantine: boolean): Promise<number[]> {
   const wA = await wireChild(childA, standbyA as { ip: string; port: number });
   const wB = await wireChild(childB, standbyB as { ip: string; port: number });
 
+  // No-op for the browser producer (the fake-VP8 device produces continuously from creation); kept
+  // for interface/mirror symmetry with the Node-producer template.
   producer.start();
 
   const attesters: number[] = [];
@@ -207,17 +209,27 @@ async function runXProc(byzantine: boolean): Promise<number[]> {
     const done = await readLine(cp, (o) => o['t'] === 'done' || o['t'] === 'proof');
     if (done['t'] === 'proof') attesters.push(done['attesters'] as number);
   };
+  // 30s safely exceeds the worst-case HONEST path: that leg runs the full ~30-round verify loop
+  // (~200ms+ per round, no early proof), so it walks all rounds before emitting `done` — 30s gives
+  // margin before this race times out (and the BYZANTINE path proves out far sooner).
   await Promise.race([
     Promise.all([collect(childA), collect(childB)]),
     new Promise((r) => setTimeout(r, 30_000)),
   ]);
 
   producer.stop();
+  // signaling holds an OS port + a mediasoup worker — stop it FIRST in its OWN guard so it ALWAYS
+  // runs even if a later sync close throws (a leaked WSS would otherwise surface as a confusing
+  // failure in the OTHER it() of this pair). The remaining closes stay best-effort.
+  try {
+    await signaling.stop();
+  } catch {
+    /* best-effort */
+  }
   try {
     wA.close();
     wB.close();
     producer.close();
-    await signaling.stop();
     relayRouter.close();
     childA.kill();
     childB.kill();
