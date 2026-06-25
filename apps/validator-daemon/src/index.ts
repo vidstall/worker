@@ -91,6 +91,7 @@ import {
   bringUpLiveConsumer,
   type LiveConsumerRuntime,
 } from './canary/live-consumer-runtime.js';
+import { coHomeCapture } from './canary/cohome-capture.js';
 import { chooseCapture, type CanaryPipeParams } from './capture-precedence.js';
 import {
   CANARY_CAPTURE_LIVE_TOKEN,
@@ -177,12 +178,11 @@ export interface DaemonState {
    * REQ-CFA-029 (M3 chunk 2, D-CFA-26): the latest validator-probed STUN packet-loss
    * (basis points) per relayMinerId. Written in `measureRelay` (next to the rttSamplesMs
    * push) from `measurement.packetLossRate` — a value the per-relay session-proof BCS
-   * folds in (~:821) then otherwise DISCARDS. This is the per-relay SEAM that WILL be read by
-   * the loss classifier once the verify loop is wired (Task 5.2+, W-M3-SIM): the classifier
-   * is pure/test-only today (zero production callers), so this is written-now-read-later — NOT
-   * yet a live data path. When wired it folds into the classifier's BUDGET (D-CFA-25,
-   * stunPacketLossBps + delta): STUN-UDP != canary-RTP and the probe is a single global host,
-   * so it is a COARSE prior, NOT a binding signal (not per-relay-attributed until G3).
+   * folds in (~:821) then otherwise DISCARDS. This is the per-relay SEAM the loss classifier
+   * IS read by via the wired canary verify loop (getStunLossBps below, W-M3-SIM): it folds into
+   * the classifier's BUDGET (D-CFA-25, stunPacketLossBps + delta): STUN-UDP != canary-RTP and the
+   * probe is a single global host, so it is a COARSE prior, NOT a binding signal (not
+   * per-relay-attributed until G3).
    */
   relayStunLossBps: Map<string, bigint>;
   /** Stop function for the F61 HealthMonitor (DOH-018). */
@@ -666,7 +666,14 @@ export async function startDaemon(overrides?: {
         // empty no-op is returned (reads STUN, persists the accumulator, promotes nothing).
         capture: chooseCapture(
           liveSeams?.capture,
-          state.liveConsumer?.capture,
+          // B-18 (W-M3-SIM): when CANARY_COHOME_RECEIVER_2 is set, wrap the live capture so a single
+          // real drop-stream is presented under TWO distinct receiver ids => the classifier's SECONDARY
+          // >=k cross-receiver signal can fire. Default-OFF (unset) => the bare live capture, byte-identical.
+          state.liveConsumer
+            ? (process.env['CANARY_COHOME_RECEIVER_2']
+                ? coHomeCapture(state.liveConsumer.capture, process.env['CANARY_COHOME_RECEIVER_2'])
+                : state.liveConsumer.capture)
+            : undefined,
           async (scope): Promise<CanaryForwardCaptureResult> => ({
             relayId: scope.relayId,
             roomId: scope.roomId,
@@ -1123,12 +1130,11 @@ async function measureRelay(
     state.rttSamplesMs.push(Number(measurement.avgLatencyMs));
     if (state.rttSamplesMs.length > RTT_WINDOW) state.rttSamplesMs.shift();
     // REQ-CFA-029 (M3 chunk 2, D-CFA-26): persist this relay's STUN packet-loss (basis
-    // points) as the per-relay SEAM the loss classifier WILL read once the verify loop is
-    // wired (Task 5.2+, W-M3-SIM — written now, read later; no live reader today). The same
-    // value is folded into the session-proof BCS below (~packetLossRate) then otherwise
-    // discarded; here it is keyed by relayMinerId so the classifier can fold it into its
-    // BUDGET. Coarse prior only (D-CFA-25): STUN-UDP != canary-RTP, single global probe host
-    // (per-relay attribution = G3).
+    // points) as the per-relay SEAM the loss classifier IS read by via the wired canary verify
+    // loop (getStunLossBps, folded into the classifier budget; W-M3-SIM). The same value is
+    // folded into the session-proof BCS below (~packetLossRate) then otherwise discarded; here
+    // it is keyed by relayMinerId so the classifier can fold it into its BUDGET. Coarse prior
+    // only (D-CFA-25): STUN-UDP != canary-RTP, single global probe host (per-relay attribution = G3).
     state.relayStunLossBps.set(relayMinerId, measurement.packetLossRate);
   } else {
     state.consecutiveUnreachable += 1;

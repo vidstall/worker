@@ -330,6 +330,9 @@ async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: L
       sourceProducerId: producer.producerId,
       byzantine,
       pipeTransport: primaryPipe,
+      // B-18: deterministic withholding for the DROP run (X = calibrated, above the budget).
+      // TAMPER/HONEST legs leave CANARY_EVIL_DROP_EVERY_N unset => undefined => no drop, byte-identical.
+      dropEveryN: Number(process.env['CANARY_EVIL_DROP_EVERY_N']) || undefined,
     });
     // Re-produce the piped descriptor on the validator side, then attach an UNPAUSED sink consumer.
     const pipedProducer = await standbyPipe.produce({

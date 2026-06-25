@@ -37,8 +37,14 @@ export async function startEvilRelayForward(args: {
   sourceProducerId: string;
   byzantine: boolean;
   pipeTransport: msTypes.PipeTransport; // a primary pipe already created on relayRouter
+  /**
+   * REQ-MLW-B-18 (B6 DROP/withholding): deterministically WITHHOLD every Nth forwarded canary packet
+   * so ground-truth withholding exists (drop-rate ~= 1/dropEveryN). Undefined / 0 / 1 => NO drop
+   * (byte-identical to the pre-B6 always-forward path). Deterministic (counter-based, reproducible).
+   */
+  dropEveryN?: number;
 }): Promise<EvilRelayForward> {
-  const { relayRouter, sourceProducerId, byzantine, pipeTransport } = args;
+  const { relayRouter, sourceProducerId, byzantine, pipeTransport, dropEveryN } = args;
 
   const inTransport = await relayRouter.createDirectTransport();
   const inConsumer = await inTransport.consume({
@@ -49,7 +55,15 @@ export async function startEvilRelayForward(args: {
   const outTransport = await relayRouter.createDirectTransport();
   const outProducer = await outTransport.produce({ kind: inConsumer.kind, rtpParameters: inConsumer.rtpParameters });
 
+  let pktCount = 0;
+  const dropN = dropEveryN && dropEveryN > 1 ? Math.floor(dropEveryN) : 0;
   inConsumer.on('rtp', (pkt: Buffer) => {
+    pktCount += 1;
+    // REQ-MLW-B-18 DROP tooth: withhold every Nth packet (deterministic). dropN===0 => never drops
+    // => byte-identical to the pre-B6 always-forward path.
+    if (dropN !== 0 && pktCount % dropN === 0) {
+      return; // withhold
+    }
     const copy = Buffer.from(pkt);
     if (byzantine) {
       const ti = copy.length - SFRAME_TRAILER_LEN - 1; // a ciphertext byte just before the trailer
