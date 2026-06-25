@@ -35,7 +35,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { types as msTypes } from 'mediasoup';
 import type { Logger } from '@dvconf/shared';
-import { ensureWarmPipe, type RoomTopology } from './relay-role-manager.js';
+import { ensureWarmPipe, pipeSrtpEnabled, type RoomTopology } from './relay-role-manager.js';
 
 // ── Cross-daemon inter-relay link auth (G3.2b) ──────────────────────────
 
@@ -826,7 +826,7 @@ export async function createPrimaryPipeTransport(
     listenIp: { ip: '0.0.0.0', announcedIp },
     port: pipePort,
     enableRtx: false,
-    enableSrtp: false,
+    enableSrtp: pipeSrtpEnabled(),
   } as Parameters<msTypes.Router['createPipeTransport']>[0]);
 }
 
@@ -1011,10 +1011,17 @@ export class PrimaryPipeCoordinator {
       s.connected = true;
 
       // Reply DOWN with the primary's OWN bound port (the §2 handshake reply).
+      // B1-SRTP: when PIPE_SRTP=1 the primary's PipeTransport carries SRTP params
+      // (the TOP-LEVEL `transport.srtpParameters` getter — NOT `transport.tuple.
+      // srtpParameters`, which is undefined). Guarded `!== undefined` spread so a
+      // flag-OFF reply omits the field and stays byte-identical to today.
       const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
       this.deps.paramSender(roomId, {
         ip: announcedIp,
         port: transport.tuple.localPort,
+        ...(transport.srtpParameters !== undefined
+          ? { srtpParameters: transport.srtpParameters }
+          : {}),
       });
       this.deps.logger?.info(
         { roomId, primaryPort: transport.tuple.localPort, standbyPort: s.standbyParams.port },

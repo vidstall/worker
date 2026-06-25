@@ -17,6 +17,11 @@ import type { types as msTypes } from 'mediasoup';
 
 export type RelayRole = 'primary' | 'standby';
 
+/** B1-SRTP (WAN-precursor): gate the F1 PipeTransport SRTP wrap. Single source of truth; default OFF. */
+export function pipeSrtpEnabled(): boolean {
+  return process.env['PIPE_SRTP'] === '1';
+}
+
 /**
  * Per-room topology state held by the relay daemon.
  * pipeConsumer is null until the first peer joins (lazy warm-pipe, C7).
@@ -187,7 +192,7 @@ export async function createStandbyPipeTransport(
     listenIp: { ip: '0.0.0.0', announcedIp },
     port: pipePort,
     enableRtx: false,
-    enableSrtp: false,
+    enableSrtp: pipeSrtpEnabled(),
   } as Parameters<msTypes.Router['createPipeTransport']>[0]);
 }
 
@@ -257,7 +262,7 @@ export async function ensureWarmPipe(
       listenIp: { ip: '0.0.0.0', announcedIp },
       port: pipePort,
       enableRtx: false,
-      enableSrtp: false,
+      enableSrtp: pipeSrtpEnabled(),
     } as Parameters<msTypes.Router['createPipeTransport']>[0]);
   }
 
