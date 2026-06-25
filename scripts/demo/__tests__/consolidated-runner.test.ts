@@ -2,13 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { consolidatedComposeFiles, exitCodeFor, STAGE_KEYS } from '../../../../run-consolidated-demo.ts';
 
 describe('run-consolidated-demo contract', () => {
-  it('composes the 4 layers in order (base, w1, relay-overlap, consolidated)', () => {
+  it('composes the 5 layers in order (base, w1, relay-overlap, consolidated, realmedia)', () => {
     const files = consolidatedComposeFiles('/ROOT');
     expect(files).toEqual([
       '/ROOT/docker-compose-demo.yml',
       '/ROOT/docker-compose-demo-w1.override.yml',
       '/ROOT/docker-compose-demo-relay-overlap.override.yml',
       '/ROOT/docker-compose-demo-consolidated.override.yml',
+      '/ROOT/docker-compose-demo-realmedia.override.yml',
     ]);
   });
 
@@ -26,6 +27,7 @@ describe('run-consolidated-demo contract', () => {
       '5-canary-audit-run',
       '5a-canary-slash-e2e',
       '5b-onchain-slash-2distinct',
+      '5-realmedia-browser-slash',
     ]);
   });
 
