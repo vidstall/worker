@@ -256,6 +256,48 @@ describe('W5 M2 P1.0 — {peerId → sessionPubkey} roster capture + malformed-k
     wsGuest.close();
   });
 
+  it('COVERT (negative): a NO-password legacy joiner is admitted but triggers ZERO rosterPeer to the host (signaling.ts:963)', async () => {
+    // The mirror of the positive announce above + the cross-lock for the covert canary
+    // publisher (validator-daemon RelaySignalingCovertTransport, REQ-MLW-A-11): a join that
+    // OMITS roomPassword takes the legacy path (signaling.ts:790) → sessionPubkey stays
+    // undefined → the :963 `if (sessionPubkey !== undefined)` roster broadcast is skipped. The
+    // legacy peer's media is still forwarded, but no existing member is told a new MEMBER
+    // appeared. This pins the NEGATIVE direction on the REAL relay (not just the canary's
+    // in-test FakeRelay model).
+    const s = await startServer();
+    server = s.wss;
+
+    // Host joins WITH a password → it has a sessionPubkey and is a roster-broadcast target.
+    const wsHost = await connect(s.port);
+    const hostReply = waitForMessage(wsHost);
+    wsHost.send(JSON.stringify({ type: 'join', roomId: 'covert-neg', peerId: 'host', roomPassword: 'p', peerPubkey: pubkey32(1) }));
+    await hostReply;
+
+    // Collect EVERY frame the host receives from here on.
+    const hostFrames: Record<string, unknown>[] = [];
+    wsHost.on('message', (d) => hostFrames.push(JSON.parse(d.toString()) as Record<string, unknown>));
+
+    // The covert joiner joins the SAME room with NO roomPassword / no peerPubkey (legacy path).
+    const wsCovert = await connect(s.port);
+    const covertReply = waitForMessage(wsCovert);
+    wsCovert.send(JSON.stringify({ type: 'join', roomId: 'covert-neg', peerId: 'covert' }));
+    const covertMsg = await covertReply;
+    // It IS admitted (legacy path — the password gate only engages when roomPassword is sent).
+    expect(covertMsg['type']).toBe('routerRtpCapabilities');
+    expect(s.getRoomCount()).toBe(1);
+
+    await tick(200);
+
+    // The host received ZERO rosterPeer frames about the covert peer — covert by omission.
+    const rosterAboutCovert = hostFrames.filter(
+      (f) => f['type'] === 'rosterPeer' && f['peerId'] === 'covert',
+    );
+    expect(rosterAboutCovert.length).toBe(0);
+
+    wsHost.close();
+    wsCovert.close();
+  });
+
   it('a malformed (non-32-byte) peerPubkey FAILS admission loud (error reply, no room created)', async () => {
     const s = await startServer();
     server = s.wss;

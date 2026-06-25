@@ -172,10 +172,16 @@ importers:
       mediasoup:
         specifier: ^3.14.0
         version: 3.19.17
+      ws:
+        specifier: ^8.16.0
+        version: 8.20.1
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.13
+      '@types/ws':
+        specifier: ^8.5.10
+        version: 8.18.1
 
   packages/chain-event-listener:
     dependencies:
