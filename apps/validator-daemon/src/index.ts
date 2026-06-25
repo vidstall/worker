@@ -85,9 +85,8 @@ import { buildLiveSeams, loadCanaryTls, selectCaptureMode } from './canary/live-
 import {
   bringUpLiveConsumer,
   type LiveConsumerRuntime,
-  type PipedProducerDescriptor,
 } from './canary/live-consumer-runtime.js';
-import { chooseCapture } from './capture-precedence.js';
+import { chooseCapture, type CanaryPipeParams } from './capture-precedence.js';
 import {
   startCanaryClaimsServer,
   isCanaryClaimsTlsEnabled,
@@ -528,29 +527,38 @@ export async function startDaemon(overrides?: {
     if (selectCaptureMode(process.env) === 'pipe' && !liveSeams?.capture) {
       const paramsPath = process.env['CANARY_PIPE_PARAMS_PATH'];
       if (paramsPath) {
-        const params = JSON.parse(readFileSync(paramsPath, 'utf8')) as {
-          relay: { ip: string; port: number };
-          piped: PipedProducerDescriptor;
-          receiverMinerId: string;
-          meta: { canaryKid: number; expectedCtrs: number[]; kRoom: number[]; cellSecret: number[] };
-        };
-        const runtime = await bringUpLiveConsumer({
-          pipePort: 0,
-          receiverMinerId: params.receiverMinerId,
-          meta: {
-            canaryKid: params.meta.canaryKid,
-            expectedCtrs: params.meta.expectedCtrs,
-            kRoom: Uint8Array.from(params.meta.kRoom),
-            cellSecret: Uint8Array.from(params.meta.cellSecret),
-          },
-        });
-        await runtime.connectToRelay(params.relay);
-        await runtime.consumePiped(params.piped);
-        state.liveConsumer = runtime;
-        verifyLog.info(
-          { standbyPort: runtime.standbyParams.port, receiverMinerId: params.receiverMinerId },
-          'B2 live pipe-capture attached (CANARY_LIVE_CAPTURE=pipe)',
-        );
+        // Narrow guard around ONLY the read+parse: an unreadable/malformed run-config is an
+        // operability issue (skip bring-up with a TARGETED warn), NOT the misleading generic
+        // "verify loop failed to start" the outer catch would otherwise report. Byte-identical
+        // OFF is unchanged — this whole block is gated by the flag above.
+        let params: CanaryPipeParams | undefined;
+        try {
+          params = JSON.parse(readFileSync(paramsPath, 'utf8')) as CanaryPipeParams;
+        } catch (e) {
+          verifyLog.warn(
+            { paramsPath, err: e },
+            'CANARY_PIPE_PARAMS_PATH unreadable/malformed — using empty capture',
+          );
+        }
+        if (params) {
+          const runtime = await bringUpLiveConsumer({
+            pipePort: 0,
+            receiverMinerId: params.receiverMinerId,
+            meta: {
+              canaryKid: params.meta.canaryKid,
+              expectedCtrs: params.meta.expectedCtrs,
+              kRoom: Uint8Array.from(params.meta.kRoom),
+              cellSecret: Uint8Array.from(params.meta.cellSecret),
+            },
+          });
+          await runtime.connectToRelay(params.relay);
+          await runtime.consumePiped(params.piped);
+          state.liveConsumer = runtime;
+          verifyLog.info(
+            { standbyPort: runtime.standbyParams.port, receiverMinerId: params.receiverMinerId },
+            'B2 live pipe-capture attached (CANARY_LIVE_CAPTURE=pipe)',
+          );
+        }
       } else {
         verifyLog.warn('CANARY_LIVE_CAPTURE=pipe but CANARY_PIPE_PARAMS_PATH unset — using empty capture');
       }

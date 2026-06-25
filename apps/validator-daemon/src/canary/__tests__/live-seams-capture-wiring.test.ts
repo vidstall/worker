@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { selectCaptureMode } from '../live-seams.js';
 
 // This unit test pins the B2 contract WITHOUT opening a socket or spawning a mediasoup worker:
