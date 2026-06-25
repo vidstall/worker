@@ -56,6 +56,7 @@ import { HttpClaimBoard } from './claims-client.js';
 import { CanaryPublisher } from './publisher.js';
 import { submitCanarySlash, type SlashCallOpts } from './slash-submitter.js';
 import type { RelayRoomScope } from './cell.js';
+import { type PipeConnectParams } from '@dvconf/inter-relay-client';
 
 const MOD = 'canary/live-seams';
 
@@ -214,6 +215,34 @@ export async function loadCanaryTls(env: Record<string, string | undefined>): Pr
   ) as SignedManifest[];
   const trustedSpki = manifestsToTrustedSpki(await loadManifests(bundle));
   return { key, cert, trustedSpki };
+}
+
+/**
+ * B3 (REQ-MLW-B-13) — resolve the AUTHENTICATED relay pipe endpoint from the signed OOB manifest
+ * bundle. loadManifests drops bad-sig/expired/malformed; find the manifest whose operatorPubkey ==
+ * CANARY_RELAY_OPERATOR_PUBKEY (the accused relay's on-chain key — the manifest is keyed by the
+ * SAME lowercase raw-pubkey hex, no `0x`); return its relayPipe as {ip,port} (srtpParameters
+ * undefined — per-pipe SRTP is exchanged DYNAMICALLY over the mediasoup pipe-connect handshake,
+ * never baked into the long-lived manifest, INV-C). Returns null when no env / no matching-verified
+ * manifest / no relayPipe — the caller falls back to the UNSIGNED CANARY_PIPE_PARAMS_PATH file.
+ * SECURITY UPGRADE: an ed25519-signed endpoint > an unsigned file.
+ */
+export async function resolveRelayPipeFromManifest(
+  env: Record<string, string | undefined>,
+): Promise<PipeConnectParams | null> {
+  const bundlePath = env['CANARY_MANIFEST_BUNDLE_PATH'];
+  const relayOperatorPubkey = env['CANARY_RELAY_OPERATOR_PUBKEY'];
+  if (!bundlePath || !relayOperatorPubkey) return null;
+  let bundle: SignedManifest[];
+  try {
+    bundle = JSON.parse(readFileSync(bundlePath, 'utf8')) as SignedManifest[];
+  } catch {
+    return null;
+  }
+  const manifests = await loadManifests(bundle); // fail-closed: invalid/expired/malformed dropped
+  const m = manifests.get(relayOperatorPubkey);
+  if (!m?.relayPipe) return null;
+  return { ip: m.relayPipe.ip, port: m.relayPipe.port }; // srtpParameters undefined (dynamic exchange)
 }
 
 async function buildCoObserverBoards(

@@ -23,7 +23,20 @@ import { createLogger } from './logger.js';
 const log = createLogger('operator-manifest');
 
 /** Domain-separation tag + version for the canonical signing bytes. Bump on any layout change. */
-const MANIFEST_DOMAIN = 'DVCONF-OPMANIFEST-v1';
+const MANIFEST_DOMAIN = 'DVCONF-OPMANIFEST-v2';
+
+/**
+ * OPTIONAL relay→validator pipe endpoint a deployed validator connects to (B3, REQ-MLW-B-13).
+ * The relay-PUBLIC F1 pipe endpoint ONLY — announcedIp (VPN-iface IP) + a stable UDP port band.
+ * NO srtpParameters here: per-pipe SRTP keys are exchanged DYNAMICALLY over the mediasoup
+ * pipe-connect handshake (inter-relay.ts), never baked into the long-lived signed manifest (INV-C).
+ */
+export interface RelayPipeDescriptor {
+  /** announcedIp — the relay primary's reachable pipe IP (VPN iface). */
+  ip: string;
+  /** announced UDP pipe port (within PIPE_PORT_RANGE, default band 40000-40100). */
+  port: number;
+}
 
 /** The OOB-distributed binding a verifier needs to reach + trust a peer's carrier board. */
 export interface OperatorManifest {
@@ -35,6 +48,11 @@ export interface OperatorManifest {
   certFingerprint: string;
   /** Unix epoch MILLISECONDS after which this manifest is stale (bounds key-rotation staleness). */
   validUntil: number;
+  /**
+   * OPTIONAL (B3): the relay's PUBLIC F1 pipe endpoint for authenticated cross-host discovery.
+   * Absent = a pure trust anchor (co-observer-board back-compat). NO srtp key here (dynamic exchange).
+   */
+  relayPipe?: RelayPipeDescriptor;
 }
 
 /** A manifest plus the operator's ed25519 signature over its canonical bytes (raw 64 bytes, hex). */
@@ -63,7 +81,19 @@ function isWellFormed(m: OperatorManifest): boolean {
     !m.boardEndpoint.includes('\n') &&
     typeof m.validUntil === 'number' &&
     Number.isInteger(m.validUntil) &&
-    m.validUntil > 0
+    m.validUntil > 0 &&
+    // v2 (B-13): relayPipe is OPTIONAL — absent stays valid (back-compat trust anchor); present is
+    // strict {ip: non-empty no-newline string, port: int 1..65535}. NO srtp key here (INV-C).
+    (m.relayPipe === undefined ||
+      (typeof m.relayPipe === 'object' &&
+        m.relayPipe !== null &&
+        typeof m.relayPipe.ip === 'string' &&
+        m.relayPipe.ip.length > 0 &&
+        !m.relayPipe.ip.includes('\n') &&
+        typeof m.relayPipe.port === 'number' &&
+        Number.isInteger(m.relayPipe.port) &&
+        m.relayPipe.port > 0 &&
+        m.relayPipe.port <= 65535))
   );
 }
 
@@ -82,6 +112,11 @@ export function canonicalManifestBytes(m: OperatorManifest): Uint8Array {
     m.boardEndpoint,
     m.certFingerprint,
     String(m.validUntil),
+    // v2 (B-13): the relayPipe fields appended with a '-' sentinel so a NO-pipe manifest stays
+    // FIXED-ARITY (only the domain tag differs from the v1 layout). isWellFormed has already
+    // guaranteed ip/port contain no '\n' when present.
+    m.relayPipe ? m.relayPipe.ip : '-',
+    m.relayPipe ? String(m.relayPipe.port) : '-',
   ].join('\n');
   return new TextEncoder().encode(line);
 }

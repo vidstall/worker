@@ -117,7 +117,12 @@ export function renderCanaryEnvFile(o: {
  * injected (deterministic for tests; main() passes Date.now()+89d).
  */
 export async function buildManifestBundle(
-  operators: Array<{ keypair: Ed25519Keypair; certPem: string; boardEndpoint: string }>,
+  operators: Array<{
+    keypair: Ed25519Keypair;
+    certPem: string;
+    boardEndpoint: string;
+    relayPipe?: { ip: string; port: number };
+  }>,
   validUntilMs: number,
 ): Promise<SignedManifest[]> {
   const bundle: SignedManifest[] = [];
@@ -127,6 +132,10 @@ export async function buildManifestBundle(
       boardEndpoint: op.boardEndpoint,
       certFingerprint: spkiFingerprint(op.certPem),
       validUntil: validUntilMs,
+      // B3 (REQ-MLW-B-13): the OPTIONAL relay PUBLIC F1 pipe endpoint — the authenticated discovery
+      // the deployed validator prefers over the unsigned CANARY_PIPE_PARAMS_PATH file. Absent =
+      // a pure trust anchor (back-compat). NO srtp key here (dynamic exchange, INV-C).
+      ...(op.relayPipe ? { relayPipe: op.relayPipe } : {}),
     };
     bundle.push(await signManifest(manifest, op.keypair));
   }
@@ -199,7 +208,24 @@ async function main(): Promise<void> {
   const validUntilMs = Date.now() + MANIFEST_VALID_DAYS * 24 * 60 * 60 * 1000;
   const bundle = await buildManifestBundle(
     [
-      { keypair: val1Kp, certPem: val1Cert.certPem, boardEndpoint: VAL1_ENDPOINT },
+      // B3 (REQ-MLW-B-13): the relay is co-homed with validator-1 -> attach the relay PUBLIC F1 pipe
+      // endpoint to val1's manifest, env-driven (CANARY_RELAY_PIPE_IP/PORT). The runbook sets
+      // CANARY_RELAY_OPERATOR_PUBKEY=pubHex(val1Kp) so the resolver's lookup hits this same operator.
+      // Absent CANARY_RELAY_PIPE_IP -> no relayPipe -> a pure trust anchor (resolver returns null,
+      // the deployed validator falls back to the unsigned CANARY_PIPE_PARAMS_PATH file).
+      {
+        keypair: val1Kp,
+        certPem: val1Cert.certPem,
+        boardEndpoint: VAL1_ENDPOINT,
+        ...(process.env['CANARY_RELAY_PIPE_IP']
+          ? {
+              relayPipe: {
+                ip: process.env['CANARY_RELAY_PIPE_IP'],
+                port: Number(process.env['CANARY_RELAY_PIPE_PORT'] ?? '40000'),
+              },
+            }
+          : {}),
+      },
       { keypair: val2Kp, certPem: val2Cert.certPem, boardEndpoint: VAL2_ENDPOINT },
     ],
     validUntilMs,

@@ -81,7 +81,12 @@ import {
   type CanaryForwardCaptureResult,
 } from './canary/verify-loop.js';
 import { InMemoryClaimBoard } from './canary/claim-board.js';
-import { buildLiveSeams, loadCanaryTls, selectCaptureMode } from './canary/live-seams.js';
+import {
+  buildLiveSeams,
+  loadCanaryTls,
+  selectCaptureMode,
+  resolveRelayPipeFromManifest,
+} from './canary/live-seams.js';
 import {
   bringUpLiveConsumer,
   type LiveConsumerRuntime,
@@ -566,7 +571,20 @@ export async function startDaemon(overrides?: {
               cellSecret: Uint8Array.from(params.meta.cellSecret),
             },
           });
-          await runtime.connectToRelay(params.relay);
+          // B3 (REQ-MLW-B-13): the AUTHENTICATED relay pipe endpoint from the ed25519-signed OOB
+          // manifest takes precedence over the UNSIGNED CANARY_PIPE_PARAMS_PATH `params.relay`. The
+          // resolver returns null with no CANARY_RELAY_OPERATOR_PUBKEY env / no matching-verified
+          // manifest / no relayPipe -> we fall back to `params.relay` (byte-identical to Task 2). The
+          // piped descriptor + meta still come from the file; the manifest carries ONLY the relay
+          // {ip,port} (per-pipe SRTP is exchanged dynamically over pipe-connect, INV-C).
+          const authedRelay = await resolveRelayPipeFromManifest(process.env);
+          await runtime.connectToRelay(authedRelay ?? params.relay);
+          if (authedRelay) {
+            verifyLog.info(
+              { relayIp: authedRelay.ip, relayPort: authedRelay.port },
+              'B3 using AUTHENTICATED relay pipe endpoint from signed OOB manifest (precedence over unsigned file)',
+            );
+          }
           await runtime.consumePiped(params.piped);
           state.liveConsumer = runtime;
           verifyLog.info(

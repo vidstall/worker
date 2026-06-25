@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { SuiClient } from '@mysten/sui/client';
 import { signManifest, type OperatorManifest, type SignedManifest } from '@dvconf/shared';
-import { buildLiveSeams, loadCanaryTls } from '../live-seams.js';
+import { buildLiveSeams, loadCanaryTls, resolveRelayPipeFromManifest } from '../live-seams.js';
 import {
   runCanaryVerifyRound,
   type CanaryVerifyDeps,
@@ -363,5 +363,51 @@ describe('(f) the constructed submit seam invokes createClient + signs with the 
     const seams = await buildLiveSeams(fixtureEnv(), { createClient: () => client });
     const proof = await makeProof();
     await expect(seams!.submit(proof)).rejects.toThrow(/failed on-chain/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// (g) B3 (REQ-MLW-B-13) — resolveRelayPipeFromManifest: the AUTHENTICATED signed relay pipe
+//     endpoint (from the v2 OOB manifest) takes precedence over the unsigned CANARY_PIPE_PARAMS_PATH
+//     file. The lookup key MUST match loadManifests' Map key (lowercase raw-pubkey hex, no `0x`).
+// ─────────────────────────────────────────────────────────────────────────────────
+describe('(g) resolveRelayPipeFromManifest — authenticated relay pipe from the v2 OOB manifest', () => {
+  const pubHex = (kp: Ed25519Keypair): string =>
+    Buffer.from(kp.getPublicKey().toRawBytes()).toString('hex');
+
+  it('returns {ip,port} for a relayPipe-bearing signed manifest', async () => {
+    const kp = new Ed25519Keypair();
+    const m: OperatorManifest = {
+      operatorPubkey: pubHex(kp),
+      boardEndpoint: '127.0.0.1:8092',
+      certFingerprint: 'cc'.repeat(32),
+      validUntil: Date.now() + 3_600_000,
+      relayPipe: { ip: '10.9.9.9', port: 40001 },
+    };
+    const bundle: SignedManifest[] = [await signManifest(m, kp)];
+    const bundlePath = join(dir, 'pipe-bundle.json');
+    writeFileSync(bundlePath, JSON.stringify(bundle));
+    const env = {
+      CANARY_MANIFEST_BUNDLE_PATH: bundlePath,
+      CANARY_RELAY_OPERATOR_PUBKEY: pubHex(kp),
+    };
+    const r = await resolveRelayPipeFromManifest(env);
+    expect(r).toEqual({ ip: '10.9.9.9', port: 40001 });
+  });
+
+  it('returns null without the env (falls back to the unsigned file)', async () => {
+    expect(await resolveRelayPipeFromManifest({})).toBeNull();
+  });
+
+  it('returns null when the matching manifest carries NO relayPipe (pure trust anchor)', async () => {
+    const kp = new Ed25519Keypair();
+    const bundle: SignedManifest[] = [await makeSigned(kp, '127.0.0.1:8092', 'dd'.repeat(32))];
+    const bundlePath = join(dir, 'nopipe-bundle.json');
+    writeFileSync(bundlePath, JSON.stringify(bundle));
+    const r = await resolveRelayPipeFromManifest({
+      CANARY_MANIFEST_BUNDLE_PATH: bundlePath,
+      CANARY_RELAY_OPERATOR_PUBKEY: pubHex(kp),
+    });
+    expect(r).toBeNull();
   });
 });

@@ -171,6 +171,30 @@ describe('signManifest / verifyManifest — ed25519 over canonical bytes', () =>
     const m = manifestFor(kp, { certFingerprint: 'xyz' });
     await expect(signManifest(m, kp)).rejects.toThrow(/operator-manifest/);
   });
+
+  // ── v2 (B-13): the OPTIONAL relayPipe descriptor — additive + back-compat ──
+  it('v2: a relayPipe-bearing manifest signs + verifies (round-trip)', async () => {
+    const kp = new Ed25519Keypair();
+    const m = manifestFor(kp, { relayPipe: { ip: '10.0.0.1', port: 40000 } });
+    const signed = await signManifest(m, kp);
+    const res = await verifyManifest(signed, { now: m.validUntil - 1 });
+    expect(res.valid).toBe(true);
+  });
+
+  it('v2: a manifest with NO relayPipe stays valid (back-compat trust anchor)', async () => {
+    const kp = new Ed25519Keypair();
+    const m = manifestFor(kp);
+    const signed = await signManifest(m, kp);
+    const res = await verifyManifest(signed, { now: m.validUntil - 1 });
+    expect(res.valid).toBe(true);
+  });
+
+  it('v2: a malformed relayPipe (bad port) is rejected as malformed', async () => {
+    const kp = new Ed25519Keypair();
+    const m = manifestFor(kp, { relayPipe: { ip: '10.0.0.1', port: 99999 } } as Partial<OperatorManifest>);
+    const signed = await signManifest(m, kp).catch(() => null);
+    expect(signed === null || (await verifyManifest(signed, {})).valid === false).toBe(true);
+  });
 });
 
 describe('loadManifests — verify a bundle, keep the VALID ones keyed by operatorPubkey', () => {

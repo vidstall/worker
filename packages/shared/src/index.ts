@@ -164,6 +164,7 @@ export {
 } from './operator-manifest.js';
 export type {
   OperatorManifest,
+  RelayPipeDescriptor,
   SignedManifest,
   ManifestVerifyResult,
 } from './operator-manifest.js';
