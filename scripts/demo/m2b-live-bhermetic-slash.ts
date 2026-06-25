@@ -88,7 +88,14 @@ import {
 // FROZEN canary primitives (reused VERBATIM — INV-A). These live in the validator-daemon app source;
 // scripts/ resolves them by relative SOURCE path under tsx (same as the @dvconf/shared import above).
 import { verifyForwardedCanary, type VerifyInput } from '../../apps/validator-daemon/src/canary/verifier.ts';
-import { buildDivergenceProof, OBSERVED_HASH_MISSING } from '../../apps/validator-daemon/src/canary/proof.ts';
+// scripts/demo imports cross-pkg with explicit .ts.
+import {
+  signSelfAttestation,
+  assembleProofFromAttestations,
+  canonicalProofMessage,          // proof.ts:126 — takes a DivergenceProofInput (needs sessionKeypairs spread)
+  OBSERVED_HASH_MISSING,
+  type DivergenceClaim,
+} from '../../apps/validator-daemon/src/canary/proof.ts';
 import { submitCanarySlash, type SlashCallOpts } from '../../apps/validator-daemon/src/canary/slash-submitter.ts';
 // Capture topology (REUSED from Task 4A) — real browser producer + real signaling + the demo-only
 // byzantine evil-relay + the F1 pipe + the validator sink.
@@ -124,10 +131,20 @@ const HOST_FAUCET_URL = process.env['FAUCET_URL'] ?? 'http://127.0.0.1:9123/gas'
 // (those are off-chain crypto). So the producer + verifier just need to agree on these to make the
 // divergence REAL. Distinct from the booted validators' CANARY_CELL_SECRET (which audits a DIFFERENT
 // stream) — irrelevant here because the proof carries the hashes the verifier computed, not a secret.
-const K_ROOM = new Uint8Array(32).fill(0x5c);
-const CELL_SECRET = new Uint8Array(32).fill(0xab);
-const CANARY_KID = 7;
-const CTRS = [0, 1, 2, 3, 4, 5, 6, 7];
+// B-WAN (REQ-MLW-B-15 conjunct-1, closes P2): source the producer<->verifier crypto-metadata from OOB
+// per-host provisioning (env CANARY_CELL_SECRET, the STEP-3 posture), NOT hardcoded constants.
+// INV-C: cellSecret/kRoom NEVER appear on the claims wire / media wire / signed manifest.
+function hexEnv32(name: string): Uint8Array {
+  const hx = process.env[name];
+  if (!hx || !/^[0-9a-fA-F]{64}$/.test(hx)) {
+    throw new Error(`${MOD}: ${name} must be 32-byte hex (64 chars) — OOB-provision it per-host (INV-C); refusing a hardcoded secret`);
+  }
+  return Uint8Array.from(Buffer.from(hx, 'hex'));
+}
+const K_ROOM = hexEnv32('CANARY_DEMO_K_ROOM');          // was: new Uint8Array(32).fill(0x5c)
+const CELL_SECRET = hexEnv32('CANARY_CELL_SECRET');     // was: new Uint8Array(32).fill(0xab)
+const CANARY_KID = parseInt(process.env['CANARY_DEMO_CANARY_KID'] ?? '7', 10);
+const CTRS = (process.env['CANARY_DEMO_CTRS'] ?? '0,1,2,3,4,5,6,7').split(',').map((s) => parseInt(s, 10));
 
 const mediaCodecs: msTypes.RtpCodecCapability[] = [
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000, preferredPayloadType: 101 },
@@ -699,7 +716,7 @@ async function main(): Promise<void> {
   logLine('=== M2b-live-WAN B-hermetic CHAIN-BACKED walkthrough (REQ-MLW-B-06/07/08/10) ===');
   logLine(`[stamp] ${stamp}  (timestamp is for the run log only — non-load-bearing)`);
   logLine('[design] Approach (B): 2 FRESH validators with bound session wallets registered on the booted localnet.');
-  logLine('[honesty] divergence is REAL (tampered browser media → FROZEN verifier); attester set is mirrored from canary-slash-e2e; relay self-signs the slash (W-E9).');
+  logLine('[honesty] divergence is REAL (tampered browser media -> FROZEN verifier); each validator independently signs its OWN captured bytes; >=2-distinct collected over the carrier in the 2-host run (NOT mirrored); relay self-signs the slash (W-E9).');
 
   // ── 1. read booted-stack shared artifacts + hydrate env ────────────────────────────────────────
   hydrateOnchainEnv();
@@ -781,15 +798,22 @@ async function main(): Promise<void> {
   const bondBefore = await readBond(client, relayKp, relayBondId, config.packageId);
   logLine(`[byzantine] relay bond before slash = ${bondBefore.toString()} MIST`);
 
-  const proof = await buildDivergenceProof({
+  // conjunct-2 (P4): each validator independently signs its Wallet-B attestation over the SAME
+  // canonical 145-byte message (over its OWN captured bytes); assemble the >=2-distinct set from the
+  // PRE-SIGNED attestations (NOT a single-process dual-sign). In the TRUE 2-host run these arrive over
+  // the mTLS /canary/claims carrier (Task 7); here each registered validator's session key signs.
+  const claim: DivergenceClaim = {
     roomId: byzRoomId,
     relayMinerId,
     canaryId: CANARY_KID,
     frameSeq: div.frameSeq,
     expectedHash: div.expectedHash,
     observedHash: div.observedHash,
-    sessionKeypairs: [v1.sessionKp, v2.sessionKp],
-  });
+  };
+  const msg = canonicalProofMessage({ ...claim, sessionKeypairs: [] }); // 145-byte surface (INV-A); empty keypairs = msg-only build
+  const att1 = await signSelfAttestation(msg, v1.sessionKp); // signed by v1, over v1's captured bytes
+  const att2 = await signSelfAttestation(msg, v2.sessionKp); // signed by v2, over v2's captured bytes
+  const proof = assembleProofFromAttestations(claim, [att1, att2]); // >=2-distinct enforced at assembly + on-chain
 
   logLine('[byzantine] submitting on-chain canary_audit::slash_for_canary_divergence (relay self-signs — W-E9)…');
   const slashResult = await withLockRetry('submitCanarySlash', () =>
