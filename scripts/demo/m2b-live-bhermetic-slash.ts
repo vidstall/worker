@@ -42,8 +42,10 @@
  *  • The slash tx is SIGNED BY THE RELAY (the bond owner) — approach (b) / W-E9, NOT validator-driven.
  *    A StakePosition is OWNED (has key, no store); a PTB can only pass an owned &mut by its OWNER, and
  *    share_for_testing is #[test_only]/stripped. This proves the ENTRY MECHANISM end-to-end; production
- *    needs a protocol-controlled bond (W-E9, on record). The relay keypair+bond come from the LIVE seed
- *    daemon-keys.json relay slot (the relay assigned to the room), so it is the REAL accused relay.
+ *    needs a protocol-controlled bond (W-E9, on record). The accused relay is a FRESH relay registered by
+ *    THIS orchestrator (registerFreshRelay — owns its own bond, self-signs), NOT the seed relay: this
+ *    dodges the booted validators' ~15s seed-relay auto-slash race (Sui object-lock) and keeps the room
+ *    touched by nothing else, so the on-chain slash query is unambiguous.
  *
  * ── INVARIANTS ────────────────────────────────────────────────────────────────────────────────────
  * INV-A: verifyForwardedCanary + buildDivergenceProof + the 145-byte canonical message are UNCHANGED.
