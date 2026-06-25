@@ -29,6 +29,7 @@ import type { types as msTypes } from 'mediasoup';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
+  pipeSrtpEnabled,
 } from '@dvconf/inter-relay-client';
 
 const mediaCodecs: msTypes.RtpCodecCapability[] = [
@@ -126,7 +127,7 @@ describe('SPIKE: paused PipeTransport consumer getStats() counter advance (OQ-2)
       listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' },
       port: 0,
       enableRtx: false,
-      enableSrtp: false,
+      enableSrtp: pipeSrtpEnabled(),
     } as Parameters<msTypes.Router['createPipeTransport']>[0]);
 
     await primaryPipe.connect({

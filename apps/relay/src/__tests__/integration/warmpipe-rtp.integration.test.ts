@@ -43,6 +43,7 @@ import {
   ensureWarmPipe,
   createStandbyPipeTransport,
   createPipePortAllocator,
+  pipeSrtpEnabled,
   type RoomTopology,
 } from '@dvconf/inter-relay-client';
 import {
@@ -256,7 +257,7 @@ describe('warm-pipe RTP -- production-faithful (manual cross-PipeTransport pairi
       listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' },
       port: 0,
       enableRtx: false,
-      enableSrtp: false,
+      enableSrtp: pipeSrtpEnabled(),
     } as Parameters<msTypes.Router['createPipeTransport']>[0]);
 
     // 2. CONNECT-PARAM EXCHANGE (in production: over the inter-relay WS link).

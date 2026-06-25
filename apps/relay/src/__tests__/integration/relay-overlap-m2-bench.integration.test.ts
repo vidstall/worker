@@ -55,6 +55,7 @@ import { createLogger } from '@dvconf/shared';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
+  pipeSrtpEnabled,
 } from '@dvconf/inter-relay-client';
 import { ensureWarmPipe, type RoomTopology } from '@dvconf/inter-relay-client';
 import { McuPipeline } from '../../mcu-pipeline.js';
@@ -169,7 +170,7 @@ describe('relay-overlap M2 — Phase 5 gate (c): RO-014 no-ffmpeg + CPU floor', 
       listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' },
       port: 0,
       enableRtx: false,
-      enableSrtp: false,
+      enableSrtp: pipeSrtpEnabled(),
     } as Parameters<msTypes.Router['createPipeTransport']>[0]);
     await primaryPipe.connect({
       ip: '127.0.0.1',

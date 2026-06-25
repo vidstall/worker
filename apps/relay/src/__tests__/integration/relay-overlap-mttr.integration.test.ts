@@ -55,6 +55,7 @@ import { dirname, resolve } from 'node:path';
 import {
   createPrimaryPipeTransport,
   pipeProducerOntoPrimaryTransport,
+  pipeSrtpEnabled,
 } from '@dvconf/inter-relay-client';
 import { ensureWarmPipe, type RoomTopology } from '@dvconf/inter-relay-client';
 import { LatencyWriter } from '@dvconf/shared';
@@ -216,7 +217,7 @@ async function armRun(): Promise<RunScaffold> {
     listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' },
     port: 0,
     enableRtx: false,
-    enableSrtp: false,
+    enableSrtp: pipeSrtpEnabled(),
   } as Parameters<msTypes.Router['createPipeTransport']>[0]);
   await primaryPipe.connect({
     ip: '127.0.0.1',

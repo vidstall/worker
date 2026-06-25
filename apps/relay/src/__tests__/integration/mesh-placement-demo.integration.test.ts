@@ -23,7 +23,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
-import { createPrimaryPipeTransport, pipeProducerOntoPrimaryTransport } from '@dvconf/inter-relay-client';
+import { createPrimaryPipeTransport, pipeProducerOntoPrimaryTransport, pipeSrtpEnabled } from '@dvconf/inter-relay-client';
 // Cross-app reuse of the SHIPPED canary pipeline (Task 5b) — same 4-level depth as the
 // established canary-forward.integration.test.ts:48 precedent (apps/relay -> apps/validator-daemon).
 import { runCanaryVerifyRound, isRelayFlaggedByCanary, type CanaryForwardCapture, type CanaryVerifyDeps } from '../../../../validator-daemon/src/canary/verify-loop.js';
@@ -179,7 +179,7 @@ describe('REQ-RMS-014 — legs c+d: >C_worker room triggers M2 cascade, zero cro
     // M2 cascade pipe: routerA (primary) -> routerB (downstream relay).
     const primaryPipe = await createPrimaryPipeTransport(routerA, 0);
     const standbyPipe = await routerB.createPipeTransport({
-      listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' }, port: 0, enableRtx: false, enableSrtp: false,
+      listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' }, port: 0, enableRtx: false, enableSrtp: pipeSrtpEnabled(),
     } as Parameters<msTypes.Router['createPipeTransport']>[0]);
     await primaryPipe.connect({ ip: '127.0.0.1', port: standbyPipe.tuple.localPort } as Parameters<msTypes.PipeTransport['connect']>[0]);
     await standbyPipe.connect({ ip: '127.0.0.1', port: primaryPipe.tuple.localPort } as Parameters<msTypes.PipeTransport['connect']>[0]);

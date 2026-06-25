@@ -26,6 +26,7 @@
 
 import type { types as msTypes } from 'mediasoup';
 import type { RelayRole } from '@dvconf/inter-relay-client';
+import { pipeSrtpEnabled } from '@dvconf/inter-relay-client';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -106,7 +107,7 @@ export async function rebuildFromRegistry(
     listenIp: { ip: '0.0.0.0', announcedIp },
     port: snapshot.pipePort,
     enableRtx: false,
-    enableSrtp: false,
+    enableSrtp: pipeSrtpEnabled(),
   } as Parameters<msTypes.Router['createPipeTransport']>[0]);
 
   // Derive a fresh producerId — distinct from any previous (aliased) ID.

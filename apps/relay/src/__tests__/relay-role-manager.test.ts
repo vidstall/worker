@@ -458,6 +458,31 @@ describe('createStandbyPipeTransport (REQ-RO-005)', () => {
       expect.objectContaining({ listenIp: { ip: '0.0.0.0', announcedIp: '127.0.0.1' } }),
     );
   });
+
+  it('routes enableSrtp:false when PIPE_SRTP is unset (default-OFF byte-identical)', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    await createStandbyPipeTransport(router as any, 40007);
+
+    expect(router.createPipeTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ enableSrtp: false }),
+    );
+  });
+
+  it('routes enableSrtp:true when PIPE_SRTP=1 (B1 flag-ON, REQ-MLW-B-11)', async () => {
+    vi.stubEnv('PIPE_SRTP', '1');
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    await createStandbyPipeTransport(router as any, 40008);
+
+    expect(router.createPipeTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ enableSrtp: true }),
+    );
+  });
 });
 
 describe('ensureWarmPipe — consume onto a PASSED-IN transport (REQ-RO-005)', () => {
