@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>M2b-live-WAN Sub-lane A — browser canary producer (Task-0 spike)</title>
+  </head>
+  <body>
+    <h1>M2b-live-WAN Sub-lane A canary harness</h1>
+    <p>Headless Chrome → real WebRTC → in-process mediasoup relay → relay-internal tap.</p>
+    <p>
+      Bundled real mediasoup-client + the SHIPPED client SFrame crypto
+      (sframe-transform / e2ee-spike PathCKeyDerivation). The producer injects a
+      fully-pinned synthetic 62-byte canary SFrame into each encoded frame via
+      createEncodedStreams. Served from http://127.0.0.1 so getUserMedia + insertable
+      streams have a secure context.
+    </p>
+    <script src="/bundle.js"></script>
+  </body>
+</html>
