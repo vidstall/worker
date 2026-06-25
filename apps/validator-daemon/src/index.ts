@@ -88,6 +88,10 @@ import {
 } from './canary/live-consumer-runtime.js';
 import { chooseCapture, type CanaryPipeParams } from './capture-precedence.js';
 import {
+  CANARY_CAPTURE_LIVE_TOKEN,
+  CANARY_CAPTURE_EMPTY_TOKEN,
+} from './canary/capture-empty-error.js';
+import {
   startCanaryClaimsServer,
   isCanaryClaimsTlsEnabled,
   type StartCanaryClaimsResult,
@@ -97,6 +101,12 @@ const logger = createLogger('validator-daemon');
 
 /** F61 rolling-RTT window size (DOH-014): average of the latest N reachable RTTs. */
 const RTT_WINDOW = 10;
+
+/**
+ * B-WAN HARD-FAIL liveness (REQ-MLW-B-12): how long to let the relay forward before the
+ * post-bring-up empty-capture probe asserts >=1 receiver / >=1 frame (ms; env-overridable).
+ */
+const LIVENESS_PROBE_MS = parseInt(process.env['CANARY_LIVENESS_PROBE_MS'] ?? '3000', 10);
 
 /** Configuration for the measurement loop. */
 export interface ValidatorConfig {
@@ -535,10 +545,15 @@ export async function startDaemon(overrides?: {
         try {
           params = JSON.parse(readFileSync(paramsPath, 'utf8')) as CanaryPipeParams;
         } catch (e) {
-          verifyLog.warn(
-            { paramsPath, err: e },
-            'CANARY_PIPE_PARAMS_PATH unreadable/malformed — using empty capture',
+          // B-WAN HARD-FAIL (REQ-MLW-B-12): a REQUESTED pipe capture with an unreadable/malformed
+          // run-config must NOT degrade to a silent empty no-op (that masquerades as a passing
+          // audit). The bring-up sits inside the crash-safe try/catch, so a `throw` would be
+          // SWALLOWED -> use fatal + process.exit(1) so the process dies BEFORE the catch.
+          verifyLog.fatal(
+            { token: CANARY_CAPTURE_EMPTY_TOKEN, paramsPath, err: e },
+            'CANARY_PIPE_PARAMS_PATH unreadable/malformed — refusing a silent no-op audit',
           );
+          process.exit(1);
         }
         if (params) {
           const runtime = await bringUpLiveConsumer({
@@ -558,9 +573,34 @@ export async function startDaemon(overrides?: {
             { standbyPort: runtime.standbyParams.port, receiverMinerId: params.receiverMinerId },
             'B2 live pipe-capture attached (CANARY_LIVE_CAPTURE=pipe)',
           );
+          // B-WAN HARD-FAIL liveness (REQ-MLW-B-12): give the relay a moment to forward, then assert
+          // >=1 receiver with >=1 captured frame. A silent no-op must not pass as an audit. fatal +
+          // process.exit(1) (NOT throw) so the crash-safe catch can't swallow the failure.
+          await new Promise((res) => setTimeout(res, LIVENESS_PROBE_MS));
+          const probe = await runtime.capture({ relayId: params.relay.ip, roomId: params.receiverMinerId });
+          const frames = [...probe.perReceiver.values()].reduce((n, b) => n + b.length, 0);
+          if (probe.perReceiver.size === 0 || frames === 0) {
+            verifyLog.fatal(
+              { token: CANARY_CAPTURE_EMPTY_TOKEN, receivers: probe.perReceiver.size, frames },
+              'CANARY_LIVE_CAPTURE=pipe but capture is empty (0 receivers / 0 frames) — refusing a silent no-op audit',
+            );
+            runtime.shutdown();
+            process.exit(1);
+          }
+          verifyLog.info(
+            { token: CANARY_CAPTURE_LIVE_TOKEN, receivers: probe.perReceiver.size, frames },
+            'B2 live capture verified (>=1 receiver, >=1 frame)',
+          );
         }
       } else {
-        verifyLog.warn('CANARY_LIVE_CAPTURE=pipe but CANARY_PIPE_PARAMS_PATH unset — using empty capture');
+        // B-WAN HARD-FAIL (REQ-MLW-B-12): CANARY_LIVE_CAPTURE=pipe was REQUESTED but no run-config
+        // path was supplied — refuse the silent empty no-op. fatal + process.exit(1) (NOT throw) so
+        // the crash-safe catch can't swallow it.
+        verifyLog.fatal(
+          { token: CANARY_CAPTURE_EMPTY_TOKEN },
+          'CANARY_LIVE_CAPTURE=pipe but CANARY_PIPE_PARAMS_PATH unset — refusing a silent no-op audit',
+        );
+        process.exit(1);
       }
     }
     // Stage 4.5 (C1 cross-host): HOIST the verify-loop's OWN board so the local `/canary/claims` mTLS
