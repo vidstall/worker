@@ -15,6 +15,7 @@
  */
 
 import 'dotenv/config';
+import { readFileSync } from 'node:fs';
 import type { SuiClient } from '@mysten/sui/client';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
@@ -80,7 +81,13 @@ import {
   type CanaryForwardCaptureResult,
 } from './canary/verify-loop.js';
 import { InMemoryClaimBoard } from './canary/claim-board.js';
-import { buildLiveSeams, loadCanaryTls } from './canary/live-seams.js';
+import { buildLiveSeams, loadCanaryTls, selectCaptureMode } from './canary/live-seams.js';
+import {
+  bringUpLiveConsumer,
+  type LiveConsumerRuntime,
+  type PipedProducerDescriptor,
+} from './canary/live-consumer-runtime.js';
+import { chooseCapture } from './capture-precedence.js';
 import {
   startCanaryClaimsServer,
   isCanaryClaimsTlsEnabled,
@@ -192,6 +199,14 @@ export interface DaemonState {
    * vanilla mode (flag off) -> no server, byte-identical to the pre-Stage-4 daemon.
    */
   canaryClaimsServer: StartCanaryClaimsResult | null;
+  /**
+   * M2b-live-WAN B2 (REQ-MLW-B-01/02): the REAL pipe-tap consumer runtime (a mediasoup worker +
+   * standby F1 pipe + live consumer), brought up ONLY when CANARY_LIVE_CAPTURE=pipe. Its `.capture`
+   * is swapped into the verify-loop seam (via chooseCapture) so the loop verifies REAL forwarded
+   * frames. Null in the default/byte-identical-OFF path (flag unset / any other value) — then the
+   * verify-loop keeps its EXACT empty no-op capture. Shut down in BOTH teardown sites.
+   */
+  liveConsumer: LiveConsumerRuntime | null;
   /**
    * M2 chunk 2 (REQ-CFA-019/020): the latest live-discovered active-validator miner_ids
    * (Wallet-A ids from validator_registry::get_active_validators), refreshed each canary
@@ -339,6 +354,7 @@ export async function startDaemon(overrides?: {
     canaryCellLoop: null,
     canaryVerifyLoop: null,
     canaryClaimsServer: null,
+    liveConsumer: null,
     discoveredValidatorMinerIds: undefined,
     coverageServer: null,
     running: true,
@@ -504,6 +520,41 @@ export async function startDaemon(overrides?: {
     // `liveSeams` is null and the EXACT no-op seams below are used (byte-identical vanilla). The live
     // seams are an INJECTED/CONTROLLED divergence + W-E9 self-slash (HONESTY on record in live-seams.ts).
     const liveSeams = await buildLiveSeams(process.env);
+    // B2 (REQ-MLW-B-01/02): when CANARY_LIVE_CAPTURE=pipe, bring up the REAL pipe-tap consumer
+    // (a mediasoup worker + standby F1 pipe). The relay primary {ip,port} + PipedProducerDescriptor
+    // arrive OOB via a run-config the single-host walkthrough orchestrator writes (CANARY_PIPE_PARAMS_PATH).
+    // Default unset / any other value = 'injected' = the EXACT empty no-op below (byte-identical OFF).
+    // Crash-safe: any worker-spawn fault here is caught by the existing catch (daemon continues).
+    if (selectCaptureMode(process.env) === 'pipe' && !liveSeams?.capture) {
+      const paramsPath = process.env['CANARY_PIPE_PARAMS_PATH'];
+      if (paramsPath) {
+        const params = JSON.parse(readFileSync(paramsPath, 'utf8')) as {
+          relay: { ip: string; port: number };
+          piped: PipedProducerDescriptor;
+          receiverMinerId: string;
+          meta: { canaryKid: number; expectedCtrs: number[]; kRoom: number[]; cellSecret: number[] };
+        };
+        const runtime = await bringUpLiveConsumer({
+          pipePort: 0,
+          receiverMinerId: params.receiverMinerId,
+          meta: {
+            canaryKid: params.meta.canaryKid,
+            expectedCtrs: params.meta.expectedCtrs,
+            kRoom: Uint8Array.from(params.meta.kRoom),
+            cellSecret: Uint8Array.from(params.meta.cellSecret),
+          },
+        });
+        await runtime.connectToRelay(params.relay);
+        await runtime.consumePiped(params.piped);
+        state.liveConsumer = runtime;
+        verifyLog.info(
+          { standbyPort: runtime.standbyParams.port, receiverMinerId: params.receiverMinerId },
+          'B2 live pipe-capture attached (CANARY_LIVE_CAPTURE=pipe)',
+        );
+      } else {
+        verifyLog.warn('CANARY_LIVE_CAPTURE=pipe but CANARY_PIPE_PARAMS_PATH unset — using empty capture');
+      }
+    }
     // Stage 4.5 (C1 cross-host): HOIST the verify-loop's OWN board so the local `/canary/claims` mTLS
     // server (started below in live mode) can share the SAME instance — a peer's POSTed self-attestation
     // then accrues onto the board THIS daemon assembles from, so the >=2-distinct quorum forms cross-host.
@@ -540,12 +591,17 @@ export async function startDaemon(overrides?: {
         // packet-loss prior (basis points), folded into the classifier benign budget (D-CFA-25,
         // a COARSE prior). Defaults to 0n for a relay not yet measured.
         getStunLossBps: (relayId: string): bigint => state.relayStunLossBps.get(relayId) ?? 0n,
-        // PRODUCTION capture seam: NO live media this session (M4b). Yield an EMPTY per-receiver
-        // map so the loop runs hermetically (reads STUN, persists the accumulator) without a
-        // producer/SFU/consumer plane. The live capture lands in M4b (port-locked here, INV-B).
-        capture:
-          liveSeams?.capture ??
-          (async (scope): Promise<CanaryForwardCaptureResult> => ({
+        // B2 (REQ-MLW-B-01): capture-seam PRECEDENCE (chooseCapture, additive). An injected
+        // liveSeams capture wins (CANARY_LIVE_SEAMS_ENABLED, unchanged); then the live pipe
+        // consumer's capture (CANARY_LIVE_CAPTURE=pipe — `state.liveConsumer` is set ABOVE only
+        // AFTER connectToRelay + consumePiped, so its `.capture` getter never throws here); then
+        // the EXACT empty no-op below. Byte-identical OFF: with the flag unset both
+        // `liveSeams?.capture` and `state.liveConsumer?.capture` are undefined, so the verbatim
+        // empty no-op is returned (reads STUN, persists the accumulator, promotes nothing).
+        capture: chooseCapture(
+          liveSeams?.capture,
+          state.liveConsumer?.capture,
+          async (scope): Promise<CanaryForwardCaptureResult> => ({
             relayId: scope.relayId,
             roomId: scope.roomId,
             canaryKid: state.canaryCellLoop?.latest()?.round ?? 0,
@@ -556,7 +612,8 @@ export async function startDaemon(overrides?: {
             kRoom: new Uint8Array(0),
             cellSecret: new Uint8Array(0),
             perReceiver: new Map(),
-          })),
+          }),
+        ),
         // W-M4-COSIGN pull-corroboration claim board (D-CFA-42/43). In-memory fake this session
         // (the live OFF-MEDIA-PATH cp-daemon `/canary/claims` carrier is M4b, D-CFA-47); the
         // production capture yields no promotions, so nothing is published until the live plane
@@ -1093,6 +1150,14 @@ export function stopDaemon(state: DaemonState, log?: Logger): void {
     l.info('Canary verify loop stopped');
   }
 
+  // B2 (REQ-MLW-B-01/02): tear down the live pipe-tap consumer (mediasoup worker + standby pipe).
+  // No-op when CANARY_LIVE_CAPTURE != 'pipe' (state.liveConsumer stays null) — byte-identical OFF.
+  if (state.liveConsumer) {
+    state.liveConsumer.shutdown();
+    state.liveConsumer = null;
+    l.info('Canary live consumer stopped');
+  }
+
   // Stage 4.5 (C1 cross-host): stop the local /canary/claims mTLS server (live mode only). stopDaemon
   // is sync -> fire-and-forget the graceful close (the process is exiting); errors are swallowed.
   if (state.canaryClaimsServer) {
@@ -1321,6 +1386,13 @@ async function main(): Promise<void> {
           if (s.canaryClaimsServer) {
             await s.canaryClaimsServer.stop();
             s.canaryClaimsServer = null;
+          }
+          // B2 (REQ-MLW-B-01/02): tear down the live pipe-tap consumer (mediasoup worker + standby
+          // pipe) in the LAST group next to the other heavy resources. shutdown() is sync. No-op when
+          // CANARY_LIVE_CAPTURE != 'pipe' (s.liveConsumer stays null) — byte-identical OFF.
+          if (s.liveConsumer) {
+            s.liveConsumer.shutdown();
+            s.liveConsumer = null;
           }
           await (healthz?.close() ?? Promise.resolve());
         },
