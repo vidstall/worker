@@ -432,9 +432,14 @@ export function handleEvent(
       const validators = validatorState ? Array.from(validatorState.values()) : [];
       const rankedValidators = timedCanonicalSort(validators, targetRegion, weights);
 
-      // Select top validators (at least 1 if available)
+      // Select top validators. The on-chain ballot floor is required_validators(expected) =
+      // max(DEFAULT_MIN_VALIDATORS_PER_ROOM, expected/PVR_VALIDATOR_RATIO) (ADR-0006 BFT n>=3f+1); for the
+      // room sizes handled here that floor is DEFAULT_MIN_VALIDATORS_PER_ROOM = 4. The prior Math.min(3, ...)
+      // cap emitted only 3, so submit_pairing_proposal aborted E_INVALID_BALLOT (509) for any real room.
+      // Emit at least the floor (4), capped at availability.
+      const MIN_VALIDATORS_PER_ROOM = 4; // mirrors contracts constants.move DEFAULT_MIN_VALIDATORS_PER_ROOM (ADR-0006)
       const topValidatorIds = rankedValidators
-        .slice(0, Math.max(1, Math.min(3, rankedValidators.length)))
+        .slice(0, Math.max(1, Math.min(rankedValidators.length, MIN_VALIDATORS_PER_ROOM)))
         .map(v => v.minerId);
 
       // ── REQ-RMS-002/005/016/018/019 — capacity-aware placement ──────────────
