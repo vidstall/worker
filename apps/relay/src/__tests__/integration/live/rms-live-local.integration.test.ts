@@ -162,7 +162,10 @@ describe('Assertion A — on-chain K_r>=3 distinct ACTIVE relays (REQ-RMS-031, L
   const priorKrMin = process.env['RMS_KR_MIN'];
 
   beforeAll(async () => {
-    handle = await bootLocalnet({ epochDurationMs: 2000 });
+    // portWaitMs 180_000 (not the default 120_000): sui boot port-open time sits near the
+    // 120s cap on a contended Windows host and intermittently crossed it → de-flake the headline.
+    // Upper bound: hookTimeout(300s) − rpcDeadline(60s) − publish/register(~55s) ≈ 185s, so 180s is safe.
+    handle = await bootLocalnet({ epochDurationMs: 2000, portWaitMs: 180_000 });
 
     // 1 CP (floored quorum = 1 for every cast below).
     cp = await bootstrapCp(handle.client, handle.config, logger);

@@ -173,9 +173,19 @@ function spawnSuiNode(epochDurationMs?: number): { proc: ChildProcess; stop: () 
   return { proc, stop };
 }
 
-/** Wait for RPC port 9000, then for JSON-RPC readiness. */
-async function waitForSuiRpc(timeoutMs = 180_000): Promise<void> {
-  await waitForPort('127.0.0.1', 9000, Math.min(120_000, timeoutMs));
+/**
+ * Wait for RPC port 9000, then for JSON-RPC readiness.
+ *
+ * `portWaitMs` (additive) caps the :9000 open poll. Default 120_000 preserves the
+ * historical cap (was `Math.min(120_000, 180_000)` → 120s for every caller). A
+ * slow-but-successful `sui start --force-regenesis` on a contended Windows host
+ * occasionally crosses ~120s of port-open time and was being killed at the cap
+ * (observed flake on the rms-live-local headline). Callers that need the extra
+ * headroom pass a larger value; the boot still returns as soon as :9000 opens, so
+ * this only raises the failure ceiling — fast boots are byte-for-byte unchanged.
+ */
+async function waitForSuiRpc(portWaitMs = 120_000): Promise<void> {
+  await waitForPort('127.0.0.1', 9000, portWaitMs);
   const rpcDeadline = Date.now() + 60_000;
   while (Date.now() < rpcDeadline) {
     try {
@@ -354,12 +364,13 @@ async function loadActiveSigner(): Promise<Ed25519Keypair> {
  * any funded address suffices).
  */
 export async function bootLocalnet(
-  opts: { epochDurationMs?: number } = {},
+  opts: { epochDurationMs?: number; portWaitMs?: number } = {},
 ): Promise<LocalnetHandle> {
   const alias = `phase40-${Date.now()}`;
   const node = spawnSuiNode(opts.epochDurationMs);
   try {
-    await waitForSuiRpc();
+    // opts.portWaitMs undefined → waitForSuiRpc default 120_000 (unchanged for every existing caller).
+    await waitForSuiRpc(opts.portWaitMs);
     await setupSuiClient(alias);
 
     const publishOut = await publishPackage();
