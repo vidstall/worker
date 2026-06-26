@@ -245,14 +245,9 @@ describe('REQ-RMS-025 — standby ACTIVE-forward: produceLocalFromPipe mints a L
     }
   }, 30_000);
 
-  it('SKIPS a legacy announce that carries no rtpParameters (additive guard — never crashes the active-forward path)', async () => {
-    // A pre-REQ-RMS-026 primary announces { producerId, kind } with NO rtpParameters.
-    // produceLocalFromPipe REQUIRES rtpParameters (it is the produce input), so the
-    // coordinator (StandbyWarmPipeCoordinator) SKIPS such entries — here we assert the
-    // guard's precondition: the announce's rtpParameters is genuinely absent so the
-    // coordinator loop's `if (!announced.rtpParameters) continue` fires.
-    const legacy: { producerId: string; kind: msTypes.MediaKind; rtpParameters?: msTypes.RtpParameters } =
-      { producerId: 'legacy-no-rtp', kind: 'audio' };
-    expect(legacy.rtpParameters).toBeUndefined();
-  });
+  // NOTE: the coordinator wiring around produceLocalFromPipe (forwardLocalProducers
+  // dedup, the onLocalProducer callback, the retryable-vs-duplicate error split,
+  // clear(), and the legacy no-rtpParameters skip) is unit-tested with mock mediasoup
+  // in apps/relay/src/__tests__/inter-relay-warmpipe.test.ts (no real Workers needed).
+  // This integration test proves the primitive on REAL mediasoup end-to-end.
 });

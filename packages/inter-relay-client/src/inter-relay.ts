@@ -643,23 +643,34 @@ export class StandbyWarmPipeCoordinator {
    * (REQ-RMS-026), so the standby's own clients can consume the room. Then fire
    * onLocalProducer so the wiring layer registers + fans it.
    *
-   * Defensive + additive (the paused keepalive consumer is untouched):
-   *   - no bound pipe transport yet (primary, or not-ready)  → SKIP (return);
+   * Defensive + additive (the paused keepalive consumer is untouched, never throws
+   * out of the loop):
+   *   - not a standby (primary owns the source producers)    → SKIP (return);
+   *   - no bound pipe transport yet (not-ready)              → SKIP (return);
    *   - an announced entry lacks rtpParameters (legacy primary, pre-REQ-RMS-026)
-   *     → SKIP that entry (we can't produce without them) — never throw;
+   *     → SKIP that entry (we can't produce without them);
    *   - an id already minted on a prior run                   → SKIP (idempotent);
-   *   - mediasoup throws on a duplicate id / any produce error → mark + SKIP, log
-   *     at debug (never crash the coordinator).
+   *   - DUPLICATE-id throw (mediasoup "already exists") — the benign idempotency
+   *     belt-and-suspenders → mark + SKIP, log at debug;
+   *   - any OTHER (transient/real) produce error → do NOT mark, log at warn, SKIP —
+   *     the id stays unmarked so the NEXT ensure/onAnnounce self-heals (retries);
+   *   - a throwing onLocalProducer callback → log at warn + continue (the producer
+   *     is already minted + marked; one bad callback must not skip the rest).
    */
   private async forwardLocalProducers(
     roomId: string,
     topology: RoomTopology,
     peerRelayId: string,
   ): Promise<void> {
+    // Fix 3 — self-document the standby-only intent ahead of the transport check
+    // (don't rely solely on the primary's pipeTransport being null).
+    if (topology.role !== 'standby') {
+      return;
+    }
     const transport = topology.pipeTransport;
     if (!transport) {
-      // No bound pipe transport (primary returns null from ensureWarmPipe, or the
-      // standby is still not-ready) — nothing to forward onto.
+      // No bound pipe transport (the standby is still not-ready) — nothing to
+      // forward onto. onAnnounce re-drives once the pipe is established.
       return;
     }
     const key = meshKey(roomId, peerRelayId);
@@ -685,13 +696,26 @@ export class StandbyWarmPipeCoordinator {
           rtpParameters: announced.rtpParameters,
         });
       } catch (err) {
-        // Duplicate producer id (mediasoup throws) or any produce error: mark it so
-        // we don't retry every announce, and skip — the keepalive consumer is intact.
-        produced.add(announced.producerId);
-        this.logger?.debug(
-          { roomId, producerId: announced.producerId, error: (err as Error)?.message },
-          'REQ-RMS-025: produceLocalFromPipe skipped (duplicate id or produce error)',
-        );
+        // Fix 1 — discriminate a benign duplicate-id throw (idempotent belt-and-
+        // suspenders: a concurrent re-run already minted this id) from a TRANSIENT
+        // failure (worker hiccup / produce racing a rebuilt transport's connect).
+        const message = String((err as Error)?.message ?? err);
+        const dup = /already exists|duplicate/i.test(message);
+        if (dup) {
+          // Mark + skip so we never retry a known-minted id.
+          produced.add(announced.producerId);
+          this.logger?.debug(
+            { roomId, producerId: announced.producerId, error: message },
+            'REQ-RMS-025: produceLocalFromPipe skipped — producer id already exists (idempotent)',
+          );
+        } else {
+          // Do NOT mark — leave the id unmarked so the next ensure/onAnnounce
+          // self-heals (retries). A real fault → warn, not debug.
+          this.logger?.warn(
+            { roomId, producerId: announced.producerId, error: message },
+            'REQ-RMS-025: produceLocalFromPipe failed — leaving id unmarked to retry on the next drive',
+          );
+        }
         continue;
       }
       produced.add(announced.producerId);
@@ -699,7 +723,16 @@ export class StandbyWarmPipeCoordinator {
         { roomId, producerId: producer.id, kind: producer.kind, peerRelayId },
         'REQ-RMS-025: standby minted a LOCAL producer from the cross-process pipe (active forward)',
       );
-      this.onLocalProducer?.(roomId, producer, announced.producerPeerId, peerRelayId);
+      // Fix 4 — a throwing L1.3 callback must NOT abort the loop or skip the
+      // remaining producers (this one is already minted + marked).
+      try {
+        this.onLocalProducer?.(roomId, producer, announced.producerPeerId, peerRelayId);
+      } catch (cbErr) {
+        this.logger?.warn(
+          { roomId, producerId: producer.id, error: String((cbErr as Error)?.message ?? cbErr) },
+          'REQ-RMS-025: onLocalProducer callback threw — continuing the forward loop',
+        );
+      }
     }
   }
 

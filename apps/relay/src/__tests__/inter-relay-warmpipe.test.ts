@@ -47,26 +47,45 @@ function makeMockConsumer() {
   };
 }
 
-function makeMockPipeTransport(consumer: ReturnType<typeof makeMockConsumer>) {
+/** REQ-RMS-025 — a minted LOCAL producer (mock) the active-forward callback receives. */
+function makeMockProducer(id: string, kind: string) {
+  return { id, kind, close: vi.fn() };
+}
+
+/** The shape produceLocalFromPipe passes to transport.produce. */
+type ProduceOpts = { id: string; kind: string };
+/** Per-transport produce behaviour (default echoes a mock producer; tests inject throws). */
+type ProduceImpl = (opts: ProduceOpts) => Promise<unknown>;
+
+function makeMockPipeTransport(
+  consumer: ReturnType<typeof makeMockConsumer>,
+  produceImpl?: ProduceImpl,
+) {
   return {
     id: `pipe-transport-${Math.random().toString(36).slice(2)}`,
     consume: vi.fn().mockResolvedValue(consumer),
     connect: vi.fn().mockResolvedValue(undefined),
+    // REQ-RMS-025: produceLocalFromPipe calls transport.produce({id,kind,rtpParameters}).
+    // Default echoes a mock producer (id+kind preserved); error tests inject a throw.
+    produce: vi.fn(
+      produceImpl ?? (async (opts: ProduceOpts) => makeMockProducer(opts.id, opts.kind)),
+    ),
     tuple: { localIp: '127.0.0.1', localPort: 40000 },
     close: vi.fn(),
   };
 }
 
 /** A router whose createPipeTransport hands back a FRESH transport+consumer
- *  on every call (so a re-run consumes a distinct, real producer id). */
-function makeMockRouter() {
+ *  on every call (so a re-run consumes a distinct, real producer id). An optional
+ *  produceImpl is applied to every created transport's produce (REQ-RMS-025 error tests). */
+function makeMockRouter(produceImpl?: ProduceImpl) {
   const consumers: ReturnType<typeof makeMockConsumer>[] = [];
   const transports: ReturnType<typeof makeMockPipeTransport>[] = [];
   const router = {
     id: `router-${Math.random().toString(36).slice(2)}`,
     createPipeTransport: vi.fn().mockImplementation(async () => {
       const consumer = makeMockConsumer();
-      const transport = makeMockPipeTransport(consumer);
+      const transport = makeMockPipeTransport(consumer, produceImpl);
       consumers.push(consumer);
       transports.push(transport);
       return transport;
@@ -75,6 +94,25 @@ function makeMockRouter() {
   };
   return { router, consumers, transports };
 }
+
+/** Mock structured logger — asserts the debug-vs-warn split (REQ-RMS-025 Fix 1). */
+function makeMockLogger() {
+  return {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    trace: vi.fn(),
+    fatal: vi.fn(),
+    child: vi.fn(),
+  };
+}
+
+/** Minimal valid-ish RtpParameters for a recorded announce (REQ-RMS-026). */
+const rtpParams = (ssrc: number): any => ({
+  codecs: [{ mimeType: 'video/VP8', payloadType: 101, clockRate: 90000, parameters: {}, rtcpFeedback: [] }],
+  encodings: [{ ssrc }],
+});
 
 function makeStandbyTopology(roomId = 'room-g1'): RoomTopology {
   return {
@@ -282,5 +320,220 @@ describe('createWsInterRelaySender — primary announce reaches the wire', () =>
     expect(() =>
       announce('room-A', { id: 'p', kind: 'audio' }),
     ).not.toThrow();
+  });
+});
+
+// ── D. StandbyWarmPipeCoordinator — ACTIVE forward (REQ-RMS-025) ──────────
+//
+// The integration test (rms-active-forward.integration.test.ts) proves the
+// produceLocalFromPipe PRIMITIVE on REAL mediasoup. These cover the COORDINATOR
+// wiring with mock mediasoup: forwardLocalProducers dedup, the onLocalProducer
+// callback arg tuple, the retryable-vs-duplicate produce-error split (Fix 1),
+// clear()'s dedup-set drop, the legacy no-rtpParameters skip, and the throwing-
+// callback guard (Fix 4).
+//
+// HARNESS NOTE: we drive the PUBLIC methods (ensure / onAnnounce / clear). The mock
+// router's createPipeTransport returns mock PipeTransports whose `produce` we control,
+// so the REAL ensureWarmPipe runs against the mock (it consumes a mock pipe consumer +
+// sets topology.pipeTransport), and forwardLocalProducers then produces over that same
+// mock transport — no real Worker/PipeTransport is bound.
+
+describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLocalFromPipe wiring)', () => {
+  const PEER = 'relay-B';
+
+  it('REQ-RMS-025 (a): ensure mints a LOCAL producer per announced rtpParameters + fires onLocalProducer with (roomId, producer, producerPeerId, peerRelayId)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-af', producerId: 'pA', kind: 'video',
+      producerPeerId: 'pub-A', peerRelayId: PEER, rtpParameters: rtpParams(11),
+    });
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-af', producerId: 'pB', kind: 'audio',
+      producerPeerId: 'pub-B', peerRelayId: PEER, rtpParameters: rtpParams(22),
+    });
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const topology = makeStandbyTopology('room-af');
+
+    await coord.ensure(topology, router as any, 40000, PEER);
+
+    // One produce per announced id, on the standby's bound pipe transport.
+    expect(transports).toHaveLength(1);
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(2);
+    const producedIds = transports[0]!.produce.mock.calls
+      .map((c) => (c[0] as { id: string }).id)
+      .sort();
+    expect(producedIds).toEqual(['pA', 'pB']);
+
+    // onLocalProducer fired once per minted producer with the EXACT arg tuple.
+    expect(onLocalProducer).toHaveBeenCalledTimes(2);
+    expect(onLocalProducer).toHaveBeenNthCalledWith(
+      1, 'room-af', expect.objectContaining({ id: 'pA', kind: 'video' }), 'pub-A', PEER,
+    );
+    expect(onLocalProducer).toHaveBeenNthCalledWith(
+      2, 'room-af', expect.objectContaining({ id: 'pB', kind: 'audio' }), 'pub-B', PEER,
+    );
+  });
+
+  it('REQ-RMS-025 (b): dedup — the same id is NOT double-produced across ensure(not-ready)→onAnnounce→ensure(repeat)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const topology = makeStandbyTopology('room-dd');
+
+    // Not-ready first join: nothing announced yet → placeholder, NO produce.
+    await coord.ensure(topology, router as any, 40000, PEER);
+    const totalProduceAfterEnsure = transports.reduce((n, t) => n + t.produce.mock.calls.length, 0);
+    expect(totalProduceAfterEnsure).toBe(0);
+
+    // Announce arrives WITH rtpParameters → onAnnounce re-run mints the producer.
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-dd', producerId: 'pX', kind: 'video',
+      producerPeerId: 'pub-X', peerRelayId: PEER, rtpParameters: rtpParams(7),
+    });
+    const reran = await coord.onAnnounce('room-dd', topology, router as any, 40000, PEER);
+    expect(reran).toBe(true);
+
+    // Repeat drive: a 2nd ensure for the same (room,peer) must NOT re-produce pX.
+    await coord.ensure(topology, router as any, 40000, PEER);
+
+    const totalProduce = transports.reduce((n, t) => n + t.produce.mock.calls.length, 0);
+    expect(totalProduce).toBe(1);              // pX minted exactly once
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer).toHaveBeenCalledWith(
+      'room-dd', expect.objectContaining({ id: 'pX' }), 'pub-X', PEER,
+    );
+  });
+
+  it('REQ-RMS-025 (c): a DUPLICATE-id produce throw is caught (no reject), marked + debug-logged, and NOT retried on the next drive', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-dup', producerId: 'pDup', kind: 'video',
+      producerPeerId: 'pub-D', peerRelayId: PEER, rtpParameters: rtpParams(9),
+    });
+    const dup: ProduceImpl = async () => {
+      throw new Error('a Producer with same id "pDup" already exists [method=transport.produce]');
+    };
+    const { router, transports } = makeMockRouter(dup);
+    const logger = makeMockLogger();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer);
+    const topology = makeStandbyTopology('room-dup');
+
+    // Must NOT reject (the rejection here would fail the test).
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalled();   // benign idempotency → debug
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    // Marked → a 2nd drive does NOT retry the known-minted id.
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(1); // still 1, no retry
+  });
+
+  it('REQ-RMS-025 (d): a NON-duplicate produce throw is caught (no reject), warn-logged, and IS retried on the next drive (self-heal)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-err', producerId: 'pErr', kind: 'video',
+      producerPeerId: 'pub-E', peerRelayId: PEER, rtpParameters: rtpParams(13),
+    });
+    let attempts = 0;
+    const flaky: ProduceImpl = async (opts) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('transient worker hiccup — connect not settled');
+      return makeMockProducer(opts.id, opts.kind);
+    };
+    const { router, transports } = makeMockRouter(flaky);
+    const logger = makeMockLogger();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer);
+    const topology = makeStandbyTopology('room-err');
+
+    // Attempt 1 throws (non-dup) → caught, left UNMARKED, warn-logged.
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalled();    // real fault → warn (not debug)
+
+    // 2nd drive: id was left unmarked → retried → succeeds this time (self-heal).
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(2); // retried
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);        // succeeded on retry
+    expect(onLocalProducer).toHaveBeenCalledWith(
+      'room-err', expect.objectContaining({ id: 'pErr' }), 'pub-E', PEER,
+    );
+  });
+
+  it('REQ-RMS-025 (e): clear(roomId, peerRelayId) drops the dedup set so a later drive RE-MINTS', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-clr', producerId: 'pC', kind: 'video',
+      producerPeerId: 'pub-C', peerRelayId: PEER, rtpParameters: rtpParams(5),
+    });
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const topology = makeStandbyTopology('room-clr');
+
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
+
+    // Drop the (room,peer) state + dedup set.
+    coord.clear('room-clr', PEER);
+
+    // A later drive re-mints (fresh dedup set → pC no longer remembered).
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(2);
+    expect(onLocalProducer).toHaveBeenCalledTimes(2);
+  });
+
+  it('REQ-RMS-025 (f): a legacy announce WITHOUT rtpParameters drives NO produce (the real skip path through the coordinator)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-lg', producerId: 'pLegacy', kind: 'video',
+      peerRelayId: PEER, // NO rtpParameters (pre-REQ-RMS-026 primary)
+    });
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const topology = makeStandbyTopology('room-lg');
+
+    // Drives ensure end-to-end: the warm pipe still opens (keepalive consumer), but
+    // the active-forward loop SKIPS the legacy entry — no produce, no throw.
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports[0]!.produce).not.toHaveBeenCalled();
+    expect(onLocalProducer).not.toHaveBeenCalled();
+    expect(transports[0]!.consume).toHaveBeenCalled(); // keepalive consumer intact
+  });
+
+  it('REQ-RMS-025 (Fix 4): a THROWING onLocalProducer callback does not abort the loop — the remaining producers are still minted', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-cb', producerId: 'p1', kind: 'video',
+      producerPeerId: 'pub-1', peerRelayId: PEER, rtpParameters: rtpParams(31),
+    });
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-cb', producerId: 'p2', kind: 'audio',
+      producerPeerId: 'pub-2', peerRelayId: PEER, rtpParameters: rtpParams(32),
+    });
+    const { router, transports } = makeMockRouter();
+    const logger = makeMockLogger();
+    const onLocalProducer = vi.fn((_roomId: string, producer: { id: string }) => {
+      if (producer.id === 'p1') throw new Error('L1.3 callback blew up on p1');
+    });
+    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer);
+    const topology = makeStandbyTopology('room-cb');
+
+    // Must NOT reject even though the p1 callback throws.
+    await coord.ensure(topology, router as any, 40000, PEER);
+
+    // BOTH producers minted (the throw on p1 did not skip p2).
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(2);
+    expect(onLocalProducer).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalled(); // the bad callback was warn-logged
   });
 });
