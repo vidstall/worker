@@ -51,6 +51,7 @@ import { startMetricsServer, type ProbeState } from './metrics-server.js';
 import { closeRelayProbe } from './room-handler.js';
 import { deriveCoturnUrl } from './coturn-url.js';
 import { fetchTurnCredential } from './turn-fetcher.js';
+import type { types as msTypes } from 'mediasoup';
 import {
   InterRelayProducerRegistry,
   createInterRelayAnnouncer,
@@ -59,9 +60,11 @@ import {
   PrimaryPipeCoordinator,
   handleInboundInterRelayFrame,
   buildPipeConnectFrame,
+  DEFAULT_PEER_RELAY_ID,
   type InterRelaySocketLike,
   type PipeConnectParams,
 } from '@dvconf/inter-relay-client';
+import { createInterRelaySocketMap } from './inter-relay-socket-map.js';
 import { openInterRelayLink, createStandbyLinkManager } from '@dvconf/inter-relay-client';
 import {
   determineRole,
@@ -360,6 +363,25 @@ if (isMainModule) {
      */
     const standbyLink: { primaryUrl: string | null } = { primaryUrl: null };
     /**
+     * REQ-RMS-028 (L1.3-b, Bridge A) — the per-peer inter-relay socket map, OWNED
+     * here and SHARED into createSignalingServer (its tagged-peer attach writes
+     * cascade legs into it). The PRIMARY reads it to route per-peer announce/param
+     * sends: `socketFor` resolves a cascade peerRelayId to its own live socket, and
+     * the DEFAULT peer (undefined / DEFAULT_PEER_RELAY_ID) to the legacy
+     * interRelayLink.socket so the single-standby path stays byte-identical.
+     */
+    const interRelaySockets = createInterRelaySocketMap();
+    const socketFor = (p?: string): InterRelaySocketLike | null =>
+      p && p !== DEFAULT_PEER_RELAY_ID ? interRelaySockets.get(p) : interRelayLink.socket;
+    const sendToPeer = (p: string | undefined, data: string): void => {
+      try {
+        // REUSE the OPEN/null-guarded WS sender per-peer (drops best-effort).
+        createWsInterRelaySender(() => socketFor(p), logger).send(data);
+      } catch {
+        /* OPEN/null guarded by the sender; a momentary link-down must not throw. */
+      }
+    };
+    /**
      * Outbound inter-relay link sink — now a REAL transmitter (was a no-op log
      * stub that never put bytes on the wire). When a standby socket is attached
      * and OPEN, the announce frame is actually sent; otherwise dropped best-effort.
@@ -372,7 +394,26 @@ if (isMainModule) {
      * it the room topology/router at the bench; instantiated here so the wiring
      * owns a single coordinator backed by the shared registry.
      */
-    const standbyWarmPipe = new StandbyWarmPipeCoordinator(interRelayRegistry, logger);
+    // REQ-RMS-027 (L1.3-b, Bridge B) — late-bound handle to the signaling layer's
+    // fanLocalProducer. interRelayContext (and standbyWarmPipe below) are built
+    // BEFORE createSignalingServer returns, and onLocalProducer is a readonly ctor
+    // param with no setter, so we box the fn and assign it once the server starts.
+    // The callback only fires after the server is live, so the box is always set
+    // in time (mirrors the post-construction interRelayContext.role mutation).
+    const signalingRef: {
+      fanLocalProducer:
+        | ((roomId: string, peerId: string, producer: msTypes.Producer) => void)
+        | null;
+    } = { fanLocalProducer: null };
+    const standbyWarmPipe = new StandbyWarmPipeCoordinator(
+      interRelayRegistry,
+      logger,
+      // REQ-RMS-027: a standby minted a LOCAL forwarded producer → fan it to this
+      // relay's OWN local clients. Bind to the ORIGINAL publisher (producerPeerId)
+      // when the announce carried it, else the cascade peerRelayId.
+      (roomId, producer, producerPeerId, peerRelayId) =>
+        signalingRef.fanLocalProducer?.(roomId, producerPeerId ?? peerRelayId, producer),
+    );
 
     // ── G3.2b: live cross-daemon inter-relay LINK glue ───────────────────────
     // isMainModule wiring that assembles the unit-tested pieces: openInterRelayLink
@@ -445,11 +486,23 @@ if (isMainModule) {
       //     guard); it is NOT byte-identical to the pre-REQ-RMS-026 frame. Builder-level
       //     byte-identity holds only when the 5th arg is OMITTED (the in-process
       //     announceProducer path below, which passes no rtpParameters).
+      // REQ-RMS-028 (L1.3-b): route the cascade announce to the RIGHT per-peer
+      // socket via sendToPeer (DEFAULT peer → the legacy interRelayLink.socket).
+      // REUSE createInterRelayAnnouncer to build the locked frame (peerRelayId +
+      // rtpParameters) and hand its bytes to sendToPeer.
       announcer: (roomId, producer, peerRelayId, rtpParameters) =>
-        pushAnnounce(roomId, producer, undefined, peerRelayId, rtpParameters),
+        createInterRelayAnnouncer({ send: (data) => sendToPeer(peerRelayId, data) })(
+          roomId,
+          producer,
+          undefined,
+          peerRelayId,
+          rtpParameters,
+        ),
       portAllocator: pipePortAllocator,
-      paramSender: (roomId, params) =>
-        interRelaySender.send(JSON.stringify(buildPipeConnectFrame(roomId, params))),  // CONSISTENCY-FIX HIGH#5: C contract is (roomId, params); serialize the DOWN reply frame onto the live link (buildPipeConnectFrame imported in this file)
+      // REQ-RMS-028 (L1.3-b): the DOWN pipe-connect reply routes to the SAME
+      // per-peer socket (C contract is (roomId, params[, peerRelayId])).
+      paramSender: (roomId, params, peerRelayId) =>
+        sendToPeer(peerRelayId, JSON.stringify(buildPipeConnectFrame(roomId, params))),  // buildPipeConnectFrame imported in this file
       logger,
     });
     const interRelayContext: InterRelayContext = {
@@ -469,9 +522,10 @@ if (isMainModule) {
       // the primary pipe (port from the allocator, key `${roomId}:primary`), pipes
       // the producer, and announces the PIPED consumer id. Drains immediately if
       // the standby's connect params already arrived, else queues (pending).
-      onPrimaryProducer: (roomId, router, producer) => {
-        void primaryPipe.onProducer(roomId, router, producer);
-      },
+      // REQ-RMS-028 (L1.3-b): forward the cascade peerRelayId so the coordinator
+      // mints a per-peer pipe leg (DEFAULT/undefined → the legacy single leg).
+      onPrimaryProducer: (roomId, router, producer, peerRelayId) =>
+        void primaryPipe.onProducer(roomId, router, producer, peerRelayId),
       // F1 (REQ-RO-003/008): the standby's UP pipe-connect frame, delivered through
       // the SAME interRelayPeers token gate as pipe-producer announces. PRIMARY
       // feeds it to the coordinator, which binds + connect()s the primary pipe to
@@ -530,13 +584,19 @@ if (isMainModule) {
       },
     };
 
-    const { wss, getRoomCount, setAccepting, closeRooms } = createSignalingServer(
-      manager,
-      metrics,
-      logger,
-      turnContext,
-      interRelayContext,
-    );
+    const { wss, getRoomCount, setAccepting, closeRooms, fanLocalProducer } =
+      createSignalingServer(
+        manager,
+        metrics,
+        logger,
+        turnContext,
+        interRelayContext,
+        // REQ-RMS-028 (L1.3-b): SHARE the per-peer socket map so the server's
+        // tagged-peer attach + the primary's per-peer send use ONE map.
+        interRelaySockets,
+      );
+    // REQ-RMS-027 (L1.3-b): late-bind the fan so onLocalProducer can reach it.
+    signalingRef.fanLocalProducer = fanLocalProducer;
 
     // RO-020: standby-liveness state box read by GET /api/probe. `role` is the
     // live value the RoomAssigned poller (Step 7) sets per room; the pipe/RTCP

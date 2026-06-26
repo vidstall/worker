@@ -33,15 +33,26 @@
  *     apps/relay/src/__tests__/integration/rms-active-forward.integration.test.ts
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
+import { WebSocket, WebSocketServer } from 'ws';
 import {
   produceLocalFromPipe,
   createPrimaryPipeTransport,
   createStandbyPipeTransport,
   pipeProducerOntoPrimaryTransport,
+  PrimaryPipeCoordinator,
+  DEFAULT_PEER_RELAY_ID,
+  type PipeConnectParams,
+  type PipePortAllocatorLike,
+  type InterRelaySocketLike,
 } from '@dvconf/inter-relay-client';
+// L1.3-b — Bridge A/B wiring under test (real-mediasoup ⇒ live signaling fan + N-1 mesh).
+import { createSignalingServer, type InterRelayContext } from '../../signaling.js';
+import { createInterRelaySocketMap } from '../../inter-relay-socket-map.js';
+import { MetricsTracker } from '../../metrics.js';
+import type { MediasoupManager } from '../../mediasoup-manager.js';
 
 // ── Shared codec set (mirrors mediasoup-manager.ts / warmpipe-rtp) ─────────
 
@@ -91,19 +102,25 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 let primaryWorker: msTypes.Worker;
 let standbyWorker: msTypes.Worker;
+// L1.3-b — a THIRD worker/router C so one room can span ≥3 relays (the N-1 mesh).
+let cWorker: msTypes.Worker;
 let primaryRouter: msTypes.Router;
 let standbyRouter: msTypes.Router;
+let cRouter: msTypes.Router;
 
 beforeAll(async () => {
   primaryWorker = await mediasoup.createWorker({ logLevel: 'warn' });
   standbyWorker = await mediasoup.createWorker({ logLevel: 'warn' });
+  cWorker = await mediasoup.createWorker({ logLevel: 'warn' });
   primaryRouter = await primaryWorker.createRouter({ mediaCodecs });
   standbyRouter = await standbyWorker.createRouter({ mediaCodecs });
+  cRouter = await cWorker.createRouter({ mediaCodecs });
 }, 30_000);
 
 afterAll(() => {
   primaryWorker?.close();
   standbyWorker?.close();
+  cWorker?.close();
 });
 
 /** Synthetic real-RTP Opus producer on the primary router (DirectTransport src). */
@@ -250,4 +267,279 @@ describe('REQ-RMS-025 — standby ACTIVE-forward: produceLocalFromPipe mints a L
   // clear(), and the legacy no-rtpParameters skip) is unit-tested with mock mediasoup
   // in apps/relay/src/__tests__/inter-relay-warmpipe.test.ts (no real Workers needed).
   // This integration test proves the primitive on REAL mediasoup end-to-end.
+});
+
+// ── L1.3-b harness helpers (a mock MediasoupManager so a REAL createSignalingServer
+//    can run a live WS room in-process; mediasoup-FREE — the forwarded producer that
+//    is FANNED is a REAL router-C producer minted above by produceLocalFromPipe). ──
+
+function mockRouter() {
+  let n = 0;
+  return {
+    rtpCapabilities: { codecs: [], headerExtensions: [] },
+    createWebRtcTransport: vi.fn().mockImplementation(async () => ({
+      id: `transport-${++n}`,
+      iceParameters: {},
+      iceCandidates: [],
+      dtlsParameters: {},
+      connect: vi.fn().mockResolvedValue(undefined),
+      produce: vi.fn(),
+      consume: vi.fn(),
+      setMaxIncomingBitrate: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn(),
+    })),
+    canConsume: vi.fn().mockReturnValue(true),
+    close: vi.fn(),
+  };
+}
+function createMockManager(): MediasoupManager {
+  const router = mockRouter();
+  return {
+    workers: [{ pid: 1 } as unknown as msTypes.Worker],
+    getNextWorker: vi.fn().mockReturnValue({ pid: 1 }),
+    createRouter: vi.fn().mockResolvedValue(router),
+    close: vi.fn(),
+  } as unknown as MediasoupManager;
+}
+function mockLogger() {
+  return {
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+    fatal: vi.fn(), trace: vi.fn(), child: vi.fn().mockReturnThis(), level: 'info',
+  } as never;
+}
+function startSignaling(
+  interRelay: InterRelayContext,
+): Promise<{ wss: WebSocketServer; port: number; fanLocalProducer: unknown }> {
+  return new Promise((resolve) => {
+    const origPort = process.env['WS_PORT'];
+    const origToken = process.env['INTER_RELAY_TOKEN'];
+    process.env['WS_PORT'] = '0';
+    delete process.env['INTER_RELAY_TOKEN']; // single-host bench: gate open
+    const server = createSignalingServer(createMockManager(), new MetricsTracker(), mockLogger(), undefined, interRelay);
+    process.env['WS_PORT'] = origPort;
+    if (origToken === undefined) delete process.env['INTER_RELAY_TOKEN'];
+    else process.env['INTER_RELAY_TOKEN'] = origToken;
+    const { wss } = server;
+    // L1.3-b — the NEW return field under test.
+    const fanLocalProducer = (server as unknown as { fanLocalProducer?: unknown }).fanLocalProducer;
+    wss.on('listening', () => {
+      const addr = wss.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      resolve({ wss, port, fanLocalProducer });
+    });
+  });
+}
+function connectPlain(port: number): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
+function sendAndAwait(ws: WebSocket, msg: Record<string, unknown>, expectType: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    const onMessage = (data: WebSocket.RawData) => {
+      const reply = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (reply['type'] === expectType) {
+        ws.off('message', onMessage);
+        resolve(reply);
+      }
+    };
+    ws.on('message', onMessage);
+    ws.send(JSON.stringify(msg));
+  });
+}
+const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+let fanServer: WebSocketServer | undefined;
+afterEach(() => { if (fanServer) { fanServer.close(); fanServer = undefined; } });
+
+describe('REQ-RMS-027/028 — L1.3-b: standby fans newProducer to local clients + primary drives N-1 mesh legs', () => {
+  /**
+   * Test 4a (standby fan, Bridge B). A standby that minted a LOCAL forwarded
+   * producer (REAL router-C producer via produceLocalFromPipe) hands it to the
+   * signaling layer's NEW `fanLocalProducer(roomId, peerId, producer)` (returned
+   * from createSignalingServer), which fires `newProducer` to the standby's OWN
+   * local WebRTC clients. The fan must carry the FORWARDED producer's id AND the
+   * ORIGINAL publisher peerId (producerPeerId), NOT the cascade peerRelayId.
+   *
+   * RED before the wiring: createSignalingServer does NOT yet return
+   * fanLocalProducer → it is `undefined` → invoking it throws.
+   */
+  it('4a: createSignalingServer returns fanLocalProducer that fans newProducer (forwarded id + ORIGINAL producerPeerId) to a local client', async () => {
+    // ── Mint a REAL forwarded producer on standby router C (prod primitives). ──
+    const src = await makePrimaryRtpSource(); // producer on primaryRouter (A)
+    const primaryPipe = await createPrimaryPipeTransport(primaryRouter, 0);
+    const standbyPipe = await createStandbyPipeTransport(cRouter, 0);
+    await primaryPipe.connect({
+      ip: '127.0.0.1',
+      port: standbyPipe.tuple.localPort,
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+    await standbyPipe.connect({
+      ip: '127.0.0.1',
+      port: primaryPipe.tuple.localPort,
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+    const primaryPipeConsumer = await pipeProducerOntoPrimaryTransport(primaryPipe, src.producer.id);
+    const announced = {
+      producerId: primaryPipeConsumer.id,
+      kind: primaryPipeConsumer.kind,
+      rtpParameters: primaryPipeConsumer.rtpParameters,
+    };
+    const localProducer = await produceLocalFromPipe(standbyPipe, announced);
+    // Sanity: the forwarded producer is genuinely consumable on router C (L1.2 must-pass).
+    expect(
+      cRouter.canConsume({ producerId: localProducer.id, rtpCapabilities: cRouter.rtpCapabilities }),
+    ).toBe(true);
+
+    // ── Stand up a REAL signaling server + join ONE local client. ──
+    const interRelay: InterRelayContext = {
+      role: 'standby',
+      registry: new (await import('@dvconf/inter-relay-client')).InterRelayProducerRegistry(),
+      announceProducer: () => {},
+    };
+    const { wss, port, fanLocalProducer } = await startSignaling(interRelay);
+    fanServer = wss;
+    const roomId = 'rms-fan-room';
+
+    const client = await connectPlain(port);
+    await sendAndAwait(client, { type: 'join', roomId, peerId: 'local-listener' }, 'routerRtpCapabilities');
+    const fans: Array<Record<string, unknown>> = [];
+    client.on('message', (data: WebSocket.RawData) => {
+      const m = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (m['type'] === 'newProducer') fans.push(m);
+    });
+
+    // ── Bridge B UNDER TEST: fan the forwarded producer to local clients. The
+    //    index.ts adapter passes `producerPeerId ?? peerRelayId` as the peerId;
+    //    here the ORIGINAL publisher ('publisher-original') resolves first. ──
+    expect(typeof fanLocalProducer).toBe('function');
+    (fanLocalProducer as (r: string, p: string, prod: msTypes.Producer) => void)(
+      roomId,
+      'publisher-original',
+      localProducer,
+    );
+
+    // Allow the WS frame to land on the client.
+    const deadline = Date.now() + 2000;
+    while (fans.length === 0 && Date.now() < deadline) await sleepMs(25);
+
+    const fan = fans.find((m) => m['type'] === 'newProducer');
+    expect(fan).toBeDefined();
+    expect(fan!['producerId']).toBe(localProducer.id);     // the FORWARDED producer id
+    expect(fan!['peerId']).toBe('publisher-original');     // ORIGINAL producerPeerId
+    expect(fan!['peerId']).not.toBe('relay-C');            // NOT the cascade peerRelayId
+
+    // cleanup
+    client.close();
+    try {
+      localProducer.close();
+      primaryPipeConsumer.close();
+      primaryPipe.close();
+      standbyPipe.close();
+      src.producer.close();
+    } catch { /* best-effort */ }
+  }, 30_000);
+
+  /**
+   * Test 4b (N-1 mesh legs, Bridge A). One producer on router A is driven through
+   * a REAL PrimaryPipeCoordinator PER cascade peer (enumerated via the inter-relay
+   * socket map's keys()), so it is forwarded to BOTH standby router B AND standby
+   * router C. Each leg mints a LOCAL producer from its announced rtpParameters and
+   * is `canConsume===true` on its router.
+   *
+   * RED before the inter-relay.ts change: PrimaryPipeCoordinator.onProducer does
+   * NOT yet pass `peerRelayId` to paramSender → the per-peer pipe-connect reply is
+   * keyed `undefined` (overwritten across legs) → `replies.has('relay-B')` fails.
+   */
+  it('4b: PrimaryPipeCoordinator drives N-1 legs — one producer on A is canConsume on BOTH router B and router C', async () => {
+    const src = await makePrimaryRtpSource(); // producer on primaryRouter (A)
+
+    // The per-peer socket map (L1.3-a keys()) enumerates the cascade peers (B, C).
+    const sockets = createInterRelaySocketMap();
+    const stub = (): InterRelaySocketLike => ({ readyState: 1, send: () => {} });
+    sockets.attach('relay-B', stub());
+    sockets.attach('relay-C', stub());
+    const peerToRouter: Record<string, msTypes.Router> = {
+      'relay-B': standbyRouter,
+      'relay-C': cRouter,
+    };
+
+    const announces = new Map<
+      string,
+      { producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters }
+    >();
+    const replies = new Map<string, PipeConnectParams>();
+    const zeroAllocator: PipePortAllocatorLike = {
+      allocate: () => 0, // every leg = OS-assigned port (rerun-safe, no EADDRINUSE)
+      release: () => {},
+      size: () => 0,
+    };
+    const coordinator = new PrimaryPipeCoordinator({
+      announcer: (_roomId, piped, peerRelayId, rtpParameters) => {
+        announces.set(peerRelayId ?? DEFAULT_PEER_RELAY_ID, {
+          producerId: piped.id,
+          kind: piped.kind,
+          rtpParameters: rtpParameters as msTypes.RtpParameters,
+        });
+      },
+      portAllocator: zeroAllocator,
+      // L1.3-b — paramSender gained a trailing `peerRelayId`; capture the DOWN reply per peer.
+      paramSender: (
+        _roomId: string,
+        params: PipeConnectParams,
+        peerRelayId?: string,
+      ) => {
+        replies.set(peerRelayId ?? DEFAULT_PEER_RELAY_ID, params);
+      },
+    });
+
+    const roomId = 'rms-mesh-room';
+    const standbyPipes: Record<string, msTypes.PipeTransport> = {};
+
+    // N-1 fanout: drive ONE coordinator leg per cascade peer (socket map keys()).
+    for (const peerRelayId of sockets.keys()) {
+      const router = peerToRouter[peerRelayId]!;
+      const standbyPipe = await createStandbyPipeTransport(router, 0);
+      standbyPipes[peerRelayId] = standbyPipe;
+      await coordinator.onStandbyConnectParams(
+        roomId,
+        { ip: '127.0.0.1', port: standbyPipe.tuple.localPort },
+        peerRelayId,
+      );
+      await coordinator.onProducer(roomId, primaryRouter, src.producer, peerRelayId);
+    }
+
+    // Each leg got its OWN announce + its OWN pipe-connect reply, keyed by peerRelayId.
+    expect(replies.has('relay-B')).toBe(true);
+    expect(replies.has('relay-C')).toBe(true);
+    expect(announces.has('relay-B')).toBe(true);
+    expect(announces.has('relay-C')).toBe(true);
+
+    // Complete each handshake + mint the LOCAL forwarded producer; assert canConsume.
+    for (const peerRelayId of sockets.keys()) {
+      const router = peerToRouter[peerRelayId]!;
+      const standbyPipe = standbyPipes[peerRelayId]!;
+      const reply = replies.get(peerRelayId)!;
+      await standbyPipe.connect({
+        ip: reply.ip,
+        port: reply.port,
+      } as Parameters<msTypes.PipeTransport['connect']>[0]);
+      const announced = announces.get(peerRelayId)!;
+      const localProducer = await produceLocalFromPipe(standbyPipe, announced);
+      expect(localProducer.id).toBe(announced.producerId);
+      expect(
+        router.canConsume({ producerId: localProducer.id, rtpCapabilities: router.rtpCapabilities }),
+      ).toBe(true);
+      localProducer.close();
+    }
+
+    // cleanup
+    src.stop();
+    coordinator.clear(roomId, 'relay-B');
+    coordinator.clear(roomId, 'relay-C');
+    for (const p of Object.values(standbyPipes)) {
+      try { p.close(); } catch { /* best-effort */ }
+    }
+    try { src.producer.close(); } catch { /* best-effort */ }
+  }, 30_000);
 });

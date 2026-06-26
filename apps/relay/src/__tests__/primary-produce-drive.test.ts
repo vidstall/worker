@@ -26,6 +26,11 @@ import { MetricsTracker } from '../metrics.js';
 import { createSignalingServer, type InterRelayContext } from '../signaling.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import { InterRelayProducerRegistry } from '@dvconf/inter-relay-client';
+import {
+  createInterRelaySocketMap,
+  type InterRelaySocketMap,
+} from '../inter-relay-socket-map.js';
+import type { InterRelaySocketLike } from '@dvconf/inter-relay-client';
 
 /**
  * A mock router whose createWebRtcTransport returns a transport whose `produce`
@@ -73,13 +78,19 @@ function mockLogger() {
     fatal: vi.fn(), trace: vi.fn(), child: vi.fn().mockReturnThis(), level: 'info',
   } as any;
 }
-function startServer(interRelay: InterRelayContext): Promise<{ wss: WebSocketServer; port: number }> {
+function startServer(
+  interRelay: InterRelayContext,
+  sockets?: InterRelaySocketMap,
+): Promise<{ wss: WebSocketServer; port: number }> {
   return new Promise((resolve) => {
     const origPort = process.env['WS_PORT'];
     const origToken = process.env['INTER_RELAY_TOKEN'];
     process.env['WS_PORT'] = '0';
     delete process.env['INTER_RELAY_TOKEN']; // bench / single-host: gate open
-    const { wss } = createSignalingServer(createMockManager(), new MetricsTracker(), mockLogger(), undefined, interRelay);
+    // REQ-RMS-027/028 — optional 6th param injects a PRE-POPULATED inter-relay
+    // socket map so the fanout loop in handleProduce can be unit-driven (the
+    // tagged-peer WS upgrade that normally populates it is not exercised here).
+    const { wss } = createSignalingServer(createMockManager(), new MetricsTracker(), mockLogger(), undefined, interRelay, sockets);
     process.env['WS_PORT'] = origPort;
     if (origToken === undefined) delete process.env['INTER_RELAY_TOKEN'];
     else process.env['INTER_RELAY_TOKEN'] = origToken;
@@ -154,6 +165,56 @@ describe('primary produce drives the PrimaryPipeCoordinator (REQ-RO-001/002)', (
 
     // The coordinator (not the old direct announce) is the carrier now.
     expect(announceProducer).not.toHaveBeenCalled();
+
+    ws.close();
+  });
+
+  // REQ-RMS-028 (Bridge A, L1.3-b) — N-1 mesh fanout. With the per-peer inter-relay
+  // socket map populated (≥2 cascade peers), a single produce must drive
+  // onPrimaryProducer ONCE PER PEER, threading each peerRelayId — not a single
+  // default-peer call. RED before the wiring: the fanout loop + the 6th
+  // createSignalingServer param do not exist, so onPrimaryProducer fires ONCE.
+  it('drives onPrimaryProducer ONCE PER cascade peer when the inter-relay socket map has ≥2 peers (REQ-RMS-028)', async () => {
+    const onPrimaryProducer = vi.fn();
+    const announceProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer,
+      onPrimaryProducer,
+    };
+    const sockets = createInterRelaySocketMap();
+    const stub = (): InterRelaySocketLike => ({ readyState: 1, send: () => {} });
+    sockets.attach('relay-B', stub());
+    sockets.attach('relay-C', stub());
+
+    const { wss, port } = await startServer(interRelay, sockets);
+    server = wss;
+
+    const ws = await connectPlain(port);
+    await sendAndAwait(ws, { type: 'join', roomId: 'room-mesh', peerId: 'peer-1' }, 'routerRtpCapabilities');
+    const created = await sendAndAwait(
+      ws,
+      { type: 'createTransport', direction: 'send' },
+      'transportCreated',
+    );
+    await sendAndAwait(
+      ws,
+      { type: 'produce', transportId: created.id, kind: 'video', rtpParameters: { codecs: [], headerExtensions: [] } },
+      'produced',
+    );
+    await tick();
+
+    // ONE produce → ONE onPrimaryProducer call per cascade peer (N-1 mesh legs).
+    expect(onPrimaryProducer).toHaveBeenCalledTimes(2);
+    const peers = onPrimaryProducer.mock.calls.map((c) => c[3] as string).sort();
+    expect(peers).toEqual(['relay-B', 'relay-C']);
+    // Each call still carries (roomId, router, producer) in the first 3 slots.
+    for (const call of onPrimaryProducer.mock.calls) {
+      expect(call[0]).toBe('room-mesh');
+      expect(call[1]).toBeDefined();
+      expect((call[2] as { id?: string }).id).toBeDefined();
+    }
 
     ws.close();
   });

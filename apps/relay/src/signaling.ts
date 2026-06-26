@@ -37,6 +37,7 @@ import {
   createInterRelaySocketMap,
   resolveInterRelayPeerId,
   shouldRecordPath,
+  type InterRelaySocketMap,
 } from './inter-relay-socket-map.js';
 import { createSpillTrigger, type SpillTrigger } from './spill-trigger.js';
 import type { RelayRole } from '@dvconf/inter-relay-client';
@@ -308,7 +309,19 @@ export interface InterRelayContext {
    * id. Declared here (optional, unused by THIS cluster's routing) so the
    * coordinator can plug in without re-touching the context type.
    */
-  onPrimaryProducer?(roomId: string, router: msTypes.Router, producer: msTypes.Producer): void;
+  onPrimaryProducer?(
+    roomId: string,
+    router: msTypes.Router,
+    producer: msTypes.Producer,
+    /**
+     * REQ-RMS-028 (L1.3-b) — the cascade peer this leg targets. The signaling
+     * fanout loop in handleProduce drives onPrimaryProducer ONCE PER attached
+     * inter-relay peer (interRelaySockets.keys()), threading each peerRelayId so
+     * the PrimaryPipeCoordinator mints a per-peer pipe leg. Omitted (single 3-arg
+     * call) when no cascade peer is attached → the legacy single-standby path.
+     */
+    peerRelayId?: string,
+  ): void;
   /**
    * F1 (REQ-RO-009) — empty-room teardown. The wiring layer releases BOTH the
    * standby + primary pipe ports back to the allocator and drops the coordinator
@@ -421,11 +434,24 @@ export function createSignalingServer(
   logger: Logger,
   turnContext?: TurnContext,
   interRelay?: InterRelayContext,
+  /**
+   * REQ-RMS-028 (L1.3-b, Bridge A) — the per-peer inter-relay socket map, OWNED by
+   * the wiring layer (index.ts) so the PRIMARY's per-peer announce/param send and
+   * this server's tagged-peer attach share ONE map. Optional: absent ⇒ a fresh
+   * internal map (every existing ≤5-arg call site + test is unchanged).
+   */
+  providedSockets?: InterRelaySocketMap,
 ): {
   wss: WebSocketServer;
   getRoomCount: () => number;
   setAccepting: (accepting: boolean) => void;
   closeRooms: () => void;
+  /**
+   * REQ-RMS-027 (L1.3-b, Bridge B) — fan a standby-minted LOCAL forwarded producer
+   * to the room's OWN local WebRTC clients (a `newProducer` notification). Called
+   * by the wiring layer (index.ts) from StandbyWarmPipeCoordinator's onLocalProducer.
+   */
+  fanLocalProducer: (roomId: string, peerId: string, producer: msTypes.Producer) => void;
 } {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
@@ -511,7 +537,10 @@ export function createSignalingServer(
   // REQ-RMS-008: per-peer inter-relay socket map (multi-peer cascade). The single
   // attachedInterRelaySocket above stays for the DEFAULT (single-standby) peer; a
   // cascade peer attaches under its own x-inter-relay-peer-id so K_r links co-exist.
-  const interRelaySockets = createInterRelaySocketMap();
+  // REQ-RMS-028 (L1.3-b): the wiring layer (index.ts) PROVIDES this map so the
+  // PRIMARY's per-peer send and this server's tagged-peer attach share one map;
+  // absent ⇒ a fresh internal map (existing call sites/tests byte-unchanged).
+  const interRelaySockets = providedSockets ?? createInterRelaySocketMap();
 
   // REQ-RMS-006: self-observed spill trigger. Wired ONLY when RMS_C_WORKER_PATHS is
   // set (the cascade-bench env), so the M1 single-room path is byte-unchanged — a
@@ -1263,13 +1292,29 @@ export function createSignalingServer(
     // announce so the bench path is unaffected.
     if (interRelay && interRelay.role === 'primary') {
       if (interRelay.onPrimaryProducer) {
-        interRelay.onPrimaryProducer(mapping.roomId, room.router, producer);
+        // REQ-RMS-028 (L1.3-b, Bridge A) — N-1 mesh fanout. Drive the
+        // PrimaryPipeCoordinator ONCE PER attached cascade peer (the live
+        // inter-relay socket map's keys), so ONE produce forwards to ALL standby
+        // relays serving this room, each on its own per-peer pipe leg. With NO
+        // cascade peer attached the keys are empty → ONE legacy 3-arg call (the
+        // default single-standby leg, byte-identical to the pre-mesh path — the
+        // primary-produce-drive test deletes INTER_RELAY_TOKEN, leaving an empty
+        // map, and expects exactly that single 3-arg call).
+        const peerIds = interRelaySockets.keys();
+        if (peerIds.length === 0) {
+          interRelay.onPrimaryProducer(mapping.roomId, room.router, producer);
+        } else {
+          for (const p of peerIds) {
+            interRelay.onPrimaryProducer(mapping.roomId, room.router, producer, p);
+          }
+        }
         logger.info(
           {
             producerId: producer.id,
             kind: producer.kind,
             roomId: mapping.roomId,
             producerPeerId: mapping.peerId,
+            cascadePeers: peerIds.length,
           },
           'Inter-relay: drove PrimaryPipeCoordinator at produce (primary) — announces PIPED id',
         );
@@ -1607,10 +1652,38 @@ export function createSignalingServer(
     }
   }
 
+  /**
+   * REQ-RMS-027 (L1.3-b, Bridge B) — fan a standby-minted LOCAL forwarded producer
+   * to the room's OWN local WebRTC clients. The wiring layer (index.ts) backs the
+   * StandbyWarmPipeCoordinator's onLocalProducer callback with this, passing
+   * `producerPeerId ?? peerRelayId` as `peerId` so the clients bind to the ORIGINAL
+   * publisher. Delegates to the shipped `notifyNewProducer` SFU fan-out (the client
+   * then consumes the producer DIRECTLY off room.router — proven by the L1.2
+   * active-forward integration test), so NO explicit RoomState/PeerState
+   * registration is needed.
+   *
+   * DEFERRED (RMS M4) — audio-lastN: when a standby runs with AUDIO_LASTN_K>0,
+   * notifyNewProducer SUPPRESSES a forwarded AUDIO producer whose id is not in the
+   * standby's own `room.audioTopK` (which only tracks the standby's local
+   * AudioLevelObserver, never the upstream relay's). AUDIO_LASTN_K is OFF by default
+   * (K=0 → audioTopK undefined → audio fans unconditionally), so the LOCAL headline
+   * is unaffected; the cross-relay last-N union is tracked for RMS M4, not silently
+   * dropped.
+   */
+  function fanLocalProducer(roomId: string, peerId: string, producer: msTypes.Producer): void {
+    const room = rooms.get(roomId);
+    if (!room) {
+      logger.warn({ roomId }, 'fanLocalProducer: room not found');
+      return;
+    }
+    void notifyNewProducer(room, peerId, producer, logger);
+  }
+
   return {
     wss,
     getRoomCount: () => rooms.size,
     setAccepting,
     closeRooms,
+    fanLocalProducer,
   };
 }

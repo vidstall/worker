@@ -1052,8 +1052,13 @@ export interface PrimaryPipeCoordinatorDeps {
   /**
    * Sends the primary's OWN pipe-connect params DOWN to the standby (the reply
    * leg of the §2 handshake). Backed by the interRelaySender in the wiring layer.
+   *
+   * REQ-RMS-028 (L1.3-b) — gained a trailing OPTIONAL `peerRelayId` so a cascade
+   * leg's reply routes to the RIGHT per-peer socket (the wiring layer's sendToPeer
+   * resolves it). Defaults to undefined → the DEFAULT single-standby reply path is
+   * byte-stable (resolves to the legacy interRelayLink.socket).
    */
-  paramSender: (roomId: string, params: PipeConnectParams) => void;
+  paramSender: (roomId: string, params: PipeConnectParams, peerRelayId?: string) => void;
   logger?: Logger;
 }
 
@@ -1185,13 +1190,19 @@ export class PrimaryPipeCoordinator {
       // srtpParameters`, which is undefined). Guarded `!== undefined` spread so a
       // flag-OFF reply omits the field and stays byte-identical to today.
       const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
-      this.deps.paramSender(roomId, {
-        ip: announcedIp,
-        port: transport.tuple.localPort,
-        ...(transport.srtpParameters !== undefined
-          ? { srtpParameters: transport.srtpParameters }
-          : {}),
-      });
+      // REQ-RMS-028 (L1.3-b): thread `peerRelayId` so the DOWN reply routes to the
+      // RIGHT cascade leg's socket (DEFAULT peer → undefined → legacy single link).
+      this.deps.paramSender(
+        roomId,
+        {
+          ip: announcedIp,
+          port: transport.tuple.localPort,
+          ...(transport.srtpParameters !== undefined
+            ? { srtpParameters: transport.srtpParameters }
+            : {}),
+        },
+        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
+      );
       this.deps.logger?.info(
         { roomId, primaryPort: transport.tuple.localPort, standbyPort: s.standbyParams.port },
         'F1: primary pipe transport minted + connected to standby',
