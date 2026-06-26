@@ -84,6 +84,25 @@ export function selectPlacementRelay(relays: RelayCapacity[], roomLoad: number):
   return best;
 }
 
+// REQ-RMS-021 — K_r>1 active placement. Pick kR DISTINCT healthy relays, each able to absorb
+// its EQUAL share (ceil(roomLoad/kR)) under its capacity ceiling, ordered by the same
+// (l_i + share)/C_worker ratio + RTT tie-break as selectPlacementRelay. Returns [] (defer)
+// if fewer than kR relays can each absorb a share. assigned_relays[0] = the lowest-ratio relay.
+export function selectActiveRelays(
+  relays: RelayCapacity[],
+  roomLoad: number,
+  kR: number,
+): RelayCapacity[] {
+  if (kR <= 0) return [];
+  const share = Math.ceil(roomLoad / kR);
+  const eligible = relays
+    .filter((r) => r.canaryHealthy !== false && r.attestedLoadPaths + share <= r.cWorker)
+    .map((r) => ({ r, ratio: (r.attestedLoadPaths + share) / r.cWorker }))
+    .sort((a, b) => (a.ratio !== b.ratio ? a.ratio - b.ratio : Number(a.r.rtt) - Number(b.r.rtt)));
+  if (eligible.length < kR) return [];
+  return eligible.slice(0, kR).map((e) => e.r);
+}
+
 /**
  * REQ-RMS-018 — pool-health gate. A relay is healthy iff heartbeat is fresh
  * (< HEARTBEAT_STALE_EPOCHS) AND canary success-rate is acceptable. Admit only if
