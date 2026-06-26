@@ -24,6 +24,9 @@ export default defineConfig({
     include: [
       '**/cp-daemon/**/__tests__/integration/**/*.integration.test.ts',
       '**/apps/validator-daemon/**/__tests__/integration/canary-*.integration.test.ts',
+      // RMS-live LOCAL L3.3 capstone — the headline test (Assertion A boots a localnet,
+      // Assertion B is in-process real-mediasoup). Run via `pnpm test:integration rms-live-local`.
+      '**/apps/relay/**/__tests__/integration/live/rms-*.integration.test.ts',
     ],
     globals: false,
     testTimeout: 300_000,

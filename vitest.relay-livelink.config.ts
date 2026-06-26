@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, configDefaults } from 'vitest/config';
 
 /**
  * F1 Tier-3 LIVE-LINK gate (REQ-RO-003) — real inter-relay WS link + real
@@ -12,6 +12,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['**/apps/relay/**/__tests__/integration/live/**/*.integration.test.ts'],
+    exclude: [
+      ...configDefaults.exclude,
+      // RMS-live LOCAL L3.3 capstone: Assertion A BOOTS a sui localnet (~135s) — it must NOT be
+      // swept by this F1 live-link gate's 60s timeout. It runs under vitest.integration.config.ts.
+      '**/apps/relay/**/__tests__/integration/live/rms-*.integration.test.ts',
+    ],
     globals: false,
     testTimeout: 60_000,
     hookTimeout: 60_000,
