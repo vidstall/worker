@@ -4,6 +4,7 @@
  * pre-mesh frames (no peerRelayId) still validate.
  */
 import { describe, it, expect, vi } from 'vitest';
+import type { types as msTypes } from 'mediasoup';
 import {
   isPipeProducerAnnounce,
   buildPipeProducerAnnounce,
@@ -192,6 +193,14 @@ describe('REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll 
     const reg = new InterRelayProducerRegistry();
     reg.record({ type: 'pipe-producer', roomId: 'room-1', producerId: 'pLegacy', kind: 'video' });
     expect(reg.resolve('room-1')?.producerId).toBe('pLegacy'); // resolve() unchanged signature
+  });
+
+  it('registry round-trips rtpParameters on resolveAll (REQ-RMS-026)', () => {
+    const reg = new InterRelayProducerRegistry();
+    const rtp = { codecs: [{ mimeType: 'video/VP8' }], encodings: [{ ssrc: 1234 }] } as unknown as msTypes.RtpParameters;
+    reg.record({ type: 'pipe-producer', roomId: 'room1', producerId: 'p1', kind: 'video', peerRelayId: 'relayB', rtpParameters: rtp });
+    const out = reg.resolveAll('room1', 'relayB');
+    expect(out[0]?.rtpParameters).toBe(rtp);
   });
 
   it('a legacy ensure→onAnnounce cutover (no peerRelayId anywhere) re-consumes the REAL producer end-to-end (not just registry.resolve in isolation)', async () => {

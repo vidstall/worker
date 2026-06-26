@@ -140,6 +140,13 @@ export interface PipeProducerAnnounce {
    * port allocator per (roomId, peerRelayId) so K_r relays can serve one room.
    */
   peerRelayId?: string;
+  /**
+   * REQ-RMS-026 — the SSRC-remapped RtpParameters of the piped consumer.
+   * OPTIONAL on the wire (additive / back-compat: pre-REQ-RMS-026 frames omit
+   * it). Needed so the standby can call transport.produce() with the correct
+   * codec + encoding parameters after piping.
+   */
+  rtpParameters?: msTypes.RtpParameters;
 }
 
 /** Type guard for an inbound JSON frame on the relay WS server. */
@@ -166,6 +173,7 @@ export function buildPipeProducerAnnounce(
   producer: Pick<msTypes.Producer, 'id' | 'kind'>,
   producerPeerId?: string,
   peerRelayId?: string,
+  rtpParameters?: msTypes.RtpParameters,
 ): PipeProducerAnnounce {
   return {
     type: 'pipe-producer',
@@ -174,6 +182,7 @@ export function buildPipeProducerAnnounce(
     kind: producer.kind,
     ...(producerPeerId !== undefined ? { producerPeerId } : {}),
     ...(peerRelayId !== undefined ? { peerRelayId } : {}),
+    ...(rtpParameters !== undefined ? { rtpParameters } : {}),
   };
 }
 
@@ -366,6 +375,8 @@ export interface AnnouncedProducer {
   kind: msTypes.MediaKind;
   /** REQ-RO-018 — publisher peerId, when the announce carried it (additive). */
   producerPeerId?: string;
+  /** REQ-RMS-026 — the piped consumer's RtpParameters, when the announce carried it (additive). */
+  rtpParameters?: msTypes.RtpParameters;
 }
 
 /**
@@ -400,6 +411,9 @@ export class InterRelayProducerRegistry {
       kind: announce.kind,
       ...(announce.producerPeerId !== undefined
         ? { producerPeerId: announce.producerPeerId }
+        : {}),
+      ...(announce.rtpParameters !== undefined
+        ? { rtpParameters: announce.rtpParameters }
         : {}),
     });
   }
@@ -873,6 +887,7 @@ export interface PrimaryPipeCoordinatorDeps {
     roomId: string,
     producer: Pick<msTypes.Producer, 'id' | 'kind'>,
     peerRelayId?: string,
+    rtpParameters?: msTypes.RtpParameters,
   ) => void;
   /**
    * Per-(room,peer,role) port allocator. Keyed `${roomId}:primary` for the legacy
@@ -1053,10 +1068,13 @@ export class PrimaryPipeCoordinator {
       );
       // Announce the PIPED id (pipedConsumer.id), NOT producer.id (REQ-RO-002).
       // Pass peerRelayId only for a cascade peer; DEFAULT → omitted (legacy frame).
+      // REQ-RMS-026: also pass the piped consumer's rtpParameters so the standby
+      // can call transport.produce() with the SSRC-remapped codec parameters.
       this.deps.announcer(
         roomId,
         { id: pipedConsumer.id, kind: pipedConsumer.kind },
         peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
+        pipedConsumer.rtpParameters,
       );
       this.deps.logger?.info(
         { roomId, sourceProducerId: producer.id, pipedConsumerId: pipedConsumer.id },
