@@ -17,6 +17,8 @@ export interface InterRelaySocketMap {
   attach(peerRelayId: string, socket: InterRelaySocketLike): void;
   detach(peerRelayId: string, socket: InterRelaySocketLike): void;
   get(peerRelayId: string): InterRelaySocketLike | null;
+  keys(): string[];                                  // REQ-RMS-028 — enumerate attached cascade peers
+  entries(): [string, InterRelaySocketLike][];       // REQ-RMS-028
   size(): number;
 }
 
@@ -28,6 +30,8 @@ export function createInterRelaySocketMap(): InterRelaySocketMap {
       if (sockets.get(peerRelayId) === socket) sockets.delete(peerRelayId);
     },
     get(peerRelayId) { return sockets.get(peerRelayId) ?? null; },
+    keys() { return [...sockets.keys()]; },          // REQ-RMS-028 — enumerate attached cascade peers
+    entries() { return [...sockets.entries()]; },    // REQ-RMS-028
     size() { return sockets.size; },
   };
 }
