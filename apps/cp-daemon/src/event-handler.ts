@@ -45,6 +45,7 @@ import {
 import {
   estimateRoomLoad,
   selectPlacementRelay,
+  selectActiveRelays,
   poolHealthGate,
   excludeFlaggedRelays, // selectTopRelays is NOT imported here — unused in event-handler (BLOCKER-2); it lives only in the 5a.2 unit test
   MIN_RELAY,
@@ -475,9 +476,14 @@ export function handleEvent(
         };
       });
 
-      // REQ-RMS-018 — pool-health gate. M1 ships K_r=1 (single-relay placement); the recorded
-      // vector floor stays >= MIN_RELAY (2) per submit_pairing_proposal's on-chain assert.
-      const kR = 1;
+      // REQ-RMS-018/021 — pool-health gate + K_r placement. STRICT env-gate: with RMS_KR_MIN unset (or <=1),
+      // kR = 1 EXACTLY, so the M1 single-relay path + MIN_RELAY-padded ballot below is byte-identical to M1
+      // (including M1's defer when roomLoad > cWorker). The LOCAL >=3-active demo sets RMS_KR_MIN=3 to force a
+      // room to span >=3 ACTIVE relays; when forced, kR also rises with capacity demand (ceil(L_r/C_worker)).
+      // Capacity-driven auto-spill WITHOUT the floor = deferred REQ-RMS-023 (runtime growth), out of scope here.
+      // The recorded vector floor stays >= MIN_RELAY (2) per submit_pairing_proposal's on-chain assert.
+      const krMin = parseInt(process.env['RMS_KR_MIN'] ?? '1', 10);
+      const kR = krMin > 1 ? Math.max(krMin, Math.ceil(roomLoad / cWorker)) : 1;
       if (!poolHealthGate(capacities, kR)) {
         logger.warn({ roomId: e.room_id, healthyNeeded: kR }, 'Pool health below K_r — deferring admission (graceful degrade, no migration)');
         pendingRooms.set(e.room_id, roomData);
@@ -485,35 +491,48 @@ export function handleEvent(
         break;
       }
 
-      // REQ-RMS-002 — i* = argmin (l_i + L_r)/C_worker s.t. <= C_worker, RTT tie-break.
-      const chosen = selectPlacementRelay(capacities, roomLoad);
-      if (!chosen) {
-        logger.warn({ roomId: e.room_id, roomLoad, cWorker }, 'No relay can absorb L_r under capacity ceiling — deferring');
-        pendingRooms.set(e.room_id, roomData);
-        pendingEscrows?.set(e.room_id, e);
-        break;
+      let topRelayIds: string[];
+      if (kR <= 1) {
+        // ── M1 PATH (preserved verbatim): single active relay + ballot padded to MIN_RELAY. ──
+        // REQ-RMS-002 — i* = argmin (l_i + L_r)/C_worker s.t. <= C_worker, RTT tie-break.
+        const chosen = selectPlacementRelay(capacities, roomLoad);
+        if (!chosen) {
+          logger.warn({ roomId: e.room_id, roomLoad, cWorker }, 'No relay can absorb L_r under capacity ceiling — deferring');
+          pendingRooms.set(e.room_id, roomData);
+          pendingEscrows?.set(e.room_id, e);
+          break;
+        }
+        // The RECORDED ballot must be >= MIN_RELAY (on-chain floor), even though only `chosen` serves the
+        // room. Order: chosen first, then capacity-eligible peers, then back-fill from the rest of the
+        // consensus-sorted relays to reach MIN_RELAY (a ballot, not a live assignment). rankedRelays is
+        // already consensus-sorted (canonicalSort), chosen-first below.
+        const chosenFirst: string[] = [chosen.minerId];
+        const eligiblePeers = capacities
+          .filter((c) => c.minerId !== chosen.minerId && c.attestedLoadPaths + roomLoad <= c.cWorker)
+          .map((c) => c.minerId);
+        const restByConsensus = rankedRelays
+          .map((r) => r.minerId)
+          .filter((id) => id !== chosen.minerId && !eligiblePeers.includes(id)); // not chosen, not already an eligible peer
+        const ballot = [...chosenFirst, ...eligiblePeers, ...restByConsensus]; // de-dup guaranteed by the filters
+        if (ballot.length < MIN_RELAY) {
+          // The ENTIRE pool has < MIN_RELAY relays — cannot record a valid ballot; defer (graceful).
+          logger.warn({ roomId: e.room_id, poolSize: ballot.length, minRelay: MIN_RELAY }, 'Fewer than MIN_RELAY relays exist — deferring (cannot satisfy on-chain ballot floor)');
+          pendingRooms.set(e.room_id, roomData);
+          pendingEscrows?.set(e.room_id, e);
+          break;
+        }
+        topRelayIds = ballot.slice(0, MIN_RELAY); // exactly MIN_RELAY for K_r=1 M1; chosen is index 0
+      } else {
+        // ── REQ-RMS-021: kR>1 ACTIVE relays (>=3 for the LOCAL demo). All emitted ids ACTIVELY serve. ──
+        const activeRelays = selectActiveRelays(capacities, roomLoad, kR);
+        if (activeRelays.length < kR) {
+          logger.warn({ roomId: e.room_id, need: kR, got: activeRelays.length }, 'Fewer than K_r relays can absorb a share — deferring');
+          pendingRooms.set(e.room_id, roomData);
+          pendingEscrows?.set(e.room_id, e);
+          break;
+        }
+        topRelayIds = activeRelays.map((r) => r.minerId); // length kR (>= MIN_RELAY since kR>=3 here)
       }
-
-      // M1: single-relay placement (K_r=1). The RECORDED ballot must be >= MIN_RELAY (on-chain floor),
-      // even though only `chosen` serves the room. Order: chosen first, then capacity-eligible peers,
-      // then back-fill from the rest of the consensus-sorted relays to reach MIN_RELAY (a ballot, not
-      // a live assignment). rankedRelays is already consensus-sorted (canonicalSort), chosen-first below.
-      const chosenFirst: string[] = [chosen.minerId];
-      const eligiblePeers = capacities
-        .filter((c) => c.minerId !== chosen.minerId && c.attestedLoadPaths + roomLoad <= c.cWorker)
-        .map((c) => c.minerId);
-      const restByConsensus = rankedRelays
-        .map((r) => r.minerId)
-        .filter((id) => id !== chosen.minerId && !eligiblePeers.includes(id)); // not chosen, not already an eligible peer
-      const ballot = [...chosenFirst, ...eligiblePeers, ...restByConsensus]; // de-dup guaranteed by the filters
-      if (ballot.length < MIN_RELAY) {
-        // The ENTIRE pool has < MIN_RELAY relays — cannot record a valid ballot; defer (graceful).
-        logger.warn({ roomId: e.room_id, poolSize: ballot.length, minRelay: MIN_RELAY }, 'Fewer than MIN_RELAY relays exist — deferring (cannot satisfy on-chain ballot floor)');
-        pendingRooms.set(e.room_id, roomData);
-        pendingEscrows?.set(e.room_id, e);
-        break;
-      }
-      const topRelayIds = ballot.slice(0, MIN_RELAY); // exactly MIN_RELAY for K_r=1 M1; chosen is index 0
 
       // Compute individual node scores for submittedScore
       const nodeScores: bigint[] = [];
