@@ -382,18 +382,20 @@ describe('REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into th
   });
 
   it('a REAL PrimaryPipeCoordinator backed by the REAL createInterRelayAnnouncer (index.ts adapter shape) emits a cascade frame carrying peerRelayId — the latent non-forward bug', async () => {
-    // index.ts wires: announcer: (roomId, producer, peerRelayId) =>
-    //   pushAnnounce(roomId, producer, undefined, peerRelayId). A non-forwarding
+    // index.ts wires (REQ-RMS-029 arg order): announcer:
+    //   (roomId, producer, producerPeerId, peerRelayId) =>
+    //   pushAnnounce(roomId, producer, producerPeerId, peerRelayId). A non-forwarding
     // createInterRelayAnnouncer (3 params) would drop the 4th arg → the cascade
     // frame OMITS peerRelayId → this fails. The coordinator drain passes peerRelayId
-    // as its 3rd positional announcer arg.
+    // as its 4th positional announcer arg (producerPeerId is the 3rd — undefined here
+    // since onProducer is driven without a publisher id).
     const sent: string[] = [];
     const sender: InterRelaySender = { send: (d) => sent.push(d) };
     const pushAnnounce = createInterRelayAnnouncer(sender);
 
     const coord = new PrimaryPipeCoordinator({
-      announcer: (roomId, producer, peerRelayId) =>
-        pushAnnounce(roomId, producer, undefined, peerRelayId),
+      announcer: (roomId, producer, producerPeerId, peerRelayId) =>
+        pushAnnounce(roomId, producer, producerPeerId, peerRelayId),
       portAllocator: makePrimaryStubAllocator(41000),
       paramSender: vi.fn(),
     });
@@ -416,8 +418,8 @@ describe('REQ-RMS-008 — createInterRelayAnnouncer forwards peerRelayId into th
     const pushAnnounce = createInterRelayAnnouncer(sender);
 
     const coord = new PrimaryPipeCoordinator({
-      announcer: (roomId, producer, peerRelayId) =>
-        pushAnnounce(roomId, producer, undefined, peerRelayId),
+      announcer: (roomId, producer, producerPeerId, peerRelayId) =>
+        pushAnnounce(roomId, producer, producerPeerId, peerRelayId),
       portAllocator: makePrimaryStubAllocator(41000),
       paramSender: vi.fn(),
     });

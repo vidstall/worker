@@ -480,29 +480,31 @@ if (isMainModule) {
     // factory; index.ts only injects the announcer + port allocator + the
     // standby->primary param sender (the link's new send() path).
     const primaryPipe = new PrimaryPipeCoordinator({
-      // REQ-RMS-008: the coordinator's announcer dep is (roomId, producer, peerRelayId?,
-      // rtpParameters?) — its drain threads the cascade peer as the 3rd arg and (REQ-RMS-026)
-      // the piped consumer's rtpParameters as the 4th. createInterRelayAnnouncer's closure is
-      // (roomId, producer, producerPeerId?, peerRelayId?, rtpParameters?), so map the
-      // coordinator's peerRelayId into the 4th slot (producerPeerId undefined — a PIPED
-      // consumer carries no publisher peerId) and rtpParameters into the 5th slot.
-      //   • peerRelayId is DEFAULT-gated in drain (DEFAULT → undefined) → omitted on the
-      //     legacy/default path → that part of the frame stays byte-stable.
-      //   • rtpParameters is supplied UNCONDITIONALLY by drain (a real Consumer always has
-      //     it) → the live single-standby (DEFAULT) frame intentionally NOW carries it
-      //     (REQ-RMS-026, additive — a standby that ignores it still parses via the unchanged
-      //     guard); it is NOT byte-identical to the pre-REQ-RMS-026 frame. Builder-level
-      //     byte-identity holds only when the 5th arg is OMITTED (the in-process
-      //     announceProducer path below, which passes no rtpParameters).
+      // The coordinator's announcer dep + createInterRelayAnnouncer's closure now share
+      // the SAME arg order (roomId, producer, producerPeerId?, peerRelayId?, rtpParameters?),
+      // so the adapter forwards each slot 1:1.
+      //   • producerPeerId (REQ-RMS-029): the drain threads the ORIGINAL publisher's
+      //     peerId on the CASCADE/mesh path so a cross-relay consume binds the stream/
+      //     E2EE-key to the real publisher (not the cascade relayId). The publisher
+      //     peerId travels ALONGSIDE the piped consumer id; it is undefined on the
+      //     DEFAULT/legacy single-standby leg → that part of the frame stays byte-stable.
+      //   • peerRelayId (REQ-RMS-008) is DEFAULT-gated in drain (DEFAULT → undefined) →
+      //     omitted on the legacy/default path → that part of the frame stays byte-stable.
+      //   • rtpParameters (REQ-RMS-026) is supplied UNCONDITIONALLY by drain (a real
+      //     Consumer always has it) → the live single-standby (DEFAULT) frame intentionally
+      //     NOW carries it (additive — a standby that ignores it still parses via the
+      //     unchanged guard); it is NOT byte-identical to the pre-REQ-RMS-026 frame.
+      //     Builder-level byte-identity holds only when the 5th arg is OMITTED (the
+      //     in-process announceProducer path below, which passes no rtpParameters).
       // REQ-RMS-028 (L1.3-b): route the cascade announce to the RIGHT per-peer
       // socket via sendToPeer (DEFAULT peer → the legacy interRelayLink.socket).
-      // REUSE createInterRelayAnnouncer to build the locked frame (peerRelayId +
-      // rtpParameters) and hand its bytes to sendToPeer.
-      announcer: (roomId, producer, peerRelayId, rtpParameters) =>
+      // REUSE createInterRelayAnnouncer to build the locked frame (producerPeerId +
+      // peerRelayId + rtpParameters) and hand its bytes to sendToPeer.
+      announcer: (roomId, producer, producerPeerId, peerRelayId, rtpParameters) =>
         createInterRelayAnnouncer({ send: (data) => sendToPeer(peerRelayId, data) })(
           roomId,
           producer,
-          undefined,
+          producerPeerId,
           peerRelayId,
           rtpParameters,
         ),
@@ -532,8 +534,10 @@ if (isMainModule) {
       // the standby's connect params already arrived, else queues (pending).
       // REQ-RMS-028 (L1.3-b): forward the cascade peerRelayId so the coordinator
       // mints a per-peer pipe leg (DEFAULT/undefined → the legacy single leg).
-      onPrimaryProducer: (roomId, router, producer, peerRelayId) =>
-        void primaryPipe.onProducer(roomId, router, producer, peerRelayId),
+      // REQ-RMS-029: also forward the ORIGINAL publisher's producerPeerId so the
+      // coordinator drain threads it into the cascade announce.
+      onPrimaryProducer: (roomId, router, producer, peerRelayId, producerPeerId) =>
+        void primaryPipe.onProducer(roomId, router, producer, peerRelayId, producerPeerId),
       // F1 (REQ-RO-003/008): the standby's UP pipe-connect frame, delivered through
       // the SAME interRelayPeers token gate as pipe-producer announces. PRIMARY
       // feeds it to the coordinator, which binds + connect()s the primary pipe to

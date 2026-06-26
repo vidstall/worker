@@ -286,13 +286,17 @@ export interface InterRelaySender {
  *
  * REQ-RMS-008 — the returned closure gained a trailing OPTIONAL `peerRelayId`
  * (4th arg) forwarded into the frame's peerRelayId field, so this LIVE backing of
- * PrimaryPipeCoordinator.deps.announcer carries the cascade peer on the wire. Both
+ * PrimaryPipeCoordinator.deps.announcer carries the cascade peer on the wire. All
  * trailing args default to undefined → the legacy single-standby path emits a
  * byte-identical frame (builder OMITS undefined fields). The two live call sites
- * thread DIFFERENT slots: the legacy in-process bench announce passes
+ * thread the slots they have: the legacy in-process bench announce passes
  * `producerPeerId` (3rd arg, peerRelayId omitted); the coordinator drain (via the
- * index.ts adapter) passes `peerRelayId` (4th arg, producerPeerId omitted — a
- * PIPED consumer carries no publisher peerId).
+ * index.ts adapter) NOW threads BOTH the ORIGINAL publisher's `producerPeerId`
+ * (3rd arg) AND the cascade `peerRelayId` (4th arg) on the CASCADE/mesh path
+ * (REQ-RMS-029 — the publisher id travels alongside the PIPED consumer id so a
+ * cross-relay consume binds to the real publisher, not the cascade relayId). On
+ * the DEFAULT/legacy single-standby leg the drain leaves producerPeerId undefined
+ * → that part of the frame stays byte-stable.
  *
  * REQ-RMS-026 — the closure also forwards a trailing OPTIONAL `rtpParameters`
  * (5th arg) into the frame so the live primary→standby wire carries the piped
@@ -1051,10 +1055,21 @@ export interface PrimaryPipeCoordinatorDeps {
    * createInterRelayAnnouncer (inter-relay.ts) in the wiring layer. Receives the
    * PIPED consumer (its .id is the id the standby must consume) — NOT the source
    * producer.
+   *
+   * Arg order ALIGNS with createInterRelayAnnouncer's closure
+   * `(roomId, producer, producerPeerId?, peerRelayId?, rtpParameters?)`:
+   *   - producerPeerId (REQ-RMS-029): the ORIGINAL publishing peer. The drain
+   *     threads it on the CASCADE/mesh path so a cross-relay consume binds the
+   *     stream/E2EE-key to the real publisher (not the cascade relayId). Left
+   *     undefined on the DEFAULT/legacy single-standby leg → that frame stays
+   *     byte-stable.
+   *   - peerRelayId (REQ-RMS-008): the cascade peer; DEFAULT-gated in drain.
+   *   - rtpParameters (REQ-RMS-026): the piped consumer's RtpParameters.
    */
   announcer: (
     roomId: string,
     producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+    producerPeerId?: string,
     peerRelayId?: string,
     rtpParameters?: msTypes.RtpParameters,
   ) => void;
@@ -1086,9 +1101,12 @@ interface PrimaryPipeState {
   /**
    * Producers seen before the pair was connectable. Drained (piped + announced)
    * once connected — REQ-RO-008 either-order tolerance. We keep only the fields
-   * the announce + pipe need (id, kind) so a plain mock is a valid pending entry.
+   * the announce + pipe need (id, kind) so a plain mock is a valid pending entry,
+   * PLUS the optional ORIGINAL publisher peerId (REQ-RMS-029). It is PER-ENTRY
+   * (not per-state): a multi-user room queues several producers from DIFFERENT
+   * publishers on one (room,peer) state, so each pending entry carries its own id.
    */
-  pendingProducers: Array<Pick<msTypes.Producer, 'id' | 'kind'>>;
+  pendingProducers: Array<Pick<msTypes.Producer, 'id' | 'kind'> & { producerPeerId?: string }>;
   /** The standby's pipe-connect params once received; null until they arrive. */
   standbyParams: PipeConnectParams | null;
   /** The allocator port held for `${roomId}:primary` (for release on clear). */
@@ -1171,9 +1189,13 @@ export class PrimaryPipeCoordinator {
     router: msTypes.Router,
     producer: Pick<msTypes.Producer, 'id' | 'kind'>,
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+    producerPeerId?: string,
   ): Promise<void> {
     const s = this.getState(roomId, peerRelayId);
-    s.pendingProducers.push(producer);
+    // REQ-RMS-029: queue a SELF-CONTAINED entry carrying the ORIGINAL publisher
+    // peerId so the drain can thread it into the cascade announce (undefined on
+    // the DEFAULT/legacy leg → byte-stable frame). Per-entry, not per-state.
+    s.pendingProducers.push({ id: producer.id, kind: producer.kind, producerPeerId });
 
     if (s.standbyParams === null) {
       // params-not-yet: keep queued; a later onStandbyConnectParams → onProducer
@@ -1247,12 +1269,16 @@ export class PrimaryPipeCoordinator {
         producer.id,
       );
       // Announce the PIPED id (pipedConsumer.id), NOT producer.id (REQ-RO-002).
+      // REQ-RMS-029: the ORIGINAL publisher's producerPeerId travels WITH the
+      // piped consumer id so a cross-relay consume binds to the real publisher
+      // (undefined on the DEFAULT/legacy leg → byte-stable frame).
       // Pass peerRelayId only for a cascade peer; DEFAULT → omitted (legacy frame).
       // REQ-RMS-026: also pass the piped consumer's rtpParameters so the standby
       // can call transport.produce() with the SSRC-remapped codec parameters.
       this.deps.announcer(
         roomId,
         { id: pipedConsumer.id, kind: pipedConsumer.kind },
+        producer.producerPeerId,
         peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
         pipedConsumer.rtpParameters,
       );

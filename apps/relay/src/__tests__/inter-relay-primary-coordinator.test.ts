@@ -247,3 +247,58 @@ describe('PrimaryPipeCoordinator — mint-once, multi-producer, clear', () => {
     expect(allocator.release).not.toHaveBeenCalled();
   });
 });
+
+// ── D. REQ-RMS-029 / L1-gate partial #3 — original publisher producerPeerId on
+//    the CASCADE announce (so a cross-relay consume binds to the REAL publisher,
+//    not the cascade relayId). Additive + cascade-only: the DEFAULT/legacy single-
+//    standby leg keeps producerPeerId === undefined (byte-stable frame). ───────
+
+describe('PrimaryPipeCoordinator — REQ-RMS-029 original producerPeerId on cascade announce', () => {
+  let announcer: ReturnType<typeof vi.fn>;
+  let paramSender: ReturnType<typeof vi.fn>;
+  let allocator: ReturnType<typeof makeStubAllocator>;
+
+  beforeEach(() => {
+    announcer = vi.fn();
+    paramSender = vi.fn();
+    allocator = makeStubAllocator(41000);
+  });
+
+  it('drain threads the original producerPeerId into the announce on a cascade leg (REQ-RMS-029 / L1-gate partial #3)', async () => {
+    const { router } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    await coord.onStandbyConnectParams('room1', STANDBY_PARAMS, 'relayB');
+    await coord.onProducer('room1', router as any, { id: 'p1', kind: 'video' }, 'relayB', 'alice-original');
+
+    // The announce carries the ORIGINAL publisher in the NEW 3rd slot — alongside the
+    // PIPED consumer id (slot 2) and the cascade peerRelayId (slot 4). The mock piped
+    // consumer carries no rtpParameters, so the 5th slot is undefined.
+    expect(announcer).toHaveBeenCalledWith(
+      'room1',
+      expect.objectContaining({ kind: 'video' }),
+      'alice-original', // ← NEW: producerPeerId = original publisher
+      'relayB', // peerRelayId
+      undefined, // rtpParameters (mock consumer has none)
+    );
+    // The announced id is the PIPED consumer id, NOT the source producer id.
+    expect(announcer.mock.calls[0]![1].id).not.toBe('p1');
+  });
+
+  it('the DEFAULT/legacy single-standby leg announces with producerPeerId undefined (byte-stable frame)', async () => {
+    const { router } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    // No peerRelayId (DEFAULT peer) + no producerPeerId → both omitted on the wire.
+    await coord.onStandbyConnectParams('room2', STANDBY_PARAMS);
+    await coord.onProducer('room2', router as any, { id: 'p2', kind: 'video' });
+
+    expect(announcer).toHaveBeenCalledWith(
+      'room2',
+      expect.objectContaining({ kind: 'video' }),
+      undefined, // producerPeerId omitted on the default/legacy path
+      undefined, // peerRelayId omitted (DEFAULT-gated)
+      undefined, // rtpParameters (mock consumer has none)
+    );
+  });
+});

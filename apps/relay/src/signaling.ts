@@ -321,6 +321,14 @@ export interface InterRelayContext {
      * call) when no cascade peer is attached → the legacy single-standby path.
      */
     peerRelayId?: string,
+    /**
+     * REQ-RMS-029 — the ORIGINAL publishing peer (mapping.peerId). The fanout loop
+     * threads it ONLY on the cascade leg so the coordinator drain records it on the
+     * inter-relay announce → a cross-relay consume binds the stream/E2EE-key to the
+     * real publisher, not the cascade relayId. Omitted on the legacy single-standby
+     * (empty-keys) leg → byte-stable.
+     */
+    producerPeerId?: string,
   ): void;
   /**
    * F1 (REQ-RO-009) — empty-room teardown. The wiring layer releases BOTH the
@@ -1310,7 +1318,10 @@ export function createSignalingServer(
           interRelay.onPrimaryProducer(mapping.roomId, room.router, producer);
         } else {
           for (const p of peerIds) {
-            interRelay.onPrimaryProducer(mapping.roomId, room.router, producer, p);
+            // REQ-RMS-029: thread the ORIGINAL publishing peer (mapping.peerId) on the
+            // CASCADE leg so the coordinator drain records it on the announce (the
+            // cross-relay consume then binds to the real publisher, not the relayId).
+            interRelay.onPrimaryProducer(mapping.roomId, room.router, producer, p, mapping.peerId);
           }
         }
         logger.info(

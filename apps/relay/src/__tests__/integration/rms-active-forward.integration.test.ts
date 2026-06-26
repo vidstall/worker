@@ -43,6 +43,9 @@ import {
   createStandbyPipeTransport,
   pipeProducerOntoPrimaryTransport,
   PrimaryPipeCoordinator,
+  InterRelayProducerRegistry,
+  createInterRelayAnnouncer,
+  isPipeProducerAnnounce,
   DEFAULT_PEER_RELAY_ID,
   type PipeConnectParams,
   type PipePortAllocatorLike,
@@ -475,7 +478,8 @@ describe('REQ-RMS-027/028 — L1.3-b: standby fans newProducer to local clients 
       size: () => 0,
     };
     const coordinator = new PrimaryPipeCoordinator({
-      announcer: (_roomId, piped, peerRelayId, rtpParameters) => {
+      // REQ-RMS-029 arg order: (roomId, piped, producerPeerId?, peerRelayId?, rtpParameters?).
+      announcer: (_roomId, piped, _producerPeerId, peerRelayId, rtpParameters) => {
         announces.set(peerRelayId ?? DEFAULT_PEER_RELAY_ID, {
           producerId: piped.id,
           kind: piped.kind,
@@ -541,5 +545,118 @@ describe('REQ-RMS-027/028 — L1.3-b: standby fans newProducer to local clients 
       try { p.close(); } catch { /* best-effort */ }
     }
     try { src.producer.close(); } catch { /* best-effort */ }
+  }, 30_000);
+
+  /**
+   * Test 4c (REQ-RMS-029 — original publisher reaches the fan via the REAL announce
+   * path). 4a proves the fan WIRING but feeds it a LITERAL 'publisher-original' peerId,
+   * which makes the original-publisher claim tautological. 4c closes L1-gate partial #3
+   * properly: the publisher id flows through the REAL PrimaryPipeCoordinator drive
+   * (onProducer WITH a producerPeerId → drain → the REAL createInterRelayAnnouncer wire
+   * frame → parsed through the REAL guard → recorded into the REAL registry), and the
+   * fan's peerId is RESOLVED FROM THAT ANNOUNCE — not typed inline. If the drain failed
+   * to thread producerPeerId, registry.resolveAll(...)[0].producerPeerId would be
+   * undefined and BOTH the announce assertion and the fan assertion would fail.
+   */
+  it('4c: the ORIGINAL publisher producerPeerId reaches the fan through the REAL PrimaryPipeCoordinator announce path (not a literal) — closes L1-gate partial #3', async () => {
+    const roomId = 'rms-fan-real-room';
+    const CASCADE_PEER = 'relay-C';
+    const ORIGINAL_PUBLISHER = 'publisher-original';
+
+    // ── Mint a REAL forwarded producer on router C via a REAL coordinator drive. ──
+    const src = await makePrimaryRtpSource(); // producer on primaryRouter (A)
+    const standbyPipe = await createStandbyPipeTransport(cRouter, 0);
+
+    // The REAL announce path: createInterRelayAnnouncer serializes the wire frame; we
+    // parse it through the REAL guard and record into a REAL registry — exactly what
+    // signaling.ts does on receipt. producerPeerId rides the actual JSON wire (no literal).
+    const registry = new InterRelayProducerRegistry();
+    const pushAnnounce = createInterRelayAnnouncer({
+      send: (data) => {
+        const parsed = JSON.parse(data) as unknown;
+        if (isPipeProducerAnnounce(parsed)) registry.record(parsed);
+      },
+    });
+    const replies = new Map<string, PipeConnectParams>();
+    const zeroAllocator: PipePortAllocatorLike = {
+      allocate: () => 0, // OS-assigned port (rerun-safe)
+      release: () => {},
+      size: () => 0,
+    };
+    const coordinator = new PrimaryPipeCoordinator({
+      announcer: pushAnnounce, // the REAL announcer closure index.ts uses (forwards all slots)
+      portAllocator: zeroAllocator,
+      paramSender: (_r: string, params: PipeConnectParams, peer?: string) =>
+        replies.set(peer ?? DEFAULT_PEER_RELAY_ID, params),
+    });
+
+    // Drive the coordinator with a REAL producerPeerId — the ORIGINAL publisher.
+    await coordinator.onStandbyConnectParams(
+      roomId,
+      { ip: '127.0.0.1', port: standbyPipe.tuple.localPort },
+      CASCADE_PEER,
+    );
+    await coordinator.onProducer(roomId, primaryRouter, src.producer, CASCADE_PEER, ORIGINAL_PUBLISHER);
+
+    // The announce the coordinator EMITTED (and the standby registry RECORDED) carries
+    // the ORIGINAL publisher — NOT the cascade relayId. THIS is the partial-#3 fix.
+    const announced = registry.resolveAll(roomId, CASCADE_PEER)[0];
+    expect(announced).toBeDefined();
+    expect(announced!.producerPeerId).toBe(ORIGINAL_PUBLISHER);
+    expect(announced!.producerPeerId).not.toBe(CASCADE_PEER);
+
+    // Complete the handshake + mint the forwarded LOCAL producer on router C.
+    const reply = replies.get(CASCADE_PEER)!;
+    await standbyPipe.connect({
+      ip: reply.ip,
+      port: reply.port,
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+    const localProducer = await produceLocalFromPipe(standbyPipe, {
+      producerId: announced!.producerId,
+      kind: announced!.kind,
+      rtpParameters: announced!.rtpParameters!,
+    });
+    expect(
+      cRouter.canConsume({ producerId: localProducer.id, rtpCapabilities: cRouter.rtpCapabilities }),
+    ).toBe(true);
+
+    // ── Stand up REAL signaling + a local client; fan using the producerPeerId
+    //    RESOLVED FROM THE REAL ANNOUNCE (not a literal). ──
+    const interRelay: InterRelayContext = { role: 'standby', registry, announceProducer: () => {} };
+    const { wss, port, fanLocalProducer } = await startSignaling(interRelay);
+    fanServer = wss;
+    const client = await connectPlain(port);
+    await sendAndAwait(client, { type: 'join', roomId, peerId: 'local-listener' }, 'routerRtpCapabilities');
+    const fans: Array<Record<string, unknown>> = [];
+    client.on('message', (data: WebSocket.RawData) => {
+      const m = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (m['type'] === 'newProducer') fans.push(m);
+    });
+
+    expect(typeof fanLocalProducer).toBe('function');
+    (fanLocalProducer as (r: string, p: string, prod: msTypes.Producer) => void)(
+      roomId,
+      announced!.producerPeerId!, // ← sourced from the REAL announce, NOT a literal
+      localProducer,
+    );
+
+    const deadline = Date.now() + 2000;
+    while (fans.length === 0 && Date.now() < deadline) await sleepMs(25);
+
+    const fan = fans.find((m) => m['type'] === 'newProducer');
+    expect(fan).toBeDefined();
+    expect(fan!['producerId']).toBe(localProducer.id); // the FORWARDED producer id
+    expect(fan!['peerId']).toBe(ORIGINAL_PUBLISHER); // ORIGINAL publisher (via the real announce path)
+    expect(fan!['peerId']).not.toBe(CASCADE_PEER); // NOT the cascade peerRelayId
+
+    // cleanup
+    client.close();
+    src.stop();
+    coordinator.clear(roomId, CASCADE_PEER);
+    try {
+      localProducer.close();
+      standbyPipe.close();
+      src.producer.close();
+    } catch { /* best-effort */ }
   }, 30_000);
 });
