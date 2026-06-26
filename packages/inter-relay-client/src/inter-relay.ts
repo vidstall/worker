@@ -1188,6 +1188,8 @@ export class PrimaryPipeCoordinator {
     roomId: string,
     router: msTypes.Router,
     producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+    // NB: arg order here is (peerRelayId, producerPeerId) — the OPPOSITE of
+    // deps.announcer's (producerPeerId, peerRelayId). drain() bridges the two.
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
     producerPeerId?: string,
   ): Promise<void> {
