@@ -203,6 +203,13 @@ describe('REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll 
     expect(out[0]?.rtpParameters).toBe(rtp);
   });
 
+  it('a legacy announce WITHOUT rtpParameters omits the key on the recorded entry (REQ-RMS-026 back-compat)', () => {
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'room1', producerId: 'pLegacy', kind: 'video', peerRelayId: 'relayB' });
+    const out = reg.resolveAll('room1', 'relayB');
+    expect('rtpParameters' in out[0]!).toBe(false); // key omitted, not undefined-valued
+  });
+
   it('a legacy ensure→onAnnounce cutover (no peerRelayId anywhere) re-consumes the REAL producer end-to-end (not just registry.resolve in isolation)', async () => {
     // Drives the DEFAULT-peer thread through the REAL coordinator path the way the M1
     // single-standby flow does (mirrors inter-relay-warmpipe.test.ts RED-BENCH2-4):

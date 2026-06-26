@@ -63,6 +63,26 @@ describe('isPipeProducerAnnounce', () => {
     expect(isPipeProducerAnnounce('pipe-producer')).toBe(false);
     expect(isPipeProducerAnnounce(42)).toBe(false);
   });
+
+  it('REQ-RMS-026: accepts a frame WITH a valid object rtpParameters', () => {
+    expect(isPipeProducerAnnounce({
+      type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video',
+      rtpParameters: { codecs: [{ mimeType: 'video/VP8' }], encodings: [{ ssrc: 1234 }] },
+    })).toBe(true);
+  });
+
+  it('REQ-RMS-026: rejects a frame with a NON-object rtpParameters (malformed inbound)', () => {
+    expect(isPipeProducerAnnounce({
+      type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video',
+      rtpParameters: 'not-an-object',
+    })).toBe(false);
+  });
+
+  it('REQ-RMS-026: accepts a frame WITHOUT rtpParameters (back-compat, no requiredness)', () => {
+    expect(isPipeProducerAnnounce({
+      type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video',
+    })).toBe(true);
+  });
 });
 
 // ── buildPipeProducerAnnounce ──────────────────────────────────────────

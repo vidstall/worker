@@ -436,9 +436,15 @@ if (isMainModule) {
       // the piped consumer's rtpParameters as the 4th. createInterRelayAnnouncer's closure is
       // (roomId, producer, producerPeerId?, peerRelayId?, rtpParameters?), so map the
       // coordinator's peerRelayId into the 4th slot (producerPeerId undefined — a PIPED
-      // consumer carries no publisher peerId) and rtpParameters into the 5th slot so the live
-      // primary→standby frame carries it for the standby's transport.produce(). DEFAULT/legacy
-      // → peerRelayId/rtpParameters undefined → builder omits them → byte-identical legacy frame.
+      // consumer carries no publisher peerId) and rtpParameters into the 5th slot.
+      //   • peerRelayId is DEFAULT-gated in drain (DEFAULT → undefined) → omitted on the
+      //     legacy/default path → that part of the frame stays byte-stable.
+      //   • rtpParameters is supplied UNCONDITIONALLY by drain (a real Consumer always has
+      //     it) → the live single-standby (DEFAULT) frame intentionally NOW carries it
+      //     (REQ-RMS-026, additive — a standby that ignores it still parses via the unchanged
+      //     guard); it is NOT byte-identical to the pre-REQ-RMS-026 frame. Builder-level
+      //     byte-identity holds only when the 5th arg is OMITTED (the in-process
+      //     announceProducer path below, which passes no rtpParameters).
       announcer: (roomId, producer, peerRelayId, rtpParameters) =>
         pushAnnounce(roomId, producer, undefined, peerRelayId, rtpParameters),
       portAllocator: pipePortAllocator,

@@ -161,6 +161,9 @@ export function isPipeProducerAnnounce(msg: unknown): msg is PipeProducerAnnounc
     (m['producerPeerId'] === undefined || typeof m['producerPeerId'] === 'string')
     &&
     (m['peerRelayId'] === undefined || typeof m['peerRelayId'] === 'string')
+    &&
+    (m['rtpParameters'] === undefined
+      || (typeof m['rtpParameters'] === 'object' && m['rtpParameters'] !== null))
   );
 }
 
