@@ -154,6 +154,32 @@ async function makePrimaryRtpSource(): Promise<{
   };
 }
 
+/**
+ * A second/third real Opus producer on the PRIMARY router with a DISTINCT SSRC (so two
+ * publishers can coexist on one router — the RtpListener rejects a duplicate SSRC at
+ * produce() time). Used by 4d: like 4b, it asserts forwarding via canConsume (deterministic)
+ * WITHOUT flowing RTP, so the producer never needs to .send() — only a valid distinct SSRC.
+ */
+async function makePrimaryProducerWithSsrc(ssrc: number): Promise<msTypes.Producer> {
+  const directTransport = await primaryRouter.createDirectTransport();
+  return directTransport.produce({
+    kind: 'audio',
+    rtpParameters: {
+      codecs: [
+        {
+          mimeType: 'audio/opus',
+          payloadType: OPUS_PT,
+          clockRate: 48000,
+          channels: 2,
+          parameters: {},
+          rtcpFeedback: [],
+        },
+      ],
+      encodings: [{ ssrc }],
+    },
+  });
+}
+
 describe('REQ-RMS-025 — standby ACTIVE-forward: produceLocalFromPipe mints a LOCAL producer from the cross-process pipe', () => {
   it('mints a LOCAL producer the standby router can consume + real RTP forwards through it (body byte-identical, header SSRC remapped by design)', async () => {
     const src = await makePrimaryRtpSource();
@@ -657,6 +683,115 @@ describe('REQ-RMS-027/028 — L1.3-b: standby fans newProducer to local clients 
       localProducer.close();
       standbyPipe.close();
       src.producer.close();
+    } catch { /* best-effort */ }
+  }, 30_000);
+
+  /**
+   * Test 4d (REQ-RMS-029 — consume RESPONSE carries per-producer original publisher on
+   * the MESH; L2.3). TWO distinct publishers' producers are forwarded over the mesh and
+   * recorded under DISTINCT per-peer buckets (relay-B, relay-C), each WITH its OWN
+   * producerPeerId, through the REAL announce→record path (REAL PrimaryPipeCoordinator →
+   * REAL createInterRelayAnnouncer wire frame → REAL isPipeProducerAnnounce guard →
+   * registry.record). NO hand-seeded records.
+   *
+   * Then a handleConsume-style resolution — `registry.resolveByProducerId(roomId,
+   * <each producerId>)`, asserted at the registry+coordinator SEAM (the exact source
+   * handleConsume now reads for the response's producerPeerId) — returns each producer's
+   * OWN original publisher (publisher-A for producer-A, publisher-C for producer-C),
+   * where the OLD `resolve(roomId)` (DEFAULT bucket) returns null. This proves the
+   * consume RESPONSE now carries per-producer original-publisher attribution on the mesh
+   * (multi-publisher robust). Forwarding is proven via canConsume===true (like 4b),
+   * deterministic and RTP-flow-free; the producerId is the PIPED id the client sends.
+   */
+  it('4d: resolveByProducerId returns each mesh producer\'s OWN original publisher across distinct per-peer buckets — consume-response multi-publisher attribution (REQ-RMS-029)', async () => {
+    const roomId = 'rms-multipub-room';
+    const PUB_A = { peer: 'publisher-A', cascade: 'relay-B', router: standbyRouter, ssrc: 0x0a0a0a01 };
+    const PUB_C = { peer: 'publisher-C', cascade: 'relay-C', router: cRouter, ssrc: 0x0c0c0c01 };
+
+    // Two REAL producers on the primary (A) = two DISTINCT publishers (distinct SSRCs).
+    const prodA = await makePrimaryProducerWithSsrc(PUB_A.ssrc);
+    const prodC = await makePrimaryProducerWithSsrc(PUB_C.ssrc);
+
+    // ONE real registry fed by ONE real announcer closure (the signaling.ts receipt path).
+    const registry = new InterRelayProducerRegistry();
+    const pushAnnounce = createInterRelayAnnouncer({
+      send: (data) => {
+        const parsed = JSON.parse(data) as unknown;
+        if (isPipeProducerAnnounce(parsed)) registry.record(parsed);
+      },
+    });
+    const replies = new Map<string, PipeConnectParams>();
+    const zeroAllocator: PipePortAllocatorLike = {
+      allocate: () => 0, // OS-assigned port (rerun-safe)
+      release: () => {},
+      size: () => 0,
+    };
+    const coordinator = new PrimaryPipeCoordinator({
+      announcer: pushAnnounce, // the REAL announcer closure index.ts uses (forwards all slots)
+      portAllocator: zeroAllocator,
+      paramSender: (_r: string, params: PipeConnectParams, peer?: string) =>
+        replies.set(peer ?? DEFAULT_PEER_RELAY_ID, params),
+    });
+
+    // Drive BOTH publishers through the REAL coordinator → DISTINCT cascade peers.
+    const pipeA = await createStandbyPipeTransport(PUB_A.router, 0);
+    await coordinator.onStandbyConnectParams(roomId, { ip: '127.0.0.1', port: pipeA.tuple.localPort }, PUB_A.cascade);
+    await coordinator.onProducer(roomId, primaryRouter, prodA, PUB_A.cascade, PUB_A.peer);
+
+    const pipeC = await createStandbyPipeTransport(PUB_C.router, 0);
+    await coordinator.onStandbyConnectParams(roomId, { ip: '127.0.0.1', port: pipeC.tuple.localPort }, PUB_C.cascade);
+    await coordinator.onProducer(roomId, primaryRouter, prodC, PUB_C.cascade, PUB_C.peer);
+
+    // (a) Each landed in its OWN per-peer bucket WITH its own producerPeerId.
+    const annA = registry.resolveAll(roomId, PUB_A.cascade);
+    const annC = registry.resolveAll(roomId, PUB_C.cascade);
+    expect(annA).toHaveLength(1);
+    expect(annC).toHaveLength(1);
+    expect(annA[0]!.producerPeerId).toBe(PUB_A.peer);
+    expect(annC[0]!.producerPeerId).toBe(PUB_C.peer);
+    const producerIdA = annA[0]!.producerId; // the PIPED id = exactly what the client sends in `consume`
+    const producerIdC = annC[0]!.producerId;
+    expect(producerIdA).not.toBe(producerIdC);
+
+    // The OLD consume-response source — resolve(roomId) reads only the DEFAULT bucket —
+    // MISSES both mesh records (they are per-peer-bucketed). This is the dead-path bug.
+    expect(registry.resolve(roomId)).toBeNull();
+
+    // (b) handleConsume-style resolution (the NEW response source): producerId-keyed,
+    //     returns each producer's OWN original publisher. Multi-publisher robust.
+    expect(registry.resolveByProducerId(roomId, producerIdA)?.producerPeerId).toBe(PUB_A.peer);
+    expect(registry.resolveByProducerId(roomId, producerIdC)?.producerPeerId).toBe(PUB_C.peer);
+    // No bleed across publishers, and a miss returns null.
+    expect(registry.resolveByProducerId(roomId, producerIdA)?.producerPeerId).not.toBe(PUB_C.peer);
+    expect(registry.resolveByProducerId(roomId, 'no-such-producer')).toBeNull();
+
+    // Prove BOTH were genuinely FORWARDED over the mesh (mint each LOCAL producer →
+    // canConsume===true on its router), exactly as 4b proves a leg forwarded.
+    for (const cfg of [PUB_A, PUB_C]) {
+      const reply = replies.get(cfg.cascade)!;
+      const pipe = cfg.cascade === PUB_A.cascade ? pipeA : pipeC;
+      await pipe.connect({ ip: reply.ip, port: reply.port } as Parameters<msTypes.PipeTransport['connect']>[0]);
+      const announced = registry.resolveAll(roomId, cfg.cascade)[0]!;
+      const localProducer = await produceLocalFromPipe(pipe, {
+        producerId: announced.producerId,
+        kind: announced.kind,
+        rtpParameters: announced.rtpParameters!,
+      });
+      expect(localProducer.id).toBe(announced.producerId);
+      expect(
+        cfg.router.canConsume({ producerId: localProducer.id, rtpCapabilities: cfg.router.rtpCapabilities }),
+      ).toBe(true);
+      localProducer.close();
+    }
+
+    // cleanup
+    coordinator.clear(roomId, PUB_A.cascade);
+    coordinator.clear(roomId, PUB_C.cascade);
+    try {
+      pipeA.close();
+      pipeC.close();
+      prodA.close();
+      prodC.close();
     } catch { /* best-effort */ }
   }, 30_000);
 });

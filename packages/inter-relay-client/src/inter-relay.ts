@@ -475,6 +475,31 @@ export class InterRelayProducerRegistry {
   }
 
   /**
+   * REQ-RMS-029 — resolve an announced producer by its producerId across ALL of a
+   * room's per-peer buckets. handleConsume holds the producerId (the client sends it),
+   * so this returns the ORIGINAL publisher's producerPeerId for the SPECIFIC producer —
+   * unlike resolve(roomId) which only reads the DEFAULT bucket (missing mesh records) and
+   * returns the first entry (not producerId-keyed). Returns null if not found.
+   *
+   * Room-scoping is HONEST via the SAME meshKey convention: every bucket key is
+   * `meshKey(roomId, peerRelayId)` = `${roomId}::${peerRelayId}`, and `::` is a reserved
+   * separator that never appears inside a roomId/peerRelayId (see meshKey docstring). So
+   * `meshKey(roomId, '')` = `${roomId}::` is an unambiguous prefix for exactly this room's
+   * buckets (DEFAULT + every per-peer leg) and cannot false-match another room. Scoping by
+   * key (not producerId alone) keeps the lookup correct even if a future caller reused an
+   * id across rooms; within a room the producerId lookup is exact (mediasoup ids unique).
+   */
+  resolveByProducerId(roomId: string, producerId: string): AnnouncedProducer | null {
+    const roomPrefix = meshKey(roomId, ''); // `${roomId}::` — this room's per-peer buckets only
+    for (const [key, bucket] of this.byRoom) {
+      if (!key.startsWith(roomPrefix)) continue;
+      const hit = bucket.get(producerId);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /**
    * Drops a (room, peer)'s records (on room close / worker.died rebuild).
    * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID (legacy single-standby).
    */

@@ -247,6 +247,45 @@ describe('REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll 
   });
 });
 
+describe('REQ-RMS-029 — resolveByProducerId: producerId-keyed cross-bucket lookup (consume-response on the mesh)', () => {
+  it('resolveByProducerId finds a per-peer-bucketed producer that resolve(DEFAULT) misses (REQ-RMS-029 mesh)', () => {
+    const reg = new InterRelayProducerRegistry();
+    // mesh announce recorded under a NON-default per-peer bucket, WITH a publisher id:
+    reg.record({ type: 'pipe-producer', roomId: 'room1', producerId: 'piped-X', kind: 'video', producerPeerId: 'alice-original', peerRelayId: 'relayB' });
+    // the DEFAULT-bucket resolve (what handleConsume used to call) MISSES it:
+    expect(reg.resolve('room1')).toBeNull();
+    // producerId-keyed resolve FINDS it with the right publisher:
+    const got = reg.resolveByProducerId('room1', 'piped-X');
+    expect(got?.producerPeerId).toBe('alice-original');
+  });
+
+  it('resolveByProducerId is producerId-specific across 2 publishers in distinct per-peer buckets', () => {
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'room1', producerId: 'piped-A', kind: 'video', producerPeerId: 'alice', peerRelayId: 'relayB' });
+    reg.record({ type: 'pipe-producer', roomId: 'room1', producerId: 'piped-C', kind: 'video', producerPeerId: 'carol', peerRelayId: 'relayC' });
+    expect(reg.resolveByProducerId('room1', 'piped-A')?.producerPeerId).toBe('alice');
+    expect(reg.resolveByProducerId('room1', 'piped-C')?.producerPeerId).toBe('carol');
+    expect(reg.resolveByProducerId('room1', 'nope')).toBeNull();
+  });
+
+  it('resolveByProducerId is room-scoped — a same-producerId entry in ANOTHER room never false-matches', () => {
+    // The room-scope guard (meshKey prefix) must not bleed across rooms even if two
+    // rooms held the same producerId (mediasoup ids are globally unique so this is
+    // synthetic — it pins the room-scoping behaviour regardless).
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'roomA', producerId: 'shared-id', kind: 'video', producerPeerId: 'a-pub', peerRelayId: 'relayB' });
+    reg.record({ type: 'pipe-producer', roomId: 'roomB', producerId: 'shared-id', kind: 'video', producerPeerId: 'b-pub', peerRelayId: 'relayB' });
+    expect(reg.resolveByProducerId('roomA', 'shared-id')?.producerPeerId).toBe('a-pub');
+    expect(reg.resolveByProducerId('roomB', 'shared-id')?.producerPeerId).toBe('b-pub');
+  });
+
+  it('resolveByProducerId also finds a DEFAULT-bucket (legacy single-standby) producer', () => {
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'room1', producerId: 'piped-legacy', kind: 'video', producerPeerId: 'leg-pub' });
+    expect(reg.resolveByProducerId('room1', 'piped-legacy')?.producerPeerId).toBe('leg-pub');
+  });
+});
+
 describe('REQ-RMS-008 — StandbyWarmPipeCoordinator.currentPipeConsumer per-(room,peer) disambiguation', () => {
   it('explicit (roomId, peerRelayId) returns THAT peer-leg consumer; the no-arg single-room path is byte-stable', async () => {
     // M1 byte-stable invariant: one tracked leg → the no-arg convenience accessor

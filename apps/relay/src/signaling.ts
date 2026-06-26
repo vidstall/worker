@@ -1391,8 +1391,14 @@ export function createSignalingServer(
       return;
     }
 
+    // REQ-RMS-029 — resolve the ORIGINAL publisher by the FINAL producerId (the one
+    // passed to createConsumer), not resolve(roomId). resolve(roomId) reads only the
+    // DEFAULT bucket and misses a cross-relay MESH announce (bucketed per peerRelayId),
+    // so the consume RESPONSE used to omit producerPeerId on the mesh. The producerId-
+    // keyed lookup scans every per-peer bucket and returns THIS producer's own publisher,
+    // so multi-publisher attribution via the response holds on the mesh path.
     const announcedPeer =
-      interRelay?.registry.resolve(mapping.roomId)?.producerPeerId;
+      interRelay?.registry.resolveByProducerId(mapping.roomId, producerId)?.producerPeerId;
 
     sendJson(ws, {
       type: 'consumed',
