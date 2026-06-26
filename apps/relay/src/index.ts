@@ -431,14 +431,16 @@ if (isMainModule) {
     // factory; index.ts only injects the announcer + port allocator + the
     // standby->primary param sender (the link's new send() path).
     const primaryPipe = new PrimaryPipeCoordinator({
-      // REQ-RMS-008: the coordinator's announcer dep is (roomId, producer, peerRelayId?)
-      // — its drain threads the cascade peer as the 3rd arg. createInterRelayAnnouncer's
-      // closure is (roomId, producer, producerPeerId?, peerRelayId?), so map the
+      // REQ-RMS-008: the coordinator's announcer dep is (roomId, producer, peerRelayId?,
+      // rtpParameters?) — its drain threads the cascade peer as the 3rd arg and (REQ-RMS-026)
+      // the piped consumer's rtpParameters as the 4th. createInterRelayAnnouncer's closure is
+      // (roomId, producer, producerPeerId?, peerRelayId?, rtpParameters?), so map the
       // coordinator's peerRelayId into the 4th slot (producerPeerId undefined — a PIPED
-      // consumer carries no publisher peerId). DEFAULT/legacy → peerRelayId undefined →
-      // builder omits it → byte-identical legacy frame.
-      announcer: (roomId, producer, peerRelayId) =>
-        pushAnnounce(roomId, producer, undefined, peerRelayId),
+      // consumer carries no publisher peerId) and rtpParameters into the 5th slot so the live
+      // primary→standby frame carries it for the standby's transport.produce(). DEFAULT/legacy
+      // → peerRelayId/rtpParameters undefined → builder omits them → byte-identical legacy frame.
+      announcer: (roomId, producer, peerRelayId, rtpParameters) =>
+        pushAnnounce(roomId, producer, undefined, peerRelayId, rtpParameters),
       portAllocator: pipePortAllocator,
       paramSender: (roomId, params) =>
         interRelaySender.send(JSON.stringify(buildPipeConnectFrame(roomId, params))),  // CONSISTENCY-FIX HIGH#5: C contract is (roomId, params); serialize the DOWN reply frame onto the live link (buildPipeConnectFrame imported in this file)

@@ -285,6 +285,12 @@ export interface InterRelaySender {
  * `producerPeerId` (3rd arg, peerRelayId omitted); the coordinator drain (via the
  * index.ts adapter) passes `peerRelayId` (4th arg, producerPeerId omitted — a
  * PIPED consumer carries no publisher peerId).
+ *
+ * REQ-RMS-026 — the closure also forwards a trailing OPTIONAL `rtpParameters`
+ * (5th arg) into the frame so the live primary→standby wire carries the piped
+ * consumer's RtpParameters (the standby needs them for transport.produce()). Like
+ * the other trailing args it defaults to undefined → the builder omits the field
+ * → a legacy frame is byte-identical.
  */
 export function createInterRelayAnnouncer(
   sender: InterRelaySender,
@@ -293,9 +299,10 @@ export function createInterRelayAnnouncer(
   producer: Pick<msTypes.Producer, 'id' | 'kind'>,
   producerPeerId?: string,
   peerRelayId?: string,
+  rtpParameters?: msTypes.RtpParameters,
 ) => void {
-  return (roomId, producer, producerPeerId, peerRelayId) => {
-    const frame = buildPipeProducerAnnounce(roomId, producer, producerPeerId, peerRelayId);
+  return (roomId, producer, producerPeerId, peerRelayId, rtpParameters) => {
+    const frame = buildPipeProducerAnnounce(roomId, producer, producerPeerId, peerRelayId, rtpParameters);
     try {
       sender.send(JSON.stringify(frame));
     } catch {

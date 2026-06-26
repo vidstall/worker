@@ -19,6 +19,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import type { types as msTypes } from 'mediasoup';
 import {
   isPipeProducerAnnounce,
   buildPipeProducerAnnounce,
@@ -168,6 +169,20 @@ describe('createInterRelayAnnouncer', () => {
     // Must NOT throw — the primary's produce path stays healthy even if the
     // standby link is temporarily down (announce is best-effort).
     expect(() => announce('room-8', { id: 'p8', kind: 'video' })).not.toThrow();
+  });
+
+  it('REQ-RMS-026: forwards the 5th rtpParameters arg into the emitted frame', () => {
+    const send = vi.fn();
+    const sender: InterRelaySender = { send };
+    const announce = createInterRelayAnnouncer(sender);
+    const rtp = { codecs: [{ mimeType: 'video/VP8' }], encodings: [{ ssrc: 1234 }] } as unknown as msTypes.RtpParameters;
+
+    announce('room-9', { id: 'piped-9', kind: 'video' }, undefined, 'relay-B', rtp);
+
+    expect(send).toHaveBeenCalledOnce();
+    const payload = JSON.parse(send.mock.calls[0]![0] as string) as Record<string, unknown>;
+    expect(payload['rtpParameters']).toEqual(rtp); // the standby needs it for transport.produce()
+    expect(payload['peerRelayId']).toBe('relay-B'); // 4th-arg slot still threads the cascade peer
   });
 });
 
