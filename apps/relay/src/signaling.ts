@@ -1292,11 +1292,16 @@ export function createSignalingServer(
     // announce so the bench path is unaffected.
     if (interRelay && interRelay.role === 'primary') {
       if (interRelay.onPrimaryProducer) {
-        // REQ-RMS-028 (L1.3-b, Bridge A) — N-1 mesh fanout. Drive the
-        // PrimaryPipeCoordinator ONCE PER attached cascade peer (the live
-        // inter-relay socket map's keys), so ONE produce forwards to ALL standby
-        // relays serving this room, each on its own per-peer pipe leg. With NO
-        // cascade peer attached the keys are empty → ONE legacy 3-arg call (the
+        // REQ-RMS-028 (L1.3-b, Bridge A) — N-1 mesh fanout. Fan onPrimaryProducer
+        // to every attached inter-relay peer (interRelaySockets.keys()), each on
+        // its own per-peer pipe leg. interRelaySockets is a PER-DAEMON map (keyed
+        // by peerRelayId, populated when ANY tagged inter-relay peer connects), NOT
+        // per-room. Under the single-room demo scope (RMS-live LOCAL) every attached
+        // peer IS a cascade standby of this room, so this equals "this room's
+        // standbys". MULTI-ROOM CARRY-FORWARD: a per-(room,peer) filter is needed
+        // before multi-room — a peer that is a standby of room Y but not room X
+        // would otherwise get an undrained pendingProducers entry per produce. With
+        // NO cascade peer attached the keys are empty → ONE legacy 3-arg call (the
         // default single-standby leg, byte-identical to the pre-mesh path — the
         // primary-produce-drive test deletes INTER_RELAY_TOKEN, leaving an empty
         // map, and expects exactly that single 3-arg call).
@@ -1676,7 +1681,9 @@ export function createSignalingServer(
       logger.warn({ roomId }, 'fanLocalProducer: room not found');
       return;
     }
-    void notifyNewProducer(room, peerId, producer, logger);
+    void notifyNewProducer(room, peerId, producer, logger).catch((err) =>
+      logger.warn({ err, roomId }, 'fanLocalProducer: fan failed'),
+    );
   }
 
   return {
