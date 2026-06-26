@@ -84,10 +84,12 @@ export function selectPlacementRelay(relays: RelayCapacity[], roomLoad: number):
   return best;
 }
 
-// REQ-RMS-021 — K_r>1 active placement. Pick kR DISTINCT healthy relays, each able to absorb
-// its EQUAL share (ceil(roomLoad/kR)) under its capacity ceiling, ordered by the same
-// (l_i + share)/C_worker ratio + RTT tie-break as selectPlacementRelay. Returns [] (defer)
-// if fewer than kR relays can each absorb a share. assigned_relays[0] = the lowest-ratio relay.
+/**
+ * REQ-RMS-021 — K_r>1 active placement. Pick kR DISTINCT healthy relays, each able to absorb
+ * its EQUAL share (ceil(roomLoad/kR)) under its capacity ceiling, ordered by the same
+ * (l_i + share)/C_worker ratio + RTT tie-break as selectPlacementRelay. Returns [] (defer)
+ * if fewer than kR relays can each absorb a share. result[0] = the lowest-ratio (primary) relay.
+ */
 export function selectActiveRelays(
   relays: RelayCapacity[],
   roomLoad: number,
@@ -96,7 +98,7 @@ export function selectActiveRelays(
   if (kR <= 0) return [];
   const share = Math.ceil(roomLoad / kR);
   const eligible = relays
-    .filter((r) => r.canaryHealthy !== false && r.attestedLoadPaths + share <= r.cWorker)
+    .filter((r) => r.cWorker > 0 && r.canaryHealthy !== false && r.attestedLoadPaths + share <= r.cWorker) // cWorker>0: fail-closed, avoids NaN ratio
     .map((r) => ({ r, ratio: (r.attestedLoadPaths + share) / r.cWorker }))
     .sort((a, b) => (a.ratio !== b.ratio ? a.ratio - b.ratio : Number(a.r.rtt) - Number(b.r.rtt)));
   if (eligible.length < kR) return [];
