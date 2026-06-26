@@ -292,6 +292,35 @@ export async function ensureWarmPipe(
   return consumer;
 }
 
+// ── produceLocalFromPipe (REQ-RMS-025 — standby ACTIVE forward) ─────────────
+
+/**
+ * REQ-RMS-025 — ACTIVE forward. After the warm pipe is connected, mint a LOCAL
+ * producer on the standby's room router FROM the piped producer so the standby's
+ * own clients can consume it. The `rtpParameters` come from the primary's announce
+ * (REQ-RMS-026) — they carry the pipe's REMAPPED SSRC, so the standby produce
+ * ingests the forwarded RTP correctly (the source's rtpParameters would NOT, the
+ * SSRC differs across the pipe).
+ *
+ * Mirrors the manual `standbyPipe.produce({...})` step in the warm-pipe SPIKE
+ * (warmpipe-rtp.integration.test.ts) — the production helper for it. RETURNS the
+ * local Producer for the caller (StandbyWarmPipeCoordinator) to register + fan
+ * (L1.3); it imports NOTHING from apps/relay (no notifyNewProducer / RoomState
+ * coupling). The paused keepalive consumer (ensureWarmPipe, REQ-RO-005) is left
+ * untouched — a producer + a consumer on the same pipe transport coexist (the
+ * warm-pipe SPIKE proves it).
+ */
+export async function produceLocalFromPipe(
+  transport: msTypes.PipeTransport,
+  announced: { producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters },
+): Promise<msTypes.Producer> {
+  return transport.produce({
+    id: announced.producerId,
+    kind: announced.kind,
+    rtpParameters: announced.rtpParameters,
+  } as Parameters<msTypes.PipeTransport['produce']>[0]);
+}
+
 // ── pipeRoomToSecondWorker (REQ-RMS-007 — tier-2 intra-box cross-worker spill) ──
 
 /**

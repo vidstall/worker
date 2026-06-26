@@ -35,7 +35,12 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { types as msTypes } from 'mediasoup';
 import type { Logger } from '@dvconf/shared';
-import { ensureWarmPipe, pipeSrtpEnabled, type RoomTopology } from './relay-role-manager.js';
+import {
+  ensureWarmPipe,
+  produceLocalFromPipe,
+  pipeSrtpEnabled,
+  type RoomTopology,
+} from './relay-role-manager.js';
 
 // ── Cross-daemon inter-relay link auth (G3.2b) ──────────────────────────
 
@@ -601,11 +606,102 @@ function placeholderProducerId(roomId: string): string {
  */
 export class StandbyWarmPipeCoordinator {
   private readonly states = new Map<string, WarmPipeState>();
+  /**
+   * REQ-RMS-025 — producerIds already minted as LOCAL producers, keyed by
+   * meshKey(roomId, peerRelayId). Prevents a re-run (ensure → onAnnounce, or a
+   * repeated announce) from double-producing the same id (mediasoup throws on a
+   * duplicate producer id). Cleared with the room's state in clear().
+   */
+  private readonly producedIds = new Map<string, Set<string>>();
 
+  /**
+   * @param registry        - the standby's announce registry.
+   * @param logger          - optional structured logger.
+   * @param onLocalProducer - REQ-RMS-025 — OPTIONAL callback fired AFTER the
+   *   standby mints a LOCAL producer from the cross-process pipe (active forward).
+   *   The wiring layer (L1.3, index.ts) backs it to register the producer with the
+   *   room + fan it to local clients. Kept OPTIONAL so existing 2-arg callers
+   *   (index.ts) compile unchanged; surfaces the roomId, the minted Producer, the
+   *   original producerPeerId (publisher, when the announce carried it), and the
+   *   peerRelayId (which cascade leg minted it).
+   */
   constructor(
     private readonly registry: InterRelayProducerRegistry,
     private readonly logger?: Logger,
+    private readonly onLocalProducer?: (
+      roomId: string,
+      producer: msTypes.Producer,
+      producerPeerId: string | undefined,
+      peerRelayId: string,
+    ) => void,
   ) {}
+
+  /**
+   * REQ-RMS-025 — ACTIVE forward. Once the warm pipe is connected (the transport
+   * is retained on topology.pipeTransport by ensureWarmPipe), mint a LOCAL producer
+   * on the standby's router for EVERY announced producer that carries rtpParameters
+   * (REQ-RMS-026), so the standby's own clients can consume the room. Then fire
+   * onLocalProducer so the wiring layer registers + fans it.
+   *
+   * Defensive + additive (the paused keepalive consumer is untouched):
+   *   - no bound pipe transport yet (primary, or not-ready)  → SKIP (return);
+   *   - an announced entry lacks rtpParameters (legacy primary, pre-REQ-RMS-026)
+   *     → SKIP that entry (we can't produce without them) — never throw;
+   *   - an id already minted on a prior run                   → SKIP (idempotent);
+   *   - mediasoup throws on a duplicate id / any produce error → mark + SKIP, log
+   *     at debug (never crash the coordinator).
+   */
+  private async forwardLocalProducers(
+    roomId: string,
+    topology: RoomTopology,
+    peerRelayId: string,
+  ): Promise<void> {
+    const transport = topology.pipeTransport;
+    if (!transport) {
+      // No bound pipe transport (primary returns null from ensureWarmPipe, or the
+      // standby is still not-ready) — nothing to forward onto.
+      return;
+    }
+    const key = meshKey(roomId, peerRelayId);
+    let produced = this.producedIds.get(key);
+    if (!produced) {
+      produced = new Set<string>();
+      this.producedIds.set(key, produced);
+    }
+    for (const announced of this.registry.resolveAll(roomId, peerRelayId)) {
+      if (announced.rtpParameters === undefined) {
+        // Legacy primary — no rtpParameters to produce from. Skip (keepalive intact).
+        continue;
+      }
+      if (produced.has(announced.producerId)) {
+        // Already minted on a prior ensure/onAnnounce — no double-produce.
+        continue;
+      }
+      let producer: msTypes.Producer;
+      try {
+        producer = await produceLocalFromPipe(transport, {
+          producerId: announced.producerId,
+          kind: announced.kind,
+          rtpParameters: announced.rtpParameters,
+        });
+      } catch (err) {
+        // Duplicate producer id (mediasoup throws) or any produce error: mark it so
+        // we don't retry every announce, and skip — the keepalive consumer is intact.
+        produced.add(announced.producerId);
+        this.logger?.debug(
+          { roomId, producerId: announced.producerId, error: (err as Error)?.message },
+          'REQ-RMS-025: produceLocalFromPipe skipped (duplicate id or produce error)',
+        );
+        continue;
+      }
+      produced.add(announced.producerId);
+      this.logger?.info(
+        { roomId, producerId: producer.id, kind: producer.kind, peerRelayId },
+        'REQ-RMS-025: standby minted a LOCAL producer from the cross-process pipe (active forward)',
+      );
+      this.onLocalProducer?.(roomId, producer, announced.producerPeerId, peerRelayId);
+    }
+  }
 
   /**
    * First-peer-join entry. Resolves the real producerId from the announce
@@ -647,7 +743,12 @@ export class StandbyWarmPipeCoordinator {
       );
     }
 
-    return ensureWarmPipe(topology, router, pipePort, realId);
+    const consumer = await ensureWarmPipe(topology, router, pipePort, realId);
+    // REQ-RMS-025 — ACTIVE forward: if the announce is already resolvable with
+    // rtpParameters, mint the standby's LOCAL producer(s) now. No-op while
+    // pending (resolveAll empty / no rtpParameters yet) — onAnnounce re-drives it.
+    await this.forwardLocalProducers(topology.roomId, topology, peerRelayId);
+    return consumer;
   }
 
   /**
@@ -719,6 +820,11 @@ export class StandbyWarmPipeCoordinator {
       pending: false,
     });
 
+    // REQ-RMS-025 — ACTIVE forward: the announce that just resolved is exactly when
+    // rtpParameters become available, so mint the standby's LOCAL producer(s) now
+    // (the warm pipe is connected + retained on useTopology.pipeTransport).
+    await this.forwardLocalProducers(roomId, useTopology, peerRelayId);
+
     return consumer !== null;
   }
 
@@ -727,7 +833,12 @@ export class StandbyWarmPipeCoordinator {
    * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID (legacy single-standby).
    */
   clear(roomId: string, peerRelayId: string = DEFAULT_PEER_RELAY_ID): void {
-    this.states.delete(meshKey(roomId, peerRelayId));
+    const key = meshKey(roomId, peerRelayId);
+    this.states.delete(key);
+    // REQ-RMS-025 — drop the minted-producer dedup set with the room's state so a
+    // later room with the same key re-mints cleanly (the producers themselves are
+    // owned + closed by the wiring layer / their transport teardown).
+    this.producedIds.delete(key);
   }
 
   /**
