@@ -624,6 +624,13 @@ export class StandbyWarmPipeCoordinator {
    *   (index.ts) compile unchanged; surfaces the roomId, the minted Producer, the
    *   original producerPeerId (publisher, when the announce carried it), and the
    *   peerRelayId (which cascade leg minted it).
+   * @param activeForward   - L1.4 (RMS SHIP-gate decision): when false (default),
+   *   `forwardLocalProducers` is a no-op — the standby keeps ONLY its paused
+   *   keepalive consumer (REQ-RO-005, ~80% BW saving), which is the correct
+   *   behaviour for the relay-overlap M1 / 2-relay failover path. The wiring layer
+   *   (index.ts) opts in by passing `true` via `RMS_ACTIVE_FORWARD='1'` in mesh
+   *   mode. Defaulting to false is the fail-safe: an un-flagged coordinator will
+   *   never accidentally active-forward in a non-mesh room.
    */
   constructor(
     private readonly registry: InterRelayProducerRegistry,
@@ -634,6 +641,7 @@ export class StandbyWarmPipeCoordinator {
       producerPeerId: string | undefined,
       peerRelayId: string,
     ) => void,
+    private readonly activeForward: boolean = false,
   ) {}
 
   /**
@@ -662,6 +670,13 @@ export class StandbyWarmPipeCoordinator {
     topology: RoomTopology,
     peerRelayId: string,
   ): Promise<void> {
+    // Mesh-mode gate (RMS M4 L1 SHIP-gate decision): when active-forward is OFF
+    // (default), the standby keeps ONLY its paused keepalive consumer
+    // (REQ-RO-005, ~80% BW saving) — do NOT mint a local producer.
+    // index.ts opts in via RMS_ACTIVE_FORWARD in mesh mode.
+    if (!this.activeForward) {
+      return;
+    }
     // Fix 3 — self-document the standby-only intent ahead of the transport check
     // (don't rely solely on the primary's pipeTransport being null).
     if (topology.role !== 'standby') {

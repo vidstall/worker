@@ -353,7 +353,7 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     });
     const { router, transports } = makeMockRouter();
     const onLocalProducer = vi.fn();
-    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true);
     const topology = makeStandbyTopology('room-af');
 
     await coord.ensure(topology, router as any, 40000, PEER);
@@ -380,7 +380,7 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     const registry = new InterRelayProducerRegistry();
     const { router, transports } = makeMockRouter();
     const onLocalProducer = vi.fn();
-    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true);
     const topology = makeStandbyTopology('room-dd');
 
     // Not-ready first join: nothing announced yet → placeholder, NO produce.
@@ -419,7 +419,7 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     const { router, transports } = makeMockRouter(dup);
     const logger = makeMockLogger();
     const onLocalProducer = vi.fn();
-    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer);
+    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer, true);
     const topology = makeStandbyTopology('room-dup');
 
     // Must NOT reject (the rejection here would fail the test).
@@ -449,7 +449,7 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     const { router, transports } = makeMockRouter(flaky);
     const logger = makeMockLogger();
     const onLocalProducer = vi.fn();
-    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer);
+    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer, true);
     const topology = makeStandbyTopology('room-err');
 
     // Attempt 1 throws (non-dup) → caught, left UNMARKED, warn-logged.
@@ -475,7 +475,7 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     });
     const { router, transports } = makeMockRouter();
     const onLocalProducer = vi.fn();
-    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true);
     const topology = makeStandbyTopology('room-clr');
 
     await coord.ensure(topology, router as any, 40000, PEER);
@@ -499,7 +499,7 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     });
     const { router, transports } = makeMockRouter();
     const onLocalProducer = vi.fn();
-    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true);
     const topology = makeStandbyTopology('room-lg');
 
     // Drives ensure end-to-end: the warm pipe still opens (keepalive consumer), but
@@ -525,7 +525,7 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     const onLocalProducer = vi.fn((_roomId: string, producer: { id: string }) => {
       if (producer.id === 'p1') throw new Error('L1.3 callback blew up on p1');
     });
-    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer);
+    const coord = new StandbyWarmPipeCoordinator(registry, logger as any, onLocalProducer, true);
     const topology = makeStandbyTopology('room-cb');
 
     // Must NOT reject even though the p1 callback throws.
@@ -535,5 +535,58 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     expect(transports[0]!.produce).toHaveBeenCalledTimes(2);
     expect(onLocalProducer).toHaveBeenCalledTimes(2);
     expect(logger.warn).toHaveBeenCalled(); // the bad callback was warn-logged
+  });
+});
+
+// ── L1.4: RMS_ACTIVE_FORWARD gate — default-off preserves REQ-RO-005 ───────
+//
+// Decision recorded at the L1 SHIP gate: active-forward fires for ANY warm-pipe
+// standby, including relay-overlap M1 2-relay failover rooms where the flag is
+// OFF.  Gating it off must leave the paused keepalive consumer (REQ-RO-005)
+// UNTOUCHED — that is, ensureWarmPipe still runs; only forwardLocalProducers is
+// guarded.
+
+describe('StandbyWarmPipeCoordinator — activeForward gate (L1.4, RMS_ACTIVE_FORWARD)', () => {
+  const PEER = 'relay-gate-test';
+
+  it('gate OFF (default false): standby with rtpParameters + bound transport — onLocalProducer NOT fired, NO produce minted; keepalive consumer (REQ-RO-005) is preserved', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-gate', producerId: 'pGate', kind: 'video',
+      producerPeerId: 'pub-gate', peerRelayId: PEER, rtpParameters: rtpParams(99),
+    });
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    // 4th arg omitted → default false (fail-safe, M1 / relay-overlap paused-keepalive path)
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer);
+    const topology = makeStandbyTopology('room-gate');
+
+    await coord.ensure(topology, router as any, 40000, PEER);
+
+    // Gate OFF → active-forward is skipped: no produce, no callback.
+    expect(transports[0]!.produce).not.toHaveBeenCalled();
+    expect(onLocalProducer).not.toHaveBeenCalled();
+    // ensureWarmPipe still ran → the paused keepalive consumer (REQ-RO-005) exists.
+    expect(transports[0]!.consume).toHaveBeenCalled();
+  });
+
+  it('gate ON (true): same setup — produce IS minted and onLocalProducer IS fired', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-gate-on', producerId: 'pGateOn', kind: 'audio',
+      producerPeerId: 'pub-gate-on', peerRelayId: PEER, rtpParameters: rtpParams(100),
+    });
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true);
+    const topology = makeStandbyTopology('room-gate-on');
+
+    await coord.ensure(topology, router as any, 40000, PEER);
+
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer).toHaveBeenCalledWith(
+      'room-gate-on', expect.objectContaining({ id: 'pGateOn', kind: 'audio' }), 'pub-gate-on', PEER,
+    );
   });
 });

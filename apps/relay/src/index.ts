@@ -81,6 +81,10 @@ const WS_PORT = parseInt(process.env['WS_PORT'] ?? '4000', 10);
 /** G3.2b: Bearer token the standby presents on the inter-relay link (and the
  *  primary's signaling server validates). Undefined → single-host / unauthed. */
 const INTER_RELAY_TOKEN = process.env['INTER_RELAY_TOKEN'];
+// RMS M4 L1: mesh-mode active-forward gate. Default OFF preserves the REQ-RO-005
+// paused-keepalive (M1 / relay-overlap 2-relay failover) bandwidth saving; set to '1'
+// in mesh mode (the run-rms-live-local demo sets it alongside cp-daemon RMS_KR_MIN>1).
+const RMS_ACTIVE_FORWARD = process.env['RMS_ACTIVE_FORWARD'] === '1';
 
 /**
  * P17 M2a-P11 — assemble + start the relay's F61 HealthMonitor (DOH-014/016/017/018).
@@ -413,6 +417,10 @@ if (isMainModule) {
       // when the announce carried it, else the cascade peerRelayId.
       (roomId, producer, producerPeerId, peerRelayId) =>
         signalingRef.fanLocalProducer?.(roomId, producerPeerId ?? peerRelayId, producer),
+      // L1.4: opt in to active-forward only in mesh mode (RMS_ACTIVE_FORWARD='1').
+      // Default false preserves the REQ-RO-005 paused-keepalive BW saving for M1 /
+      // relay-overlap 2-relay failover rooms where the flag is not set.
+      RMS_ACTIVE_FORWARD,
     );
 
     // ── G3.2b: live cross-daemon inter-relay LINK glue ───────────────────────
