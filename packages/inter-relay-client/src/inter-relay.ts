@@ -475,24 +475,44 @@ export class InterRelayProducerRegistry {
   }
 
   /**
-   * REQ-RMS-029 — resolve an announced producer by its producerId across ALL of a
-   * room's per-peer buckets. handleConsume holds the producerId (the client sends it),
-   * so this returns the ORIGINAL publisher's producerPeerId for the SPECIFIC producer —
-   * unlike resolve(roomId) which only reads the DEFAULT bucket (missing mesh records) and
+   * REQ-RMS-029 — resolve an announced producer by its producerId, filtered to a
+   * specific room. handleConsume holds the producerId (the client sends it), so this
+   * returns the ORIGINAL publisher's producerPeerId for the SPECIFIC producer — unlike
+   * resolve(roomId) which only reads the DEFAULT bucket (missing mesh records) and
    * returns the first entry (not producerId-keyed). Returns null if not found.
    *
-   * Room-scoping is HONEST via the SAME meshKey convention: every bucket key is
-   * `meshKey(roomId, peerRelayId)` = `${roomId}::${peerRelayId}`, and `::` is a reserved
-   * separator that never appears inside a roomId/peerRelayId (see meshKey docstring). So
-   * `meshKey(roomId, '')` = `${roomId}::` is an unambiguous prefix for exactly this room's
-   * buckets (DEFAULT + every per-peer leg) and cannot false-match another room. Scoping by
-   * key (not producerId alone) keeps the lookup correct even if a future caller reused an
-   * id across rooms; within a room the producerId lookup is exact (mediasoup ids unique).
+   * Cost: O(total buckets) — it iterates `this.byRoom` (daemon-GLOBAL across ALL rooms)
+   * and filters to the target room, then does an exact producerId lookup in each matching
+   * bucket. A producerId→record index (O(1)) is deliberately DEFERRED to keep DRY: it
+   * would be a parallel index over the same data that record()/clear() must also maintain.
+   * (If a multi-room carry-forward ever makes this hot, add the index then.)
+   *
+   * Room-scoping is EXACT via the meshKey separator convention: every bucket key is
+   * `meshKey(roomId, peerRelayId)` = `${roomId}::${peerRelayId}`, and `::` never appears
+   * inside a roomId/peerRelayId (see meshKey docstring). The separator is therefore the
+   * LAST `::` in the key — because everything AFTER it (the peerRelayId) is `::`-free — so
+   * we split at `lastIndexOf('::')` and compare the room segment for EQUALITY.
+   *
+   * NOTE — we use lastIndexOf, NOT a `${roomId}::` prefix NOR indexOf('::'): both
+   * false-handle a roomId that legitimately ends in a single `:` (still `::`-free, so it
+   * satisfies the meshKey invariant). E.g. roomId `"room1:"` → key `"room1:::relayB"`:
+   *   - `"room1:::relayB".startsWith("room1::")` is TRUE  → a query for room `"room1"` would
+   *     wrongly match `"room1:"`s producer;
+   *   - the FIRST `::` sits at the roomId's own trailing colon, so `indexOf('::')` splits
+   *     the segment as `"room1"` → SAME false-match, and it also can't find `"room1:"`s own
+   *     record.
+   * `lastIndexOf('::')` splits at the true separator → segment `"room1:"` ≠ `"room1"`, so
+   * the rooms stay isolated and each resolves its own record. (Residual symmetric edge: a
+   * peerRelayId that BEGINS with `:` reintroduces boundary ambiguity — peerRelayIds are
+   * operator-assigned relay ids and never do; this is documented, not handled, to avoid
+   * storing a redundant roomId on every record.) Scoping by key (not producerId alone)
+   * keeps the lookup correct even if a caller reused an id across rooms; within a room the
+   * producerId lookup is exact.
    */
   resolveByProducerId(roomId: string, producerId: string): AnnouncedProducer | null {
-    const roomPrefix = meshKey(roomId, ''); // `${roomId}::` — this room's per-peer buckets only
     for (const [key, bucket] of this.byRoom) {
-      if (!key.startsWith(roomPrefix)) continue;
+      const sep = key.lastIndexOf('::'); // the separator: peerRelayId after it is `::`-free
+      if (sep === -1 || key.slice(0, sep) !== roomId) continue; // exact room segment only
       const hit = bucket.get(producerId);
       if (hit) return hit;
     }

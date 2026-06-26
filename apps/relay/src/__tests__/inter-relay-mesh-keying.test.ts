@@ -269,14 +269,43 @@ describe('REQ-RMS-029 — resolveByProducerId: producerId-keyed cross-bucket loo
   });
 
   it('resolveByProducerId is room-scoped — a same-producerId entry in ANOTHER room never false-matches', () => {
-    // The room-scope guard (meshKey prefix) must not bleed across rooms even if two
-    // rooms held the same producerId (mediasoup ids are globally unique so this is
+    // The room-scope guard (exact first-segment compare) must not bleed across rooms even
+    // if two rooms held the same producerId (mediasoup ids are globally unique so this is
     // synthetic — it pins the room-scoping behaviour regardless).
     const reg = new InterRelayProducerRegistry();
     reg.record({ type: 'pipe-producer', roomId: 'roomA', producerId: 'shared-id', kind: 'video', producerPeerId: 'a-pub', peerRelayId: 'relayB' });
     reg.record({ type: 'pipe-producer', roomId: 'roomB', producerId: 'shared-id', kind: 'video', producerPeerId: 'b-pub', peerRelayId: 'relayB' });
     expect(reg.resolveByProducerId('roomA', 'shared-id')?.producerPeerId).toBe('a-pub');
     expect(reg.resolveByProducerId('roomB', 'shared-id')?.producerPeerId).toBe('b-pub');
+  });
+
+  it('resolveByProducerId keeps PREFIX-ADJACENT rooms isolated — "room" never bleeds into "room1"', () => {
+    // Adjacency pin: 'room' is a string-prefix of 'room1'. (This holds under the old
+    // `${roomId}::` prefix AND the lastIndexOf('::') segment compare, since the `::`
+    // boundary already disambiguates 'room::…' from 'room1::…' — a baseline isolation
+    // guard, not the sharp edge; the trailing-colon case below is the one that genuinely
+    // fails under the old startsWith.)
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'room', producerId: 'adj-id', kind: 'video', producerPeerId: 'short-pub', peerRelayId: 'relayB' });
+    reg.record({ type: 'pipe-producer', roomId: 'room1', producerId: 'adj-id', kind: 'video', producerPeerId: 'long-pub', peerRelayId: 'relayB' });
+    expect(reg.resolveByProducerId('room', 'adj-id')?.producerPeerId).toBe('short-pub');
+    expect(reg.resolveByProducerId('room1', 'adj-id')?.producerPeerId).toBe('long-pub');
+  });
+
+  it('resolveByProducerId rejects the trailing-colon false-match ("room1:" vs "room1") — TEETH for the lastIndexOf separator fix', () => {
+    // The PRECISE edge (review FIX #1): roomId 'room1:' contains no '::' (valid per the
+    // meshKey invariant) → bucket key 'room1:::relayB'. This case FAILS under BOTH naive
+    // splits and PASSES only with lastIndexOf('::'):
+    //   - startsWith: 'room1:::relayB'.startsWith('room1::') is TRUE → query 'room1' wrongly
+    //     matches 'room1:'s producer.
+    //   - indexOf('::')=5 → segment 'room1' === query 'room1' → SAME false-match (the FIRST
+    //     '::' sits on the roomId's trailing colon), and it can't find 'room1:'s own record.
+    //   - lastIndexOf('::')=6 (the true separator; peerRelayId 'relayB' is '::'-free) →
+    //     segment 'room1:' !== 'room1' → no false-match, and 'room1:' resolves its own record.
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'room1:', producerId: 'colon-id', kind: 'video', producerPeerId: 'colon-pub', peerRelayId: 'relayB' });
+    expect(reg.resolveByProducerId('room1', 'colon-id')).toBeNull();              // no false-match
+    expect(reg.resolveByProducerId('room1:', 'colon-id')?.producerPeerId).toBe('colon-pub'); // own room resolves
   });
 
   it('resolveByProducerId also finds a DEFAULT-bucket (legacy single-standby) producer', () => {
