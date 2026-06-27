@@ -131,7 +131,10 @@ export async function ensureRegistered(
   logger.info('MINER_CAP_ID not set — attempting full auto-registration');
 
   const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
-  const stakeAmount = votingMode ? MIN_VOTING_STAKE : SIGNALING_STAKE;
+  // voting mode also stakes the full role threshold: apply_voted_role asserts
+  // stake >= minimum_for_role (713). MIN_VOTING_STAKE (0.01) < signaling threshold.
+  const stakeAmount = SIGNALING_STAKE;
+  void MIN_VOTING_STAKE;
 
   if (votingMode) {
     logger.info('Voting mode enabled — registering with minimum stake, awaiting CP role assignment');

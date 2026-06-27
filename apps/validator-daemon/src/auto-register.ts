@@ -54,7 +54,10 @@ export async function ensureRegistered(
   // remains the working production path. G-014 stays open as a real
   // code/doc tension to resolve on the Move side, not here.
   const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
-  const stakeAmount = votingMode ? MIN_VOTING_STAKE : MIN_STAKE_AMOUNT;
+  // voting mode also stakes the full role threshold: apply_voted_role asserts
+  // stake >= minimum_for_role (713). MIN_VOTING_STAKE (0.01) < validator threshold.
+  const stakeAmount = MIN_STAKE_AMOUNT;
+  void MIN_VOTING_STAKE;
   if (votingMode) {
     logger.info('REGISTRATION_MODE=voting — will register as role=0 and wait for CP vote');
   }
