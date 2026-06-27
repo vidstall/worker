@@ -507,6 +507,42 @@ export function createSignalingServer(
   );
 
   const rooms = new Map<string, RoomState>();
+
+  // G-DEMO-9 (relay byte accounting): the per-room /metrics endpoint reported bytesForwarded=0
+  // because `trackBytes` was only ever called with 0 (peer-join registration, ~:958). Periodically
+  // sample each consumer's outbound-rtp `byteCount` (relay -> receiver = the bytes mediasoup put on
+  // the wire = the ground truth used by REQ-MCS-006 bench) and record the per-poll DELTA, so the
+  // validator's work-based session proof reads REAL forwarded bytes (was the deferred Phase-2
+  // bench wiring named in metrics.ts). Additive: closes the loop, no existing caller changes.
+  const byteSampleMs = parseInt(process.env['RELAY_BYTE_SAMPLE_MS'] ?? '3000', 10);
+  const consumerLastByteCount = new Map<string, number>();
+  const byteSampler = setInterval(() => {
+    void (async () => {
+      for (const [roomId, room] of rooms) {
+        for (const [peerId, peer] of room.peers) {
+          for (const consumer of peer.consumers) {
+            try {
+              const stats = await consumer.getStats();
+              const outbound = stats.find((s) => s.type === 'outbound-rtp') as
+                | { byteCount?: number }
+                | undefined;
+              const total = outbound?.byteCount ?? 0;
+              const last = consumerLastByteCount.get(consumer.id) ?? 0;
+              const delta = total - last;
+              if (delta > 0) {
+                consumerLastByteCount.set(consumer.id, total);
+                metrics.trackBytes(roomId, peerId, delta);
+              }
+            } catch {
+              /* consumer may have closed between iteration and getStats() */
+            }
+          }
+        }
+      }
+    })();
+  }, byteSampleMs);
+  byteSampler.unref();
+
   /**
    * W5 M2 P1.0 (REQ-MCS-012, D-M2-18): per-room ADMISSION config (passwordHash),
    * co-located with `rooms`. Set by the first joiner (host); checked online for

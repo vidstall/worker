@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs';
 import type { SuiClient } from '@mysten/sui/client';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
+import { normalizeSuiAddress } from '@mysten/sui/utils';
 import {
   createSuiClient,
   loadNetworkConfig,
@@ -56,6 +57,7 @@ import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { collectMeasurements } from './measurements.js';
 import { createRelayProbe, type RelayProbeEndpoint } from './probe.js';
+import { readRelayMetricsUrls } from './relay-metrics-resolver.js';
 import {
   buildSessionProof,
   dualKeySign,
@@ -185,6 +187,13 @@ export interface DaemonState {
    * per-relay-attributed until G3).
    */
   relayStunLossBps: Map<string, bigint>;
+  /**
+   * G3 (partial): per-relayMinerId metrics base URL, resolved from each relay's ON-CHAIN ws
+   * endpoint (relay_registry::get_active_relays, metrics = ws+1). Refreshed once per measurement
+   * cycle so measureRelay probes the relay it ATTESTS (the cp's dynamically-chosen primary), not
+   * one static RELAY_METRICS_URL. Empty -> resolveProbeEndpoint falls back to RELAY_METRICS_URL.
+   */
+  relayMetricsUrls: Map<string, string>;
   /** Stop function for the F61 HealthMonitor (DOH-018). */
   healthMonitorStop: (() => void) | null;
   /**
@@ -364,6 +373,7 @@ export async function startDaemon(overrides?: {
     rttSamplesMs: [],
     consecutiveUnreachable: 0,
     relayStunLossBps: new Map(),
+    relayMetricsUrls: new Map(),
     healthMonitorStop: null,
     canaryCellLoop: null,
     canaryVerifyLoop: null,
@@ -1012,6 +1022,21 @@ async function runMeasurementCycle(
   const traceId = genTraceId();
   const cycleLog = traceChild(log, traceId);
 
+  // G3 (partial): refresh per-relay metrics URLs from chain so measureRelay probes the relay
+  // it ATTESTS (the cp's dynamic primary), not one static RELAY_METRICS_URL. Best-effort: a read
+  // failure keeps the prior map (and an empty map falls back to RELAY_METRICS_URL downstream).
+  try {
+    const urls = await readRelayMetricsUrls(
+      state.client,
+      state.config.packageId,
+      state.config.relayRegistryId,
+      state.sessionAddress,
+    );
+    if (urls.size > 0) state.relayMetricsUrls = urls;
+  } catch {
+    /* keep prior map */
+  }
+
   for (const roomId of roomIds) {
     try {
       // S23.1.A3: wrap measureRoom with `L_validator_check` timer.
@@ -1041,9 +1066,14 @@ async function runMeasurementCycle(
  * `RELAY_METRICS_URL` (single-host bench); `STANDBY_PROBE_URL` overrides it for
  * a distinct standby host (multi-host = G3). The PRIMARY is never gated.
  */
-function resolveProbeEndpoint(isStandby: boolean): RelayProbeEndpoint {
+function resolveProbeEndpoint(isStandby: boolean, metricsOverride?: string): RelayProbeEndpoint {
   const stunPortRaw = process.env['RELAY_STUN_PORT'];
-  const metricsBaseUrl = process.env['RELAY_METRICS_URL'] ?? '';
+  // G3 (partial): prefer the per-relay metrics URL resolved from chain (the relay this proof
+  // ATTESTS); fall back to the static single-host RELAY_METRICS_URL when unresolved.
+  const metricsBaseUrl =
+    metricsOverride && metricsOverride.length > 0
+      ? metricsOverride
+      : process.env['RELAY_METRICS_URL'] ?? '';
   const endpoint: RelayProbeEndpoint = {
     metricsBaseUrl,
     stunHost: process.env['RELAY_STUN_HOST'] ?? '',
@@ -1117,7 +1147,10 @@ async function measureRelay(
   // metrics HTTP) instead of the removed random simulation. Per-relay endpoint
   // is resolved via env (single RELAY_METRICS_URL today; multi-host = G3).
   // RO-020: the standby additionally carries the /api/probe liveness gate.
-  const probe = createRelayProbe(roomId, () => resolveProbeEndpoint(isStandby), undefined, traceId);
+  // G3 (partial): probe THIS relay's own metrics endpoint (resolved from chain), not one static
+  // URL — so the cp's dynamically-chosen primary relay is reached (404 -> bytes=0 otherwise).
+  const perRelayMetrics = state.relayMetricsUrls.get(normalizeSuiAddress(relayMinerId));
+  const probe = createRelayProbe(roomId, () => resolveProbeEndpoint(isStandby, perRelayMetrics), undefined, traceId);
   const measurement = await collectMeasurements(relayMinerId, probe);
 
   // F61 health signals (DOH-014): a reachable cycle (unreachableSample =>
