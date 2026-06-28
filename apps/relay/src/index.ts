@@ -475,8 +475,10 @@ if (isMainModule) {
               // Feed its {ip,port} into the standby's already-bound PipeTransport
               // so the link is connect()'d BEFORE the announce arrives (the
               // coordinator drains pending producers once both ends connect).
-              onConnectParams: (roomId, params) => {
-                void standbyWarmPipe.onPrimaryConnectParams(roomId, params);
+              // C6 part-2: thread the echoed peerRelayId → connect the SAME
+              // per-(room,peer) warm-pipe leg ensure() bound (undefined → DEFAULT).
+              onConnectParams: (roomId, params, peerRelayId) => {
+                void standbyWarmPipe.onPrimaryConnectParams(roomId, params, peerRelayId);
               },
               logger,
             }),
@@ -528,8 +530,21 @@ if (isMainModule) {
       portAllocator: pipePortAllocator,
       // REQ-RMS-028 (L1.3-b): the DOWN pipe-connect reply routes to the SAME
       // per-peer socket (C contract is (roomId, params[, peerRelayId])).
+      // C6 part-2: carry peerRelayId BACK on the reply frame so the standby
+      // connect()s the SAME leg (sendToPeer already routes by it). The DEFAULT
+      // sentinel is mapped to undefined so the legacy single-standby reply frame
+      // stays byte-identical (omits the field) — only a real cascade peer carries it.
       paramSender: (roomId, params, peerRelayId) =>
-        sendToPeer(peerRelayId, JSON.stringify(buildPipeConnectFrame(roomId, params))),  // buildPipeConnectFrame imported in this file
+        sendToPeer(
+          peerRelayId,
+          JSON.stringify(
+            buildPipeConnectFrame(
+              roomId,
+              params,
+              peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
+            ),
+          ),
+        ),
       logger,
     });
     const interRelayContext: InterRelayContext = {
@@ -560,8 +575,10 @@ if (isMainModule) {
       // feeds it to the coordinator, which binds + connect()s the primary pipe to
       // these params, then replies DOWN with its own tuple (paramSender) and drains
       // any pending producers.
-      onConnectParams: (roomId, params) => {
-        void primaryPipe.onStandbyConnectParams(roomId, params);
+      // C6 part-2: thread the standby's peerRelayId → connect the SAME per-(room,peer)
+      // producer pipe leg the cascade onPrimaryProducer minted (undefined → DEFAULT).
+      onConnectParams: (roomId, params, peerRelayId) => {
+        void primaryPipe.onStandbyConnectParams(roomId, params, peerRelayId);
       },
       // G3.2b STANDBY: on the first peer join for a standby room, build the room's
       // topology + open the paused warm pipe in the LIVE signaling path. F1: the
@@ -593,7 +610,10 @@ if (isMainModule) {
             // (the standby re-announces on reconnect; the coordinator re-drives).
             const ip = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
             const params: PipeConnectParams = { ip, port: pipePort };
-            standbyLinkManager.send(JSON.stringify(buildPipeConnectFrame(roomId, params)));
+            // C6 part-2: tag the UP pipe-connect with this standby's OWN peerRelayId
+            // (same value as the link header + ensure() key) so the primary binds the
+            // RIGHT per-(room,peer) leg. undefined (non-mesh) → frame omits it → DEFAULT.
+            standbyLinkManager.send(JSON.stringify(buildPipeConnectFrame(roomId, params, interRelayPeerId)));
           })
           .catch((err) => logger.error({ err, roomId }, 'G3.2b: standby warm-pipe ensure failed'));
       },

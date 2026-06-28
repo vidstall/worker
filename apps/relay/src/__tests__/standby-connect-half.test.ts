@@ -28,6 +28,25 @@ describe('handleInboundInterRelayFrame — inbound pipe-connect (REQ-RO-006 stan
     expect(onConnectParams).toHaveBeenCalledOnce();
     expect(onConnectParams.mock.calls[0]![0]).toBe('room-S');
     expect(onConnectParams.mock.calls[0]![1]).toMatchObject({ ip: '127.0.0.1', port: 41999 });
+    // C6 part-2 byte-stable: a legacy (no-peerRelayId) frame leaves the 3rd arg undefined
+    // → the coordinator defaults to DEFAULT_PEER_RELAY_ID (single-standby path unchanged).
+    expect(onConnectParams.mock.calls[0]![2]).toBeUndefined();
+  });
+
+  it('threads the frame peerRelayId into onConnectParams (C6 part-2 — mesh DOWN reply)', async () => {
+    // The primary's DOWN pipe-connect reply echoes the standby's own peerRelayId so the
+    // standby connect()s the SAME per-(room,peer) warm-pipe leg its ensure() bound.
+    const onConnectParams = vi.fn();
+    const raw = JSON.stringify(
+      buildPipeConnectFrame('room-S', { ip: '127.0.0.1', port: 41999 }, 'ws://127.0.0.1:4000'),
+    );
+    const handled = await handleInboundInterRelayFrame(raw, {
+      registry: new InterRelayProducerRegistry(),
+      onConnectParams,
+    });
+    expect(handled).toBe(true);
+    expect(onConnectParams).toHaveBeenCalledOnce();
+    expect(onConnectParams.mock.calls[0]![2]).toBe('ws://127.0.0.1:4000');
   });
 
   it('still routes a pipe-producer announce (back-compat) and ignores junk', async () => {

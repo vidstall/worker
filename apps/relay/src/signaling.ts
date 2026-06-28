@@ -191,6 +191,12 @@ interface PipeConnectMessage {
   ip: string;
   port: number;
   srtpParameters?: msTypes.SrtpParameters;
+  /**
+   * C6 part-2 (REQ-RMS-008) — the cascade peerRelayId the standby tags on its UP
+   * pipe-connect (= its own x-inter-relay-peer-id). OPTIONAL / additive (mirrors
+   * PipeConnectFrame): a legacy frame omits it → DEFAULT_PEER_RELAY_ID downstream.
+   */
+  peerRelayId?: string;
 }
 
 /**
@@ -300,8 +306,14 @@ export interface InterRelayContext {
    * frame through the token gate. The wiring layer (PrimaryPipeCoordinator,
    * cluster C) binds + connect()s its PipeTransport to these params. Optional —
    * absent on the in-process bench. Params are the peer's {ip, port[, srtp]}.
+   *
+   * C6 part-2 (REQ-RMS-008): the THIRD arg is the standby's cascade peerRelayId
+   * (carried on its UP pipe-connect frame). The wiring threads it to
+   * `PrimaryPipeCoordinator.onStandbyConnectParams(.., peerRelayId)` so the primary
+   * connect()s the SAME per-(room,peer) producer pipe leg the cascade minted —
+   * undefined (legacy frame) → DEFAULT_PEER_RELAY_ID, single-standby byte-stable.
    */
-  onConnectParams?(roomId: string, params: PipeConnectParams): void;
+  onConnectParams?(roomId: string, params: PipeConnectParams, peerRelayId?: string): void;
   /**
    * REQ-RO-001/002 (consumed by Tasks 5-6 + driven by Task 15) — the primary has a real producer to
    * pipe for a room it is primary for. The coordinator mints + connects the
@@ -819,13 +831,19 @@ export function createSignalingServer(
       logger.warn({ msg }, 'Malformed pipe-connect — ignoring');
       return;
     }
-    interRelay.onConnectParams?.(msg.roomId, {
-      ip: msg.ip,
-      port: msg.port,
-      ...(msg.srtpParameters !== undefined ? { srtpParameters: msg.srtpParameters } : {}),
-    });
+    // C6 part-2 (REQ-RMS-008): thread the standby's peerRelayId so the primary
+    // connect()s the SAME per-(room,peer) leg. Undefined (legacy) → DEFAULT.
+    interRelay.onConnectParams?.(
+      msg.roomId,
+      {
+        ip: msg.ip,
+        port: msg.port,
+        ...(msg.srtpParameters !== undefined ? { srtpParameters: msg.srtpParameters } : {}),
+      },
+      msg.peerRelayId,
+    );
     logger.info(
-      { roomId: msg.roomId, ip: msg.ip, port: msg.port },
+      { roomId: msg.roomId, ip: msg.ip, port: msg.port, peerRelayId: msg.peerRelayId },
       'Inter-relay: routed pipe-connect to onConnectParams',
     );
   }

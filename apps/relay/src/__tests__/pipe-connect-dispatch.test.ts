@@ -99,6 +99,26 @@ describe('pipe-connect dispatch (REQ-RO-006)', () => {
     expect(onConnectParams).toHaveBeenCalledOnce();
     expect(onConnectParams.mock.calls[0]![0]).toBe('r-go');
     expect(onConnectParams.mock.calls[0]![1]).toMatchObject({ ip: '127.0.0.1', port: 44020 });
+    // C6 part-2 byte-stable: a legacy (no-peerRelayId) frame leaves the 3rd arg undefined.
+    expect(onConnectParams.mock.calls[0]![2]).toBeUndefined();
+    ws.close();
+  });
+
+  it('RED-PCD-5: threads the frame peerRelayId into onConnectParams (C6 part-2 — mesh UP receive)', async () => {
+    // The standby's UP pipe-connect carries its own peerRelayId so the primary connect()s
+    // the SAME per-(room,peer) producer pipe leg the cascade onPrimaryProducer minted.
+    const onConnectParams = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary', registry: new InterRelayProducerRegistry(), announceProducer: vi.fn(), onConnectParams,
+    };
+    const { wss, port } = await startServer(interRelay, 'relay-secret');
+    server = wss;
+    const ws = await connectWithToken(port, 'relay-secret');
+    ws.send(JSON.stringify({ type: 'pipe-connect', roomId: 'r-mesh', ip: '127.0.0.1', port: 44030, peerRelayId: 'ws://127.0.0.1:4000' }));
+    await tick();
+    expect(onConnectParams).toHaveBeenCalledOnce();
+    expect(onConnectParams.mock.calls[0]![0]).toBe('r-mesh');
+    expect(onConnectParams.mock.calls[0]![2]).toBe('ws://127.0.0.1:4000');
     ws.close();
   });
 

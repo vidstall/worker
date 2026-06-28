@@ -580,8 +580,18 @@ export interface InboundInterRelayContext {
    * arrived on the link the standby opened. The handler feeds {ip,port[,srtp]}
    * here so the standby connect()s its already-bound PipeTransport (design §2
    * step 5). Optional — omitted in pure-registry unit tests.
+   *
+   * C6 part-2 (REQ-RMS-008): the THIRD arg is the cascade peerRelayId the primary
+   * echoes back on its DOWN reply (= the standby's own x-inter-relay-peer-id). The
+   * wiring threads it to `StandbyWarmPipeCoordinator.onPrimaryConnectParams(.., peerRelayId)`
+   * so the connect() targets the SAME per-(room,peer) warm-pipe leg ensure() bound —
+   * undefined (legacy frame) → DEFAULT_PEER_RELAY_ID, single-standby byte-stable.
    */
-  onConnectParams?: (roomId: string, params: PipeConnectParams) => void | Promise<void>;
+  onConnectParams?: (
+    roomId: string,
+    params: PipeConnectParams,
+    peerRelayId?: string,
+  ) => void | Promise<void>;
   logger?: Logger;
 }
 
@@ -613,11 +623,17 @@ export async function handleInboundInterRelayFrame(
   // already-bound transport, then return (it is not an announce).
   if (isPipeConnectFrame(parsed)) {
     if (ctx.onConnectParams) {
-      await ctx.onConnectParams(parsed.roomId, {
-        ip: parsed.ip,
-        port: parsed.port,
-        ...(parsed.srtpParameters !== undefined ? { srtpParameters: parsed.srtpParameters } : {}),
-      });
+      // C6 part-2 (REQ-RMS-008): thread the frame's peerRelayId so the standby
+      // connect()s the SAME per-(room,peer) leg. Undefined (legacy) → DEFAULT.
+      await ctx.onConnectParams(
+        parsed.roomId,
+        {
+          ip: parsed.ip,
+          port: parsed.port,
+          ...(parsed.srtpParameters !== undefined ? { srtpParameters: parsed.srtpParameters } : {}),
+        },
+        parsed.peerRelayId,
+      );
     }
     ctx.logger?.debug(
       { roomId: parsed.roomId, ip: parsed.ip, port: parsed.port },
