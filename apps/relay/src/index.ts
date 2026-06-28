@@ -622,6 +622,7 @@ if (isMainModule) {
       role: 'unknown',
       pipeConsumerAlive: false,
       rtcpAlive: false,
+      pipeBytesObserved: 0,
     };
 
     // Step 5: Start metrics HTTP server (default port 4001).
@@ -641,9 +642,15 @@ if (isMainModule) {
     // / ProbeState are UNCHANGED (no metrics-server contract change).
     const pipeLiveness = createPipeLivenessObserver({
       getPipeConsumer: () => standbyWarmPipe.currentPipeConsumer(),
+      // REQ-RMS-025 byte-proof: also read the pipe TRANSPORT bytes (bytesReceived+
+      // Sent) so /api/probe reports `pipe_bytes_observed` — a DIRECT live measure
+      // that cross-relay active-forward RTP crossed (the keepalive consumer is
+      // paused, so rtcpAlive alone under-reports the active-forward path).
+      getPipeTransport: () => standbyWarmPipe.currentPipeTransport(),
       setLiveness: (next) => {
         probeLiveness.pipeConsumerAlive = next.pipeConsumerAlive;
         probeLiveness.rtcpAlive = next.rtcpAlive;
+        probeLiveness.pipeBytesObserved = next.pipeBytesObserved ?? 0;
       },
     });
     pipeLiveness.start();

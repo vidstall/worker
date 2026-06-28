@@ -396,6 +396,15 @@ export interface PipeLivenessFlags {
    * true for a paused-but-static counter (REQ-RO-011 anti-over-claim).
    */
   rtcpAlive: boolean;
+  /**
+   * REQ-RMS-025 byte-proof — cumulative bytes on the standby's inter-relay PIPE
+   * TRANSPORT (bytesReceived + bytesSent), summed across its stats. Unlike
+   * rtcpAlive (which watches the PAUSED keepalive consumer), this counts ALL RTP
+   * the primary piped across for the active-forward path — a DIRECT live measure
+   * that cross-relay media actually crossed (>0 => bytes traversed the pipe).
+   * 0 when no getPipeTransport dep is wired (additive / back-compat).
+   */
+  pipeBytesObserved?: number;
 }
 
 /**
@@ -407,6 +416,14 @@ export interface PipeLivenessFlags {
 export interface PipeLivenessObserverDeps {
   /** Resolve the CURRENT standby pipe consumer (null when none). */
   getPipeConsumer: () => msTypes.Consumer | null;
+  /**
+   * REQ-RMS-025 byte-proof (OPTIONAL, additive) — resolve the CURRENT standby
+   * inter-relay pipe TRANSPORT (null when none). When provided, each poll reads
+   * its getStats() and reports the cumulative bytesReceived+bytesSent as
+   * `pipeBytesObserved` (a DIRECT live measure that cross-relay RTP crossed).
+   * Omitted by failover-only callers => pipeBytesObserved stays 0.
+   */
+  getPipeTransport?: () => msTypes.PipeTransport | null;
   /** Write the resolved flags into the /api/probe state box. */
   setLiveness: (flags: PipeLivenessFlags) => void;
   /** Poll cadence (ms). Default 2000. */
@@ -483,12 +500,39 @@ export function createPipeLivenessObserver(
     advanceSamples = 0;
   }
 
+  /**
+   * REQ-RMS-025 byte-proof — cumulative bytes on the standby's inter-relay PIPE
+   * TRANSPORT (bytesReceived + bytesSent). Independent of the paused keepalive
+   * consumer: counts ALL active-forward RTP that crossed. 0 when no transport
+   * dep / no bound transport / a transient getStats() failure.
+   */
+  async function readPipeTransportBytes(): Promise<number> {
+    const transport = deps.getPipeTransport?.() ?? null;
+    if (transport === null || transport.closed) return 0;
+    try {
+      const tstats = (await transport.getStats()) as ReadonlyArray<{
+        bytesReceived?: number;
+        bytesSent?: number;
+      }>;
+      let total = 0;
+      for (const s of tstats) total += (s.bytesReceived ?? 0) + (s.bytesSent ?? 0);
+      return total;
+    } catch {
+      return 0;
+    }
+  }
+
   async function poll(): Promise<void> {
+    // REQ-RMS-025 byte-proof: read the pipe TRANSPORT bytes independently of the
+    // (paused) keepalive consumer — a DIRECT live measure that cross-relay RTP
+    // crossed. Reported on EVERY setLiveness call below (additive; 0 when unwired).
+    const pipeBytesObserved = await readPipeTransportBytes();
+
     const consumer = deps.getPipeConsumer();
     // Clear on null/closed — never report stale liveness.
     if (consumer === null || consumer.closed) {
       resetHistory();
-      deps.setLiveness({ pipeConsumerAlive: false, rtcpAlive: false });
+      deps.setLiveness({ pipeConsumerAlive: false, rtcpAlive: false, pipeBytesObserved });
       return;
     }
 
@@ -510,7 +554,7 @@ export function createPipeLivenessObserver(
 
     if (counter === null) {
       // Consumer exists but no usable sample this tick.
-      deps.setLiveness({ pipeConsumerAlive: true, rtcpAlive: false });
+      deps.setLiveness({ pipeConsumerAlive: true, rtcpAlive: false, pipeBytesObserved });
       return;
     }
 
@@ -525,7 +569,7 @@ export function createPipeLivenessObserver(
     prevCounter = counter;
 
     const rtcpAlive = advanceSamples >= requiredSamples - 1;
-    deps.setLiveness({ pipeConsumerAlive: true, rtcpAlive });
+    deps.setLiveness({ pipeConsumerAlive: true, rtcpAlive, pipeBytesObserved });
   }
 
   return {

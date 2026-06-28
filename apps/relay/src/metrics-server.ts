@@ -51,6 +51,13 @@ export interface ProbeState {
   pipeConsumerAlive: boolean;
   /** RTCP keepalive is flowing on the warm pipe (REQ-RO-005). */
   rtcpAlive: boolean;
+  /**
+   * REQ-RMS-025 byte-proof — cumulative bytes on the standby's inter-relay pipe
+   * TRANSPORT (bytesReceived + bytesSent). A DIRECT live measure that cross-relay
+   * active-forward RTP crossed (>0 => bytes traversed the pipe), independent of
+   * the paused keepalive consumer's rtcpAlive. Defaults to 0 (additive).
+   */
+  pipeBytesObserved?: number;
 }
 
 /**
@@ -84,6 +91,12 @@ export interface ProbeResponse {
   pipe_consumer_alive: boolean;
   /** Whether RTCP keepalive is flowing on the warm pipe. */
   rtcp_alive: boolean;
+  /**
+   * REQ-RMS-025 byte-proof — cumulative bytes on the standby's inter-relay pipe
+   * transport (bytesReceived + bytesSent). >0 proves cross-relay active-forward
+   * RTP actually crossed the pipe (DIRECT live measure). 0 for primary / unwired.
+   */
+  pipe_bytes_observed: number;
 }
 
 // ── /metrics Bearer-token auth (REQ-MCS-007) ─────────────────────────────
@@ -145,6 +158,7 @@ function buildProbeResponse(state: ProbeState | undefined, startedAt: number): P
     latency_ms: Math.max(0, performance.now() - startedAt),
     pipe_consumer_alive: pipeConsumerAlive,
     rtcp_alive: rtcpAlive,
+    pipe_bytes_observed: state?.pipeBytesObserved ?? 0,
   };
 }
 

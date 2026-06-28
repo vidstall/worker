@@ -1021,6 +1021,31 @@ export class StandbyWarmPipeCoordinator {
     const first = this.states.values().next();
     return first.done ? null : (first.value.topology.pipeConsumer ?? null);
   }
+
+  /**
+   * REQ-RMS-025 byte-proof — resolve the CURRENT standby pipe TRANSPORT (null when
+   * none). Mirrors {@link currentPipeConsumer}: the liveness observer reads its
+   * getStats().bytesReceived to prove cross-relay RTP actually crossed the pipe
+   * (the keepalive consumer is paused, so its byteCount under-reports). Same no-arg
+   * single-leg convenience + multi-leg ambiguity warning.
+   */
+  currentPipeTransport(
+    roomId?: string,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): msTypes.PipeTransport | null {
+    if (roomId !== undefined) {
+      return this.states.get(meshKey(roomId, peerRelayId))?.topology.pipeTransport ?? null;
+    }
+    if (this.states.size > 1) {
+      this.logger?.warn(
+        { legCount: this.states.size },
+        'F6: currentPipeTransport() called with no peerRelayId on a multi-leg room — ' +
+          'polling an ARBITRARY leg; pass an explicit (roomId, peerRelayId) to disambiguate',
+      );
+    }
+    const first = this.states.values().next();
+    return first.done ? null : (first.value.topology.pipeTransport ?? null);
+  }
 }
 
 // ── Primary-side pipe half (Phase 5.3 spike — the missing production half) ──

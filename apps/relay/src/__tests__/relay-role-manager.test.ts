@@ -665,6 +665,45 @@ describe('createPipeLivenessObserver — honest probe flip', () => {
     expect(calls.at(-1)!.pipeConsumerAlive).toBe(true);
   });
 
+  it('REQ-RMS-025 byte-proof: pipeBytesObserved sums the pipe TRANSPORT bytesReceived+bytesSent (cross-relay RTP that crossed)', async () => {
+    const { consumer } = makeStatConsumer(0);
+    let received = 0;
+    const transport = {
+      closed: false,
+      getStats: vi.fn(async () => [{ type: 'pipe-transport', bytesReceived: received, bytesSent: 200 }]),
+    };
+    const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean; pipeBytesObserved?: number }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => consumer as any,
+      getPipeTransport: () => transport as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+      requiredSamples: 2,
+    });
+    obs.start();
+    await pump(1, 100);
+    expect(calls.at(-1)!.pipeBytesObserved).toBe(200); // 0 received + 200 sent
+    received = 9000; // the primary piped real RTP across the inter-relay pipe
+    await pump(1, 100);
+    obs.stop();
+    // The standby's pipe transport RECEIVED 9000 bytes => cross-relay RTP actually crossed.
+    expect(calls.at(-1)!.pipeBytesObserved).toBe(9200);
+  });
+
+  it('byte-proof: pipeBytesObserved is 0 when no getPipeTransport dep is wired (additive back-compat)', async () => {
+    const { consumer } = makeStatConsumer(0);
+    const calls: Array<{ pipeBytesObserved?: number }> = [];
+    const obs = createPipeLivenessObserver({
+      getPipeConsumer: () => consumer as any,
+      setLiveness: (f) => calls.push({ ...f }),
+      intervalMs: 100,
+    });
+    obs.start();
+    await pump(1, 100);
+    obs.stop();
+    expect(calls.at(-1)!.pipeBytesObserved ?? 0).toBe(0);
+  });
+
   it('RED-RO-010: clears BOTH false when getPipeConsumer returns null', async () => {
     const calls: Array<{ pipeConsumerAlive: boolean; rtcpAlive: boolean }> = [];
     const obs = createPipeLivenessObserver({
@@ -677,7 +716,7 @@ describe('createPipeLivenessObserver — honest probe flip', () => {
     await pump(1, 100);
     obs.stop();
 
-    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false });
+    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false, pipeBytesObserved: 0 });
   });
 
   it('RED-RO-010: clears BOTH false when the consumer is closed', async () => {
@@ -696,7 +735,7 @@ describe('createPipeLivenessObserver — honest probe flip', () => {
     await pump(1, 100);
     obs.stop();
 
-    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false });
+    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false, pipeBytesObserved: 0 });
     expect(closedConsumer.getStats).not.toHaveBeenCalled(); // short-circuit on closed
   });
 
@@ -719,7 +758,7 @@ describe('createPipeLivenessObserver — honest probe flip', () => {
     await pump(1, 100);
     obs.stop();
 
-    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false });
+    expect(calls.at(-1)!).toEqual({ pipeConsumerAlive: false, rtcpAlive: false, pipeBytesObserved: 0 });
   });
 
   it('RED-RO-010: stop() halts polling (no further setLiveness calls)', async () => {
