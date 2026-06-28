@@ -567,8 +567,14 @@ export interface InboundInterRelayContext {
    * Optional re-run hook — `StandbyWarmPipeCoordinator.onAnnounce(roomId)`. Fired
    * AFTER the record so the coordinator re-runs the warm pipe with the now-real
    * producerId (placeholder cutover). Omitted in pure-registry unit tests.
+   *
+   * C6 (REQ-RMS-008): the SECOND arg is the cascade peerRelayId carried by the
+   * frame (the primary echoes the standby's own x-inter-relay-peer-id). The
+   * wiring threads it to `StandbyWarmPipeCoordinator.onAnnounce(roomId, …, peerRelayId)`
+   * so the announce re-run keys the SAME (room, peer) warm-pipe state ensure()
+   * recorded — undefined (legacy frame) → DEFAULT_PEER_RELAY_ID, byte-stable.
    */
-  onAnnounce?: (roomId: string) => void | Promise<void>;
+  onAnnounce?: (roomId: string, peerRelayId?: string) => void | Promise<void>;
   /**
    * F1 (REQ-RO-003/006 standby half) — the primary's DOWN pipe-connect reply
    * arrived on the link the standby opened. The handler feeds {ip,port[,srtp]}
@@ -627,7 +633,9 @@ export async function handleInboundInterRelayFrame(
     return false;
   }
   ctx.registry.record(parsed);
-  if (ctx.onAnnounce) await ctx.onAnnounce(parsed.roomId);
+  // C6 (REQ-RMS-008): thread the frame's peerRelayId so the cutover re-run keys
+  // the SAME (room, peer) state ensure() recorded. Undefined (legacy) → DEFAULT.
+  if (ctx.onAnnounce) await ctx.onAnnounce(parsed.roomId, parsed.peerRelayId);
   return true;
 }
 

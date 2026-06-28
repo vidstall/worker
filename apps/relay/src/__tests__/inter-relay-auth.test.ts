@@ -84,7 +84,33 @@ describe('handleInboundInterRelayFrame', () => {
 
     expect(handled).toBe(true);
     expect(registry.resolve('room-link-1')?.producerId).toBe('producer-REAL-77');
-    expect(onAnnounce).toHaveBeenCalledWith('room-link-1');
+    // C6: the inbound handler threads the frame's peerRelayId (undefined here —
+    // a legacy frame omits it → the standby coordinator defaults to DEFAULT).
+    expect(onAnnounce).toHaveBeenCalledWith('room-link-1', undefined);
+  });
+
+  // C6 (REQ-RMS-008) — a CASCADE frame carries the primary-echoed peerRelayId
+  // (= the standby's own outbound x-inter-relay-peer-id). The inbound handler
+  // threads it into onAnnounce so ensure()/onAnnounce key the SAME (room,peer)
+  // warm-pipe state — without this the displaced standby's announce misses its
+  // ensure state and mints 0 (the live C6 collision root cause).
+  it('threads the frame peerRelayId into onAnnounce (mesh cascade)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    const onAnnounce = vi.fn();
+
+    const raw = JSON.stringify({
+      type: 'pipe-producer',
+      roomId: 'room-mesh-1',
+      producerId: 'producer-REAL-88',
+      kind: 'video',
+      peerRelayId: 'ws://127.0.0.1:4004',
+    });
+    const handled = await handleInboundInterRelayFrame(raw, { registry, onAnnounce });
+
+    expect(handled).toBe(true);
+    // Recorded under the cascade peer key (not DEFAULT).
+    expect(registry.resolve('room-mesh-1', 'ws://127.0.0.1:4004')?.producerId).toBe('producer-REAL-88');
+    expect(onAnnounce).toHaveBeenCalledWith('room-mesh-1', 'ws://127.0.0.1:4004');
   });
 
   it('works without an onAnnounce callback (records only)', async () => {

@@ -335,7 +335,9 @@ describe('inter-relay cross-daemon link END-TO-END (G3.2b)', () => {
     await tick(200);
 
     expect(standbyRegistry.resolve('room-E2E')?.producerId).toBe('producer-REAL-e2e');
-    expect(onAnnounce).toHaveBeenCalledWith('room-E2E');
+    // C6: the inbound handler threads the frame's peerRelayId (undefined — this
+    // E2E announce carries no cascade peer → the standby defaults to DEFAULT).
+    expect(onAnnounce).toHaveBeenCalledWith('room-E2E', undefined);
 
     link.close();
   });

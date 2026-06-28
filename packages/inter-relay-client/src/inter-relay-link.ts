@@ -31,6 +31,16 @@ export interface OpenInterRelayLinkOptions {
    */
   token?: string;
   /**
+   * C6 (REQ-RMS-008) — this standby's DISTINCT inter-relay peer id, sent as
+   * `x-inter-relay-peer-id: <id>` on the upgrade so the primary buckets each
+   * standby under its own peerRelayId (resolveInterRelayPeerId) instead of
+   * colliding on DEFAULT_PEER_RELAY_ID when ≥2 standbys link to one primary
+   * (the live K_r≥2 mesh topology). Omit (single-standby / non-mesh) to dial
+   * with NO peer-id header → the primary resolves DEFAULT → the M1 /
+   * relay-overlap failover path is byte-for-byte unchanged.
+   */
+  peerRelayId?: string;
+  /**
    * Called with each inbound frame (the primary's pipe-producer announces).
    * Fire-and-forget — the return is discarded (handleInboundInterRelayFrame
    * resolves to a boolean), so the type accepts any thenable/value.
@@ -47,11 +57,16 @@ export interface OpenInterRelayLinkOptions {
  * primary link must never crash the standby daemon.
  */
 export function openInterRelayLink(opts: OpenInterRelayLinkOptions): WebSocket {
-  const ws = opts.token
-    ? new WebSocket(opts.url, INTER_RELAY_SUBPROTOCOL, {
-        headers: { Authorization: `Bearer ${opts.token}` },
-      })
-    : new WebSocket(opts.url, INTER_RELAY_SUBPROTOCOL);
+  // Build the upgrade headers additively: Authorization (token) and/or the C6
+  // peer-id tag. When NEITHER is set we pass NO `headers` option so the dial is
+  // byte-identical to the pre-C6 / no-token call (the DEFAULT single-standby path).
+  const headers: Record<string, string> = {};
+  if (opts.token) headers['Authorization'] = `Bearer ${opts.token}`;
+  if (opts.peerRelayId) headers['x-inter-relay-peer-id'] = opts.peerRelayId;
+  const ws =
+    Object.keys(headers).length > 0
+      ? new WebSocket(opts.url, INTER_RELAY_SUBPROTOCOL, { headers })
+      : new WebSocket(opts.url, INTER_RELAY_SUBPROTOCOL);
 
   ws.on('open', () => {
     opts.logger?.info({ url: opts.url }, 'G3.2b: inter-relay link to primary OPEN');

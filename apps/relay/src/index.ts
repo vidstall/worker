@@ -440,6 +440,19 @@ if (isMainModule) {
     const pipePortAllocator = createPipePortAllocator(pipePortRange);
     const reconnectMs = parseInt(process.env['INTER_RELAY_RECONNECT_MS'] ?? '3000', 10);
 
+    // C6 (REQ-RMS-008): this standby's DISTINCT inter-relay peer id, tagged on the
+    // outbound link so the primary buckets ≥2 standbys (the live K_r≥2 mesh) each
+    // under their own peerRelayId instead of colliding on DEFAULT_PEER_RELAY_ID
+    // (the displaced standby would then mint 0 — the live C6 root cause). We reuse
+    // endpointUrl — already this relay's stable, unique identity (standbyEndpoint
+    // below) — so no extra chain read is needed; the peerRelayId is an opaque
+    // routing/keying token (socket map + registry meshKey), never compared to an
+    // on-chain miner_id. GATED on the active-forward mesh flag: when OFF (M1 /
+    // relay-overlap failover) we send NO peer id → the primary resolves DEFAULT →
+    // that path is byte-stable. The SAME value keys ensure() below so the
+    // primary-echoed announce re-run matches the warm-pipe state it recorded.
+    const interRelayPeerId = RMS_ACTIVE_FORWARD ? endpointUrl : undefined;
+
     // The standby's outbound link lifecycle (dedup + reconnect) lives in the
     // unit-tested createStandbyLinkManager; index.ts only supplies the live socket
     // factory (openInterRelayLink) + the inbound-frame → registry/cutover routing.
@@ -448,11 +461,15 @@ if (isMainModule) {
         openInterRelayLink({
           url,
           ...(INTER_RELAY_TOKEN ? { token: INTER_RELAY_TOKEN } : {}),
+          ...(interRelayPeerId ? { peerRelayId: interRelayPeerId } : {}),
           onFrame: (raw) =>
             handleInboundInterRelayFrame(raw, {
               registry: interRelayRegistry,
-              onAnnounce: (roomId) => {
-                void standbyWarmPipe.onAnnounce(roomId);
+              // C6 (REQ-RMS-008): thread the frame's cascade peerRelayId into the
+              // coordinator re-run so it keys the SAME (room, peer) warm-pipe
+              // state ensure() recorded (undefined/legacy frame → DEFAULT).
+              onAnnounce: (roomId, peerRelayId) => {
+                void standbyWarmPipe.onAnnounce(roomId, undefined, undefined, undefined, peerRelayId);
               },
               // F1 (REQ-RO-003/008): the primary's DOWN pipe-connect reply.
               // Feed its {ip,port} into the standby's already-bound PipeTransport
@@ -563,7 +580,11 @@ if (isMainModule) {
           pipeTransport: null,
         };
         void standbyWarmPipe
-          .ensure(topology, router, pipePort)
+          // C6 (REQ-RMS-008): key the warm-pipe state under this standby's OWN
+          // peerRelayId (same value tagged on the outbound link) so the primary-
+          // echoed announce re-run (onAnnounce above) finds this state instead of
+          // missing under DEFAULT. undefined (non-mesh) → DEFAULT — byte-stable.
+          .ensure(topology, router, pipePort, interRelayPeerId)
           .then(() => {
             // F1 (REQ-RO-003): announce the standby's bound {ip,port} UP to the
             // primary so it can connect() its end. ANNOUNCED_IP default 127.0.0.1

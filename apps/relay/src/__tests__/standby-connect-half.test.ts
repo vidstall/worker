@@ -35,7 +35,8 @@ describe('handleInboundInterRelayFrame — inbound pipe-connect (REQ-RO-006 stan
     const reg = new InterRelayProducerRegistry();
     const announce = JSON.stringify({ type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video' });
     expect(await handleInboundInterRelayFrame(announce, { registry: reg, onAnnounce })).toBe(true);
-    expect(onAnnounce).toHaveBeenCalledWith('r');
+    // C6: 2-arg onAnnounce(roomId, peerRelayId) — legacy frame omits peerRelayId → undefined.
+    expect(onAnnounce).toHaveBeenCalledWith('r', undefined);
     expect(await handleInboundInterRelayFrame('not json', { registry: reg })).toBe(false);
     expect(await handleInboundInterRelayFrame(JSON.stringify({ type: 'nope' }), { registry: reg })).toBe(false);
   });

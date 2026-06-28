@@ -178,6 +178,45 @@ describe('openInterRelayLink', () => {
     link.close();
   });
 
+  // C6 (REQ-RMS-008 mesh threading) — a standby tags its OUTBOUND link with a
+  // DISTINCT x-inter-relay-peer-id so the primary buckets each standby under its
+  // own peerRelayId (resolveInterRelayPeerId) instead of colliding on __default__.
+  it('sends the x-inter-relay-peer-id header when peerRelayId is set (C6)', async () => {
+    const srv = await startCapturingServer();
+    server = srv.wss;
+
+    const link = openInterRelayLink({
+      url: `ws://127.0.0.1:${srv.port}`,
+      peerRelayId: 'ws://127.0.0.1:4004',
+      onFrame: vi.fn(),
+      logger: mockLogger(),
+    });
+    await srv.firstSocket();
+
+    expect(srv.headers()?.['x-inter-relay-peer-id']).toBe('ws://127.0.0.1:4004');
+    link.close();
+  });
+
+  it('omits the x-inter-relay-peer-id header when peerRelayId is not set (DEFAULT byte-stable)', async () => {
+    const srv = await startCapturingServer();
+    server = srv.wss;
+
+    const link = openInterRelayLink({
+      url: `ws://127.0.0.1:${srv.port}`,
+      token: 'standby-secret',
+      onFrame: vi.fn(),
+      logger: mockLogger(),
+    });
+    await srv.firstSocket();
+
+    // No peerRelayId → the upgrade carries NO peer-id header (primary resolves
+    // DEFAULT_PEER_RELAY_ID → the M1/relay-overlap single-standby path unchanged).
+    expect(srv.headers()?.['x-inter-relay-peer-id']).toBeUndefined();
+    // Authorization is still present (token path independent of the peer-id header).
+    expect(srv.headers()?.['authorization']).toBe('Bearer standby-secret');
+    link.close();
+  });
+
   it('delivers an inbound frame pushed by the primary to onFrame', async () => {
     const srv = await startCapturingServer();
     server = srv.wss;
