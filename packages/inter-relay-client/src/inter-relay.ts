@@ -520,6 +520,30 @@ export class InterRelayProducerRegistry {
   }
 
   /**
+   * Stage B / G2 — EVERY announced producer for a roomId, across ALL peerRelayId
+   * buckets (audio + video, every cascade leg). The STANDBY's minted LOCAL
+   * producers live ONLY here (they are produced by produceLocalFromPipe with
+   * `id == announced.producerId`, NOT by handleProduce), so they are absent from
+   * room.peers[*].producers — the array handleJoin re-announce normally reads.
+   * handleJoin iterates THIS so a FRESH browser that HOMES to a standby and joins
+   * AFTER the producers were minted learns each id and consumes it (handleConsume
+   * resolves the same id from this registry, REQ-RMS-029). On a PRIMARY the
+   * registry is empty (it announces, never records) ⇒ [] ⇒ re-announce is a no-op.
+   *
+   * Room-scoped EXACTLY via the meshKey `::` separator — same `lastIndexOf('::')`
+   * convention as resolveByProducerId (see its docstring for the boundary proof).
+   */
+  listForRoom(roomId: string): AnnouncedProducer[] {
+    const out: AnnouncedProducer[] = [];
+    for (const [key, bucket] of this.byRoom) {
+      const sep = key.lastIndexOf('::'); // separator: peerRelayId after it is `::`-free
+      if (sep === -1 || key.slice(0, sep) !== roomId) continue; // exact room segment only
+      for (const rec of bucket.values()) out.push(rec);
+    }
+    return out;
+  }
+
+  /**
    * Drops a (room, peer)'s records (on room close / worker.died rebuild).
    * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID (legacy single-standby).
    */

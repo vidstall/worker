@@ -156,6 +156,30 @@ describe('InterRelayProducerRegistry', () => {
     expect(reg.roomCount).toBe(0);
     expect(reg.resolve('room-4')).toBeNull();
   });
+
+  // ── Stage B / G2 — listForRoom (handleJoin re-announce source) ──────────
+  // A standby's minted/forwarded producers live ONLY in this registry (never in
+  // room.peers[*].producers). handleJoin re-announce needs EVERY forwarded
+  // producer for a roomId across ALL peerRelayId buckets so a FRESH browser
+  // homed to the standby learns each id and consumes it (id == announced id).
+  it('RED-G2-1: listForRoom returns ALL producers across peerRelayId buckets, room-scoped + attributed', () => {
+    const reg = new InterRelayProducerRegistry();
+    // Two DISTINCT peer-relay buckets for the SAME room (cascade / >=2-standby).
+    reg.record({ type: 'pipe-producer', roomId: 'room-G2', producerId: 'p-A', kind: 'video', peerRelayId: 'relay-B', producerPeerId: 'pub-1' });
+    reg.record({ type: 'pipe-producer', roomId: 'room-G2', producerId: 'p-B', kind: 'audio', peerRelayId: 'relay-C', producerPeerId: 'pub-2' });
+    // A DIFFERENT room must NOT leak into the listing.
+    reg.record({ type: 'pipe-producer', roomId: 'room-OTHER', producerId: 'p-X', kind: 'video' });
+
+    const all = reg.listForRoom('room-G2');
+    expect(all.map((p) => p.producerId).sort()).toEqual(['p-A', 'p-B']);
+    expect(all.find((p) => p.producerId === 'p-A')?.producerPeerId).toBe('pub-1');
+    expect(all.find((p) => p.producerId === 'p-B')?.kind).toBe('audio');
+  });
+
+  it('RED-G2-2: listForRoom is empty for an unknown room (a PRIMARY records nothing → re-announce no-op)', () => {
+    const reg = new InterRelayProducerRegistry();
+    expect(reg.listForRoom('never-announced')).toEqual([]);
+  });
 });
 
 // ── createInterRelayAnnouncer (primary→standby push, index.ts glue) ─────

@@ -1,0 +1,70 @@
+﻿ [32mâœ“[39m apps/validator-daemon/src/__tests__/measurements.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 12[2mms[22m[39m
+ [32mâœ“[39m apps/relay/src/__tests__/inter-relay-socket-map.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32mâœ“[39m apps/validator-daemon/src/canary/__tests__/pipe-tap.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 5[2mms[22m[39m
+ [31mâ¯[39m scripts/governance/__tests__/revoke-cap-token.test.ts [2m([22m[2m13 tests[22m[2m | [22m[31m2 failed[39m[2m)[22m[33m 20098[2mms[22m[39m
+   [32mâœ“[39m assertValidRevokeReason[2m > [22maccepts the three enum values 0=normal/1=slash/2=admin[32m 2[2mms[22m[39m
+   [32mâœ“[39m assertValidRevokeReason[2m > [22mrejects out-of-enum / non-integer reasons before submit[32m 1[2mms[22m[39m
+   [32mâœ“[39m buildRevokeCanonicalMsg[2m > [22mproduces 32-byte cap id followed by the 1-byte reason[32m 1[2mms[22m[39m
+   [32mâœ“[39m buildRevokeCapTokenTx[2m > [22mbuilds new_quorum_sig then revoke_capability_token_via_quorum with the 7 args in exact order[32m 1[2mms[22m[39m
+   [32mâœ“[39m buildRevokeCapTokenTx[2m > [22mthrows on an out-of-enum reason before emitting any moveCall[32m 1[2mms[22m[39m
+[31m   [31mÃ—[31m submitRevokeCapToken[2m > [22mcollects the quorum over the revoke canonical msg, submits the correct PTB, logs structured confirmation[39m[33m 10063[2mms[22m[39m
+[31m     â†’ Test timed out in 10000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+[31m   [31mÃ—[31m submitRevokeCapToken[2m > [22mpropagates an executeWithRetry rejection (e.g. on-chain E_TOKEN_ALREADY_REVOKED=907) without swallowing it[39m[33m 10012[2mms[22m[39m
+[31m     â†’ Test timed out in 10000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+   [32mâœ“[39m submitRevokeCapToken[2m > [22mrejects an out-of-enum reason before collecting signatures or submitting[32m 4[2mms[22m[39m
+   [32mâœ“[39m makeSingleCpKeystore[2m > [22msigns the canonical msg with the local CP key for a single-CP (threshold 1) quorum[32m 4[2mms[22m[39m
+   [32mâœ“[39m makeSingleCpKeystore[2m > [22mthrows cleanly when threshold >= 2 (multi-CP peer discovery deferred, D-014)[32m 4[2mms[22m[39m
+   [32mâœ“[39m parseFlag[2m > [22mextracts the value following a flag[32m 1[2mms[22m[39m
+   [32mâœ“[39m parseFlag[2m > [22mreturns null when the flag is absent[32m 1[2mms[22m[39m
+   [32mâœ“[39m parseFlag[2m > [22mreturns null when the flag has no following value[32m 0[2mms[22m[39m
+ [32mâœ“[39m apps/relay/src/__tests__/room-handler-lastn.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+{"level":30,"time":1782641098313,"pid":26068,"hostname":"Quang","name":"seed-bootstrap","module":"seed-bootstrap","action":"start","context":{"rpcUrl":"localnet","faucetUrl":"http://127.0.0.1:9123","keysOut":"/shared/daemon-keys.json","packageId":"0x1532bcc151d7015256f7cb28d1f57a3d3326368870a94b5fc9bc2c53b5384f5e"},"msg":"seed-bootstrap starting"}
+{"level":40,"time":1782641098383,"pid":25008,"hostname":"Quang","name":"validator:probe","relayMinerId":"0xstandby","roomId":"0xroom1","ok":false,"msg":"RO-020: standby liveness probe failed; gating duration_seconds = 0"}
+{"level":40,"time":1782641098385,"pid":25008,"hostname":"Quang","name":"validator:probe","relayMinerId":"0xstandby","roomId":"0xroom1","ok":false,"msg":"RO-020: standby liveness probe failed; gating duration_seconds = 0"}
+ [32mâœ“[39m apps/validator-daemon/src/__tests__/probe-liveness.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32mâœ“[39m scripts/demo/__tests__/seed-bootstrap-validator2.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+ [32mâœ“[39m apps/relay/src/__tests__/relay-endpoint-resolver.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+ [32mâœ“[39m apps/cp-daemon/src/__tests__/room-assignment-spill.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32mâœ“[39m scripts/demo/__tests__/assert-active-validators.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32mâœ“[39m scripts/demo/__tests__/consolidated-runner.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32mâœ“[39m scripts/demo/__tests__/register-lowstake-miner.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+ [32mâœ“[39m apps/validator-daemon/src/canary/__tests__/live-seams-capture-wiring.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32mâœ“[39m apps/validator-daemon/src/canary/__tests__/live-seams-capture-flag.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+
+[31mâŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯[39m[1m[41m Failed Tests 2 [49m[22m[31mâŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯[39m
+
+[41m[1m FAIL [22m[49m scripts/governance/__tests__/revoke-cap-token.test.ts[2m > [22msubmitRevokeCapToken[2m > [22mcollects the quorum over the revoke canonical msg, submits the correct PTB, logs structured confirmation
+[31m[1mError[22m: Test timed out in 10000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+[36m [2mâ¯[22m scripts/governance/__tests__/revoke-cap-token.test.ts:[2m158:3[22m[39m
+    [90m156| [39m  })[33m;[39m
+    [90m157| [39m
+    [90m158| [39m  it('collects the quorum over the revoke canonical msg, submits the câ€¦
+    [90m   | [39m  [31m^[39m
+    [90m159| [39m    [35mlet[39m captured[33m:[39m { calls[33m:[39m any[][33m;[39m label[33m:[39m string } [33m|[39m undefined[33m;[39m
+    [90m160| [39m    mockExecuteWithRetry[33m.[39m[34mmockImplementation[39m(
+
+[31m[2mâŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯[1/2]âŽ¯[22m[39m
+
+[41m[1m FAIL [22m[49m scripts/governance/__tests__/revoke-cap-token.test.ts[2m > [22msubmitRevokeCapToken[2m > [22mpropagates an executeWithRetry rejection (e.g. on-chain E_TOKEN_ALREADY_REVOKED=907) without swallowing it
+[31m[1mError[22m: Test timed out in 10000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+[36m [2mâ¯[22m scripts/governance/__tests__/revoke-cap-token.test.ts:[2m206:3[22m[39m
+    [90m204| [39m  })[33m;[39m
+    [90m205| [39m
+    [90m206| [39m  it('propagates an executeWithRetry rejection (e.g. on-chain E_TOKEN_â€¦
+    [90m   | [39m  [31m^[39m
+    [90m207| [39m    // Simulate the on-chain idempotency abort surfacing through execuâ€¦
+    [90m208| [39m    mockExecuteWithRetry[33m.[39m[34mmockRejectedValue[39m(
+
+[31m[2mâŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯âŽ¯[2/2]âŽ¯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m180 passed[39m[22m[90m (181)[39m
+[2m      Tests [22m [1m[31m2 failed[39m[22m[2m | [22m[1m[32m1553 passed[39m[22m[90m (1555)[39m
+[2m   Start at [22m 17:04:34
+[2m   Duration [22m 24.52s[2m (transform 12.07s, setup 0ms, collect 237.98s, tests 82.75s, environment 83ms, prepare 49.92s)[22m
+
+â€‰ELIFECYCLEâ€‰ Test failed. See above for more details.

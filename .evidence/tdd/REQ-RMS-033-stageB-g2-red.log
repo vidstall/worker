@@ -1,0 +1,19 @@
+Stage B / G2 — handleJoin re-announces STANDBY-forwarded producers (RED)
+Captured 2026-06-28. Command:
+  cd dvconf-daemons/apps/relay && pnpm exec vitest run \
+    src/__tests__/inter-relay.test.ts src/__tests__/inter-relay-wiring.test.ts
+
+RED — 3 failed / 28 passed (31):
+
+ × InterRelayProducerRegistry > RED-G2-1: listForRoom returns ALL producers across peerRelayId buckets, room-scoped + attributed
+   TypeError: reg.listForRoom is not a function   (src/__tests__/inter-relay.test.ts:173)
+ × InterRelayProducerRegistry > RED-G2-2: listForRoom is empty for an unknown room (a PRIMARY records nothing -> re-announce no-op)
+   TypeError: reg.listForRoom is not a function   (src/__tests__/inter-relay.test.ts:181)
+ × inter-relay wiring (G1) > RED-G2-WIRE-4: STANDBY re-announces forwarded (registry) producers to a FRESH joiner
+   AssertionError: fresh joiner on a standby must receive newProducer for the forwarded producer: expected undefined to be truthy
+   (src/__tests__/inter-relay-wiring.test.ts:248)
+
+Root cause proven: minted/forwarded producers live ONLY in InterRelayProducerRegistry
+(produceLocalFromPipe, id == announced.producerId), NEVER in room.peers[*].producers;
+handleJoin re-announce read only peer.producers -> a fresh browser homed to a standby
+never learned the minted ids.

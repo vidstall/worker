@@ -208,4 +208,47 @@ describe('inter-relay wiring (G1)', () => {
 
     ws.close();
   });
+
+  // ── Stage B / G2 — fresh-join re-announce of forwarded producers ──────────
+  it('RED-G2-WIRE-4: STANDBY re-announces forwarded (registry) producers to a FRESH joiner', async () => {
+    const registry = new InterRelayProducerRegistry();
+    // A forwarded/minted producer lives ONLY in the registry (it is produced by
+    // the coordinator, NOT handleProduce, so it is never in room.peers[*].producers).
+    registry.record({
+      type: 'pipe-producer',
+      roomId: 'room-D',
+      producerId: 'producer-FWD-42',
+      kind: 'video',
+      producerPeerId: 'publisher-X',
+    });
+    const interRelay: InterRelayContext = {
+      role: 'standby',
+      registry,
+      announceProducer: vi.fn(),
+    };
+    const { wss, port } = await startServer(interRelay);
+    server = wss;
+
+    const ws = await connect(port);
+    const got: Record<string, unknown>[] = [];
+    ws.on('message', (d) => got.push(JSON.parse(d.toString()) as Record<string, unknown>));
+
+    // A FRESH browser HOMES to the standby and joins AFTER the producer was minted.
+    ws.send(JSON.stringify({ type: 'join', roomId: 'room-D', peerId: 'fresh-peer' }));
+    await tick(150);
+
+    const fwd = got.find(
+      (m) => m['type'] === 'newProducer' && m['producerId'] === 'producer-FWD-42',
+    );
+    // RED today: handleJoin re-announce reads ONLY peer.producers (empty for a
+    // forwarded producer), so the fresh joiner never learns the minted id.
+    expect(
+      fwd,
+      'fresh joiner on a standby must receive newProducer for the forwarded producer',
+    ).toBeTruthy();
+    expect(fwd?.['kind']).toBe('video');
+    expect(fwd?.['peerId']).toBe('publisher-X');
+
+    ws.close();
+  });
 });

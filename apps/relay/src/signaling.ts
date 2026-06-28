@@ -1026,6 +1026,28 @@ export function createSignalingServer(
       }
     }
 
+    // Stage B / G2 — re-announce STANDBY-forwarded producers to the fresh joiner.
+    // A standby's minted (active-forward) LOCAL producers are produced by the
+    // coordinator (produceLocalFromPipe, id == announced.producerId), NOT by
+    // handleProduce, so they are NEVER in room.peers[*].producers — the loop above
+    // misses them. Without this, a browser that HOMES to a standby and joins AFTER
+    // the producers were minted never learns their ids (a mid-session client gets
+    // them via fanLocalProducer's live fan-out; a FRESH join does not). The client
+    // consumes each by id; handleConsume resolves the SAME id from this registry
+    // (REQ-RMS-029). producerPeerId carries the original publisher for tile/E2EE
+    // attribution (the consume RESPONSE re-binds authoritatively, REQ-RO-018). On a
+    // PRIMARY the registry is empty (it announces, never records) ⇒ no-op.
+    if (interRelay) {
+      for (const fwd of interRelay.registry.listForRoom(roomId)) {
+        sendJson(ws, {
+          type: 'newProducer',
+          peerId: fwd.producerPeerId ?? fwd.producerId,
+          producerId: fwd.producerId,
+          kind: fwd.kind,
+        });
+      }
+    }
+
     // W5 M2 P1.0 (REQ-MCS-013): roster sync over signaling (reuses the per-room
     // peer-iteration idiom). Session pubkeys are PUBLIC keys — safe to send/log.
     // Only the E2EE/admission path captures a sessionPubkey; legacy joins skip

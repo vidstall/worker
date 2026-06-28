@@ -1,0 +1,14 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mC:/Thesis/dvconf/dvconf-daemons[39m
+
+[90mstdout[2m | apps/relay/src/__tests__/integration/live/warmpipe-live-link.integration.test.ts[2m > [22m[2mF1 Tier-3 — real inter-relay WS link drives connect() → RTP on wire → /api/probe flips ok only after RTP (REQ-RO-003)[2m > [22m[2mWS-driven pipe-connect puts real RTP on the wire; /api/probe ok is false BEFORE and true AFTER the liveness observer sees RTCP advance
+[22m[39m[F1 REQ-RO-003 live-link] before.ok=false after.ok=true after.rtcp_alive=true role=standby
+
+ [32m✓[39m apps/relay/src/__tests__/integration/live/warmpipe-live-link.integration.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 414[2mms[22m[39m
+   [33m[2m✓[22m[39m F1 Tier-3 — real inter-relay WS link drives connect() → RTP on wire → /api/probe flips ok only after RTP (REQ-RO-003)[2m > [22mWS-driven pipe-connect puts real RTP on the wire; /api/probe ok is false BEFORE and true AFTER the liveness observer sees RTCP advance [33m 412[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m   Start at [22m 17:07:57
+[2m   Duration [22m 1.82s[2m (transform 203ms, setup 0ms, collect 1.16s, tests 414ms, environment 0ms, prepare 88ms)[22m
+
