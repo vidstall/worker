@@ -77,6 +77,10 @@ describe('StandbyWarmPipeCoordinator.currentPipeConsumer (F6 accessor)', () => {
     const reg = new InterRelayProducerRegistry();
     const coord = new StandbyWarmPipeCoordinator(reg);
     expect(coord.currentPipeConsumer('unknown')).toBeNull();
+    // C1: ensure mints the keepalive consumer only once a REAL producerId is known
+    // (the no-producer path now DEFERS). Record the primary's announce first so
+    // ensure consumes it on the ready path.
+    reg.record({ type: 'pipe-producer', roomId: 'room-S', producerId: 'c-prod', kind: 'video' });
     const consumer = { id: 'c', kind: 'video', pause: vi.fn(), paused: true, close: vi.fn() } as any;
     const pipeTransport = { consume: vi.fn().mockResolvedValue(consumer), connect: vi.fn(), tuple: { localPort: 1 }, close: vi.fn() } as any;
     const router = { createPipeTransport: vi.fn().mockResolvedValue(pipeTransport) } as any;

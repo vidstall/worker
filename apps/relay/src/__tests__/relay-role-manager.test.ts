@@ -120,12 +120,14 @@ describe('ensureWarmPipe — standby pre-first-join', () => {
     expect(topology.pipeConsumer).toBeNull();
   });
 
-  it('RED-RO-005: after ensureWarmPipe, consumer is paused (consumer.pause() called)', async () => {
+  it('RED-RO-005: after ensureWarmPipe with a REAL producerId, consumer is paused (consumer.pause() called)', async () => {
     const consumer = makeMockConsumer();
     const pipeTransport = makeMockPipeTransport(consumer);
     const router = makeMockRouter(pipeTransport);
 
-    const result = await ensureWarmPipe(topology, router as any, 40000);
+    // C1: the keepalive consumer is minted once the REAL producerId is known
+    // (post-announce). The no-producerId pre-join call now DEFERS (see DEFER test).
+    const result = await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL');
 
     // Consumer must exist and pause() must have been called
     expect(result).not.toBeNull();
@@ -139,7 +141,7 @@ describe('ensureWarmPipe — standby pre-first-join', () => {
     const pipeTransport = makeMockPipeTransport(consumer);
     const router = makeMockRouter(pipeTransport);
 
-    await ensureWarmPipe(topology, router as any, 40000);
+    await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL');
 
     // The pipe transport was created (pipe established)
     expect(router.createPipeTransport).toHaveBeenCalledOnce();
@@ -149,13 +151,32 @@ describe('ensureWarmPipe — standby pre-first-join', () => {
     expect(consumer.pause).toHaveBeenCalledOnce();
   });
 
-  it('idempotent: second call returns same consumer, does not open second pipe', async () => {
+  it('C1 DEFER: with NO producerId, ensureWarmPipe binds the transport but does NOT consume — returns null', async () => {
     const consumer = makeMockConsumer();
     const pipeTransport = makeMockPipeTransport(consumer);
     const router = makeMockRouter(pipeTransport);
 
-    const first = await ensureWarmPipe(topology, router as any, 40000);
-    const second = await ensureWarmPipe(topology, router as any, 40000);
+    const result = await ensureWarmPipe(topology, router as any, 40000);
+
+    // No real producer announced yet → defer. Consuming a `pipe-producer-pending`
+    // sentinel throws "Producer not found" on real mediasoup; the transport is still
+    // bound + retained so the standby can announce its {ip,port} UP, and onAnnounce
+    // re-runs with the real id.
+    expect(result).toBeNull();
+    expect(router.createPipeTransport).toHaveBeenCalledOnce();
+    expect(pipeTransport.consume).not.toHaveBeenCalled();
+    expect(consumer.pause).not.toHaveBeenCalled();
+    expect(topology.pipeConsumer).toBeNull();
+    expect(topology.pipeTransport).toBe(pipeTransport);
+  });
+
+  it('idempotent: second call (real producerId) returns same consumer, does not open second pipe', async () => {
+    const consumer = makeMockConsumer();
+    const pipeTransport = makeMockPipeTransport(consumer);
+    const router = makeMockRouter(pipeTransport);
+
+    const first = await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL');
+    const second = await ensureWarmPipe(topology, router as any, 40000, 'producer-REAL');
 
     expect(first).toBe(second);
     // createPipeTransport called only ONCE
@@ -220,16 +241,18 @@ describe('ensureWarmPipe — G1 producerId resolution', () => {
     expect(consumeArg.producerId).toBe('producer-REAL-from-primary');
   });
 
-  it('RED-G1: falls back to the typed placeholder when no producerId is provided', async () => {
+  it('C1: DEFERS (no consume) when no producerId is provided — the placeholder sentinel is never consumed', async () => {
     const consumer = makeMockConsumer();
     const pipeTransport = makeMockPipeTransport(consumer);
     const router = makeMockRouter(pipeTransport);
 
-    await ensureWarmPipe(topology, router as any, 40000);
+    const result = await ensureWarmPipe(topology, router as any, 40000);
 
-    const consumeArg = pipeTransport.consume.mock.calls[0]![0] as { producerId: string };
-    // Clearly-marked fallback placeholder (no real producer announced yet)
-    expect(consumeArg.producerId).toBe('pipe-producer-pending-room-g1');
+    // No real producer announced yet → defer. The `pipe-producer-pending-<roomId>`
+    // sentinel is NEVER consumed (it throws "Producer not found" on real mediasoup);
+    // onAnnounce re-runs with the real id once it arrives.
+    expect(result).toBeNull();
+    expect(pipeTransport.consume).not.toHaveBeenCalled();
   });
 
   it('RED-G1: still pauses the consumer when a real producerId is used (REQ-RO-005 preserved)', async () => {

@@ -224,11 +224,10 @@ describe('REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll 
     const { router, transports } = makeMockRouter();
     const coord = new StandbyWarmPipeCoordinator(reg);
 
-    // First join: NOT ready → placeholder (legacy ensure, no peerRelayId).
-    await coord.ensure(topology, router as any, 40000);
-    expect(transports[0]!.consume.mock.calls[0]![0]).toMatchObject({
-      producerId: 'pipe-producer-pending-room-g1',
-    });
+    // First join: NOT ready → DEFER (C1, legacy ensure, no peerRelayId). No consume yet.
+    const first = await coord.ensure(topology, router as any, 40000);
+    expect(first).toBeNull();
+    expect(transports[0]!.consume).not.toHaveBeenCalled();
 
     // Legacy announce arrives (NO peerRelayId) → must land under the DEFAULT key.
     reg.record({ type: 'pipe-producer', roomId: 'room-g1', producerId: 'pReal-legacy', kind: 'video' });
@@ -237,12 +236,11 @@ describe('REQ-RMS-008 — registry keyed per (roomId, peerRelayId) + resolveAll 
     // The cutover re-consumed the REAL producer the ensure was awaiting (default-key match).
     expect(reran).toBe(true);
     expect(reg.resolve('room-g1')?.producerId).toBe('pReal-legacy'); // 1-arg resolve = DEFAULT peer
-    // ensureWarmPipe's create-own path mints a FRESH transport on the re-run (the
-    // placeholder lived on transports[0]; the real re-consume on transports[1]),
-    // mirroring inter-relay-warmpipe.test.ts RED-BENCH2-4. Assert the re-run's
-    // transport consumed the REAL id end-to-end (the default-key cutover worked).
-    expect(transports.length).toBeGreaterThanOrEqual(2);
-    const reConsume = transports.at(-1)!.consume.mock.calls.at(-1)![0] as { producerId: string };
+    // C3 (cross-relay DEADLOCK fix): the EXISTING bound transport is REUSED (not
+    // closed+rebuilt — that would tear down the connected pipe) and consumes the REAL
+    // id end-to-end — still ONE transport (the default-key cutover worked).
+    expect(transports).toHaveLength(1);
+    const reConsume = transports[0]!.consume.mock.calls.at(-1)![0] as { producerId: string };
     expect(reConsume.producerId).toBe('pReal-legacy'); // re-run consumed the REAL id end-to-end
   });
 });

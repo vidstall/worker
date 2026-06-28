@@ -902,11 +902,31 @@ export class StandbyWarmPipeCoordinator {
       'G1: announce arrived — re-running warm pipe with REAL producerId (placeholder cutover)',
     );
 
+    // C3 (RMS-live cross-relay DEADLOCK fix) — PRODUCE-then-CONSUME.
+    // produceLocalFromPipe must mint the standby's LOCAL producer (id ==
+    // announced.producerId) on useTopology.pipeTransport BEFORE ensureWarmPipe
+    // consumes it: REAL mediasoup `transport.consume({producerId})` requires that
+    // producer to already exist on the router. Every passing integration test
+    // produces-then-consumes; the live coordinator consumed-then-produced, so on
+    // first-peer-join the consume threw "Producer not found" and the warm pipe
+    // never came up (the active-forward DEADLOCK). The forward also feeds local
+    // clients (REQ-RMS-025); it is a no-op when active-forward is OFF (keepalive-
+    // only) — so a gate-OFF standby keeps consuming the announced id as before.
+    await this.forwardLocalProducers(roomId, useTopology, peerRelayId);
+
+    // C3 — consume onto the EXISTING bound+connected pipe transport (5-arg) instead
+    // of letting ensureWarmPipe close+rebuild it (the 4-arg create-own path). A
+    // rebuild here would tear down the transport the standby already announced UP +
+    // connected (onPrimaryConnectParams) AND destroy the LOCAL producer just minted
+    // on it, re-triggering "Producer not found". Falls back to the create-own path
+    // only if no transport is bound yet (defensive; ensure binds it first).
+    const reuse = useTopology.pipeTransport ?? undefined;
     const consumer = await ensureWarmPipe(
       useTopology,
       useRouter,
       usePipePort,
       announced.producerId,
+      reuse,
     );
 
     this.states.set(meshKey(roomId, peerRelayId), {
@@ -916,11 +936,6 @@ export class StandbyWarmPipeCoordinator {
       consumedProducerId: announced.producerId,
       pending: false,
     });
-
-    // REQ-RMS-025 — ACTIVE forward: the announce that just resolved is exactly when
-    // rtpParameters become available, so mint the standby's LOCAL producer(s) now
-    // (the warm pipe is connected + retained on useTopology.pipeTransport).
-    await this.forwardLocalProducers(roomId, useTopology, peerRelayId);
 
     return consumer !== null;
   }

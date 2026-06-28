@@ -213,11 +213,12 @@ export async function createStandbyPipeTransport(
  * @param topology   - Room topology state (mutated: pipeConsumer set on success).
  * @param router     - The mediasoup Router on the standby relay.
  * @param pipePort   - Local port for the PlainTransport pipe (from PIPE_PORT_RANGE).
- * @param producerId - The PRIMARY's real pipe-producer ID, resolved from the
- *                     inter-relay announce (see inter-relay.ts). When omitted,
- *                     a clearly-marked `pipe-producer-pending-<roomId>` placeholder
- *                     is used (no real producer announced yet — G1 fallback).
- * @returns The paused Consumer, or null for primary / on error.
+ * @param producerId - The real pipe-producer ID, resolved from the inter-relay
+ *                     announce (see inter-relay.ts). When OMITTED (no producer
+ *                     announced yet) the transport is bound + retained and the
+ *                     call DEFERS — returns null without consuming (C1). The
+ *                     standby's onAnnounce re-runs with the real id once it arrives.
+ * @returns The paused Consumer, or null for primary / deferred (no producerId).
  */
 export async function ensureWarmPipe(
   topology: RoomTopology,
@@ -270,16 +271,28 @@ export async function ensureWarmPipe(
   // close it (an un-retained transport leaks idle on the router until exit).
   topology.pipeTransport = transport;
 
-  // Consume from the pipe transport — the producer lives on the primary Router.
-  // G1 wiring: the caller (signaling layer) resolves the PRIMARY's real
-  // producerId from the inter-relay announce registry (inter-relay.ts) and
-  // passes it here. If no producer has been announced yet, we fall back to a
-  // CLEARLY-MARKED `pipe-producer-pending-<roomId>` placeholder — the standby
-  // re-runs ensureWarmPipe once the announce arrives (the topology.pipeConsumer
-  // idempotency guard is reset by the caller in that not-ready path).
-  const resolvedProducerId = producerId ?? `pipe-producer-pending-${topology.roomId}`;
+  // C1 (RMS-live cross-relay DEADLOCK fix) — DEFER when no producer announced yet.
+  // The standby's FIRST ensure runs on first-peer-join, BEFORE the primary has
+  // announced any producer (the live ordering). With no real producerId there is
+  // NOTHING to consume: consuming a `pipe-producer-pending-<roomId>` sentinel
+  // throws "Producer … not found" on REAL mediasoup (only mocks tolerated it,
+  // which is why the hermetic suite hid the live deadlock). The transport is
+  // already bound + retained on topology.pipeTransport ABOVE, so index.ts can
+  // announce its {ip,port} UP. Return null (deferred) and let
+  // StandbyWarmPipeCoordinator.onAnnounce re-run with the REAL producerId once the
+  // announce arrives. The resolved-id path below (failover/keepalive consumer,
+  // REQ-RO-005, relay-worker-recovery) is UNCHANGED.
+  if (producerId === undefined) {
+    return null;
+  }
+
+  // Consume from the pipe transport — the producer (the standby's LOCAL producer
+  // minted by produceLocalFromPipe in the active-forward path, or the primary's
+  // piped producer in single-process tests) lives on this router by now. The
+  // caller (StandbyWarmPipeCoordinator) resolves the real producerId from the
+  // inter-relay announce registry (inter-relay.ts) and passes it here.
   const consumer = await transport.consume({
-    producerId: resolvedProducerId,
+    producerId,
   } as Parameters<msTypes.PipeTransport['consume']>[0]);
 
   // REQ-RO-005: pause immediately — RTCP keepalive only, saves ~80% pipe BW.
