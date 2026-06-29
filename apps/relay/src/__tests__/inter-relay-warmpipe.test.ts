@@ -34,6 +34,7 @@ import {
   createInterRelayAnnouncer,
 } from '@dvconf/inter-relay-client';
 import type { RoomTopology } from '@dvconf/inter-relay-client';
+import type { types as msTypes } from 'mediasoup';
 
 // ── mediasoup mock factories (mirror relay-role-manager.test.ts) ─────────
 
@@ -595,5 +596,114 @@ describe('StandbyWarmPipeCoordinator — activeForward gate (L1.4, RMS_ACTIVE_FO
     expect(onLocalProducer).toHaveBeenCalledWith(
       'room-gate-on', expect.objectContaining({ id: 'pGateOn', kind: 'audio' }), 'pub-gate-on', PEER,
     );
+  });
+});
+
+// ── E. StandbyWarmPipeCoordinator — REVERSE leg (REQ-RMS-034 / 026, part-3) ──
+//
+// part-3 reverse leg (Task A2): a STANDBY-homed local client's producer is
+// consumed onto the warm pipe UP toward the primary and announced UP carrying
+// the pipe-CONSUMER's REMAPPED rtpParameters (REQ-RMS-026, symmetric to the
+// forward leg). Ordering (REQ-RMS-037): a producer arriving BEFORE the pipe is
+// connected is QUEUED and drained on connect. Idempotent per (room,peer): the
+// same producerId is consumed at most once onto a given transport; the dedup is
+// cleared when the leg's transport is replaced so a fresh pipe re-consumes.
+
+describe('StandbyWarmPipeCoordinator — REQ-RMS-034 REVERSE leg (onLocalClientProducer)', () => {
+  /** A distinct rtpParameters object — proves the announce carries the pipe
+   *  CONSUMER's REMAPPED params (REQ-RMS-026), not the source producer's. */
+  const REMAPPED_RTP = rtpParams(987654) as msTypes.RtpParameters;
+  /** onLocalClientProducer ignores the router arg (the standby consumes onto its
+   *  retained pipeTransport, not a fresh router transport) — a mock is enough. */
+  const fakeRouter = makeMockRouter().router as unknown as msTypes.Router;
+
+  it('RED-RA-2: onLocalClientProducer consumes the local producer onto the warm pipe and announces UP with the CONSUMER rtpParameters', async () => {
+    const upAnnounce = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    const fakeConsumer = { id: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP };
+    const fakeTransport = { consume: vi.fn().mockResolvedValue(fakeConsumer) } as unknown as msTypes.PipeTransport;
+    coord.setReverseAnnouncer(upAnnounce);
+    coord.bindPipeTransportForTest('roomA', 'ws://primary', fakeTransport); // thin test seam mirroring currentPipeTransport
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://primary');
+    expect(fakeTransport.consume).toHaveBeenCalledWith(expect.objectContaining({ producerId: 'local-1' }));
+    expect(upAnnounce).toHaveBeenCalledWith('roomA', { id: 'piped-up-1', kind: 'video' }, 'clientA', 'ws://primary', REMAPPED_RTP);
+  });
+
+  it('RED-RA-2b: a local producer arriving BEFORE the pipe is connected is QUEUED, then drained on connect (never consumes onto an unconnected transport)', async () => {
+    const upAnnounce = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    coord.setReverseAnnouncer(upAnnounce);
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://primary');
+    expect(upAnnounce).not.toHaveBeenCalled();
+    coord.bindPipeTransportForTest('roomA', 'ws://primary', { consume: vi.fn().mockResolvedValue({ id: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }) } as unknown as msTypes.PipeTransport);
+    await coord.drainReverse('roomA', 'ws://primary'); // the method onPrimaryConnectParams calls after transport.connect succeeds
+    expect(upAnnounce).toHaveBeenCalledTimes(1);
+  });
+
+  it('RED-RA-2c: the same local producer is not consumed twice (idempotency); dedup is cleared when the pipe transport is replaced', async () => {
+    const upAnnounce = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    coord.setReverseAnnouncer(upAnnounce);
+    const t1 = { consume: vi.fn().mockResolvedValue({ id: 'p1', kind: 'video', rtpParameters: REMAPPED_RTP }) } as unknown as msTypes.PipeTransport;
+    coord.bindPipeTransportForTest('roomA', 'ws://primary', t1);
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://primary');
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://primary');
+    expect(t1.consume).toHaveBeenCalledTimes(1); // deduped on same transport
+    coord.onPipeTransportReplacedForTest('roomA', 'ws://primary'); // clears reverseConsumedIds for the leg
+    const t2 = { consume: vi.fn().mockResolvedValue({ id: 'p2', kind: 'video', rtpParameters: REMAPPED_RTP }) } as unknown as msTypes.PipeTransport;
+    coord.bindPipeTransportForTest('roomA', 'ws://primary', t2);
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://primary');
+    expect(t2.consume).toHaveBeenCalledTimes(1); // re-consumes after replacement
+  });
+
+  it('RED-RA-2d: a TRANSIENT consume failure leaves the id UN-marked + warn-logged (no reject), so a later drive RE-CONSUMES and announces (self-heal, mirror forward Fix 1)', async () => {
+    const upAnnounce = vi.fn();
+    const logger = makeMockLogger();
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), logger as any, vi.fn(), true);
+    coord.setReverseAnnouncer(upAnnounce);
+    let calls = 0;
+    const consume = vi.fn().mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('transient worker hiccup — pipe connect not settled');
+      return { id: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP };
+    });
+    coord.bindPipeTransportForTest('roomA', 'ws://primary', { consume } as unknown as msTypes.PipeTransport);
+
+    // Attempt 1: consume REJECTS (transient) → must NOT reject out of onLocalClientProducer,
+    // must NOT announce, must warn-log, and must leave the id UN-marked.
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://primary');
+    expect(consume).toHaveBeenCalledTimes(1);
+    expect(upAnnounce).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalled(); // real fault → warn (not debug)
+
+    // Attempt 2 (same id): id was left un-marked → RETRY → consume resolves → announce fires.
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://primary');
+    expect(consume).toHaveBeenCalledTimes(2); // retried (self-heal)
+    expect(upAnnounce).toHaveBeenCalledTimes(1);
+    expect(upAnnounce).toHaveBeenCalledWith('roomA', { id: 'piped-up-1', kind: 'video' }, 'clientA', 'ws://primary', REMAPPED_RTP);
+  });
+
+  it('RED-RA-2d-drain: a transient failure on ONE queued producer does NOT discard the rest of the drained queue (the second is still announced)', async () => {
+    const upAnnounce = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    coord.setReverseAnnouncer(upAnnounce);
+
+    // Two producers QUEUE before the pipe is connected (no transport bound yet).
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'q1', kind: 'video' }, 'pubQ1', 'ws://primary');
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'q2', kind: 'video' }, 'pubQ2', 'ws://primary');
+    expect(upAnnounce).not.toHaveBeenCalled();
+
+    // On connect, the FIRST queued consume (q1) rejects (transient); the SECOND (q2) resolves.
+    const consume = vi.fn().mockImplementation(async (arg: { producerId: string }) => {
+      if (arg.producerId === 'q1') throw new Error('transient on q1');
+      return { id: `piped-${arg.producerId}`, kind: 'video', rtpParameters: REMAPPED_RTP };
+    });
+    coord.bindPipeTransportForTest('roomA', 'ws://primary', { consume } as unknown as msTypes.PipeTransport);
+    await coord.drainReverse('roomA', 'ws://primary'); // must NOT reject; must not lose q2
+
+    // q1 failed transiently, but q2 was STILL drained + announced (no queue loss).
+    expect(consume).toHaveBeenCalledTimes(2);
+    expect(upAnnounce).toHaveBeenCalledTimes(1);
+    expect(upAnnounce).toHaveBeenCalledWith('roomA', { id: 'piped-q2', kind: 'video' }, 'pubQ2', 'ws://primary', REMAPPED_RTP);
   });
 });

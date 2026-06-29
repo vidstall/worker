@@ -678,6 +678,25 @@ function placeholderProducerId(roomId: string): string {
 }
 
 /**
+ * REQ-RMS-034 / 026 (part-3 reverse leg) — pushes a standby's local-client
+ * producer UP to the primary over the warm pipe. Mirrors the forward announcer's
+ * closure shape `(roomId, producer, producerPeerId?, peerRelayId?, rtpParameters?)`:
+ * the `producer` is the PIPED consumer (its `.id` is the id the primary consumes,
+ * NOT the source producer's id); `rtpParameters` are the pipe-CONSUMER's REMAPPED
+ * params (REQ-RMS-026 — the SSRC differs across the pipe), so the primary's
+ * produceLocalFromPipe ingests it correctly. Bound by the wiring layer (index.ts)
+ * via setReverseAnnouncer; null until wired (forward/keepalive-only rooms never set
+ * it → byte-stable).
+ */
+export type ReverseUpAnnouncer = (
+  roomId: string,
+  producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+  producerPeerId?: string,
+  peerRelayId?: string,
+  rtpParameters?: msTypes.RtpParameters,
+) => void;
+
+/**
  * BENCH-2 / G1 — orchestrates the STANDBY warm pipe so it consumes the PRIMARY's
  * REAL producer (replacing the `pipe-producer-pending-<roomId>` placeholder).
  *
@@ -710,6 +729,38 @@ export class StandbyWarmPipeCoordinator {
    * duplicate producer id). Cleared with the room's state in clear().
    */
   private readonly producedIds = new Map<string, Set<string>>();
+
+  /**
+   * REQ-RMS-034 (part-3 reverse leg) — the UP-announcer that pushes a reverse
+   * announce to the primary. Bound by setReverseAnnouncer (wiring layer); null
+   * until wired so a forward/keepalive-only room is byte-stable (never announces UP).
+   */
+  private reverseAnnouncer: ReverseUpAnnouncer | null = null;
+  /**
+   * REQ-RMS-037 — local-client producers seen BEFORE the reverse pipe was
+   * connected, keyed by meshKey(roomId, peerRelayId). Drained by drainReverse once
+   * onPrimaryConnectParams connects the leg. Cleared with the room's state in clear().
+   */
+  private readonly reversePending = new Map<
+    string,
+    Array<{ producer: Pick<msTypes.Producer, 'id' | 'kind'>; producerPeerId?: string }>
+  >();
+  /**
+   * REQ-RMS-034 — producerIds already consumed onto the reverse pipe, keyed by
+   * meshKey. Prevents a re-drive (drainReverse / a repeated onLocalClientProducer)
+   * from double-consuming the same id.
+   *
+   * Cleared in PRODUCTION ONLY on leg teardown (clear()). `onPipeTransportReplacedForTest`
+   * is TEST-ONLY (it models a transport swap the direct-class unit cannot otherwise
+   * trigger). GUARDRAIL: any FUTURE production path that REPLACES an established leg's
+   * `topology.pipeTransport` in place — specifically `ensureWarmPipe`'s create-own
+   * close+replace (relay-role-manager.ts:252-254) — MUST also clear `reverseConsumedIds`
+   * + `reversePending` for that key, or a re-consume onto the NEW pipe is silently
+   * dropped (the id stays marked against the dead transport). Not wired now: that
+   * close+replace is NOT on the reverse leg's live path (A2 scope), and `onAnnounce`'s
+   * C3 path REUSES the bound transport instead of replacing it.
+   */
+  private readonly reverseConsumedIds = new Map<string, Set<string>>();
 
   /**
    * @param registry        - the standby's announce registry.
@@ -999,6 +1050,11 @@ export class StandbyWarmPipeCoordinator {
     // later room with the same key re-mints cleanly (the producers themselves are
     // owned + closed by the wiring layer / their transport teardown).
     this.producedIds.delete(key);
+    // part-3 reverse leg — the leg's pipe transport is being torn down: drop the
+    // reverse consume-dedup + any queued local producers so a later room/leg with
+    // the same key re-consumes onto a fresh pipe cleanly.
+    this.reverseConsumedIds.delete(key);
+    this.reversePending.delete(key);
   }
 
   /**
@@ -1033,6 +1089,12 @@ export class StandbyWarmPipeCoordinator {
       { roomId, primaryPort: params.port },
       'F1: standby PipeTransport connected to primary reply params (handshake complete)',
     );
+    // part-3 reverse leg (REQ-RMS-037 ordering) — the pipe is now connected: drain
+    // any local-client producers that arrived BEFORE connect (consume-onto-pipe UP
+    // + announce UP). No-op when nothing was queued. NOT driven from the forward
+    // forwardLocalProducers/onAnnounce path (that would risk re-announcing a minted
+    // producer UP = a loop — REQ-RMS-036).
+    await this.drainReverse(roomId, peerRelayId);
   }
 
   /**
@@ -1093,6 +1155,199 @@ export class StandbyWarmPipeCoordinator {
     }
     const first = this.states.values().next();
     return first.done ? null : (first.value.topology.pipeTransport ?? null);
+  }
+
+  // ── part-3 REVERSE leg (REQ-RMS-034 / 026) ──────────────────────────────
+  // A STANDBY-homed local client's producer is consumed onto the warm pipe UP
+  // toward the primary and announced UP (mirror of the forward consume-onto-pipe).
+  // ADDITIVE to the forward path; the reverse UP-announcer fires ONLY from
+  // onLocalClientProducer (a real local-client produce) — NEVER from the forward
+  // mint path (forwardLocalProducers), so a minted/hub-fanned producer never re-
+  // announces UP (loop-safe, REQ-RMS-036; Task B2 asserts this wire output).
+
+  /** REQ-RMS-034 — bind the reverse UP-announcer (wiring layer, index.ts). */
+  setReverseAnnouncer(fn: ReverseUpAnnouncer): void {
+    this.reverseAnnouncer = fn;
+  }
+
+  /**
+   * REQ-RMS-034 — a STANDBY-homed local client produced. Consume that producer
+   * onto the warm PipeTransport UP toward the primary and announce it UP carrying
+   * the pipe-CONSUMER's REMAPPED rtpParameters (REQ-RMS-026). If the pipe transport
+   * is not connected yet the producer is QUEUED (reversePending) and drained by
+   * drainReverse once onPrimaryConnectParams connects the leg (REQ-RMS-037 ordering)
+   * — RTP is NEVER piped onto an unconnected transport. Idempotent per (room,peer):
+   * the same producerId is consumed at most once onto a given transport
+   * (reverseConsumedIds).
+   *
+   * `_router` is accepted for signature symmetry with the forward onStandbyProducer
+   * hook (A1) but unused here — the standby consumes onto its RETAINED
+   * topology.pipeTransport, not a fresh router transport.
+   */
+  async onLocalClientProducer(
+    roomId: string,
+    _router: msTypes.Router,
+    producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+    producerPeerId?: string,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): Promise<void> {
+    const key = meshKey(roomId, peerRelayId);
+    const transport = this.states.get(key)?.topology.pipeTransport ?? null;
+    if (transport === null) {
+      // Not connected yet — QUEUE; drainReverse re-drives on connect (no double-pipe).
+      const q = this.reversePending.get(key) ?? [];
+      q.push({ producer, producerPeerId });
+      this.reversePending.set(key, q);
+      return;
+    }
+    await this.reverseConsumeAndAnnounce(roomId, key, peerRelayId, transport, producer, producerPeerId);
+  }
+
+  /**
+   * Consume one local producer onto the (connected) reverse pipe transport and
+   * announce the piped consumer UP. Dedup per (room,peer): a producerId already
+   * consumed onto this leg is skipped (no double-consume). Marks BEFORE the consume
+   * so a re-entrant drive cannot double-consume the same id.
+   *
+   * Error discipline MIRRORS the forward path's Fix 1 (forwardLocalProducers): the
+   * consume + announce are wrapped so a TRANSIENT failure (a) un-marks the id (a later
+   * re-drive self-heals/retries) and (b) is SWALLOWED — it never propagates out of
+   * drainReverse (so one bad queued item does not discard the rest of the drained
+   * queue) nor out of onPrimaryConnectParams after transport.connect() already
+   * succeeded. A benign duplicate (defensive belt — consume(), unlike the forward
+   * produce(), does NOT throw on duplicate, so the `seen` Set is the real dedup) keeps
+   * the id marked.
+   */
+  private async reverseConsumeAndAnnounce(
+    roomId: string,
+    key: string,
+    peerRelayId: string,
+    transport: msTypes.PipeTransport,
+    producer: Pick<msTypes.Producer, 'id' | 'kind'>,
+    producerPeerId?: string,
+  ): Promise<void> {
+    let seen = this.reverseConsumedIds.get(key);
+    if (!seen) {
+      seen = new Set<string>();
+      this.reverseConsumedIds.set(key, seen);
+    }
+    if (seen.has(producer.id)) {
+      return;
+    }
+    // Mark BEFORE the await — the re-entrancy guard against two concurrent calls for
+    // the SAME id. Un-marked below on a transient failure so a re-drive retries.
+    seen.add(producer.id);
+    let pipedConsumer: msTypes.Consumer;
+    try {
+      // REQ-RMS-026 — the announce carries the pipe CONSUMER's rtpParameters (the
+      // REMAPPED SSRC across the pipe), NOT the source producer's.
+      pipedConsumer = await pipeProducerOntoPrimaryTransport(transport, producer.id);
+      this.reverseAnnouncer?.(
+        roomId,
+        { id: pipedConsumer.id, kind: pipedConsumer.kind },
+        producerPeerId,
+        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
+        pipedConsumer.rtpParameters,
+      );
+    } catch (err) {
+      // Mirror forward Fix 1 — discriminate a benign duplicate (keep marked; a
+      // defensive belt since consume() does not throw on duplicate) from a TRANSIENT
+      // failure (worker hiccup / consume racing a rebuilt pipe's connect).
+      const message = String((err as Error)?.message ?? err);
+      const dup = /already exists|duplicate/i.test(message);
+      if (dup) {
+        // Keep marked + skip so we never re-consume a known id.
+        this.logger?.debug(
+          { roomId, producerId: producer.id, error: message },
+          'REQ-RMS-034: reverse consume-onto-pipe skipped — producer id already consumed (idempotent)',
+        );
+      } else {
+        // Un-mark so the next onLocalClientProducer / drainReverse self-heals
+        // (retries). A real fault → warn, not debug. SWALLOW (do NOT rethrow): one
+        // bad item must not discard the rest of a drained queue nor escape
+        // onPrimaryConnectParams after connect() already succeeded.
+        seen.delete(producer.id);
+        this.logger?.warn(
+          { roomId, producerId: producer.id, error: message },
+          'REQ-RMS-034: reverse consume-onto-pipe failed — leaving id unmarked to retry on the next drive',
+        );
+      }
+      return;
+    }
+    // Log AFTER a successful announce (A1 lesson — keep log fidelity; never before).
+    // Records the source producer id → piped consumer id (mirror the forward info shape).
+    this.logger?.info(
+      {
+        roomId,
+        producerId: producer.id,
+        pipedConsumerId: pipedConsumer.id,
+        kind: pipedConsumer.kind,
+        peerRelayId,
+      },
+      'REQ-RMS-034: standby consumed a LOCAL producer onto the reverse pipe + announced UP (reverse hop)',
+    );
+  }
+
+  /**
+   * REQ-RMS-037 — drain producers queued before the reverse pipe was connected.
+   * Called by onPrimaryConnectParams AFTER transport.connect() succeeds. No-op when
+   * the leg has no bound transport yet (defensive).
+   */
+  async drainReverse(roomId: string, peerRelayId: string = DEFAULT_PEER_RELAY_ID): Promise<void> {
+    const key = meshKey(roomId, peerRelayId);
+    const transport = this.states.get(key)?.topology.pipeTransport ?? null;
+    if (transport === null) {
+      return;
+    }
+    const pend = this.reversePending.get(key) ?? [];
+    this.reversePending.set(key, []);
+    for (const p of pend) {
+      await this.reverseConsumeAndAnnounce(roomId, key, peerRelayId, transport, p.producer, p.producerPeerId);
+    }
+  }
+
+  /**
+   * TEST SEAM — bind a pipe transport for a (room,peer) leg, mirroring how
+   * ensure()/onPrimaryConnectParams retain it on topology.pipeTransport. Lets the
+   * direct-class unit exercise onLocalClientProducer/drainReverse without a real
+   * Worker (the same test-only role as the currentPipeTransport accessor). A second
+   * bind on the same leg REPLACES the transport (the dedup is cleared separately via
+   * onPipeTransportReplacedForTest).
+   */
+  bindPipeTransportForTest(
+    roomId: string,
+    peerRelayId: string,
+    transport: msTypes.PipeTransport,
+  ): void {
+    const key = meshKey(roomId, peerRelayId);
+    const existing = this.states.get(key);
+    if (existing) {
+      existing.topology.pipeTransport = transport;
+      return;
+    }
+    this.states.set(key, {
+      topology: {
+        roomId,
+        role: 'standby',
+        primaryEndpoint: '',
+        standbyEndpoint: '',
+        pipePort: 0,
+        pipeConsumer: null,
+        pipeTransport: transport,
+      },
+      router: null as unknown as msTypes.Router,
+      pipePort: 0,
+      consumedProducerId: '',
+      pending: false,
+    });
+  }
+
+  /**
+   * TEST SEAM — simulate the leg's pipe transport being replaced: clear the reverse
+   * consume-dedup so a fresh pipe re-consumes (mirrors the clear() teardown clear).
+   */
+  onPipeTransportReplacedForTest(roomId: string, peerRelayId: string): void {
+    this.reverseConsumedIds.delete(meshKey(roomId, peerRelayId));
   }
 }
 
