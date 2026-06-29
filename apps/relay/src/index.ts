@@ -698,8 +698,13 @@ if (isMainModule) {
       // key as the M2 cascade lands real per-peer primary legs.
       releaseRoom: (roomId) => {
         pipePortAllocator.release(roomId);
-        primaryPipe.clear(roomId);
-        standbyWarmPipe.clear(roomId);
+        // B6b (REQ-RMS-036): clearRoom drops EVERY (room, peer) leg across all
+        // peerRelayId buckets, not just DEFAULT. `clear(roomId)` left the cascade
+        // legs (states + reverse dedup/pending maps) alive -> stale state on a reused
+        // roomId. clearRoom still tears down the DEFAULT leg (so the `${roomId}:primary`
+        // slot release is preserved) and additionally every cascade leg.
+        primaryPipe.clearRoom(roomId);
+        standbyWarmPipe.clearRoom(roomId);
       },
     };
 

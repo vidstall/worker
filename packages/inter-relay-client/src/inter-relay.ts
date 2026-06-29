@@ -87,6 +87,32 @@ function primaryPortKey(roomId: string, peerRelayId: string): string {
 }
 
 /**
+ * B6b (REQ-RMS-036) — the DISTINCT peerRelayId suffixes, across the given
+ * per-meshKey maps, whose key's ROOM segment EXACTLY equals `roomId`. The room-wide
+ * `clearRoom` teardown on each coordinator collects candidate legs from ALL of its
+ * maps (not just `states`) so a QUEUED-but-never-connected leg — an announce that
+ * landed in reverseMintPending / reversePending before its `states` entry ever
+ * formed — is also dropped. Same lastIndexOf('::') separator-boundary + EXACT
+ * segment-equality convention as InterRelayProducerRegistry.clearRoom: peerRelayId
+ * is `::`-free, so the LAST `::` is the separator, and equality (NOT a prefix) means
+ * clearRoom('room') never matches 'roomAB::...'.
+ */
+function roomPeerRelayIds(
+  roomId: string,
+  maps: ReadonlyArray<ReadonlyMap<string, unknown>>,
+): string[] {
+  const peers = new Set<string>();
+  for (const map of maps) {
+    for (const key of map.keys()) {
+      const sep = key.lastIndexOf('::'); // separator: peerRelayId after it is `::`-free
+      if (sep === -1 || key.slice(0, sep) !== roomId) continue; // exact room segment only
+      peers.add(key.slice(sep + 2));
+    }
+  }
+  return [...peers];
+}
+
+/**
  * Validate the `Authorization: Bearer <token>` header presented on an
  * inter-relay WS upgrade against the configured INTER_RELAY_TOKEN.
  *
@@ -1087,6 +1113,25 @@ export class StandbyWarmPipeCoordinator {
   }
 
   /**
+   * B6b (REQ-RMS-036) — room-wide teardown. `clear(roomId)` drops only the DEFAULT
+   * bucket; this drops EVERY (room, peer) leg across all peerRelayId buckets (states /
+   * producedIds / reverseConsumedIds / reversePending) by delegating to clear() per
+   * distinct peer, so a reused roomId starts with zero stale cascade legs. Mirrors
+   * InterRelayProducerRegistry.clearRoom. Collects candidate peers from ALL maps
+   * (incl. reversePending) so a queued-but-never-connected leg is dropped too.
+   */
+  clearRoom(roomId: string): void {
+    for (const peerRelayId of roomPeerRelayIds(roomId, [
+      this.states,
+      this.producedIds,
+      this.reverseConsumedIds,
+      this.reversePending,
+    ])) {
+      this.clear(roomId, peerRelayId);
+    }
+  }
+
+  /**
    * F1 (REQ-RO-003, design §2 step 5) — the primary's DOWN pipe-connect reply
    * arrived. Connect the standby's ALREADY-BOUND PipeTransport (minted by
    * createStandbyPipeTransport + retained on topology.pipeTransport via
@@ -1991,5 +2036,24 @@ export class PrimaryPipeCoordinator {
       this.deps.portAllocator.release(primaryPortKey(roomId, peerRelayId));
     }
     this.states.delete(key);
+  }
+
+  /**
+   * B6b (REQ-RMS-036) — room-wide teardown. `clear(roomId)` drops only the DEFAULT
+   * leg; this drops EVERY (room, peer) leg across all peerRelayId buckets (states /
+   * reverseMintPending / reverseMintedIds), closing each leg's transport + releasing
+   * its port via clear(). Mirrors InterRelayProducerRegistry.clearRoom. Collects
+   * candidate peers from ALL maps (incl. reverseMintPending) so a queued-but-never-
+   * connected leg — a reverse announce that arrived before the leg ever connected — is
+   * dropped too (else it would wrongly mint on a later drain).
+   */
+  clearRoom(roomId: string): void {
+    for (const peerRelayId of roomPeerRelayIds(roomId, [
+      this.states,
+      this.reverseMintPending,
+      this.reverseMintedIds,
+    ])) {
+      this.clear(roomId, peerRelayId);
+    }
   }
 }
