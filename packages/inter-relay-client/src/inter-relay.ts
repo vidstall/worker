@@ -1520,6 +1520,13 @@ interface PrimaryPipeState {
  */
 export class PrimaryPipeCoordinator {
   private readonly states = new Map<string, PrimaryPipeState>();
+  // REQ-RMS-037 — reverse announces queued until the leg transport is connected.
+  private readonly reverseMintPending = new Map<
+    string,
+    Array<{ producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters }>
+  >();
+  // REQ-RMS-034 — per-leg dedup of reverse-minted producer ids (mint exactly once).
+  private readonly reverseMintedIds = new Map<string, Set<string>>();
 
   constructor(private readonly deps: PrimaryPipeCoordinatorDeps) {}
 
@@ -1679,6 +1686,192 @@ export class PrimaryPipeCoordinator {
     }
   }
 
+  // ── Part-3 REVERSE leg (REQ-RMS-034/037) ──────────────────────────────────
+  // A standby-homed client's media flows UP the warm pipe to the PRIMARY, which
+  // mints a LOCAL hub copy from the announced reverse-pipe consumer (then fans
+  // it). The dual of the forward onProducer/drain: mint LOCALLY (no announce),
+  // with an announce-before-leg-connected QUEUE (REQ-RMS-037 ordering) + per-leg
+  // dedup (REQ-RMS-034 mint exactly once). onReverseAnnounce (A4) calls this.
+
+  /**
+   * Mint a LOCAL hub producer on the primary from the announced reverse-pipe
+   * consumer. Returns the minted producer, or null if QUEUED (the leg transport
+   * is not connected yet) or if it was a no-op dedup. A queued announce is minted
+   * later by drainReverseMints when the leg connects (REQ-RMS-037 ordering).
+   */
+  async reverseMint(
+    roomId: string,
+    _router: msTypes.Router,
+    announced: { producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters },
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): Promise<msTypes.Producer | null> {
+    const key = meshKey(roomId, peerRelayId);
+    const transport = this.states.get(key)?.pipeTransport ?? null;
+    if (!transport) {
+      const q = this.reverseMintPending.get(key) ?? [];
+      q.push(announced);
+      this.reverseMintPending.set(key, q);
+      this.deps.logger?.debug(
+        { roomId, peerRelayId, producerId: announced.producerId },
+        'R3: reverse announce queued -- awaiting leg transport connect',
+      );
+      return null;
+    }
+    return this.mintOne(key, transport, announced);
+  }
+
+  /**
+   * The shared mint+dedup primitive. Mints EXACTLY ONCE per producerId on this
+   * leg (REQ-RMS-034). A benign idempotent dup from mediasoup ("already exists")
+   * is swallowed -> null (mirror forward Fix-1). A TRANSIENT produce failure
+   * UN-MARKS the id so a later announce can retry (mirror A2 reverse-consume
+   * self-heal at inter-relay.ts:1253-1257) then rethrows.
+   */
+  private async mintOne(
+    key: string,
+    transport: msTypes.PipeTransport,
+    announced: { producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters },
+  ): Promise<msTypes.Producer | null> {
+    let seen = this.reverseMintedIds.get(key);
+    if (!seen) {
+      seen = new Set();
+      this.reverseMintedIds.set(key, seen);
+    }
+    if (seen.has(announced.producerId)) return null;
+    seen.add(announced.producerId);
+    try {
+      return await produceLocalFromPipe(transport, announced);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/already exists|duplicate/i.test(message)) return null; // benign idempotent dup
+      seen.delete(announced.producerId); // transient -> allow retry
+      throw err;
+    }
+  }
+
+  /**
+   * Drain every queued reverse announce onto the (now-connected) leg transport,
+   * minting a local hub producer for each (REQ-RMS-037). Called on leg connect.
+   * No-op if the leg transport is still absent. Returns the minted producers.
+   *
+   * RESILIENT (C1; mirrors A2's "one bad queued item must not discard the rest"
+   * lesson at the reverse-consume drain): we snapshot+clear the pending queue,
+   * then mint each item INDEPENDENTLY. A transient mintOne throw on item k must
+   * NOT abort the loop and lose items k+1..n (they were already cleared from the
+   * pending map) -> instead we log, RE-QUEUE the failed item onto the LIVE
+   * pending map (safe: we iterate the separate `pend` snapshot), and CONTINUE.
+   * mintOne already un-marked the id on a transient throw (seen.delete), so the
+   * re-queued retry re-mints; a benign dup still returns null (no double-mint).
+   */
+  async drainReverseMints(
+    roomId: string,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): Promise<msTypes.Producer[]> {
+    const key = meshKey(roomId, peerRelayId);
+    const transport = this.states.get(key)?.pipeTransport ?? null;
+    if (!transport) return [];
+    const pend = this.reverseMintPending.get(key) ?? [];
+    this.reverseMintPending.set(key, []);
+    const out: msTypes.Producer[] = [];
+    for (const a of pend) {
+      try {
+        const p = await this.mintOne(key, transport, a);
+        if (p) out.push(p);
+      } catch (err) {
+        this.deps.logger?.warn(
+          {
+            roomId,
+            peerRelayId,
+            producerId: a.producerId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          'R3: reverse mint failed mid-drain - continuing, re-queued for retry',
+        );
+        const live = this.reverseMintPending.get(key) ?? [];
+        live.push(a);
+        this.reverseMintPending.set(key, live);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Ensure the primary's reverse-leg pipe transport exists by MIRRORING the FULL
+   * onProducer handshake -- mint + connect + the §2 paramSender DOWN-reply that
+   * carries the primary's OWN bound port (I1: the reply is PART of the handshake;
+   * onProducer is the only other paramSender call site, so without it here the
+   * standby never learns the primary's port -> half-open pipe -> no reverse
+   * media, and a later onProducer sees pipeTransport != null and SKIPS its own
+   * reply). Then drains any queued reverse announces. If the standby params are
+   * not yet present we CANNOT connect -> log + return; a later
+   * onStandbyConnectParams completes the pair.
+   *
+   * The create-leg branch calls REAL mediasoup (createPrimaryPipeTransport) so it
+   * is NOT unit-tested here -- A5's hermetic integration test MUST cover the
+   * reverse-announce-arrives-BEFORE-any-forward-producer path (ensureReverseLeg's
+   * reason to exist). The already-bound drain-only branch is unit-covered
+   * (RED-RA-3b-order / -resilient).
+   */
+  async ensureReverseLeg(
+    roomId: string,
+    router: msTypes.Router,
+    peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+  ): Promise<void> {
+    const s = this.getState(roomId, peerRelayId);
+    if (s.pipeTransport === null) {
+      if (s.standbyParams === null) {
+        this.deps.logger?.debug(
+          { roomId, peerRelayId },
+          'R3: ensureReverseLeg deferred -- standby pipe-connect params not yet present',
+        );
+        return;
+      }
+      if (s.pipePort === null) {
+        s.pipePort = this.deps.portAllocator.allocate(primaryPortKey(roomId, peerRelayId));
+      }
+      // A5 MUST cover this real-mediasoup mint+connect+reply path for the
+      // reverse-announce-before-any-forward-producer case (not unit-tested).
+      const transport = await createPrimaryPipeTransport(router, s.pipePort);
+      s.pipeTransport = transport;
+      await transport.connect({
+        ip: s.standbyParams.ip,
+        port: s.standbyParams.port,
+        srtpParameters: s.standbyParams.srtpParameters,
+      } as Parameters<msTypes.PipeTransport['connect']>[0]);
+      s.connected = true;
+      // §2 handshake DOWN-reply with the primary's OWN bound port (byte-mirrors
+      // onProducer): without it the standby can't complete the pipe. SRTP field
+      // is guard-spread so a flag-OFF reply stays byte-identical; peerRelayId is
+      // DEFAULT-gated so the legacy single-standby reply routes to the legacy link.
+      const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
+      this.deps.paramSender(
+        roomId,
+        {
+          ip: announcedIp,
+          port: transport.tuple.localPort,
+          ...(transport.srtpParameters !== undefined
+            ? { srtpParameters: transport.srtpParameters }
+            : {}),
+        },
+        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
+      );
+      this.deps.logger?.info(
+        { roomId, peerRelayId, primaryPort: transport.tuple.localPort },
+        'R3: reverse-leg pipe transport minted + connected to standby + replied DOWN',
+      );
+    }
+    await this.drainReverseMints(roomId, peerRelayId);
+  }
+
+  /**
+   * Test seam (thin; mirrors the file's existing `*ForTest` seams): bind a leg
+   * PipeTransport directly so reverseMint/drainReverseMints can be unit-tested
+   * WITHOUT minting real mediasoup transports (that path is A5 integration).
+   */
+  bindLegTransportForTest(roomId: string, peerRelayId: string, transport: msTypes.PipeTransport): void {
+    this.getState(roomId, peerRelayId).pipeTransport = transport;
+  }
+
   /**
    * Drops a (room, peer)'s state, closes the transport, releases the port
    * (REQ-RO-009). `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID so the legacy
@@ -1686,6 +1879,15 @@ export class PrimaryPipeCoordinator {
    */
   clear(roomId: string, peerRelayId: string = DEFAULT_PEER_RELAY_ID): void {
     const key = meshKey(roomId, peerRelayId);
+    // REQ-RMS-034/037 (M1) — drop the reverse-leg maps UNCONDITIONALLY, BEFORE the
+    // `!s` early-return below. reverseMint QUEUES via `states.get` (NOT getState),
+    // so an announce that arrived before the leg ever connected sets
+    // reverseMintPending yet leaves NO states entry -> if these deletes sat after
+    // `if (!s) return` a queued-but-never-connected item would survive teardown and
+    // wrongly mint on a later drain. Drop both so a post-teardown re-announce mints
+    // afresh (the dedup set + the pending queue are per-leg state).
+    this.reverseMintPending.delete(key);
+    this.reverseMintedIds.delete(key);
     const s = this.states.get(key);
     if (!s) return;
     if (s.pipeTransport !== null) {

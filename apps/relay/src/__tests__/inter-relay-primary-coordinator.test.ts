@@ -8,6 +8,7 @@
  * Router / PipeTransport / Consumer (same factory pattern as the warmpipe test).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { types as msTypes } from 'mediasoup';
 import {
   PrimaryPipeCoordinator,
   type PipeConnectParams,
@@ -300,5 +301,111 @@ describe('PrimaryPipeCoordinator — REQ-RMS-029 original producerPeerId on casc
       undefined, // peerRelayId omitted (DEFAULT-gated)
       undefined, // rtpParameters (mock consumer has none)
     );
+  });
+});
+
+// ── E. REQ-RMS-034/037 — reverse-leg reverseMint (part-3 reverse leg). A
+//    standby-homed client's media flows UP the warm pipe to the PRIMARY, which
+//    mints a LOCAL hub copy from the announced reverse-pipe consumer. The dual of
+//    the forward onProducer/drain: mint LOCALLY (no announce), with an
+//    announce-before-leg-connected QUEUE (REQ-RMS-037 ordering) + per-leg dedup
+//    (REQ-RMS-034 mint exactly once). bindLegTransportForTest is the thin seam
+//    that stands in for ensureReverseLeg's real-mediasoup mint+connect (which is
+//    integration-covered in A5, NOT unit-covered here). ─────────────────────────
+describe('PrimaryPipeCoordinator — REQ-RMS-034/037 reverseMint (part-3 reverse leg)', () => {
+  const REMAPPED_RTP = {
+    codecs: [],
+    headerExtensions: [],
+    encodings: [{ ssrc: 99001 }],
+    rtcp: {},
+  } as unknown as msTypes.RtpParameters;
+  const fakeRouter = makeMockRouter().router as unknown as msTypes.Router;
+  let zeroAllocator: ReturnType<typeof makeStubAllocator>;
+
+  beforeEach(() => {
+    zeroAllocator = makeStubAllocator(0);
+  });
+
+  it('RED-RA-3b: reverseMint produces a local producer from the announced reverse-pipe consumer on the leg transport', async () => {
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
+    const fakeProducer = { id: 'piped-up-1', kind: 'video', on: vi.fn() };
+    const fakeTransport = { produce: vi.fn().mockResolvedValue(fakeProducer) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    const minted = await coord.reverseMint('roomA', fakeRouter, { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA');
+    expect(fakeTransport.produce).toHaveBeenCalledWith(expect.objectContaining({ id: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }));
+    expect(minted!.id).toBe('piped-up-1');
+  });
+
+  it('RED-RA-3b-order: a reverse announce arriving BEFORE the leg transport is connected is QUEUED, then minted on connect (REQ-RMS-037 ordering)', async () => {
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
+    const r1 = await coord.reverseMint('roomA', fakeRouter, { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA');
+    expect(r1).toBeNull(); // queued, not minted (no leg transport yet)
+    const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'piped-up-1', kind: 'video', on: vi.fn() }) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    const drained = await coord.drainReverseMints('roomA', 'ws://standbyA'); // called on leg connect
+    expect(drained.map((p) => p.id)).toEqual(['piped-up-1']);
+  });
+
+  it('RED-RA-3b-dedup: a duplicate reverse announce for the same producerId mints exactly once', async () => {
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
+    const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'piped-up-1', kind: 'video', on: vi.fn() }) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    await coord.reverseMint('roomA', fakeRouter, { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA');
+    await coord.reverseMint('roomA', fakeRouter, { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA');
+    expect(fakeTransport.produce).toHaveBeenCalledTimes(1);
+  });
+
+  it('RED-RA-3b-clear: clear() drops reverse dedup state so a post-teardown re-announce mints again', async () => {
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
+    const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'piped-up-1', kind: 'video', on: vi.fn() }) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    await coord.reverseMint('roomA', fakeRouter, { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA');
+    coord.clear('roomA', 'ws://standbyA');
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    await coord.reverseMint('roomA', fakeRouter, { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA');
+    expect(fakeTransport.produce).toHaveBeenCalledTimes(2);
+  });
+
+  it('RED-RA-3b-resilient: a TRANSIENT produce throw mid-drain does NOT discard the rest of the queue -- the bad item is re-queued, the others still mint, and a later drain retries it (C1; mirrors A2 Important#1)', async () => {
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
+    // produce() THROWS a transient (non-dup) error the FIRST time it sees up-A,
+    // then succeeds for everything (up-B always, up-A on retry).
+    let aAttempts = 0;
+    const fakeTransport = {
+      produce: vi.fn().mockImplementation(async (opts: { id: string; kind: string }) => {
+        if (opts.id === 'up-A' && aAttempts === 0) {
+          aAttempts += 1;
+          throw new Error('boom'); // transient (NOT 'already exists'/'duplicate')
+        }
+        return { id: opts.id, kind: opts.kind, on: vi.fn() };
+      }),
+    } as unknown as msTypes.PipeTransport;
+
+    // Queue A then B while NO transport bound -> both land in the pending queue.
+    expect(await coord.reverseMint('roomA', fakeRouter, { producerId: 'up-A', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA')).toBeNull();
+    expect(await coord.reverseMint('roomA', fakeRouter, { producerId: 'up-B', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA')).toBeNull();
+
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    // First drain: A throws transient, B must STILL mint (loop continues), A re-queued.
+    const drained1 = await coord.drainReverseMints('roomA', 'ws://standbyA');
+    expect(drained1.map((p) => p.id)).toEqual(['up-B']);
+
+    // Second drain proves A was re-queued (not lost) AND retried successfully.
+    const drained2 = await coord.drainReverseMints('roomA', 'ws://standbyA');
+    expect(drained2.map((p) => p.id)).toEqual(['up-A']);
+  });
+
+  it('RED-RA-3b-clear-pending: clear() drops the PENDING queue so a queued-then-cleared announce is NOT minted on a later drain (M1)', async () => {
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
+    // Queue an announce with NO transport bound (so it sits in reverseMintPending).
+    expect(await coord.reverseMint('roomA', fakeRouter, { producerId: 'up-X', kind: 'video', rtpParameters: REMAPPED_RTP }, 'ws://standbyA')).toBeNull();
+    // Tear the leg down BEFORE it ever connected -> the queued item must be dropped.
+    coord.clear('roomA', 'ws://standbyA');
+    // Now bind a transport and drain: nothing should mint (the queue was cleared).
+    const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'up-X', kind: 'video', on: vi.fn() }) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    const drained = await coord.drainReverseMints('roomA', 'ws://standbyA');
+    expect(drained).toEqual([]);
+    expect(fakeTransport.produce).not.toHaveBeenCalled();
   });
 });
