@@ -707,3 +707,59 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-034 REVERSE leg (onLocalClientP
     expect(upAnnounce).toHaveBeenCalledWith('roomA', { id: 'piped-q2', kind: 'video' }, 'pubQ2', 'ws://primary', REMAPPED_RTP);
   });
 });
+
+// ── F. REQ-RMS-036: Loop/echo prevention — minted producer never re-announces UP ──
+//
+// The reverse UP-announcer (setReverseAnnouncer) fires ONLY from
+// onLocalClientProducer (handleProduce — a real local-client produce).
+// It MUST NEVER fire from the forward mint path (forwardLocalProducers /
+// produceLocalFromPipe), otherwise a hub-fanned producer would re-announce UP,
+// loop back to the primary, and cause an echo/loop in the mesh.
+//
+// This is the teeth-bearing regression guard for §9 risk #1 (highest risk).
+// The invariant holds STRUCTURALLY (forwardLocalProducers does not touch
+// reverseAnnouncer), but this wire-output assertion catches any future
+// accidental wiring. Drive: clone REQ-RMS-025 (a) arrange exactly so the
+// test proves a REAL mint happened, not a vacuous no-op.
+
+describe('StandbyWarmPipeCoordinator — REQ-RMS-036 loop/echo prevention', () => {
+  const PEER = 'relay-loop-guard';
+
+  it('RED-RB-2: a standby that MINTS a hub-fanned producer (produceLocalFromPipe) never invokes the reverse UP-announcer (no loop)', async () => {
+    // Arrange: clone REQ-RMS-025 (a) exactly — single producer with rtpParameters,
+    // activeForward=true so forwardLocalProducers mints via produceLocalFromPipe.
+    const registry = new InterRelayProducerRegistry();
+    registry.record({
+      type: 'pipe-producer',
+      roomId: 'room-rb2',
+      producerId: 'pRB2',
+      kind: 'video',
+      producerPeerId: 'pub-RB2',
+      peerRelayId: PEER,
+      rtpParameters: rtpParams(77),
+    });
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    const upAnnounce = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true);
+    coord.setReverseAnnouncer(upAnnounce);
+    const topology = makeStandbyTopology('room-rb2');
+
+    // Drive the forward hub-fan mint seam (same as REQ-RMS-025 a).
+    await coord.ensure(topology, router as any, 40000, PEER);
+
+    // Positive assertion: the forward mint DID happen (not a vacuous no-op).
+    expect(transports[0]!.produce).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer).toHaveBeenCalledWith(
+      'room-rb2',
+      expect.objectContaining({ id: 'pRB2', kind: 'video' }),
+      'pub-RB2',
+      PEER,
+    );
+
+    // REQ-RMS-036: a MINTED producer NEVER re-announces UP (loop-safe).
+    // The reverse UP-announcer fires strictly from onLocalClientProducer
+    // (handleProduce) -- never from forwardLocalProducers / produceLocalFromPipe.
+    expect(upAnnounce).not.toHaveBeenCalled();
+  });
+});

@@ -1496,7 +1496,8 @@ export function createSignalingServer(
       // a hub copy and fans it everywhere (full bidirectional mesh, hub-via-primary).
       // Fires ONLY for a real local-client produce (handleProduce); a piped/minted
       // producer is created via produceLocalFromPipe and NEVER reaches handleProduce
-      // — so this can never re-announce a hub-minted stream (loop-safe). producerPeerId
+      // — so this can never re-announce a hub-minted stream (loop-safe, REQ-RMS-036;
+      // regression guard: inter-relay-warmpipe.test.ts RED-RB-2). producerPeerId
       // = the ORIGINAL local publisher (mapping.peerId) for stream/E2EE fidelity.
       // Gated on the hook being present (mirrors the primary onPrimaryProducer block):
       // until A4 wires it (and on the in-process bench) the hook is absent — without the
