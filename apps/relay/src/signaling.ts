@@ -178,6 +178,10 @@ interface PipeProducerMessage {
   kind: msTypes.MediaKind;
   /** REQ-RO-018 — publisher peerId (optional on the wire, back-compat). */
   producerPeerId?: string;
+  /** REQ-RMS-026/036 — origin relay (reverse leg). Optional/additive. */
+  peerRelayId?: string;
+  /** REQ-RMS-026 — remapped consumer params (reverse leg). Optional/additive. */
+  rtpParameters?: msTypes.RtpParameters;
 }
 
 /**
@@ -360,6 +364,16 @@ export interface InterRelayContext {
     producer: msTypes.Producer,
     producerPeerId?: string,
   ): void;
+  /** REQ-RMS-034/035 — the PRIMARY received a reverse announce from a standby's
+   *  local client. Mint locally + fan + hub-fan. Async (does mediasoup produce). */
+  onReverseAnnounce?(
+    roomId: string,
+    producerId: string,
+    kind: msTypes.MediaKind,
+    rtpParameters: msTypes.RtpParameters | undefined,
+    peerRelayId: string | undefined,
+    producerPeerId: string | undefined,
+  ): Promise<void>;
   /**
    * F1 (REQ-RO-009) — empty-room teardown. The wiring layer releases BOTH the
    * standby + primary pipe ports back to the allocator and drops the coordinator
@@ -759,7 +773,7 @@ export function createSignalingServer(
       }
 
       case 'pipe-producer': {
-        handlePipeProducerAnnounce(msg, ws);
+        await handlePipeProducerAnnounce(msg, ws);
         break;
       }
 
@@ -799,7 +813,7 @@ export function createSignalingServer(
    * The primary pushes these so the standby can resolve the real producerId
    * for its warm pipe + for client consume requests that omit producerId.
    */
-  function handlePipeProducerAnnounce(msg: PipeProducerMessage, ws: WebSocket): void {
+  async function handlePipeProducerAnnounce(msg: PipeProducerMessage, ws: WebSocket): Promise<void> {
     if (!interRelay) {
       logger.debug('Received pipe-producer announce but no InterRelayContext — ignoring');
       return;
@@ -823,6 +837,17 @@ export function createSignalingServer(
       { roomId: msg.roomId, producerId: msg.producerId, kind: msg.kind },
       'Inter-relay: recorded announced pipe producer (standby)',
     );
+    // REQ-RMS-034 part-3 reverse leg: ONLY the PRIMARY mints a hub copy from a
+    // standby's reverse announce (standby path stays record-only → byte-stable).
+    if (interRelay?.role === 'primary' && interRelay.onReverseAnnounce) {
+      try {
+        await interRelay.onReverseAnnounce(
+          msg.roomId, msg.producerId, msg.kind, msg.rtpParameters, msg.peerRelayId, msg.producerPeerId,
+        );
+      } catch (err) {
+        logger.warn({ err, roomId: msg.roomId }, 'reverse-announce mint failed');
+      }
+    }
   }
 
   /**

@@ -249,6 +249,64 @@ describe('inter-relay wiring (G1)', () => {
     ws.close();
   });
 
+  // ── Part-3 reverse leg — PRIMARY receives a standby's reverse announce ─────
+  it('RED-RA-3a: a PRIMARY receiving a pipe-producer frame fires onReverseAnnounce with the full announce', async () => {
+    const onReverseAnnounce = vi.fn().mockResolvedValue(undefined);
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onReverseAnnounce,
+    };
+    const { wss, port } = await startServer(interRelay);
+    server = wss;
+
+    const ws = await connect(port); // a peer that sends an inter-relay frame
+    ws.send(JSON.stringify({
+      type: 'pipe-producer',
+      roomId: 'roomA',
+      producerId: 'piped-up-1',
+      kind: 'video',
+      rtpParameters: { x: 1 },
+      peerRelayId: 'ws://standbyA',
+      producerPeerId: 'clientA',
+    }));
+    await tick();
+
+    expect(onReverseAnnounce).toHaveBeenCalledWith(
+      'roomA', 'piped-up-1', 'video', { x: 1 }, 'ws://standbyA', 'clientA',
+    );
+
+    ws.close();
+  });
+
+  it('RED-RA-3a-stable: a STANDBY receiving a pipe-producer frame does NOT fire onReverseAnnounce (records only; byte-stable)', async () => {
+    const onReverseAnnounce = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'standby',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onReverseAnnounce,
+    };
+    const { wss, port } = await startServer(interRelay);
+    server = wss;
+
+    const ws = await connect(port);
+    ws.send(JSON.stringify({
+      type: 'pipe-producer',
+      roomId: 'roomA',
+      producerId: 'p1',
+      kind: 'video',
+      producerPeerId: 'clientA',
+    }));
+    await tick();
+
+    // standby records (existing) but never reverse-mints
+    expect(onReverseAnnounce).not.toHaveBeenCalled();
+
+    ws.close();
+  });
+
   it('RED-G1-WIRE-3: STANDBY consume WITHOUT producerId resolves from room context', async () => {
     const registry = new InterRelayProducerRegistry();
     registry.record({ type: 'pipe-producer', roomId: 'room-C', producerId: 'producer-PIPED-7', kind: 'audio' });
