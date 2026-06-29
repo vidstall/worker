@@ -343,6 +343,24 @@ export interface InterRelayContext {
     producerPeerId?: string,
   ): void;
   /**
+   * REQ-RMS-034 (part-3 reverse leg) — a STANDBY-homed local client produced. The
+   * reverse-leg sibling of onPrimaryProducer?: the standby drives a reverse
+   * consume-onto-pipe UP + announce-UP so the primary mints a hub copy and fans it
+   * everywhere (full bidirectional mesh, hub-via-primary). Fired ONLY from
+   * handleProduce (a real local-client produce) — a piped/minted producer is created
+   * via produceLocalFromPipe and never reaches handleProduce, so this is loop-safe.
+   * producerPeerId = the ORIGINAL local publisher (mapping.peerId), threaded so the
+   * primary's reverse mint binds the stream/E2EE-key to the real publisher, not this
+   * standby's relayId (REQ-RMS-038). Optional — absent on the in-process bench /
+   * primary-only deployments, exactly as onPrimaryProducer? is guarded.
+   */
+  onStandbyProducer?(
+    roomId: string,
+    router: msTypes.Router,
+    producer: msTypes.Producer,
+    producerPeerId?: string,
+  ): void;
+  /**
    * F1 (REQ-RO-009) — empty-room teardown. The wiring layer releases BOTH the
    * standby + primary pipe ports back to the allocator and drops the coordinator
    * state, so a reused roomId starts fresh and the [min..max] port range does not
@@ -1416,6 +1434,25 @@ export function createSignalingServer(
         logger.info(
           { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId },
           'Inter-relay: announced producer to standby (primary, legacy direct)',
+        );
+      }
+    } else if (interRelay && interRelay.role === 'standby') {
+      // REQ-RMS-034 (part-3 reverse leg) — announce this standby's LOCAL-client
+      // producer UP to the primary. notifyNewProducer (above) already local-fanned it
+      // to this standby's own clients; this adds the reverse hop so the primary mints
+      // a hub copy and fans it everywhere (full bidirectional mesh, hub-via-primary).
+      // Fires ONLY for a real local-client produce (handleProduce); a piped/minted
+      // producer is created via produceLocalFromPipe and NEVER reaches handleProduce
+      // — so this can never re-announce a hub-minted stream (loop-safe). producerPeerId
+      // = the ORIGINAL local publisher (mapping.peerId) for stream/E2EE fidelity.
+      // Gated on the hook being present (mirrors the primary onPrimaryProducer block):
+      // until A4 wires it (and on the in-process bench) the hook is absent — without the
+      // guard the "drove..." log would over-claim a reverse hop that never happened.
+      if (interRelay.onStandbyProducer) {
+        interRelay.onStandbyProducer(mapping.roomId, room.router, producer, mapping.peerId);
+        logger.info(
+          { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId, producerPeerId: mapping.peerId },
+          'Inter-relay: drove reverse consume-onto-pipe at produce (standby) — announces UP to primary',
         );
       }
     }

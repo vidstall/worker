@@ -153,6 +153,78 @@ describe('inter-relay wiring (G1)', () => {
     ws.close();
   });
 
+  it('RED-RA-1: a STANDBY fires onStandbyProducer with the local publisher peerId after produce', async () => {
+    const onStandbyProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'standby',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onStandbyProducer,
+    };
+    const { wss, port } = await startServer(interRelay);
+    server = wss;
+
+    const ws = await connect(port);
+    const joinReply = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: 'join', roomId: 'roomA', peerId: 'clientA' }));
+    await joinReply;
+
+    const tReply = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: 'createTransport', direction: 'send' }));
+    await tReply;
+
+    const pReply = waitForMessage(ws);
+    ws.send(JSON.stringify({
+      type: 'produce', transportId: 'transport-1', kind: 'audio', rtpParameters: {},
+    }));
+    await pReply;
+    await tick(120);
+
+    // REQ-RMS-034: standby announces its LOCAL-client producer UP, threading the
+    // ORIGINAL publisher peerId (mapping.peerId) for E2EE/stream fidelity.
+    expect(onStandbyProducer).toHaveBeenCalledWith(
+      'roomA',
+      expect.anything(),
+      expect.objectContaining({ id: 'producer-PRIMARY-1', kind: 'audio' }),
+      'clientA',
+    );
+
+    ws.close();
+  });
+
+  it('RED-RA-1b: a PRIMARY does NOT fire onStandbyProducer (forward path byte-stable)', async () => {
+    const onStandbyProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onStandbyProducer,
+    };
+    const { wss, port } = await startServer(interRelay);
+    server = wss;
+
+    const ws = await connect(port);
+    const joinReply = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: 'join', roomId: 'roomA', peerId: 'clientP' }));
+    await joinReply;
+
+    const tReply = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: 'createTransport', direction: 'send' }));
+    await tReply;
+
+    const pReply = waitForMessage(ws);
+    ws.send(JSON.stringify({
+      type: 'produce', transportId: 'transport-1', kind: 'audio', rtpParameters: {},
+    }));
+    await pReply;
+    await tick(120);
+
+    // The reverse hop must fire ONLY on a standby; a primary keeps the forward leg.
+    expect(onStandbyProducer).not.toHaveBeenCalled();
+
+    ws.close();
+  });
+
   it('RED-G1-WIRE-2: STANDBY records an inbound pipe-producer frame', async () => {
     const registry = new InterRelayProducerRegistry();
     const interRelay: InterRelayContext = {
