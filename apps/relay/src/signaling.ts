@@ -1125,7 +1125,10 @@ export function createSignalingServer(
     // consumes each by id; handleConsume resolves the SAME id from this registry
     // (REQ-RMS-029). producerPeerId carries the original publisher for tile/E2EE
     // attribution (the consume RESPONSE re-binds authoritatively, REQ-RO-018). On a
-    // PRIMARY the registry is empty (it announces, never records) ⇒ no-op.
+    // PRIMARY the registry ALSO holds reverse-announced (piped-up) producers from
+    // standby clients (recorded unconditionally at the pipe-producer handler,
+    // signaling.ts:863), so this loop re-announces them to fresh primary-homed
+    // joiners too -- for free (DESIGN-1, REQ-RMS-037).
     if (interRelay) {
       for (const fwd of interRelay.registry.listForRoom(roomId)) {
         sendJson(ws, {

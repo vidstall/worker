@@ -528,7 +528,11 @@ export class InterRelayProducerRegistry {
    * handleJoin iterates THIS so a FRESH browser that HOMES to a standby and joins
    * AFTER the producers were minted learns each id and consumes it (handleConsume
    * resolves the same id from this registry, REQ-RMS-029). On a PRIMARY the
-   * registry is empty (it announces, never records) ⇒ [] ⇒ re-announce is a no-op.
+   * registry ALSO holds reverse-announced (piped-up) producers from standby clients
+   * (recorded unconditionally at handlePipeProducerAnnounce), so on a PRIMARY this
+   * returns those piped-up entries and handleJoin re-announces them to fresh
+   * primary-homed joiners (DESIGN-1, REQ-RMS-037). The list is non-empty on a
+   * primary that has received at least one reverse announce.
    *
    * Room-scoped EXACTLY via the meshKey `::` separator — same `lastIndexOf('::')`
    * convention as resolveByProducerId (see its docstring for the boundary proof).

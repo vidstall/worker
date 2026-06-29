@@ -530,6 +530,56 @@ describe('inter-relay wiring (G1)', () => {
     ws.close();
   });
 
+  // ── Part-3 reverse leg B3 -- DESIGN-1 lock-in: PRIMARY re-announces piped-up ──
+  it('RED-RB-3: PRIMARY re-announces reverse-announced (piped-up) producers to a FRESH joiner (REQ-RMS-037)', async () => {
+    // DESIGN-1: the unconditional record at handlePipeProducerAnnounce
+    // (signaling.ts:863) means the PRIMARY registry is non-empty after a
+    // standby reverse-announces. handleJoin's single registry loop
+    // (signaling.ts:1130) therefore re-announces those piped-up producers to
+    // any fresh joiner on the primary -- for free (no extra loop needed).
+    const registry = new InterRelayProducerRegistry();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry,
+      announceProducer: vi.fn(),
+    };
+    const { wss, port } = await startServer(interRelay);
+    server = wss;
+
+    // (a) A standby relay sends a reverse pipe-producer announce to the primary.
+    const standbyWs = await connect(port);
+    standbyWs.send(JSON.stringify({
+      type: 'pipe-producer',
+      roomId: 'roomA',
+      producerId: 'piped-up-1',
+      kind: 'audio',
+      rtpParameters: {},
+      peerRelayId: 'ws://standbyA',
+      producerPeerId: 'clientA',
+    }));
+    await tick(); // handlePipeProducerAnnounce records unconditionally (DESIGN-1)
+
+    // (b) A fresh primary-homed browser joins AFTER the reverse announce.
+    const freshWs = await connect(port);
+    const got: Record<string, unknown>[] = [];
+    freshWs.on('message', (d) => got.push(JSON.parse(d.toString()) as Record<string, unknown>));
+    freshWs.send(JSON.stringify({ type: 'join', roomId: 'roomA', peerId: 'freshP' }));
+    await tick(150);
+
+    // (c) The fresh joiner must receive a newProducer for the reverse-announced producer.
+    const fwd = got.find(
+      (m) => m['type'] === 'newProducer' && m['producerId'] === 'piped-up-1',
+    );
+    expect(
+      fwd,
+      'fresh primary-homed joiner must receive newProducer for the reverse-announced producer (DESIGN-1)',
+    ).toBeTruthy();
+    expect(fwd?.['peerId']).toBe('clientA'); // original publisher, not the relayId
+
+    standbyWs.close();
+    freshWs.close();
+  });
+
   it('RED-RA-4-getroom: getRoom returns the room after a join and undefined for an unknown room (REQ-RMS-036)', async () => {
     const interRelay: InterRelayContext = {
       role: 'primary',
