@@ -422,6 +422,9 @@ if (isMainModule) {
         originRelayId: string,
         producerPeerId?: string,
       ) => void;
+      // REQ-RMS-037 (Task B4b): STANDBY re-announce-on-reopen — back-fill local
+      // producers UP after an outbound-link flap (late-bound like the rest).
+      reannounceLocalProducersUp?: (roomId: string) => void;
     } = { fanLocalProducer: null };
     const standbyWarmPipe = new StandbyWarmPipeCoordinator(
       interRelayRegistry,
@@ -585,6 +588,12 @@ if (isMainModule) {
       attachPeerSocket: (socket) => {
         interRelayLink.socket = socket;
       },
+      // REQ-RMS-037 (part-3 reverse leg, Task B4b) PRIMARY: on a newly-attached
+      // inter-relay peer, eagerly ensure its reverse pipe leg exists (so a pure-
+      // reverse room forms its leg before the first reverse announce). DRY — the
+      // SAME primaryPipe.ensureReverseLeg already used by makeOnReverseAnnounce below.
+      ensureReverseLeg: (roomId, router, peerRelayId) =>
+        primaryPipe.ensureReverseLeg(roomId, router, peerRelayId),
       // F1 (REQ-RO-001/002/008) PRIMARY: a real producer was created for a room
       // this relay is primary for. Hand it to the coordinator, which mints+connects
       // the primary pipe (port from the allocator, key `${roomId}:primary`), pipes
@@ -694,7 +703,16 @@ if (isMainModule) {
       },
     };
 
-    const { wss, getRoomCount, setAccepting, closeRooms, fanLocalProducer, getRoom, registerReverseMinted } =
+    const {
+      wss,
+      getRoomCount,
+      setAccepting,
+      closeRooms,
+      fanLocalProducer,
+      getRoom,
+      registerReverseMinted,
+      reannounceLocalProducersUp,
+    } =
       createSignalingServer(
         manager,
         metrics,
@@ -712,6 +730,9 @@ if (isMainModule) {
     // is live (same box pattern as fanLocalProducer).
     signalingRef.getRoom = getRoom;
     signalingRef.registerReverseMinted = registerReverseMinted;
+    // REQ-RMS-037 (Task B4b): late-bind the standby UP re-announce so the link
+    // reopen back-fill can reach it once the server is live (same box pattern).
+    signalingRef.reannounceLocalProducersUp = reannounceLocalProducersUp;
     // REQ-RMS-034: bind the reverse UP-announcer on the standby coordinator. Uses
     // the SAME UP link seam as the pipe-connect frame (standbyLinkManager.send),
     // NOT a primary per-peer send. The frame carries peerRelayId + rtpParameters

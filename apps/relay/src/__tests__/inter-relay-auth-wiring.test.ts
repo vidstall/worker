@@ -37,7 +37,12 @@ function mockRouter() {
     rtpCapabilities: { codecs: [], headerExtensions: [] },
     createWebRtcTransport: vi.fn().mockResolvedValue({
       id: 't', iceParameters: {}, iceCandidates: [], dtlsParameters: {},
-      connect: vi.fn(), produce: vi.fn(), consume: vi.fn(), setMaxIncomingBitrate: vi.fn().mockResolvedValue(undefined), close: vi.fn(),
+      connect: vi.fn(),
+      // REQ-RMS-037 (Task B4b): produce resolves a real Producer-shaped object so
+      // handleProduce reaches the re-fan path (was `vi.fn()` → undefined → crash on
+      // producer.id). VIDEO so the audio-observer arm is skipped (no observer mock).
+      produce: vi.fn().mockResolvedValue({ id: 'producer-REAL-refan', kind: 'video', on: vi.fn(), close: vi.fn() }),
+      consume: vi.fn(), setMaxIncomingBitrate: vi.fn().mockResolvedValue(undefined), close: vi.fn(),
     }),
     canConsume: vi.fn().mockReturnValue(true),
     close: vi.fn(),
@@ -65,7 +70,7 @@ function mockLogger() {
 function startServer(
   interRelay: InterRelayContext,
   token?: string,
-): Promise<{ wss: WebSocketServer; port: number }> {
+): Promise<{ wss: WebSocketServer; port: number; factory: ReturnType<typeof createSignalingServer> }> {
   return new Promise((resolve) => {
     const origPort = process.env['WS_PORT'];
     const origToken = process.env['INTER_RELAY_TOKEN'];
@@ -73,9 +78,13 @@ function startServer(
     if (token === undefined) delete process.env['INTER_RELAY_TOKEN'];
     else process.env['INTER_RELAY_TOKEN'] = token;
 
-    const { wss } = createSignalingServer(
+    // REQ-RMS-037 (Task B4b): capture the FULL factory return so a test can drive
+    // reannounceLocalProducersUp directly (additive — existing callers destructure
+    // only { wss, port } and ignore the extra field).
+    const factory = createSignalingServer(
       createMockManager(), new MetricsTracker(), mockLogger(), undefined, interRelay,
     );
+    const { wss } = factory;
 
     process.env['WS_PORT'] = origPort;
     if (origToken === undefined) delete process.env['INTER_RELAY_TOKEN'];
@@ -84,7 +93,7 @@ function startServer(
     wss.on('listening', () => {
       const addr = wss.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
-      resolve({ wss, port });
+      resolve({ wss, port, factory });
     });
   });
 }
@@ -104,6 +113,36 @@ function connectWithToken(port: number, token: string): Promise<WebSocket> {
     });
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
+  });
+}
+
+/**
+ * REQ-RMS-037 (Task B4b): connect as a TAGGED inter-relay peer carrying a DISTINCT
+ * x-inter-relay-peer-id (the "attach a standby" path) so the primary buckets it
+ * under `peerRelayId` and the re-fan-on-attach targets JUST this peer.
+ */
+function connectInterRelay(port: number, token: string, peerRelayId: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, INTER_RELAY_SUBPROTOCOL, {
+      headers: { Authorization: `Bearer ${token}`, 'x-inter-relay-peer-id': peerRelayId },
+    });
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
+
+/** Send a message and await the next inbound message of `expectType`. */
+function sendAndAwait(ws: WebSocket, msg: Record<string, unknown>, expectType: string): Promise<any> {
+  return new Promise((resolve) => {
+    const onMessage = (data: WebSocket.RawData) => {
+      const reply = JSON.parse(data.toString());
+      if (reply.type === expectType) {
+        ws.off('message', onMessage);
+        resolve(reply);
+      }
+    };
+    ws.on('message', onMessage);
+    ws.send(JSON.stringify(msg));
   });
 }
 
@@ -340,5 +379,90 @@ describe('inter-relay cross-daemon link END-TO-END (G3.2b)', () => {
     expect(onAnnounce).toHaveBeenCalledWith('room-E2E', undefined);
 
     link.close();
+  });
+});
+
+describe('inter-relay re-fan-on-attach + standby UP re-announce (REQ-RMS-037, Task B4b)', () => {
+  it('RED-RB-4a: a primary re-fans existing producers DOWN to a NEWLY-attached standby ONLY (no re-broadcast to synced peers)', async () => {
+    const onPrimaryProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onPrimaryProducer,
+      attachPeerSocket: vi.fn(),
+    };
+    const { wss, port } = await startServer(interRelay, 'relay-secret');
+    server = wss;
+
+    // An untagged client joins + produces BEFORE any standby attaches.
+    const client = await connectPlain(port);
+    await sendAndAwait(client, { type: 'join', roomId: 'roomA', peerId: 'clientP' }, 'routerRtpCapabilities');
+    const created = await sendAndAwait(client, { type: 'createTransport', direction: 'send' }, 'transportCreated');
+    await sendAndAwait(
+      client,
+      { type: 'produce', transportId: created.id, kind: 'video', rtpParameters: { codecs: [], headerExtensions: [] } },
+      'produced',
+    );
+    await tick();
+
+    // The pre-attach produce fanned ONE legacy (empty-keys) call (c[3] === undefined);
+    // clear it so we count ONLY the re-fan to the newly-attached peer.
+    onPrimaryProducer.mockClear();
+
+    // NOW a standby attaches as a TAGGED inter-relay peer (Bearer + peerRelayId header).
+    const standby = await connectInterRelay(port, 'relay-secret', 'ws://standbyB');
+    await tick();
+
+    // Exactly ONE re-fan, to JUST standbyB (4th arg = peerRelayId), carrying the
+    // original local publisher (clientP) as the 5th arg — NOT a re-broadcast.
+    const calls = onPrimaryProducer.mock.calls.filter((c) => c[3] === 'ws://standbyB');
+    expect(calls.length).toBe(1);
+    expect(calls[0]![4]).toBe('clientP');
+
+    client.close();
+    standby.close();
+  });
+
+  it('RED-RB-4b: reannounceLocalProducersUp re-drives a standby local producer UP (link-reopen back-fill capability)', async () => {
+    // 3b ships the back-fill as a CAPABILITY (factory fn + late-bind). Its automatic
+    // trigger on link reopen has no clean per-room seam — the standby link is single-
+    // box / per-daemon and its open event is owned by inter-relay-link.ts — so the
+    // reopen back-fill is covered structurally by RED-RA-2b (the A2 reverse queue
+    // back-fills pre-connect producers). This asserts the capability the wiring would
+    // invoke. RED today: reannounceLocalProducersUp does not exist on the factory.
+    const onStandbyProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'standby',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onStandbyProducer,
+    };
+    const { wss, port, factory } = await startServer(interRelay); // token unset
+    server = wss;
+
+    const client = await connectPlain(port);
+    await sendAndAwait(client, { type: 'join', roomId: 'roomS', peerId: 'clientS' }, 'routerRtpCapabilities');
+    const created = await sendAndAwait(client, { type: 'createTransport', direction: 'send' }, 'transportCreated');
+    await sendAndAwait(
+      client,
+      { type: 'produce', transportId: created.id, kind: 'video', rtpParameters: { codecs: [], headerExtensions: [] } },
+      'produced',
+    );
+    await tick();
+
+    // The live produce already fired onStandbyProducer once; clear it so we count
+    // ONLY the reopen re-announce.
+    onStandbyProducer.mockClear();
+
+    factory.reannounceLocalProducersUp('roomS');
+    await tick();
+
+    expect(onStandbyProducer).toHaveBeenCalledTimes(1);
+    const call = onStandbyProducer.mock.calls[0]!;
+    expect(call[0]).toBe('roomS');   // roomId
+    expect(call[3]).toBe('clientS'); // the original local publisher (REQ-RMS-029)
+
+    client.close();
   });
 });

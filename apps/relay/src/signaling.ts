@@ -375,6 +375,17 @@ export interface InterRelayContext {
     producerPeerId: string | undefined,
   ): Promise<void>;
   /**
+   * REQ-RMS-037 (part-3 reverse leg, Task B4b) — eagerly ensure the PRIMARY's
+   * reverse pipe leg for a NEWLY-attached inter-relay peer exists, even before
+   * that peer's first reverse announce arrives (so a pure-reverse room — one whose
+   * only media originates on the standby — still forms its leg). Driven from the
+   * signaling attach seam ONCE per tagged-peer connect, alongside the re-fan of
+   * existing producers DOWN to that peer. Optional / additive — absent on the
+   * in-process bench (which never attaches a peer over the WS upgrade), exactly as
+   * attachPeerSocket? / onPrimaryProducer? are guarded.
+   */
+  ensureReverseLeg?(roomId: string, router: msTypes.Router, peerRelayId: string): Promise<void>;
+  /**
    * F1 (REQ-RO-009) — empty-room teardown. The wiring layer releases BOTH the
    * standby + primary pipe ports back to the allocator and drops the coordinator
    * state, so a reused roomId starts fresh and the [min..max] port range does not
@@ -524,6 +535,12 @@ export function createSignalingServer(
     originRelayId: string,
     producerPeerId?: string,
   ) => void;
+  /**
+   * REQ-RMS-037 (part-3 reverse leg, Task B4b) — STANDBY re-announce-on-reopen:
+   * re-drive every existing LOCAL producer UP toward the primary (back-fill after an
+   * outbound-link flap). No-op on a primary / when the room is unknown.
+   */
+  reannounceLocalProducersUp: (roomId: string) => void;
 } {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
@@ -575,9 +592,15 @@ export function createSignalingServer(
   // REQ-RMS-036 (part-3 reverse leg) — per-room origin registry (producerId ->
   // origin info) for hub-fan exclusion + loop prevention (R-B reads it). Cleared
   // ROOM-WIDE on teardown (and per-producer on the minted producer's '@close').
+  // REQ-RMS-037 (Task B4b): the value carries the LIVE minted Producer handle so a
+  // newly-attached standby can be re-fanned the reverse-minted hub copies it missed
+  // (the entry is removed on the producer's '@close', so the handle never goes stale).
   const originRegistry = new Map<
     string,
-    Map<string, { originRelayId: string; kind: msTypes.MediaKind; producerPeerId?: string }>
+    Map<
+      string,
+      { originRelayId: string; kind: msTypes.MediaKind; producerPeerId?: string; producer: msTypes.Producer }
+    >
   >();
 
   // G-DEMO-9 (relay byte accounting): the per-room /metrics endpoint reported bytesForwarded=0
@@ -723,6 +746,60 @@ export function createSignalingServer(
       interRelaySockets.attach(peerRelayId, ws as unknown as InterRelaySocketLike);
       interRelay?.attachPeerSocket?.(ws);
       logger.info({ peerRelayId }, 'G3.2b: inter-relay peer connected + attached (tagged)');
+
+      // REQ-RMS-037 (Task B4b) — RE-FAN-ON-ATTACH. The handleProduce fanout only
+      // reaches inter-relay peers attached AT produce time; a standby that attaches
+      // AFTER the primary already has producers would otherwise never receive them.
+      // For every room this relay is PRIMARY of, re-announce existing producers DOWN
+      // to JUST this newly-attached peer (NEVER a re-broadcast to already-synced
+      // peers — we target peerRelayId, not interRelaySockets.keys()), reusing the
+      // forward onPrimaryProducer hook (DRY-1, no new pipe path). The iteration
+      // mirrors handleJoin's room.peers[*].producers shape.
+      // MULTI-ROOM CARRY-FORWARD: this iterates ALL `rooms` and targets the
+      // per-DAEMON `interRelaySockets` peer (peerRelayId), NOT a per-(room,peer)
+      // membership — fine under the single-room demo scope (every attached peer is a
+      // standby of this room), but a per-(room,peer) filter is needed before
+      // multi-room (out-of-scope for part-3). Mirrors the same caveat on
+      // registerReverseMinted + the handleProduce fanout.
+      if (interRelay && interRelay.role === 'primary') {
+        for (const [reRoomId, reRoom] of rooms) {
+          // 3a(i) eager reverse leg (defense-in-depth): create this peer's reverse
+          // pipe leg even if the primary never produced, so a pure-reverse room
+          // (media only on the standby) still forms its leg before the first
+          // reverse announce. Optional hook — a no-op on the in-process bench.
+          // CONTAINED: ensureReverseLeg does real mediasoup transport create+connect;
+          // apps/relay has NO global unhandledRejection handler, so a bare `void` on a
+          // rejecting promise would terminate the process — .catch + warn instead.
+          void interRelay.ensureReverseLeg?.(reRoomId, reRoom.router, peerRelayId)
+            ?.catch((err) =>
+              logger.warn({ err, roomId: reRoomId, peerRelayId }, 'REQ-RMS-037: eager reverse-leg failed'),
+            );
+          // 3a(ii) [LOAD-BEARING]: re-announce existing LOCAL producers DOWN to the
+          // new peer. producerPeerId = the local owner so a cross-relay consume binds
+          // the stream/E2EE-key to the real publisher, not the relayId (REQ-RMS-029).
+          for (const [ownerPeerId, ownerPeer] of reRoom.peers) {
+            for (const producer of ownerPeer.producers) {
+              interRelay.onPrimaryProducer?.(reRoomId, reRoom.router, producer, peerRelayId, ownerPeerId);
+            }
+          }
+          // 3a(ii) reverse-minted: also re-announce the hub copies of OTHER standbys'
+          // streams DOWN to the new peer, EXCLUDING any whose origin IS this peer
+          // (never echo a producer back to its own origin, REQ-RMS-036). The live
+          // minted Producer is held in the originRegistry entry (recorded at mint
+          // time), so it resolves without fabricating a handle.
+          const originBucket = originRegistry.get(reRoomId);
+          if (originBucket) {
+            for (const entry of originBucket.values()) {
+              if (entry.originRelayId === peerRelayId) continue; // REQ-RMS-036 — no echo to origin
+              interRelay.onPrimaryProducer?.(reRoomId, reRoom.router, entry.producer, peerRelayId, entry.producerPeerId);
+            }
+          }
+        }
+        logger.info(
+          { peerRelayId },
+          'REQ-RMS-037: re-fanned existing producers DOWN to the newly-attached inter-relay peer',
+        );
+      }
     }
 
     logger.debug('New WebSocket connection');
@@ -1921,7 +1998,7 @@ export function createSignalingServer(
       bucket = new Map();
       originRegistry.set(roomId, bucket);
     }
-    bucket.set(minted.id, { originRelayId, kind: minted.kind, producerPeerId });
+    bucket.set(minted.id, { originRelayId, kind: minted.kind, producerPeerId, producer: minted });
     minted.on('@close', () => originRegistry.get(roomId)?.delete(minted.id));
     fanLocalProducer(roomId, producerPeerId, minted, originRelayId);
     // REQ-RMS-035/036 (Task B1) — hub-fan DOWN: forward the reverse-minted
@@ -1953,6 +2030,32 @@ export function createSignalingServer(
     }
   }
 
+  /**
+   * REQ-RMS-037 (part-3 reverse leg, Task B4b) — STANDBY re-announce-on-reopen.
+   * Re-drive every existing LOCAL-client producer UP toward the primary (the A1
+   * reverse path) so a standby back-fills its producers after an outbound-link flap.
+   * Producers created BEFORE the first connect are already covered by the A2 reverse
+   * queue (reversePending → drainReverse); this covers the reopen of an already-
+   * drained leg. Guarded on role === 'standby' (a no-op on a primary). Reuses the
+   * onStandbyProducer hook (DRY — no new reverse path); ownerPeerId = the original
+   * local publisher (REQ-RMS-029/038 publisher binding).
+   */
+  function reannounceLocalProducersUp(roomId: string): void {
+    if (interRelay?.role !== 'standby') return;
+    const room = rooms.get(roomId);
+    if (!room) return;
+    let count = 0;
+    for (const [ownerPeerId, ownerPeer] of room.peers) {
+      for (const producer of ownerPeer.producers) {
+        interRelay.onStandbyProducer?.(roomId, room.router, producer, ownerPeerId);
+        count++;
+      }
+    }
+    if (count > 0) {
+      logger.info({ roomId, count }, 'REQ-RMS-037: re-announced local producers UP on standby link reopen');
+    }
+  }
+
   return {
     wss,
     getRoomCount: () => rooms.size,
@@ -1961,5 +2064,6 @@ export function createSignalingServer(
     fanLocalProducer,
     getRoom,
     registerReverseMinted,
+    reannounceLocalProducersUp,
   };
 }

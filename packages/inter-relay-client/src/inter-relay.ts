@@ -1187,6 +1187,23 @@ export class StandbyWarmPipeCoordinator {
    * `_router` is accepted for signature symmetry with the forward onStandbyProducer
    * hook (A1) but unused here — the standby consumes onto its RETAINED
    * topology.pipeTransport, not a fresh router transport.
+   *
+   * REQ-RMS-037 (Task B4b) — RECORDED standby asymmetries (single-room demo scope;
+   * NOT fixed here, by design):
+   *   (1) This gates on `transport === null`, NOT on a `connected` flag — so a
+   *       producer can be consumed onto an EXISTING-but-not-yet-connected pipe
+   *       transport (consume-before-connect). mediasoup TOLERATES this (the consume
+   *       binds and self-heals once the transport connects); RTP is never lost, only
+   *       briefly buffered. The primary side has no such window (reverseMint queues
+   *       on BOTH leg-absent AND params-absent).
+   *   (2) On a transient consume/announce failure, reverseConsumeAndAnnounce un-marks
+   *       the id in `reverseConsumedIds` (so a FUTURE onLocalClientProducer retries)
+   *       but `drainReverse` does NOT re-queue the failed item into `reversePending`
+   *       (line 1307 empties the queue up-front). This is ASYMMETRIC to the primary's
+   *       `drainReverseMints`, which re-queues a transient-failed mint. Net: a queued
+   *       reverse producer that fails its single drain attempt is recovered only if
+   *       the local client produces it again — acceptable under single-room demo
+   *       scope where each producer is driven repeatedly by the live media path.
    */
   async onLocalClientProducer(
     roomId: string,
