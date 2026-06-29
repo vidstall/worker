@@ -1643,6 +1643,13 @@ export class PrimaryPipeCoordinator {
   >();
   // REQ-RMS-034 — per-leg dedup of reverse-minted producer ids (mint exactly once).
   private readonly reverseMintedIds = new Map<string, Set<string>>();
+  // B6b (REQ-RMS-035) — per-leg dedup of FORWARD-piped producer ids (pipe exactly
+  // once). onProducer re-queues a producer on every call, so a standby link flap /
+  // re-attach re-queues an already-piped id; without this, drain() re-pipes it and
+  // mediasoup throws "Consumer already exists". Mirror of reverseMintedIds; cleared
+  // with the leg in clear() (the leg's pipe transport is minted ONCE in onProducer
+  // and torn down only there, so clear() is the sole forward-transport teardown).
+  private readonly forwardPipedIds = new Map<string, Set<string>>();
 
   constructor(private readonly deps: PrimaryPipeCoordinatorDeps) {}
 
@@ -1775,12 +1782,33 @@ export class PrimaryPipeCoordinator {
     peerRelayId: string,
   ): Promise<void> {
     if (!s.connected || s.pipeTransport === null) return;
+    const key = meshKey(roomId, peerRelayId);
+    let piped = this.forwardPipedIds.get(key);
+    if (!piped) {
+      piped = new Set();
+      this.forwardPipedIds.set(key, piped);
+    }
     while (s.pendingProducers.length > 0) {
       const producer = s.pendingProducers.shift()!;
-      const pipedConsumer = await pipeProducerOntoPrimaryTransport(
-        s.pipeTransport,
-        producer.id,
-      );
+      // B6b (REQ-RMS-035) — pipe each source producer onto this leg EXACTLY ONCE.
+      // onProducer re-queues unconditionally, so a standby link flap/re-attach
+      // re-queues an already-piped id; re-piping would make mediasoup throw
+      // "Consumer already exists". Mark BEFORE the await (re-entrancy guard) and
+      // mirror mintOne's dup-vs-transient discrimination.
+      if (piped.has(producer.id)) continue;
+      piped.add(producer.id);
+      let pipedConsumer: msTypes.Consumer;
+      try {
+        pipedConsumer = await pipeProducerOntoPrimaryTransport(
+          s.pipeTransport,
+          producer.id,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/already exists|duplicate/i.test(message)) continue; // benign dup -> keep marked, skip
+        piped.delete(producer.id); // transient -> un-mark so a later re-drive retries
+        throw err;
+      }
       // Announce the PIPED id (pipedConsumer.id), NOT producer.id (REQ-RO-002).
       // REQ-RMS-029: the ORIGINAL publisher's producerPeerId travels WITH the
       // piped consumer id so a cross-relay consume binds to the real publisher
@@ -2023,6 +2051,9 @@ export class PrimaryPipeCoordinator {
     // afresh (the dedup set + the pending queue are per-leg state).
     this.reverseMintPending.delete(key);
     this.reverseMintedIds.delete(key);
+    // B6b (REQ-RMS-035) — drop the forward-pipe dedup with the leg so a reused leg
+    // re-pipes its producers onto the fresh transport.
+    this.forwardPipedIds.delete(key);
     const s = this.states.get(key);
     if (!s) return;
     if (s.pipeTransport !== null) {
@@ -2052,6 +2083,7 @@ export class PrimaryPipeCoordinator {
       this.states,
       this.reverseMintPending,
       this.reverseMintedIds,
+      this.forwardPipedIds,
     ])) {
       this.clear(roomId, peerRelayId);
     }

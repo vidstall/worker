@@ -422,3 +422,74 @@ describe('PrimaryPipeCoordinator — REQ-RMS-034/037 reverseMint (part-3 reverse
     expect(fanSpy).toHaveBeenCalledWith('roomA', expect.objectContaining({ id: 'piped-up-1' }), 'ws://standbyA', 'clientA'); // original producerPeerId preserved
   });
 });
+
+// ── F. B6b (REQ-RMS-035) — FORWARD flap idempotency. onProducer re-queues a
+//    producer UNCONDITIONALLY (inter-relay.ts:1711). On a standby link flap /
+//    re-attach the SAME producer.id is re-queued -> drain() re-pipes it ->
+//    pipeProducerOntoPrimaryTransport calls transport.consume() a 2nd time for an
+//    already-piped producer -> real mediasoup throws "Consumer already exists".
+//    A per-leg forwardPipedIds dedup (mirror of reverseMintedIds) pipes each id
+//    EXACTLY ONCE, cleared with the leg in clear(). ───────────────────────────
+describe('PrimaryPipeCoordinator — B6b forward flap-dedup (REQ-RMS-035)', () => {
+  let announcer: ReturnType<typeof vi.fn>;
+  let paramSender: ReturnType<typeof vi.fn>;
+  let allocator: ReturnType<typeof makeStubAllocator>;
+
+  beforeEach(() => {
+    announcer = vi.fn();
+    paramSender = vi.fn();
+    allocator = makeStubAllocator(41000);
+  });
+
+  it('RED-PPC-FLAP-DEDUP: a re-queued forward producer (same id; standby link flap re-attach) pipes EXACTLY ONCE', async () => {
+    const { router, transports } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    await coord.onStandbyConnectParams('room-P', STANDBY_PARAMS);
+    await coord.onProducer('room-P', router as any, makeProducer('p1'));
+    expect(transports[0]!.consume).toHaveBeenCalledTimes(1);
+    expect(announcer).toHaveBeenCalledTimes(1);
+
+    // Flap: the SAME producer is re-announced/re-attached (onProducer re-fires).
+    await coord.onProducer('room-P', router as any, makeProducer('p1'));
+
+    // Deduped — NOT re-piped (real mediasoup would throw "Consumer already exists").
+    expect(transports[0]!.consume).toHaveBeenCalledTimes(1);
+    expect(announcer).toHaveBeenCalledTimes(1); // no second announce either
+  });
+
+  it('RED-PPC-FLAP-DEDUP-clear: clear() drops the forward dedup so a post-teardown re-pipe of the same id pipes AGAIN', async () => {
+    const { router, transports } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    await coord.onStandbyConnectParams('room-P', STANDBY_PARAMS);
+    await coord.onProducer('room-P', router as any, makeProducer('p1'));
+    expect(transports[0]!.consume).toHaveBeenCalledTimes(1);
+
+    coord.clear('room-P'); // teardown drops the leg + its forward dedup
+
+    // Re-establish the room (fresh transport) + re-pipe the same id -> NOT deduped.
+    await coord.onStandbyConnectParams('room-P', STANDBY_PARAMS);
+    await coord.onProducer('room-P', router as any, makeProducer('p1'));
+    expect(router.createPipeTransport).toHaveBeenCalledTimes(2); // a second transport minted
+    expect(transports[1]!.consume).toHaveBeenCalledTimes(1); // re-piped onto it
+  });
+
+  it('RED-PPC-FLAP-DEDUP-perleg: the forward dedup is per (room,peer) — the SAME id pipes once on EACH distinct cascade leg, re-attach deduped per leg', async () => {
+    const { router, transports } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    await coord.onStandbyConnectParams('room-P', STANDBY_PARAMS, 'relay-B');
+    await coord.onProducer('room-P', router as any, makeProducer('p1'), 'relay-B');
+    await coord.onStandbyConnectParams('room-P', STANDBY_PARAMS, 'relay-C');
+    await coord.onProducer('room-P', router as any, makeProducer('p1'), 'relay-C');
+
+    // Distinct legs -> two transports, each piped p1 once (dedup is per-leg, not global).
+    expect(router.createPipeTransport).toHaveBeenCalledTimes(2);
+
+    // Re-attach p1 on relay-B -> deduped on THAT leg only.
+    await coord.onProducer('room-P', router as any, makeProducer('p1'), 'relay-B');
+    const totalConsumes = transports.reduce((n, t) => n + t.consume.mock.calls.length, 0);
+    expect(totalConsumes).toBe(2); // p1 piped once per leg; the re-attach was deduped
+  });
+});
