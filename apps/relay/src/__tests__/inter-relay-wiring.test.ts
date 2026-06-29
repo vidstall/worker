@@ -19,7 +19,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { MetricsTracker } from '../metrics.js';
 import { createSignalingServer, type InterRelayContext } from '../signaling.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
-import { InterRelayProducerRegistry } from '@dvconf/inter-relay-client';
+import { InterRelayProducerRegistry, type InterRelaySocketLike } from '@dvconf/inter-relay-client';
+import { createInterRelaySocketMap, type InterRelaySocketMap } from '../inter-relay-socket-map.js';
 import type { types as msTypes } from 'mediasoup';
 
 // ── Mocks (mirror signaling.test.ts) ──────────────────────────────────
@@ -103,6 +104,7 @@ function startServer(
 // registerReverseMinted -> fanLocalProducer client fan is covered by RED-RA-4 below.
 function startServerFull(
   interRelay: InterRelayContext,
+  providedSockets?: InterRelaySocketMap,
 ): Promise<{
   wss: WebSocketServer;
   port: number;
@@ -118,7 +120,7 @@ function startServerFull(
     const originalPort = process.env['WS_PORT'];
     process.env['WS_PORT'] = '0';
     const srv = createSignalingServer(
-      createMockManager(), new MetricsTracker(), mockLogger(), undefined, interRelay,
+      createMockManager(), new MetricsTracker(), mockLogger(), undefined, interRelay, providedSockets,
     ) as unknown as {
       wss: WebSocketServer;
       getRoom: (roomId: string) => unknown;
@@ -479,6 +481,51 @@ describe('inter-relay wiring (G1)', () => {
     expect(fan, 'local client must receive the reverse-minted producer fan').toBeTruthy();
     expect(fan?.['kind']).toBe('video');
     expect(fan?.['peerId']).toBe('clientA'); // bound to the ORIGINAL publisher, not the relayId
+
+    ws.close();
+  });
+
+  it('RED-RB-1: registerReverseMinted fans DOWN to non-origin standbys via onPrimaryProducer (REQ-RMS-035/036)', async () => {
+    // Pre-populate a socket map with TWO standby peer sockets.
+    const socketMap = createInterRelaySocketMap();
+    const stubSocketA = { readyState: 1, send: vi.fn() } as unknown as InterRelaySocketLike;
+    const stubSocketB = { readyState: 1, send: vi.fn() } as unknown as InterRelaySocketLike;
+    socketMap.attach('ws://standbyA', stubSocketA);
+    socketMap.attach('ws://standbyB', stubSocketB);
+
+    const onPrimaryProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onPrimaryProducer,
+    };
+    const { wss, port, registerReverseMinted } = await startServerFull(interRelay, socketMap);
+    server = wss;
+
+    // Join so rooms.get('roomA') is non-null (registerReverseMinted early-returns otherwise).
+    const ws = await connect(port);
+    const joinReply = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: 'join', roomId: 'roomA', peerId: 'local-listener' }));
+    await joinReply;
+
+    // Drive registerReverseMinted (synchronous): origin = standbyA; standbyB must
+    // receive the fan. onPrimaryProducer is a sync vi.fn() so assert immediately.
+    const fakeMinted = { id: 'piped-up-1', kind: 'video', on: vi.fn() } as unknown as msTypes.Producer;
+    registerReverseMinted('roomA', fakeMinted, 'ws://standbyA', 'clientA');
+
+    // REQ-RMS-036: must NOT echo back to origin standbyA.
+    // REQ-RMS-035: must fan DOWN to standbyB carrying the original producerPeerId 'clientA'.
+    const peers = onPrimaryProducer.mock.calls.map((c) => c[3]);
+    expect(peers).toContain('ws://standbyB');
+    expect(peers).not.toContain('ws://standbyA');
+    expect(onPrimaryProducer).toHaveBeenCalledWith(
+      'roomA',
+      expect.anything(),
+      expect.objectContaining({ id: 'piped-up-1' }),
+      'ws://standbyB',
+      'clientA',
+    );
 
     ws.close();
   });

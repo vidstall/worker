@@ -1892,12 +1892,17 @@ export function createSignalingServer(
   }
 
   /**
-   * REQ-RMS-034/036 (part-3 reverse leg) — record a primary-minted reverse hub
-   * producer in the per-room originRegistry (for hub-fan exclusion + loop
-   * prevention, read by R-B) and fan it to this relay's OWN local clients. The
-   * E2EE fail-closed gate fires INSIDE fanLocalProducer because we pass the RAW
-   * producerPeerId. The REQ-RMS-035 hub-fan DOWN (exclude origin) is added by R-B
-   * (Task B1), NOT here.
+   * REQ-RMS-034/035/036 (part-3 reverse leg) — record a primary-minted reverse
+   * hub producer in the per-room originRegistry (for hub-fan exclusion + loop
+   * prevention) and propagate it BOTH ways from the hub:
+   *   1. fanLocalProducer — fan to this relay's OWN local WebRTC clients. The
+   *      E2EE fail-closed gate fires INSIDE fanLocalProducer because we pass the
+   *      RAW producerPeerId.
+   *   2. hub-fan DOWN (REQ-RMS-035/036) — drive onPrimaryProducer for every
+   *      attached standby EXCEPT the origin (originRelayId is excluded so the
+   *      stream is never echoed back to the standby it came from). Reuses the
+   *      forward onPrimaryProducer hook (DRY-1, no new pipe path); each receiving
+   *      standby mints + fans via its normal forward route.
    */
   function registerReverseMinted(
     roomId: string,
@@ -1915,6 +1920,33 @@ export function createSignalingServer(
     bucket.set(minted.id, { originRelayId, kind: minted.kind, producerPeerId });
     minted.on('@close', () => originRegistry.get(roomId)?.delete(minted.id));
     fanLocalProducer(roomId, producerPeerId, minted, originRelayId);
+    // REQ-RMS-035/036 (Task B1) — hub-fan DOWN: forward the reverse-minted
+    // producer to every OTHER standby (exclude origin to prevent echo-back).
+    // Reuses onPrimaryProducer (DRY-1) so the receiving standby mints + fans
+    // via its normal forward path without a new pipe-creation route.
+    // MULTI-ROOM CARRY-FORWARD: interRelaySockets is a PER-DAEMON map (keyed by
+    // peerRelayId), NOT per-room — fine under the single-room demo scope (every
+    // attached peer is a standby of this room), but a per-(room,peer) fan filter
+    // is needed before multi-room (out-of-scope for part-3; see the plan's
+    // Out-of-scope section). Mirrors the same caveat on the UP fanout above.
+    if (interRelay?.onPrimaryProducer) {
+      let cascadePeers = 0;
+      for (const p of interRelaySockets.keys()) {
+        if (p === originRelayId) continue;           // REQ-RMS-036 -- never echo back to origin
+        interRelay.onPrimaryProducer(roomId, room.router, minted, p, producerPeerId);
+        cascadePeers++;
+      }
+      logger.info(
+        {
+          producerId: minted.id,
+          kind: minted.kind,
+          roomId,
+          originRelayId,
+          cascadePeers,
+        },
+        'REQ-RMS-035: hub-fanned reverse-minted producer DOWN to non-origin standbys',
+      );
+    }
   }
 
   return {
