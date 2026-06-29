@@ -90,9 +90,17 @@ function startServer(
 // REQ-RMS-034 (A4) — capture the factory's reverse-leg exports (getRoom +
 // registerReverseMinted) that the wiring layer (index.ts) assigns onto the
 // signalingRef box. The base startServer drops them; this variant returns them so
-// the unit can assert the signaling.ts surface A4 adds. The full index.ts
-// onReverseAnnounce -> primaryPipe.reverseMint -> registerReverseMinted closure
-// (over REAL mediasoup) is A5-integration-covered.
+// the unit can assert the signaling.ts surface A4 adds.
+//
+// COVERAGE (corrected A6): the index.ts onReverseAnnounce ORCHESTRATION closure
+// (getRoom guard + ensureReverseLeg-before-reverseMint ordering + the truthy-mint
+// registerReverseMinted call) is unit-covered by reverse-announce-handler.test.ts,
+// which runs the REAL extracted handler (makeOnReverseAnnounce) against a mock
+// PrimaryPipeCoordinator. A5 (rms-reverse-leg.integration.test.ts) covers
+// reverseMint -> produceLocalFromPipe + REQ-RMS-026 SSRC remap + byte-identity over
+// REAL mediasoup ONLY -- it calls the coordinators directly and consumes via a raw
+// DirectTransport sink, so it does NOT run the index.ts closure. The
+// registerReverseMinted -> fanLocalProducer client fan is covered by RED-RA-4 below.
 function startServerFull(
   interRelay: InterRelayContext,
 ): Promise<{
@@ -432,9 +440,13 @@ describe('inter-relay wiring (G1)', () => {
   });
 
   // ── Part-3 reverse leg — A4 factory surface (registerReverseMinted + getRoom) ──
-  // NOTE: the full index.ts onReverseAnnounce -> primaryPipe.reverseMint ->
-  // registerReverseMinted closure (over REAL mediasoup) is A5-integration-covered;
-  // these units pin the signaling.ts surface A4 adds (seed + fan + room lookup).
+  // NOTE (corrected A6): the index.ts onReverseAnnounce orchestration closure is
+  // unit-covered by reverse-announce-handler.test.ts -- it runs the REAL extracted
+  // handler (getRoom guard + ensureReverseLeg-before-reverseMint ordering + the
+  // truthy-mint registerReverseMinted call). A5 covers reverseMint ->
+  // produceLocalFromPipe over REAL mediasoup ONLY (no index.ts closure). These units
+  // pin the signaling.ts surface A4 adds (seed + fan + room lookup); the
+  // registerReverseMinted -> fanLocalProducer client fan is exercised by RED-RA-4.
   it('RED-RA-4: registerReverseMinted fans a reverse-minted producer to a joined local client (REQ-RMS-034/027)', async () => {
     const interRelay: InterRelayContext = {
       role: 'primary',

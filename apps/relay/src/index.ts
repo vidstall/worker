@@ -49,6 +49,7 @@ import { createSignalingServer, type TurnContext, type InterRelayContext } from 
 import { MetricsTracker } from './metrics.js';
 import { startMetricsServer, type ProbeState } from './metrics-server.js';
 import { closeRelayProbe, type RoomState } from './room-handler.js';
+import { makeOnReverseAnnounce } from './reverse-announce-handler.js';
 import { deriveCoturnUrl } from './coturn-url.js';
 import { fetchTurnCredential } from './turn-fetcher.js';
 import type { types as msTypes } from 'mediasoup';
@@ -599,23 +600,24 @@ if (isMainModule) {
           interRelayPeerId,
         );
       },
-      // REQ-RMS-034/035 (part-3 reverse leg) PRIMARY: a reverse announce arrived
-      // from a standby's local client. Mint a LOCAL hub copy from the announced
-      // reverse-pipe consumer, then seed + fan it via registerReverseMinted. Fail-
-      // safe: a missing room or absent rtpParameters is a no-op; only a truthy mint
-      // is registered. peerRelayId undefined (legacy) -> DEFAULT (single-leg).
-      onReverseAnnounce: async (roomId, producerId, kind, rtpParameters, peerRelayId, producerPeerId) => {
-        const room = signalingRef.getRoom?.(roomId);
-        if (!room || rtpParameters === undefined) return;
-        const origin = peerRelayId ?? DEFAULT_PEER_RELAY_ID;
-        const minted = await primaryPipe.reverseMint(
-          roomId,
-          room.router,
-          { producerId, kind, rtpParameters },
-          origin,
-        );
-        if (minted) signalingRef.registerReverseMinted?.(roomId, minted, origin, producerPeerId);
-      },
+      // REQ-RMS-034/035/037 (part-3 reverse leg) PRIMARY: a reverse announce arrived
+      // from a standby's local client. The handler (EXTRACTED to reverse-announce-
+      // handler.ts so it is unit-testable without index.ts's main side effects)
+      // ensures+drains the reverse leg FIRST, then mints a LOCAL hub copy and seeds +
+      // fans it via registerReverseMinted. Fail-safe: a missing room or absent
+      // rtpParameters is a no-op; only a truthy mint is registered. peerRelayId
+      // undefined (legacy) -> DEFAULT (single-leg). getRoom/registerReverseMinted are
+      // bound through the signalingRef box so they return undefined / no-op before the
+      // signaling server is live (preserving pre-server-live safety).
+      onReverseAnnounce: makeOnReverseAnnounce({
+        ensureReverseLeg: (roomId, router, peerRelayId) =>
+          primaryPipe.ensureReverseLeg(roomId, router, peerRelayId),
+        reverseMint: (roomId, router, announced, peerRelayId) =>
+          primaryPipe.reverseMint(roomId, router, announced, peerRelayId),
+        getRoom: (roomId) => signalingRef.getRoom?.(roomId),
+        registerReverseMinted: (roomId, minted, originRelayId, producerPeerId) =>
+          signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId),
+      }),
       // F1 (REQ-RO-003/008): the standby's UP pipe-connect frame, delivered through
       // the SAME interRelayPeers token gate as pipe-producer announces. PRIMARY
       // feeds it to the coordinator, which binds + connect()s the primary pipe to
