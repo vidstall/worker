@@ -48,7 +48,7 @@ import { createMediasoupManager } from './mediasoup-manager.js';
 import { createSignalingServer, type TurnContext, type InterRelayContext } from './signaling.js';
 import { MetricsTracker } from './metrics.js';
 import { startMetricsServer, type ProbeState } from './metrics-server.js';
-import { closeRelayProbe } from './room-handler.js';
+import { closeRelayProbe, type RoomState } from './room-handler.js';
 import { deriveCoturnUrl } from './coturn-url.js';
 import { fetchTurnCredential } from './turn-fetcher.js';
 import type { types as msTypes } from 'mediasoup';
@@ -60,6 +60,7 @@ import {
   PrimaryPipeCoordinator,
   handleInboundInterRelayFrame,
   buildPipeConnectFrame,
+  buildPipeProducerAnnounce,
   DEFAULT_PEER_RELAY_ID,
   type InterRelaySocketLike,
   type PipeConnectParams,
@@ -406,8 +407,20 @@ if (isMainModule) {
     // in time (mirrors the post-construction interRelayContext.role mutation).
     const signalingRef: {
       fanLocalProducer:
-        | ((roomId: string, peerId: string, producer: msTypes.Producer) => void)
+        | ((
+            roomId: string,
+            producerPeerId: string | undefined,
+            producer: msTypes.Producer,
+            peerRelayId?: string,
+          ) => void)
         | null;
+      getRoom?: (roomId: string) => RoomState | undefined;
+      registerReverseMinted?: (
+        roomId: string,
+        minted: msTypes.Producer,
+        originRelayId: string,
+        producerPeerId?: string,
+      ) => void;
     } = { fanLocalProducer: null };
     const standbyWarmPipe = new StandbyWarmPipeCoordinator(
       interRelayRegistry,
@@ -415,8 +428,11 @@ if (isMainModule) {
       // REQ-RMS-027: a standby minted a LOCAL forwarded producer → fan it to this
       // relay's OWN local clients. Bind to the ORIGINAL publisher (producerPeerId)
       // when the announce carried it, else the cascade peerRelayId.
+      // REQ-RMS-034: pass RAW producerPeerId + peerRelayId — the publisher-binding
+      // `??` resolution now lives INSIDE fanLocalProducer (behavior-neutral for the
+      // shipped forward leg; C1 later replaces it with the E2EE gate).
       (roomId, producer, producerPeerId, peerRelayId) =>
-        signalingRef.fanLocalProducer?.(roomId, producerPeerId ?? peerRelayId, producer),
+        signalingRef.fanLocalProducer?.(roomId, producerPeerId, producer, peerRelayId),
       // L1.4: opt in to active-forward only in mesh mode (RMS_ACTIVE_FORWARD='1').
       // Default false preserves the REQ-RO-005 paused-keepalive BW saving for M1 /
       // relay-overlap 2-relay failover rooms where the flag is not set.
@@ -570,6 +586,36 @@ if (isMainModule) {
       // coordinator drain threads it into the cascade announce.
       onPrimaryProducer: (roomId, router, producer, peerRelayId, producerPeerId) =>
         void primaryPipe.onProducer(roomId, router, producer, peerRelayId, producerPeerId),
+      // REQ-RMS-034 (part-3 reverse leg) STANDBY: a standby-homed LOCAL client
+      // produced. Consume it onto the warm pipe UP toward the primary + announce UP
+      // (the reverse dual of onPrimaryProducer). Key under THIS standby's own
+      // interRelayPeerId (same value tagged on the outbound link + ensure()).
+      onStandbyProducer: (roomId, router, producer, producerPeerId) => {
+        void standbyWarmPipe.onLocalClientProducer(
+          roomId,
+          router,
+          producer,
+          producerPeerId,
+          interRelayPeerId,
+        );
+      },
+      // REQ-RMS-034/035 (part-3 reverse leg) PRIMARY: a reverse announce arrived
+      // from a standby's local client. Mint a LOCAL hub copy from the announced
+      // reverse-pipe consumer, then seed + fan it via registerReverseMinted. Fail-
+      // safe: a missing room or absent rtpParameters is a no-op; only a truthy mint
+      // is registered. peerRelayId undefined (legacy) -> DEFAULT (single-leg).
+      onReverseAnnounce: async (roomId, producerId, kind, rtpParameters, peerRelayId, producerPeerId) => {
+        const room = signalingRef.getRoom?.(roomId);
+        if (!room || rtpParameters === undefined) return;
+        const origin = peerRelayId ?? DEFAULT_PEER_RELAY_ID;
+        const minted = await primaryPipe.reverseMint(
+          roomId,
+          room.router,
+          { producerId, kind, rtpParameters },
+          origin,
+        );
+        if (minted) signalingRef.registerReverseMinted?.(roomId, minted, origin, producerPeerId);
+      },
       // F1 (REQ-RO-003/008): the standby's UP pipe-connect frame, delivered through
       // the SAME interRelayPeers token gate as pipe-producer announces. PRIMARY
       // feeds it to the coordinator, which binds + connect()s the primary pipe to
@@ -637,7 +683,7 @@ if (isMainModule) {
       },
     };
 
-    const { wss, getRoomCount, setAccepting, closeRooms, fanLocalProducer } =
+    const { wss, getRoomCount, setAccepting, closeRooms, fanLocalProducer, getRoom, registerReverseMinted } =
       createSignalingServer(
         manager,
         metrics,
@@ -650,6 +696,20 @@ if (isMainModule) {
       );
     // REQ-RMS-027 (L1.3-b): late-bind the fan so onLocalProducer can reach it.
     signalingRef.fanLocalProducer = fanLocalProducer;
+    // REQ-RMS-034 (part-3 reverse leg): late-bind the room lookup + reverse-mint
+    // registrar so onReverseAnnounce (built above) can reach them once the server
+    // is live (same box pattern as fanLocalProducer).
+    signalingRef.getRoom = getRoom;
+    signalingRef.registerReverseMinted = registerReverseMinted;
+    // REQ-RMS-034: bind the reverse UP-announcer on the standby coordinator. Uses
+    // the SAME UP link seam as the pipe-connect frame (standbyLinkManager.send),
+    // NOT a primary per-peer send. The frame carries peerRelayId + rtpParameters
+    // (REQ-RMS-026) so the primary mints the right per-(room,peer) hub copy.
+    standbyWarmPipe.setReverseAnnouncer((roomId, prod, producerPeerId, peerRelayId, rtpParameters) =>
+      standbyLinkManager.send(
+        JSON.stringify(buildPipeProducerAnnounce(roomId, prod, producerPeerId, peerRelayId, rtpParameters)),
+      ),
+    );
 
     // RO-020: standby-liveness state box read by GET /api/probe. `role` is the
     // live value the RoomAssigned poller (Step 7) sets per room; the pipe/RTCP

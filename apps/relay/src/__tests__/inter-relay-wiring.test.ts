@@ -20,6 +20,7 @@ import { MetricsTracker } from '../metrics.js';
 import { createSignalingServer, type InterRelayContext } from '../signaling.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import { InterRelayProducerRegistry } from '@dvconf/inter-relay-client';
+import type { types as msTypes } from 'mediasoup';
 
 // ── Mocks (mirror signaling.test.ts) ──────────────────────────────────
 
@@ -82,6 +83,54 @@ function startServer(
       const addr = wss.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
       resolve({ wss, port });
+    });
+  });
+}
+
+// REQ-RMS-034 (A4) — capture the factory's reverse-leg exports (getRoom +
+// registerReverseMinted) that the wiring layer (index.ts) assigns onto the
+// signalingRef box. The base startServer drops them; this variant returns them so
+// the unit can assert the signaling.ts surface A4 adds. The full index.ts
+// onReverseAnnounce -> primaryPipe.reverseMint -> registerReverseMinted closure
+// (over REAL mediasoup) is A5-integration-covered.
+function startServerFull(
+  interRelay: InterRelayContext,
+): Promise<{
+  wss: WebSocketServer;
+  port: number;
+  getRoom: (roomId: string) => unknown;
+  registerReverseMinted: (
+    roomId: string,
+    minted: msTypes.Producer,
+    originRelayId: string,
+    producerPeerId?: string,
+  ) => void;
+}> {
+  return new Promise((resolve) => {
+    const originalPort = process.env['WS_PORT'];
+    process.env['WS_PORT'] = '0';
+    const srv = createSignalingServer(
+      createMockManager(), new MetricsTracker(), mockLogger(), undefined, interRelay,
+    ) as unknown as {
+      wss: WebSocketServer;
+      getRoom: (roomId: string) => unknown;
+      registerReverseMinted: (
+        roomId: string,
+        minted: msTypes.Producer,
+        originRelayId: string,
+        producerPeerId?: string,
+      ) => void;
+    };
+    process.env['WS_PORT'] = originalPort;
+    srv.wss.on('listening', () => {
+      const addr = srv.wss.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      resolve({
+        wss: srv.wss,
+        port,
+        getRoom: srv.getRoom,
+        registerReverseMinted: srv.registerReverseMinted,
+      });
     });
   });
 }
@@ -378,6 +427,71 @@ describe('inter-relay wiring (G1)', () => {
     ).toBeTruthy();
     expect(fwd?.['kind']).toBe('video');
     expect(fwd?.['peerId']).toBe('publisher-X');
+
+    ws.close();
+  });
+
+  // ── Part-3 reverse leg — A4 factory surface (registerReverseMinted + getRoom) ──
+  // NOTE: the full index.ts onReverseAnnounce -> primaryPipe.reverseMint ->
+  // registerReverseMinted closure (over REAL mediasoup) is A5-integration-covered;
+  // these units pin the signaling.ts surface A4 adds (seed + fan + room lookup).
+  it('RED-RA-4: registerReverseMinted fans a reverse-minted producer to a joined local client (REQ-RMS-034/027)', async () => {
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+    };
+    const { wss, port, registerReverseMinted } = await startServerFull(interRelay);
+    server = wss;
+
+    // A primary-homed LOCAL client joins; it must RECEIVE the hub-minted reverse
+    // producer's newProducer fan (it is NOT the original publisher 'clientA').
+    const ws = await connect(port);
+    const joinReply = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: 'join', roomId: 'roomA', peerId: 'local-listener' }));
+    await joinReply;
+
+    const fans: Record<string, unknown>[] = [];
+    ws.on('message', (d) => {
+      const m = JSON.parse(d.toString()) as Record<string, unknown>;
+      if (m['type'] === 'newProducer') fans.push(m);
+    });
+
+    // A reverse-minted hub producer (origin = a DIFFERENT standby's relayId; the
+    // ORIGINAL publisher 'clientA' is remote, so 'local-listener' must be notified).
+    const fakeMinted = { id: 'reverse-1', kind: 'video', on: vi.fn() } as unknown as msTypes.Producer;
+    registerReverseMinted('roomA', fakeMinted, 'ws://standbyA', 'clientA');
+    await tick(150);
+
+    const fan = fans.find((m) => m['producerId'] === 'reverse-1');
+    expect(fan, 'local client must receive the reverse-minted producer fan').toBeTruthy();
+    expect(fan?.['kind']).toBe('video');
+    expect(fan?.['peerId']).toBe('clientA'); // bound to the ORIGINAL publisher, not the relayId
+
+    ws.close();
+  });
+
+  it('RED-RA-4-getroom: getRoom returns the room after a join and undefined for an unknown room (REQ-RMS-036)', async () => {
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+    };
+    const { wss, port, getRoom } = await startServerFull(interRelay);
+    server = wss;
+
+    expect(getRoom('roomG')).toBeUndefined(); // no room yet
+
+    const ws = await connect(port);
+    const joinReply = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: 'join', roomId: 'roomG', peerId: 'p-g' }));
+    await joinReply;
+    await tick();
+
+    const room = getRoom('roomG') as { router?: unknown } | undefined;
+    expect(room, 'getRoom must return the live room after a join').toBeTruthy();
+    expect(room?.router).toBeDefined();
+    expect(getRoom('nope')).toBeUndefined();
 
     ws.close();
   });

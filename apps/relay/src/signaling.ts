@@ -502,8 +502,28 @@ export function createSignalingServer(
    * REQ-RMS-027 (L1.3-b, Bridge B) — fan a standby-minted LOCAL forwarded producer
    * to the room's OWN local WebRTC clients (a `newProducer` notification). Called
    * by the wiring layer (index.ts) from StandbyWarmPipeCoordinator's onLocalProducer.
+   *
+   * REQ-RMS-034 (part-3 reverse leg) — widened to 4-arg: the publisher-binding
+   * `??` resolution moved from the caller INTO the body (behavior-neutral for the
+   * shipped forward leg; Task C1 replaces it with the cross-relay E2EE gate).
    */
-  fanLocalProducer: (roomId: string, peerId: string, producer: msTypes.Producer) => void;
+  fanLocalProducer: (
+    roomId: string,
+    producerPeerId: string | undefined,
+    producer: msTypes.Producer,
+    peerRelayId?: string,
+  ) => void;
+  /**
+   * REQ-RMS-034/036 (part-3 reverse leg) — the wiring layer's onReverseAnnounce
+   * reads a live room (to mint onto room.router) then seeds + fans the hub copy.
+   */
+  getRoom: (roomId: string) => RoomState | undefined;
+  registerReverseMinted: (
+    roomId: string,
+    minted: msTypes.Producer,
+    originRelayId: string,
+    producerPeerId?: string,
+  ) => void;
 } {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
@@ -551,6 +571,14 @@ export function createSignalingServer(
   );
 
   const rooms = new Map<string, RoomState>();
+
+  // REQ-RMS-036 (part-3 reverse leg) — per-room origin registry (producerId ->
+  // origin info) for hub-fan exclusion + loop prevention (R-B reads it). Cleared
+  // ROOM-WIDE on teardown (and per-producer on the minted producer's '@close').
+  const originRegistry = new Map<
+    string,
+    Map<string, { originRelayId: string; kind: msTypes.MediaKind; producerPeerId?: string }>
+  >();
 
   // G-DEMO-9 (relay byte accounting): the per-room /metrics endpoint reported bytesForwarded=0
   // because `trackBytes` was only ever called with 0 (peer-join registration, ~:958). Periodically
@@ -1771,6 +1799,10 @@ export function createSignalingServer(
         }
         room.router.close();
         rooms.delete(roomId);
+        // REQ-RMS-036 (part-3 reverse leg): drop the per-room origin registry so a
+        // reused roomId starts fresh (mirror rooms.delete; per-producer cleanup
+        // already fires on each minted producer's '@close').
+        originRegistry.delete(roomId);
         metrics.clearRoom(roomId);
         // G1: drop the inter-relay announce records for this room (standby side).
         interRelay?.registry.clear(roomId);
@@ -1830,15 +1862,59 @@ export function createSignalingServer(
    * is unaffected; the cross-relay last-N union is tracked for RMS M4, not silently
    * dropped.
    */
-  function fanLocalProducer(roomId: string, peerId: string, producer: msTypes.Producer): void {
+  function fanLocalProducer(
+    roomId: string,
+    producerPeerId: string | undefined,
+    producer: msTypes.Producer,
+    peerRelayId?: string,
+  ): void {
     const room = rooms.get(roomId);
     if (!room) {
       logger.warn({ roomId }, 'fanLocalProducer: room not found');
       return;
     }
+    // R-A: bind to the ORIGINAL publisher when present, else the cascade relayId.
+    // This MOVES the `??` resolution from the forward caller (index.ts) INTO the
+    // body — behavior-neutral for the shipped forward leg (REQ-RMS-027/028/029).
+    // (Task C1 replaces this with the cross-relay E2EE fail-closed gate.)
+    const peerId = producerPeerId ?? peerRelayId ?? '';
     void notifyNewProducer(room, peerId, producer, logger).catch((err) =>
       logger.warn({ err, roomId }, 'fanLocalProducer: fan failed'),
     );
+  }
+
+  /**
+   * REQ-RMS-034/036 (part-3 reverse leg) — return a live room so the wiring layer's
+   * onReverseAnnounce can mint the hub copy onto room.router.
+   */
+  function getRoom(roomId: string): RoomState | undefined {
+    return rooms.get(roomId);
+  }
+
+  /**
+   * REQ-RMS-034/036 (part-3 reverse leg) — record a primary-minted reverse hub
+   * producer in the per-room originRegistry (for hub-fan exclusion + loop
+   * prevention, read by R-B) and fan it to this relay's OWN local clients. The
+   * E2EE fail-closed gate fires INSIDE fanLocalProducer because we pass the RAW
+   * producerPeerId. The REQ-RMS-035 hub-fan DOWN (exclude origin) is added by R-B
+   * (Task B1), NOT here.
+   */
+  function registerReverseMinted(
+    roomId: string,
+    minted: msTypes.Producer,
+    originRelayId: string,
+    producerPeerId?: string,
+  ): void {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    let bucket = originRegistry.get(roomId);
+    if (!bucket) {
+      bucket = new Map();
+      originRegistry.set(roomId, bucket);
+    }
+    bucket.set(minted.id, { originRelayId, kind: minted.kind, producerPeerId });
+    minted.on('@close', () => originRegistry.get(roomId)?.delete(minted.id));
+    fanLocalProducer(roomId, producerPeerId, minted, originRelayId);
   }
 
   return {
@@ -1847,5 +1923,7 @@ export function createSignalingServer(
     setAccepting,
     closeRooms,
     fanLocalProducer,
+    getRoom,
+    registerReverseMinted,
   };
 }
