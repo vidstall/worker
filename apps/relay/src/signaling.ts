@@ -389,7 +389,7 @@ export interface InterRelayContext {
    * F1 (REQ-RO-009) — empty-room teardown. The wiring layer releases BOTH the
    * standby + primary pipe ports back to the allocator and drops the coordinator
    * state, so a reused roomId starts fresh and the [min..max] port range does not
-   * leak. Routed through the context (mirrors registry.clear) so signaling.ts stays
+   * leak. Routed through the context (mirrors registry.clearRoom) so signaling.ts stays
    * decoupled from the allocator/coordinator handles. Optional — absent on the
    * in-process bench (which builds an InterRelayContext without it), exactly as
    * attachPeerSocket? / onStandbyRoomReady? are guarded.
@@ -1885,8 +1885,9 @@ export function createSignalingServer(
         // already fires on each minted producer's '@close').
         originRegistry.delete(roomId);
         metrics.clearRoom(roomId);
-        // G1: drop the inter-relay announce records for this room (standby side).
-        interRelay?.registry.clear(roomId);
+        // G1: drop ALL inter-relay announce buckets (room-wide; clearRoom not clear --
+        // per-peer reverse buckets, REQ-RMS-036).
+        interRelay?.registry.clearRoom(roomId);
         // F1 (REQ-RO-009): release this room's pipe ports + coordinator state so a
         // reused roomId starts fresh and the [min..max] range does not leak.
         interRelay?.releaseRoom?.(roomId);

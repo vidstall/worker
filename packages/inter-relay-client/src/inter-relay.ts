@@ -548,11 +548,36 @@ export class InterRelayProducerRegistry {
   }
 
   /**
-   * Drops a (room, peer)'s records (on room close / worker.died rebuild).
-   * `peerRelayId` defaults to DEFAULT_PEER_RELAY_ID (legacy single-standby).
+   * Drops a SINGLE (room, peer) bucket (on worker.died per-peer rebuild or a
+   * targeted single-standby teardown). `peerRelayId` defaults to
+   * DEFAULT_PEER_RELAY_ID (legacy single-standby path, byte-stable).
+   *
+   * For a full room close use clearRoom(roomId) -- it drops EVERY per-peer
+   * bucket for the room, not just DEFAULT (mirrors metrics.clearSession vs
+   * metrics.clearRoom; the part-3 hub-fan reverse-buckets would otherwise leak
+   * across a room teardown, DESIGN-1 / REQ-RMS-036).
    */
   clear(roomId: string, peerRelayId: string = DEFAULT_PEER_RELAY_ID): void {
     this.byRoom.delete(meshKey(roomId, peerRelayId));
+  }
+
+  /**
+   * Room-wide teardown -- drops EVERY (room, peer) bucket for roomId across ALL
+   * peerRelayId buckets, not just DEFAULT. `clear(roomId, peer)` drops a SINGLE
+   * bucket (single-standby / worker.died per-peer rebuild); this drops them all so
+   * a reused roomId starts with zero stale announce records. The per-peer reverse
+   * buckets the part-3 hub-fan populates would otherwise leak (DESIGN-1). Same
+   * `lastIndexOf('::')` room-scoping convention as listForRoom (see its docstring
+   * for the separator-boundary proof).
+   */
+  clearRoom(roomId: string): void {
+    const stale: string[] = [];
+    for (const key of this.byRoom.keys()) {
+      const sep = key.lastIndexOf('::'); // separator: peerRelayId after it is `::`-free
+      if (sep === -1 || key.slice(0, sep) !== roomId) continue; // exact room segment only
+      stale.push(key);
+    }
+    for (const key of stale) this.byRoom.delete(key);
   }
 
   /** Test/diagnostic — total (room, peer) buckets tracked. */
