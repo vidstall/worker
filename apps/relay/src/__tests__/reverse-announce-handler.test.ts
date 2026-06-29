@@ -35,6 +35,10 @@ interface Announced {
   producerId: string;
   kind: msTypes.MediaKind;
   rtpParameters: msTypes.RtpParameters;
+  // B4a (REQ-RMS-037): the handler now threads the ORIGINAL publisher's
+  // producerPeerId onto the announced descriptor so the QUEUED double-race path
+  // preserves it for the drain fan.
+  producerPeerId?: string;
 }
 
 // Build a fresh set of strongly-typed mocks per test. NB: no Partial-spread
@@ -80,7 +84,9 @@ describe('makeOnReverseAnnounce (A6-gate remediation, REQ-RMS-037)', () => {
     expect(deps.reverseMint).toHaveBeenCalledWith(
       'roomA',
       fakeRouter,
-      { producerId: 'prod-1', kind: 'video', rtpParameters: rtpParams },
+      // B4a: producerPeerId is now threaded onto the announced descriptor so the
+      // QUEUED double-race path can fan bound to the real publisher on drain.
+      { producerId: 'prod-1', kind: 'video', rtpParameters: rtpParams, producerPeerId: 'peer-X' },
       'relay-B',
     );
 
@@ -140,7 +146,8 @@ describe('makeOnReverseAnnounce (A6-gate remediation, REQ-RMS-037)', () => {
     expect(deps.reverseMint).toHaveBeenCalledWith(
       'roomA',
       fakeRouter,
-      { producerId: 'prod-1', kind: 'audio', rtpParameters: rtpParams },
+      // B4a: producerPeerId threaded onto the announced descriptor (see A6FIX-1).
+      { producerId: 'prod-1', kind: 'audio', rtpParameters: rtpParams, producerPeerId: 'peer-Y' },
       DEFAULT_PEER_RELAY_ID,
     );
     expect(deps.registerReverseMinted).toHaveBeenCalledWith(

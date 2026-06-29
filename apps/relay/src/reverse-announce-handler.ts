@@ -23,6 +23,10 @@ interface ReverseAnnounced {
   producerId: string;
   kind: msTypes.MediaKind;
   rtpParameters: msTypes.RtpParameters;
+  /** B4a (REQ-RMS-037): the ORIGINAL publishing peer, threaded onto the queue so a
+   *  double-race announce (queued before the leg connects) is fanned bound to the
+   *  real publisher when drainReverseMints fires onReverseMinted. */
+  producerPeerId?: string;
 }
 
 /** Collaborators the handler orchestrates (the PrimaryPipeCoordinator reverse-leg
@@ -93,7 +97,11 @@ export function makeOnReverseAnnounce(deps: ReverseAnnounceDeps) {
     const minted = await deps.reverseMint(
       roomId,
       room.router,
-      { producerId, kind, rtpParameters },
+      // B4a: carry producerPeerId on the announced descriptor so the QUEUED path
+      // (double-race: leg + standby params both absent) preserves it for the drain
+      // fan. The immediate path is unaffected -- mintOne ignores producerPeerId and
+      // the `if (minted)` registerReverseMinted below already fans with it.
+      { producerId, kind, rtpParameters, producerPeerId },
       origin,
     );
     if (minted) deps.registerReverseMinted(roomId, minted, origin, producerPeerId);

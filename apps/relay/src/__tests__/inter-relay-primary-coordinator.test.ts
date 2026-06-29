@@ -408,4 +408,17 @@ describe('PrimaryPipeCoordinator — REQ-RMS-034/037 reverseMint (part-3 reverse
     expect(drained).toEqual([]);
     expect(fakeTransport.produce).not.toHaveBeenCalled();
   });
+
+  it('RED-RB-4c: a reverse announce arriving while the leg transport is UNCONNECTED is minted AND fanned (with the original producerPeerId) once it drains -- A6 double-race', async () => {
+    const fanSpy = vi.fn();
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn(), onReverseMinted: fanSpy });
+    const r1 = await coord.reverseMint('roomA', fakeRouter, { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP, producerPeerId: 'clientA' }, 'ws://standbyA');
+    expect(r1).toBeNull(); // queued, not minted (no leg transport yet)
+    const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'piped-up-1', kind: 'video', on: vi.fn() }) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    const drained = await coord.drainReverseMints('roomA', 'ws://standbyA');
+    expect(drained.map(p => p.id)).toEqual(['piped-up-1']);          // minted
+    expect(fanSpy).toHaveBeenCalledTimes(1);                          // fanned -- RED today: drainReverseMints never fans
+    expect(fanSpy).toHaveBeenCalledWith('roomA', expect.objectContaining({ id: 'piped-up-1' }), 'ws://standbyA', 'clientA'); // original producerPeerId preserved
+  });
 });

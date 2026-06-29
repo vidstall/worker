@@ -562,6 +562,15 @@ if (isMainModule) {
             ),
           ),
         ),
+      // REQ-RMS-037 (Task B4a): close the A6 double-race fan tail. When BOTH the
+      // reverse leg AND the standby params were absent at announce time the handler
+      // QUEUES the announce (reverseMint -> null) so its immediate
+      // registerReverseMinted never ran. drainReverseMints (run by a later
+      // onStandbyConnectParams/onProducer) now fires onReverseMinted per drained
+      // mint -> registerReverseMinted fans it to local clients + hub-fans DOWN,
+      // threading the ORIGINAL publisher's producerPeerId carried on the queue entry.
+      onReverseMinted: (roomId, minted, originRelayId, producerPeerId) =>
+        signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId),
       logger,
     });
     const interRelayContext: InterRelayContext = {

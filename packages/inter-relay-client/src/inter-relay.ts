@@ -1481,6 +1481,23 @@ export interface PrimaryPipeCoordinatorDeps {
    * byte-stable (resolves to the legacy interRelayLink.socket).
    */
   paramSender: (roomId: string, params: PipeConnectParams, peerRelayId?: string) => void;
+  /**
+   * REQ-RMS-037 (Task B4a) — fires once per reverse mint DRAINED by
+   * drainReverseMints (the A6 double-race tail: a reverse announce that arrived
+   * while BOTH the leg transport AND the standby params were absent → queued via
+   * reverseMint → the immediate `if (minted) registerReverseMinted(...)` path
+   * never ran). Wired in the daemon to registerReverseMinted so a queued-then-
+   * drained hub producer is STILL fanned to local clients + hub-fanned DOWN,
+   * threading the ORIGINAL publisher's producerPeerId carried on the queue entry.
+   * OPTIONAL → the immediate (non-queued) reverse path + every existing
+   * construction stay byte-stable (this fires only on the drain leg).
+   */
+  onReverseMinted?: (
+    roomId: string,
+    minted: msTypes.Producer,
+    originRelayId: string,
+    producerPeerId?: string,
+  ) => void;
   logger?: Logger;
 }
 
@@ -1525,9 +1542,17 @@ interface PrimaryPipeState {
 export class PrimaryPipeCoordinator {
   private readonly states = new Map<string, PrimaryPipeState>();
   // REQ-RMS-037 — reverse announces queued until the leg transport is connected.
+  // B4a: the entry carries the ORIGINAL publisher's producerPeerId so a
+  // queued-then-drained mint can be fanned bound to the real publisher (the A6
+  // double-race tail) — undefined on the legacy/default path.
   private readonly reverseMintPending = new Map<
     string,
-    Array<{ producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters }>
+    Array<{
+      producerId: string;
+      kind: msTypes.MediaKind;
+      rtpParameters: msTypes.RtpParameters;
+      producerPeerId?: string;
+    }>
   >();
   // REQ-RMS-034 — per-leg dedup of reverse-minted producer ids (mint exactly once).
   private readonly reverseMintedIds = new Map<string, Set<string>>();
@@ -1706,7 +1731,12 @@ export class PrimaryPipeCoordinator {
   async reverseMint(
     roomId: string,
     _router: msTypes.Router,
-    announced: { producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters },
+    announced: {
+      producerId: string;
+      kind: msTypes.MediaKind;
+      rtpParameters: msTypes.RtpParameters;
+      producerPeerId?: string;
+    },
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<msTypes.Producer | null> {
     const key = meshKey(roomId, peerRelayId);
@@ -1734,7 +1764,12 @@ export class PrimaryPipeCoordinator {
   private async mintOne(
     key: string,
     transport: msTypes.PipeTransport,
-    announced: { producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters },
+    announced: {
+      producerId: string;
+      kind: msTypes.MediaKind;
+      rtpParameters: msTypes.RtpParameters;
+      producerPeerId?: string;
+    },
   ): Promise<msTypes.Producer | null> {
     let seen = this.reverseMintedIds.get(key);
     if (!seen) {
@@ -1780,7 +1815,16 @@ export class PrimaryPipeCoordinator {
     for (const a of pend) {
       try {
         const p = await this.mintOne(key, transport, a);
-        if (p) out.push(p);
+        if (p) {
+          out.push(p);
+          // B4a (REQ-RMS-037) — fan the queued-then-drained mint (the A6 double-
+          // race tail: it bypassed the handler's immediate registerReverseMinted
+          // because reverseMint returned null when queued). Thread the entry's
+          // ORIGINAL producerPeerId so the fan binds to the real publisher. Fires
+          // exactly once per successful mint (inside `if (p)`); dedup'd upstream
+          // by mintOne's reverseMintedIds set so a benign dup never re-fans.
+          this.deps.onReverseMinted?.(roomId, p, peerRelayId, a.producerPeerId);
+        }
       } catch (err) {
         this.deps.logger?.warn(
           {
