@@ -216,9 +216,10 @@ export async function bootstrapCp(
   client: SuiClient,
   config: NetworkConfig,
   logger: Logger,
+  stakeMist: bigint = CP_STAKE_MIST, // default 0.6 SUI keeps existing 1-CP callers unchanged; B2 passes higher for 5-CP setup
 ): Promise<BootstrapCpResult> {
   const kp = await createFundedKeypair(logger);
-  const reg = await registerMiner(client, kp, config, CP_STAKE_MIST, logger);
+  const reg = await registerMiner(client, kp, config, stakeMist, logger);
   if (reg.cpCapId === null) {
     throw new Error('bootstrapCp: expected a ControlPlaneCap from a 0.6 SUI register, got none');
   }
