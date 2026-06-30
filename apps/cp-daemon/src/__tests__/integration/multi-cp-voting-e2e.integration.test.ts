@@ -76,6 +76,13 @@ const BOOT_PORT_WAIT_MS = 240_000;
  */
 const IDLE_GAP = 31n;
 
+/**
+ * Wall-clock budget for the B4 beforeAll epoch-advance (IDLE_GAP at 2s/epoch ≈ 62s,
+ * plus RPC poll latency). This is UNRELATED to BOOT_PORT_WAIT_MS despite the equal
+ * numeric value — named separately so a reader does not assume they are linked.
+ */
+const EPOCH_ADVANCE_TIMEOUT_MS = 240_000;
+
 /** Number of distinct CPs stood up — the active-CP count that fixes the quorum. */
 const CP_COUNT = 5;
 
@@ -507,7 +514,7 @@ describe('Multi-CP revote — 4-of-5 idle-relay Relay→Validator (GD-1)', () =>
     // max_idle (30). baseEpoch is captured AFTER register_relay set last_heartbeat.
     relay = await seedRelayVia4Cps();
     baseEpoch = BigInt((await handle.client.getLatestSuiSystemState()).epoch);
-    await waitForEpochAtLeast(handle.client, baseEpoch + IDLE_GAP, { timeoutMs: 240_000 }, logger);
+    await waitForEpochAtLeast(handle.client, baseEpoch + IDLE_GAP, { timeoutMs: EPOCH_ADVANCE_TIMEOUT_MS }, logger);
   }, 600_000);
 
   afterAll(async () => {
@@ -563,6 +570,15 @@ describe('Multi-CP revote — 4-of-5 idle-relay Relay→Validator (GD-1)', () =>
           handle.config,
           logger,
         );
+        // ── DISCRIMINATOR (mirrors B2): after the first 3 of 4 votes the role is
+        // NOT yet assigned — 3 < required=4. On the OLD floor-1 contract the very
+        // first re-vote would already have assigned, so this REJECT proves the
+        // 4-of-5 quorum DIRECTLY for the revote (not only via the event field).
+        if (i === 2) {
+          await expect(
+            waitForRoleAssignment(handle.client, handle.config, relay.minerId, logger, NEGATIVE_WAIT_MS),
+          ).rejects.toThrow(/timeout/i);
+        }
       }
       const assignedRole = await waitForRoleAssignment(handle.client, handle.config, relay.minerId, logger, 30_000);
       expect(assignedRole).toBe(MinerRole.Validator);
@@ -586,9 +602,7 @@ describe('Multi-CP revote — 4-of-5 idle-relay Relay→Validator (GD-1)', () =>
         handle.config,
         logger,
       );
-      const transitioned = (applyResult.events ?? []).find((e) =>
-        (e.type ?? '').includes('::registration::RoleTransitioned'),
-      );
+      const transitioned = findEvent(applyResult, '::registration::RoleTransitioned');
       expect(transitioned).toBeDefined();
       const rt = transitioned!.parsedJson as { miner_id: string; old_role: number; new_role: number };
       expect(normalizeSuiAddress(rt.miner_id)).toBe(relay.minerId);
