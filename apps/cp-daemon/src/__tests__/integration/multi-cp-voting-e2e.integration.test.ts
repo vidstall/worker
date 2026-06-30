@@ -196,4 +196,136 @@ describe('Multi-CP role voting — 4-of-5 live quorum (GD-1)', () => {
     },
     120_000,
   );
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // B3 — LIVE abort-code + role-guard negative paths (GD-1).
+  //
+  // The headline test proved the POSITIVE 4-of-5 quorum. These three exercise the
+  // quorum's NEGATIVE guards on the SAME live localnet + SAME 5 CPs, each against
+  // its OWN fresh USER miner. The shared RoleVoteBox is keyed by miner_id, so a
+  // distinct miner isolates each test, and a reverted cast leaves NO on-chain trace
+  // (the aborting voter is not recorded) — order/state never cross-contaminate.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Register a fresh USER-role miner (0.3 SUI → MinerCap, role User). current_role
+   * == User means the cast-side re-vote-eligibility guard (708) is skipped — these
+   * are INITIAL votes, not re-votes, so the cooldown/revote path (709) is not
+   * involved and cannot be tripped accidentally.
+   */
+  async function freshUserMiner() {
+    const minerKp = await createFundedKeypair(logger);
+    const reg = await registerMiner(handle.client, minerKp, handle.config, RELAY_STAKE_MIST, logger);
+    return { minerId: reg.minerId, minerKp };
+  }
+
+  /**
+   * Drive one `castRoleVoteFromCp` that is EXPECTED to revert, then assert the
+   * on-chain MoveAbort carries EXACTLY `expectedCode`.
+   *
+   * castRoleVoteFromCp → signAndAssert throws
+   *   `cast_role_vote failed on-chain: status=failure error=<effects.status.error>`
+   * and Sui formats effects.status.error as
+   *   `MoveAbort(MoveLocation { … name: Identifier("role_voting") … }, <code>) in command N`.
+   *
+   * RIGOR: we EXTRACT the numeric abort code and compare it with `toBe`. The inner
+   * `Identifier("…")` / `Some("…")` parens defeat a naive `MoveAbort(.., N)` capture,
+   * so — exactly like the proven validator-daemon `expectMoveAbort` helper — we fall
+   * back to the `, <code>) in command` tail form. This is STRICTER than
+   * `.rejects.toThrow(/704/)`: a different abort (709/711/719/…) cannot satisfy
+   * `actual === expectedCode`, and we additionally pin the module to `role_voting`.
+   * The real string is logged once so the GREEN evidence records its exact form.
+   */
+  async function expectCastAbortCode(
+    cp: BootstrapCpResult,
+    minerId: string,
+    role: number,
+    expectedCode: number,
+    label: string,
+  ): Promise<void> {
+    let msg: string | null = null;
+    try {
+      await castRoleVoteFromCp(handle.client, cp, minerId, role, handle.config, logger);
+    } catch (e) {
+      msg = e instanceof Error ? e.message : String(e);
+    }
+    if (msg === null) {
+      throw new Error(
+        `[${label}] expected cast_role_vote to abort with Move code ${expectedCode}, but it SUCCEEDED`,
+      );
+    }
+    logger.info(
+      { module: 'multi-cp-voting-e2e', action: 'abort_capture', context: { label, expectedCode } },
+      `[${label}] cast abort string: ${msg}`,
+    );
+    const m = msg.match(/MoveAbort\([^)]*?,\s*(\d+)\)/) ?? msg.match(/,\s*(\d+)\)\s*in command/);
+    const actual = m && m[1] !== undefined ? Number(m[1]) : null;
+    expect(actual).toBe(expectedCode); // EXACT code — cannot pass on a different abort
+    expect(msg).toContain('role_voting'); // abort originates in the role_voting module
+  }
+
+  it(
+    '6a-2: same CP voting twice while the record is open aborts E_ALREADY_VOTED (704)',
+    async () => {
+      const { minerId } = await freshUserMiner();
+      // cps[0] casts once — succeeds (1 of 4; record open, below the 4-of-5 quorum).
+      await castRoleVoteFromCp(handle.client, cps[0], minerId, MinerRole.Relay, handle.config, logger);
+      // cps[0] casts the SAME role for the SAME miner again → E_ALREADY_VOTED (704).
+      // No assignment is pending (711 skipped) and the role matches the record (719
+      // skipped), so 704 — the duplicate-voter guard — is precisely what fires.
+      await expectCastAbortCode(cps[0], minerId, MinerRole.Relay, 704, '6a-2');
+    },
+    120_000,
+  );
+
+  it(
+    '6a-3: a distinct 5th CP voting after finalize aborts E_PRIOR_ASSIGNMENT_PENDING (711)',
+    async () => {
+      const { minerId } = await freshUserMiner();
+      // 4 DISTINCT CPs cast Relay → crosses the 4-of-5 quorum → assigned_roles[miner]
+      // is populated (finalized, pending — NOT yet applied by the miner).
+      for (let i = 0; i < 4; i++) {
+        await castRoleVoteFromCp(handle.client, cps[i], minerId, MinerRole.Relay, handle.config, logger);
+      }
+      // Confirm the assignment actually landed on-chain before probing the guard.
+      const assignedRole = await waitForRoleAssignment(handle.client, handle.config, minerId, logger, 30_000);
+      expect(assignedRole).toBe(MinerRole.Relay);
+      // cps[4] (a fresh, distinct CP) casts into the pending assignment →
+      // E_PRIOR_ASSIGNMENT_PENDING (711). 711 is the FIRST guard reached past the
+      // existence/role checks (assigned_roles is populated), so it fires before any
+      // duplicate (704) / mismatch (719) check.
+      await expectCastAbortCode(cps[4], minerId, MinerRole.Relay, 711, '6a-3');
+    },
+    120_000,
+  );
+
+  it(
+    '6a-4: an off-role vote aborts E_ROLE_MISMATCH (719) and does not skew the Relay outcome',
+    async () => {
+      const { minerId } = await freshUserMiner();
+      // 3 CPs cast Relay (record open, first-mover role = Relay; below the quorum).
+      for (let i = 0; i < 3; i++) {
+        await castRoleVoteFromCp(handle.client, cps[i], minerId, MinerRole.Relay, handle.config, logger);
+      }
+      // cps[3] casts VALIDATOR (off-role; a VALID role, so 703 is NOT the cause) →
+      // E_ROLE_MISMATCH (719) because role != record.role (Relay). The revert leaves
+      // no on-chain trace, so it is NOT tallied toward any role.
+      await expectCastAbortCode(cps[3], minerId, MinerRole.Validator, 719, '6a-4');
+      // cps[4] casts Relay — the 4th DISTINCT *Relay* voter {0,1,2,4} crosses the
+      // quorum (cps[3]'s reverted off-role vote left no trace).
+      const fourth = await castRoleVoteFromCp(handle.client, cps[4], minerId, MinerRole.Relay, handle.config, logger);
+      // Outcome is Relay — the off-role Validator vote was correctly ignored, never counted.
+      const assignedRole = await waitForRoleAssignment(handle.client, handle.config, minerId, logger, 30_000);
+      expect(assignedRole).toBe(MinerRole.Relay);
+      // Extra pin: RoleAssigned on the 4th Relay cast carries threshold==4 (the live
+      // 2/3-of-5 quorum) and vote_count==4 (exactly the {0,1,2,4} Relay voters).
+      const assigned = findEvent(fourth, '::role_voting::RoleAssigned');
+      expect(assigned).toBeDefined();
+      const ra = assigned!.parsedJson as { role: number; vote_count: string; threshold: string };
+      expect(ra.role).toBe(MinerRole.Relay);
+      expect(ra.threshold).toBe(EXPECTED_THRESHOLD); // 4
+      expect(ra.vote_count).toBe(EXPECTED_VOTE_COUNT); // 4 distinct Relay voters {0,1,2,4}
+    },
+    120_000,
+  );
 });
