@@ -246,12 +246,14 @@ async function buildSframes(): Promise<SframeCtx> {
   return { sframes, sentBodiesB64, kid, keyLookup, ctrToPlain };
 }
 
-/** A real VP8 producer on `router` that sends real-SFrame VP8 RTP (start/stop driven). */
+/** A real VP8 producer on `router` that sends real-SFrame VP8 RTP (start/stop driven).
+ *  `ssrc` is parameterized so two producers can coexist on ONE router (the RtpListener
+ *  rejects a duplicate SSRC at produce() time). */
 async function makeSframeVp8SourceOn(
   router: msTypes.Router,
   sframes: Uint8Array[],
+  ssrc = 0x7000_0000,
 ): Promise<{ producer: msTypes.Producer; start: () => void; stop: () => void }> {
-  const ssrc = 0x7000_0000;
   const rtpParameters: msTypes.RtpParameters = {
     codecs: [{ mimeType: 'video/VP8', payloadType: VP8_PT, clockRate: 90000, parameters: {}, rtcpFeedback: [] }],
     encodings: [{ ssrc, scalabilityMode: 'L1T1' }],
@@ -401,8 +403,10 @@ describe('REQ-RMS-038 — R-C hermetic E2EE 2-hop fidelity + fail-closed-on-deli
 
     // The hub RECEIVED standby-A's reverse UP-announce carrying producerPeerId='clientA'
     // (driven through the REAL announce wire — proves the binding survives serialization).
-    // produceLocalFromPipe mints id === announced.id (rms-reverse-leg), so the hub copy's id
-    // is the announced id; resolveByProducerId(minted.id) returns the ORIGINAL publisher.
+    // In production, produceLocalFromPipe mints id === announced.id (rms-reverse-leg), so the
+    // hub copy's id IS the announced id; the test models that by announcing minted.producer.id
+    // directly (no produceLocalFromPipe here — `minted` is a fresh real producer), so
+    // resolveByProducerId(minted.id) returns the ORIGINAL publisher.
     const recordIntoHub = createInterRelayAnnouncer({
       send: (data) => { const p = JSON.parse(data) as unknown; if (isPipeProducerAnnounce(p)) hubRegistry.record(p); },
     });
@@ -531,7 +535,26 @@ describe('REQ-RMS-038 — R-C hermetic E2EE 2-hop fidelity + fail-closed-on-deli
         `hubFanFiredForC=${calledPeers.includes(CASCADE_RELAY)} (fail-closed = NOT-DELIVERED, not never-minted)`,
     );
 
-    try { minted.producer.close(); } catch { /* best-effort */ }
+    // ── POSITIVE CONTROL (proves the absence above is real suppression, not a dead/slow
+    //    listener): fan a PRESENT-id producer through the SAME shipped path to BOTH e2ee
+    //    servers and confirm it DOES land on both clients within waitForFan's ~2000ms (the
+    //    same delivery bound case (a) relies on). A distinct SSRC lets it coexist with the
+    //    missing-id producer on primaryRouter. No media leg here ⇒ P10-insensitive (so (b)
+    //    stays GREEN under P10_FORCE_TAMPER). ──
+    const PRESENT = 'clientPresent';
+    const present = await makeSframeVp8SourceOn(primaryRouter, [new Uint8Array([5, 6, 7, 8])], 0x7000_0010);
+    hubServer.registerReverseMinted(roomId, present.producer, ORIGIN_RELAY, PRESENT);
+    const { pipeProducer: presentPipe } = await pipeRoomToSecondWorker(primaryRouter, routerC, present.producer.id);
+    cServer.fanLocalProducer(roomId, PRESENT, presentPipe, HUB_RELAY);
+
+    const hubPresentFan = await waitForFan(hub.fans, present.producer.id);
+    const cPresentFan = await waitForFan(c.fans, presentPipe.id);
+    expect(hubPresentFan, 'positive control: present-id MUST deliver to the primary client (channel live + fast)').toBeDefined();
+    expect(hubPresentFan!['peerId']).toBe(PRESENT);
+    expect(cPresentFan, 'positive control: present-id MUST deliver to the far-standby client (channel live + fast)').toBeDefined();
+    expect(cPresentFan!['peerId']).toBe(PRESENT);
+
+    try { minted.producer.close(); present.producer.close(); } catch { /* best-effort */ }
   }, 60_000);
 
   it('(c)+(d) OPEN room, publisher-id MISSING: graceful fallback DELIVERS (bound to relayId) byte-stable — proves the gate is E2EE-scoped (P10 RED hook)', async () => {
