@@ -86,7 +86,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * in command N"); the SDK's own execution-failure throws carry the same substring.
  * Returns the trailing abort code, or null when no MoveAbort is present.
  */
-function extractMoveAbortCode(err: unknown): number | null {
+export function extractMoveAbortCode(err: unknown): number | null {
   const msg = err instanceof Error ? err.message : String(err);
   const m = msg.match(/MoveAbort\(.*,\s*(\d+)\)/s); // greedy → the final `, <code>)`.
   return m ? Number(m[1]) : null;
@@ -211,7 +211,7 @@ async function main(): Promise<void> {
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.roomManagerId),
-          tx.pure.address(roomId),
+          tx.pure.id(roomId), // room_id: ID — BCS-identical to address, matches provision-room.ts:111-113.
           payment!,
         ],
       });
