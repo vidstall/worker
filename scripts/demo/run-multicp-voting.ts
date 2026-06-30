@@ -661,7 +661,7 @@ async function main(): Promise<void> {
   const handles: ProcessHandle[] = [];
   let tearingDown = false;
   const onSignal = (sig: NodeJS.Signals): void => {
-    if (tearingDown) return; // a second signal during teardown → ignore
+    if (tearingDown) return; // de-dup a DIFFERENT signal mid-teardown (e.g. SIGTERM after SIGINT); handlers are `once`, so a repeat of the SAME signal isn't redelivered here → it hits Node's default = force-quit (the conventional double-Ctrl-C escape hatch)
     tearingDown = true;
     logger.warn({ module: MODULE, action: 'signal', context: { signal: sig, count: handles.length } }, `${sig} received — tearing down fleet`);
     void teardownFleet(handles, logger).finally(() => process.exit(130)); // 130 = terminated by signal (non-zero)
