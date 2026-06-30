@@ -493,3 +493,64 @@ describe('PrimaryPipeCoordinator — B6b forward flap-dedup (REQ-RMS-035)', () =
     expect(totalConsumes).toBe(2); // p1 piped once per leg; the re-attach was deduped
   });
 });
+
+// ── G. RC-A (REQ-RMS-035) — the FORWARD queue must be flushed when the leg is
+//    brought up by the REVERSE path. Each (room,peer) leg uses ONE bidirectional
+//    pipeTransport for BOTH forward (primary→standby) and reverse (standby→primary).
+//    The forward queue (s.pendingProducers) is drained by drain(), called from
+//    onProducer (only if standbyParams present at produce time) and
+//    onStandbyConnectParams (only if already connected). When the leg is instead
+//    minted+connected by ensureReverseLeg (a reverse announce brings it up), it
+//    historically called ONLY drainReverseMints -> the queued FORWARD producers were
+//    orphaned (no later forward onProducer to flush them). This is the LIVE bug: the
+//    last standby to bring up its leg via the reverse path never received the
+//    primary's producers. ensureReverseLeg MUST also drain() the forward queue.
+//    drain() self-guards (!connected || pipeTransport===null) and is idempotent
+//    (forwardPipedIds Set), so this is safe regardless of mint order. ─────────────
+describe('PrimaryPipeCoordinator — RC-A forward drain on reverse-leg bring-up (REQ-RMS-035)', () => {
+  let announcer: ReturnType<typeof vi.fn>;
+  let paramSender: ReturnType<typeof vi.fn>;
+  let allocator: ReturnType<typeof makeStubAllocator>;
+
+  beforeEach(() => {
+    announcer = vi.fn();
+    paramSender = vi.fn();
+    allocator = makeStubAllocator(41000);
+  });
+
+  it('RED-PPC-FWD-ON-REVERSE-BRINGUP: a forward producer queued before params is drained + announced when the leg is brought up by ensureReverseLeg (no later forward onProducer)', async () => {
+    const { router, transports, piped } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    // 1. A forward producer arrives BEFORE the standby pipe-connect params -> queued
+    //    into s.pendingProducers, NOT piped (never pipe onto an unconnected transport).
+    await coord.onProducer('room-P', router as any, makeProducer('fwd-1'));
+    expect(announcer).not.toHaveBeenCalled();
+
+    // 2. The standby pipe-connect params arrive (the UP leg). The transport is minted
+    //    lazily WITH a router (onProducer / ensureReverseLeg), so nothing pipes yet:
+    //    s.pipeTransport is still null and s.connected is still false.
+    await coord.onStandbyConnectParams('room-P', STANDBY_PARAMS);
+    expect(announcer).not.toHaveBeenCalled(); // still queued (transport null)
+
+    // 3. The leg is brought up by the REVERSE path: a reverse announce calls
+    //    ensureReverseLeg, which mints + connects the SHARED bidirectional pipe. This
+    //    is the LAST-standby-via-reverse case — there is NO later forward onProducer to
+    //    flush the forward queue.
+    await coord.ensureReverseLeg('room-P', router as any);
+
+    // The leg WAS brought up (transport minted + connected, DOWN reply sent).
+    expect(router.createPipeTransport).toHaveBeenCalledOnce();
+    expect(transports).toHaveLength(1);
+    expect(paramSender).toHaveBeenCalledOnce();
+
+    // RC-A: the queued FORWARD producer MUST be drained on reverse-leg bring-up.
+    // TODAY ensureReverseLeg calls ONLY drainReverseMints -> the forward queue is
+    // orphaned -> announcer never fires -> RED. After the fix ensureReverseLeg also
+    // calls drain() -> the queued producer is piped + announced with its PIPED id.
+    expect(announcer).toHaveBeenCalledTimes(1);
+    expect(announcer.mock.calls[0]![0]).toBe('room-P');
+    expect(announcer.mock.calls[0]![1].id).toBe(piped[0]!.id); // PIPED consumer id…
+    expect(announcer.mock.calls[0]![1].id).not.toBe('fwd-1'); // …NOT the source id
+  });
+});

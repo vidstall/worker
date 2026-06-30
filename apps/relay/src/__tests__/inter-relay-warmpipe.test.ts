@@ -544,6 +544,58 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-025 ACTIVE forward (produceLoca
     expect(onLocalProducer).toHaveBeenCalledTimes(2);
     expect(logger.warn).toHaveBeenCalled(); // the bad callback was warn-logged
   });
+
+  // RC-B (REQ-RMS-035) — a forward producer announced AFTER the FIRST announce
+  // cutover must still be minted. onAnnounce flips state.pending=false on the first
+  // announce (placeholder→real consumer swap). Historically every SUBSEQUENT forward
+  // announce then hit the `!state.pending` short-circuit and returned BEFORE
+  // forwardLocalProducers -> a producer announced post-cutover was record()'d in the
+  // registry yet NEVER minted on the standby router -> the local client saw "0
+  // inbound video". The fix re-drives the idempotent forward mint on the live
+  // state.topology when already cut over (producedIds dedups already-minted ids).
+  it('RED-WP-POSTCUTOVER-MINT (REQ-RMS-035): a producer announced AFTER the first cutover is still minted on the standby router (not dropped by the !pending short-circuit)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    const { router, transports } = makeMockRouter();
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true);
+    const topology = makeStandbyTopology('room-pc');
+
+    // 1. ensure() with NOTHING announced yet -> pending=true (placeholder, no produce).
+    await coord.ensure(topology, router as any, 40000, PEER);
+    expect(transports.reduce((n, t) => n + t.produce.mock.calls.length, 0)).toBe(0);
+
+    // 2. FIRST announce: producer #1 announced -> onAnnounce does the placeholder
+    //    cutover AND mints #1 (pending flips to false).
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-pc', producerId: 'p1', kind: 'audio',
+      producerPeerId: 'pub-1', peerRelayId: PEER, rtpParameters: rtpParams(11),
+    });
+    const reran = await coord.onAnnounce('room-pc', topology, router as any, 40000, PEER);
+    expect(reran).toBe(true); // cutover happened
+    expect(transports.reduce((n, t) => n + t.produce.mock.calls.length, 0)).toBe(1); // #1 minted
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
+
+    // 3. A SECOND producer is announced AFTER the cutover (a peer's 2nd track produced
+    //    once this leg already cut over). record() it, then re-announce.
+    registry.record({
+      type: 'pipe-producer', roomId: 'room-pc', producerId: 'p2', kind: 'video',
+      producerPeerId: 'pub-1', peerRelayId: PEER, rtpParameters: rtpParams(22),
+    });
+    await coord.onAnnounce('room-pc', topology, router as any, 40000, PEER);
+
+    // RC-B: the post-cutover announce MUST mint #2. TODAY the `!state.pending`
+    // short-circuit returns before forwardLocalProducers -> #2 dropped -> RED.
+    // After the fix forwardLocalProducers re-drives (idempotent) -> #2 minted -> GREEN.
+    expect(transports.reduce((n, t) => n + t.produce.mock.calls.length, 0)).toBe(2);
+    const mintedIds = transports
+      .flatMap((t) => t.produce.mock.calls.map((c) => (c[0] as { id: string }).id))
+      .sort();
+    expect(mintedIds).toEqual(['p1', 'p2']);
+    expect(onLocalProducer).toHaveBeenCalledTimes(2);
+    expect(onLocalProducer).toHaveBeenLastCalledWith(
+      'room-pc', expect.objectContaining({ id: 'p2', kind: 'video' }), 'pub-1', PEER,
+    );
+  });
 });
 
 // ── L1.4: RMS_ACTIVE_FORWARD gate — default-off preserves REQ-RO-005 ───────

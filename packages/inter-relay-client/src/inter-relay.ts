@@ -1024,7 +1024,20 @@ export class StandbyWarmPipeCoordinator {
       return false;
     }
     if (!state.pending) {
-      // Already consuming the real producer — no double-pipe.
+      // Already cut over to the real producer — no second placeholder swap. BUT a
+      // LATER forward announce may carry a NEWLY-produced id (RC-B, REQ-RMS-035):
+      // e.g. a peer's 2nd track produced AFTER this leg already cut over. The
+      // one-shot cutover below flips pending=false on the FIRST announce, so without
+      // this every subsequent forward announce returns here and the new id — though
+      // record()'d in the registry — is NEVER minted on the standby router, so the
+      // local client can't consume it (live proof: relay-1 minted only the audio
+      // producer; the video producer announced after the cutover was dropped → "0
+      // inbound video"). Re-drive the FORWARD mint on the LIVE state.topology (it
+      // holds the connected pipeTransport — NOT the placeholder). forwardLocalProducers
+      // is idempotent (producedIds Set dedups already-minted ids), is a no-op when
+      // active-forward is OFF (keepalive-only DEFAULT path → byte-stable) or when no
+      // new ids are announced, and handles a duplicate-producer throw gracefully.
+      await this.forwardLocalProducers(roomId, state.topology, peerRelayId);
       return false;
     }
 
@@ -2023,6 +2036,20 @@ export class PrimaryPipeCoordinator {
         'R3: reverse-leg pipe transport minted + connected to standby + replied DOWN',
       );
     }
+    // RC-A (REQ-RMS-035) — this leg uses ONE bidirectional pipeTransport for BOTH
+    // forward (primary→standby) and reverse (standby→primary). The forward queue
+    // (s.pendingProducers) is flushed by drain(), which is called from onProducer
+    // (only if standbyParams were present at produce time) and onStandbyConnectParams
+    // (only if already connected). When the leg is instead brought up HERE by the
+    // REVERSE path — a reverse announce mints+connects the transport — there is NO
+    // later forward onProducer to flush the queue, so the LAST standby to bring up
+    // its leg via the reverse path had its forward pendingProducers orphaned (live
+    // proof: relay-3's leg minted via ensureReverseLeg but ZERO subsequent forward
+    // pipes → it never received the primary's producers). Drain the forward queue
+    // too. drain() self-guards (!s.connected || s.pipeTransport === null → return)
+    // and is idempotent (forwardPipedIds Set dedup), so it is safe whether or not
+    // the transport was just minted, and a no-op when nothing is queued.
+    await this.drain(roomId, s, peerRelayId);
     await this.drainReverseMints(roomId, peerRelayId);
   }
 
