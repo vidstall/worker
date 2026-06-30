@@ -126,11 +126,14 @@ const REQUIRED_CFG_VARS = [
 ] as const;
 
 /**
- * Role-identity env keys. At spawn time these are SCRUBBED from the inherited
- * process.env before layering each spec's env, so a value leaked from a prior
- * step (e.g. the controller exported CP_KEYPAIR for seeding) can NEVER bleed into
- * the wrong role — critically, it keeps VALIDATOR_CAP_ID off the user-miner
- * (presence there ⇒ voting silently skipped).
+ * Role-identity / role-behavior env keys. At spawn time these are SCRUBBED from
+ * the inherited process.env before layering each spec's env, so a value leaked
+ * from a prior step (e.g. the controller exported CP_KEYPAIR for seeding) can
+ * NEVER bleed into the wrong role — critically, it keeps VALIDATOR_CAP_ID off the
+ * user-miner (presence there ⇒ voting silently skipped) and keeps a leaked
+ * REGISTRATION_MODE=voting off the pre-registered infra validators. The
+ * user-miner re-sets REGISTRATION_MODE='voting' in its OWN spec.env afterward, so
+ * behavior is unchanged — this is defense-in-depth against env pollution.
  */
 const IDENTITY_ENV_KEYS = [
   'CP_KEYPAIR',
@@ -140,6 +143,7 @@ const IDENTITY_ENV_KEYS = [
   'PRIVATE_KEY',
   'MINER_CAP_ID',
   'SIGNALING_KEYPAIR',
+  'REGISTRATION_MODE',
 ] as const;
 
 // ── ProcessSpec (the pure plan's unit) ───────────────────────────────────
@@ -349,10 +353,12 @@ const HEALTHZ_TIMEOUT_MS = 120_000; // all-up budget per the spec (≥120s)
 const HEALTHZ_POLL_MS = 500;
 const TEARDOWN_GRACE_MS = 5_000;
 
-/** Faucet poll for the self-provisioned user-miner (mirrors seed-bootstrap.ts:78-79). */
+/** Faucet levers for the self-provisioned user-miner (mirrors escrow-driver.ts:65-79). */
 const FAUCET_URL = process.env['FAUCET_URL'] ?? getFaucetHost('localnet');
-const FAUCET_POLL_MS = 1_000;
-const FAUCET_TIMEOUT_MS = 90_000;
+const FAUCET_SETTLE_MS = 1_500; // let the drip tx settle before reading balance
+const MAX_FAUCET_DRIPS = 2;
+/** 1 SUI: clears any voted-role stake floor (relay 0.25 / validator 0.1 / signaling 0.05) + register/apply gas + headroom. */
+const USER_MINER_MIN_BALANCE_MIST = 1_000_000_000n;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -401,17 +407,28 @@ export interface ProcessHandle {
 const MAX_TAIL_LINES = 60;
 
 /**
+ * Build a child's env: scrub EVERY role-identity/behavior key from a COPY of
+ * `inherited` (so a leaked CP_KEYPAIR / VALIDATOR_CAP_ID / REGISTRATION_MODE can't
+ * bleed into the wrong role), then layer the spec's fully-resolved env on top.
+ * PURE (takes `inherited` explicitly, mutates nothing) + unit-tested — this is the
+ * only safety-critical env behavior, so it is locked by a test.
+ */
+export function mergeChildEnv(inherited: NodeJS.ProcessEnv, spec: ProcessSpec): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = { ...inherited };
+  for (const k of IDENTITY_ENV_KEYS) delete base[k];
+  return { ...base, ...spec.env };
+}
+
+/**
  * Spawn one daemon. Entry is absolute; CWD is the isolated `.run/<role>`; env is
  * the inherited process.env with ALL identity keys SCRUBBED, then the spec's
- * fully-resolved env layered on top (so no leaked identity can bleed across
- * roles). stdout/stderr are kept as a small in-memory tail for failure reporting.
+ * fully-resolved env layered on top (see mergeChildEnv). stdout/stderr are kept as
+ * a small in-memory tail for failure reporting.
  */
 export function spawnProcess(spec: ProcessSpec, logger: Logger): ProcessHandle {
   mkdirSync(spec.cwd, { recursive: true });
 
-  const base: NodeJS.ProcessEnv = { ...process.env };
-  for (const k of IDENTITY_ENV_KEYS) delete base[k]; // scrub leaked role identities
-  const env: NodeJS.ProcessEnv = { ...base, ...spec.env };
+  const env = mergeChildEnv(process.env, spec);
 
   const proc = spawn(process.execPath, ['--import', 'tsx/esm', spec.entry], {
     cwd: spec.cwd,
@@ -438,21 +455,26 @@ export function spawnProcess(spec: ProcessSpec, logger: Logger): ProcessHandle {
   return handle;
 }
 
-/** GET /healthz once; resolve true only on HTTP 200 with {status:"alive"}. */
+/**
+ * GET /healthz once; resolve true only on HTTP 200 with {status:"alive"}. A 2s
+ * per-request abort guards against a daemon that accepts the TCP socket but never
+ * answers (undici's default ~300s timeout would otherwise blow the 120s budget);
+ * the abort folds into the catch → false → retry loop.
+ */
 async function probeHealthz(port: number): Promise<boolean> {
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}/healthz`);
+    const resp = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(2000) });
     if (resp.status !== 200) return false;
     const body = (await resp.json()) as { status?: string };
     return body.status === 'alive';
   } catch {
-    return false; // not yet accepting / connection refused
+    return false; // not yet accepting / connection refused / per-request abort
   }
 }
 
 /**
  * Dual-gate readiness for one process: (1) TCP waitForPort on the healthz port
- * (reuses run-smoke's proven poller), then (2) GET /healthz until 200
+ * (the locally-replicated poller above), then (2) GET /healthz until 200
  * {status:"alive"}. Rejects early if the child exits before ready, and on timeout
  * surfaces the daemon name + last log tail (a voting-mode hang is otherwise silent).
  */
@@ -460,11 +482,14 @@ export async function waitHealthy(handle: ProcessHandle, timeoutMs = HEALTHZ_TIM
   const { spec, proc } = handle;
   const deadline = Date.now() + timeoutMs;
 
+  let rejectExit: (err: Error) => void = () => {};
+  const exitListener = (code: number | null, signal: NodeJS.Signals | null): void => {
+    rejectExit(new Error(`${spec.name} exited (code=${code}, signal=${signal ?? 'none'}) before ready`));
+  };
   const exited = new Promise<never>((_, reject) => {
-    proc.once('exit', (code, signal) => {
-      reject(new Error(`${spec.name} exited (code=${code}, signal=${signal ?? 'none'}) before ready`));
-    });
+    rejectExit = reject;
   });
+  proc.once('exit', exitListener);
 
   const ready = (async (): Promise<void> => {
     await waitForPort('127.0.0.1', spec.healthzPort, Math.max(1, deadline - Date.now()), HEALTHZ_POLL_MS);
@@ -481,6 +506,10 @@ export async function waitHealthy(handle: ProcessHandle, timeoutMs = HEALTHZ_TIM
     const tail = handle.tail.slice(-20).join('\n');
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`waitHealthy(${spec.name}): ${msg}\n--- last 20 log lines ---\n${tail}`);
+  } finally {
+    // Detach the exit listener so a later teardown 'exit' doesn't fire a dangling
+    // rejection (the success path never consumes it).
+    proc.removeListener('exit', exitListener);
   }
 }
 
@@ -496,45 +525,76 @@ function loadKeys(path: string): MultiCpKeysFile {
 }
 
 /**
- * Self-provision the USER-miner keypair: generate a fresh Ed25519 key, faucet-fund
- * it, and poll getCoins until the gas coin is indexed (mirrors seed-bootstrap.ts
- * fundAddress). Returns the bech32 secretKey for the daemon's SUI_PRIVATE_KEY.
+ * Self-provision the USER-miner keypair: generate a fresh Ed25519 key, then
+ * faucet-fund it until it holds >= USER_MINER_MIN_BALANCE_MIST — drip → settle →
+ * check balance, up to MAX_FAUCET_DRIPS, fail loud if still short (mirrors
+ * escrow-driver.ts:96-112 fundUntilSufficient). Returns the bech32 secretKey for
+ * the daemon's SUI_PRIVATE_KEY.
  */
 async function provisionUserMiner(client: SuiClient, logger: Logger): Promise<string> {
   const kp = Ed25519Keypair.generate();
   const address = kp.getPublicKey().toSuiAddress();
-  await requestSuiFromFaucetV2({ host: FAUCET_URL, recipient: address });
-  const deadline = Date.now() + FAUCET_TIMEOUT_MS;
-  for (;;) {
-    const { data } = await client.getCoins({ owner: address });
-    if (data.length > 0) break;
-    if (Date.now() > deadline) {
-      throw new Error(`provisionUserMiner: faucet gas never indexed for ${address} within ${FAUCET_TIMEOUT_MS}ms`);
-    }
-    await sleep(FAUCET_POLL_MS);
+  let balance = 0n;
+  for (let drip = 1; drip <= MAX_FAUCET_DRIPS; drip++) {
+    await requestSuiFromFaucetV2({ host: FAUCET_URL, recipient: address });
+    await sleep(FAUCET_SETTLE_MS);
+    balance = BigInt((await client.getBalance({ owner: address })).totalBalance);
+    logger.info(
+      { module: MODULE, action: 'provision_user_miner', context: { address, drip, balance: balance.toString() } },
+      'user-miner faucet drip settled',
+    );
+    if (balance >= USER_MINER_MIN_BALANCE_MIST) return kp.getSecretKey();
   }
-  logger.info({ module: MODULE, action: 'provision_user_miner', context: { address } }, 'user-miner funded (gas coin indexed)');
-  return kp.getSecretKey();
+  throw new Error(
+    `provisionUserMiner: ${address} underfunded after ${MAX_FAUCET_DRIPS} faucet drips ` +
+      `(${balance} < ${USER_MINER_MIN_BALANCE_MIST} MIST)`,
+  );
 }
 
-/** SIGTERM all handles in reverse-spawn order, wait ≤5s each, then SIGKILL stragglers. */
+/**
+ * Kill ONE handle + ALL its descendants. On Windows this MUST be a tree-kill: the
+ * relay spawns mediasoup C++ worker subprocesses that orphan under a plain
+ * proc.kill() and keep holding the RTC UDP ranges (10000-10300) → the NEXT run
+ * collides. Node-on-Windows also maps SIGTERM to TerminateProcess (no graceful
+ * handler runs anyway), so we go straight to `taskkill /T /F` (mirrors the
+ * project's existing `sui start` "needs taskkill /T" durable). NOTE: because
+ * Windows teardown is a forced TerminateProcess, graceful on-chain deregistration
+ * cannot run there — acceptable for a throwaway demo localnet. On POSIX, keep the
+ * graceful SIGTERM → grace → SIGKILL escalation.
+ */
+async function killHandle(h: ProcessHandle, logger: Logger): Promise<void> {
+  if (h.killed || h.proc.exitCode !== null || h.proc.pid === undefined) return;
+  h.killed = true;
+
+  if (process.platform === 'win32') {
+    logger.info({ module: MODULE, action: 'teardown', context: { name: h.spec.name, pid: h.proc.pid } }, `taskkill /T /F ${h.spec.name} (tree)`);
+    await new Promise<void>((res) => {
+      const tk = spawn('taskkill', ['/PID', String(h.proc.pid), '/T', '/F'], { shell: false, stdio: 'ignore' });
+      tk.once('exit', () => res());
+      tk.once('error', () => res()); // taskkill missing / already dead — best effort, never throw
+    });
+    return;
+  }
+
+  logger.info({ module: MODULE, action: 'teardown', context: { name: h.spec.name, pid: h.proc.pid } }, `SIGTERM ${h.spec.name}`);
+  h.proc.kill('SIGTERM');
+  const exited = await new Promise<boolean>((res) => {
+    const timer = setTimeout(() => res(false), TEARDOWN_GRACE_MS);
+    h.proc.once('exit', () => {
+      clearTimeout(timer);
+      res(true);
+    });
+  });
+  if (!exited) {
+    logger.warn({ module: MODULE, action: 'teardown', context: { name: h.spec.name } }, `SIGKILL ${h.spec.name} (graceful exit timed out)`);
+    h.proc.kill('SIGKILL');
+  }
+}
+
+/** Tear down all handles in reverse-spawn order (tree-kill per platform; never throws). */
 export async function teardownFleet(handles: readonly ProcessHandle[], logger: Logger): Promise<void> {
   for (const h of [...handles].reverse()) {
-    if (h.killed || h.proc.exitCode !== null) continue;
-    h.killed = true;
-    logger.info({ module: MODULE, action: 'teardown', context: { name: h.spec.name, pid: h.proc.pid } }, `SIGTERM ${h.spec.name}`);
-    h.proc.kill('SIGTERM');
-    const exited = await new Promise<boolean>((res) => {
-      const timer = setTimeout(() => res(false), TEARDOWN_GRACE_MS);
-      h.proc.once('exit', () => {
-        clearTimeout(timer);
-        res(true);
-      });
-    });
-    if (!exited) {
-      logger.warn({ module: MODULE, action: 'teardown', context: { name: h.spec.name } }, `SIGKILL ${h.spec.name} (graceful exit timed out)`);
-      h.proc.kill('SIGKILL');
-    }
+    await killHandle(h, logger);
   }
 }
 
@@ -544,8 +604,11 @@ export async function teardownFleet(handles: readonly ProcessHandle[], logger: L
  *   2. infra (4 val + 2 relay + 1 sig) in parallel → wait healthy
  *   3. user-miner LAST → wait healthy
  * On any failure, tears down whatever was already spawned and rethrows (no orphans).
+ *
+ * `handles` is caller-owned and pushed-into as each child spawns, so a SIGINT/
+ * SIGTERM handler installed by main() can see + tear down the fleet even mid-wave.
  */
-export async function launchFleet(logger: Logger): Promise<ProcessHandle[]> {
+export async function launchFleet(logger: Logger, handles: ProcessHandle[] = []): Promise<ProcessHandle[]> {
   const config = loadNetworkConfig(); // also validates the published-config env is present
   const client = createSuiClient(config.rpcUrl);
 
@@ -557,7 +620,6 @@ export async function launchFleet(logger: Logger): Promise<ProcessHandle[]> {
   const infraSpecs = plan.filter((s) => s.order === 'infra');
   const userMinerSpec = plan.find((s) => s.order === 'user-miner')!;
 
-  const handles: ProcessHandle[] = [];
   try {
     // wave 1 — CPs first.
     logger.info({ module: MODULE, action: 'wave', context: { wave: 'cp', count: cpSpecs.length } }, 'wave 1: spawning 5 cp-daemons');
@@ -592,7 +654,22 @@ async function main(): Promise<void> {
     'run-multicp-voting starting — launching the 13-process N=5 fleet',
   );
 
-  const handles = await launchFleet(logger);
+  // main OWNS the handles so a Ctrl-C during the (up to 3×120s) bringup — or under
+  // KEEP_ALIVE — can tear the fleet down instead of orphaning 13 children. The
+  // array is threaded INTO launchFleet, which pushes each child as it spawns, so
+  // the handler sees the fleet even mid-wave.
+  const handles: ProcessHandle[] = [];
+  let tearingDown = false;
+  const onSignal = (sig: NodeJS.Signals): void => {
+    if (tearingDown) return; // a second signal during teardown → ignore
+    tearingDown = true;
+    logger.warn({ module: MODULE, action: 'signal', context: { signal: sig, count: handles.length } }, `${sig} received — tearing down fleet`);
+    void teardownFleet(handles, logger).finally(() => process.exit(130)); // 130 = terminated by signal (non-zero)
+  };
+  process.once('SIGINT', () => onSignal('SIGINT'));
+  process.once('SIGTERM', () => onSignal('SIGTERM'));
+
+  await launchFleet(logger, handles);
   logger.info(
     { module: MODULE, action: 'all_healthy', context: { count: handles.length } },
     `all ${handles.length} processes healthy (5 cp + 4 val + 2 relay + 1 sig + 1 user-miner)`,
@@ -607,7 +684,10 @@ async function main(): Promise<void> {
   // ────────────────────────────────────────────────────────────
 
   if (process.env['KEEP_ALIVE'] === '1') {
-    logger.info({ module: MODULE, action: 'keep_alive' }, 'KEEP_ALIVE=1 — leaving the fleet running (SIGINT to stop)');
+    // The SIGINT/SIGTERM handler installed above stays armed → "SIGINT to stop"
+    // actually tears the fleet down (C4 owns this lifecycle: launch → demo → keep
+    // up → signal teardown). The piped child stdio keeps the event loop alive.
+    logger.info({ module: MODULE, action: 'keep_alive' }, 'KEEP_ALIVE=1 — leaving the fleet running (SIGINT to tear down)');
     return;
   }
   await teardownFleet(handles, logger);

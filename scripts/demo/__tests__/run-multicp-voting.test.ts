@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isAbsolute, join } from 'node:path';
-import { buildLaunchPlan, type ProcessSpec } from '../run-multicp-voting.ts';
+import { buildLaunchPlan, mergeChildEnv, type ProcessSpec } from '../run-multicp-voting.ts';
 // TYPE-ONLY imports — elided at runtime so neither seed-multicp.ts nor
 // seed-bootstrap.ts (both call main() at module top-level WITHOUT an argv guard)
 // executes when this test loads.
@@ -98,6 +98,11 @@ describe('buildLaunchPlan — the C3 fleet matrix (pure)', () => {
   });
 
   it('allocates pairwise non-colliding listening ports across the whole fleet', () => {
+    // Collecting RANGE BOUNDS (not every port in the RTC/pipe ranges) is sufficient
+    // here: the two relays' ranges are disjoint by stride 200 > span 100, and every
+    // scalar port sits in a far-apart band (4xxx WS/metrics, 8xxx healthz, 10xxx RTC,
+    // 40xxx pipe) — so a collision could only show up as two equal bounds/scalars.
+    // The separate "ranges disjoint" test below guards the stride assumption directly.
     const ports = plan().flatMap(listeningPorts);
     expect(new Set(ports).size).toBe(ports.length);
   });
@@ -242,9 +247,44 @@ describe('buildLaunchPlan — the C3 fleet matrix (pure)', () => {
     expect(() => buildLaunchPlan(fakeKeys(), USER_MINER_KEY, incomplete)).toThrow(/ROLE_VOTE_BOX_ID/);
   });
 
-  it('throws when the keys file is not the genuine N=5 substrate (wrong counts)', () => {
-    const short = fakeKeys();
-    short.cps.pop(); // 4 CPs — not the 5-CP substrate this lane proves
-    expect(() => buildLaunchPlan(short, USER_MINER_KEY, baseCfgEnv())).toThrow(/cps/i);
+  // Every role array must be the EXACT genuine-N=5 count: a 5th validator would
+  // collide with the user-miner on 8105, a 3rd relay would overlap the RTC range,
+  // etc. Guard ALL four arrays, not just cps.
+  it.each<[string, (k: MultiCpKeysFile) => void, RegExp]>([
+    ['cps', (k) => k.cps.pop(), /cps/i],
+    ['validators', (k) => k.validators.pop(), /validators/i],
+    ['relays', (k) => k.relays.pop(), /relays/i],
+    ['signaling', (k) => k.signaling.pop(), /signaling/i],
+  ])('throws when the %s array is not the genuine N=5 substrate count', (_label, mutate, pattern) => {
+    const wrong = fakeKeys();
+    mutate(wrong);
+    expect(() => buildLaunchPlan(wrong, USER_MINER_KEY, baseCfgEnv())).toThrow(pattern);
+  });
+});
+
+describe('mergeChildEnv — env scrub + layer (the only safety-critical behavior)', () => {
+  it('keeps a leaked VALIDATOR_CAP_ID off the user-miner (which sets no cap)', () => {
+    const um = byName(plan(), 'user-miner');
+    const inherited: NodeJS.ProcessEnv = { PATH: '/usr/bin', VALIDATOR_CAP_ID: '0xleaked_from_seed_step' };
+    const merged = mergeChildEnv(inherited, um);
+    expect('VALIDATOR_CAP_ID' in merged).toBe(false); // scrubbed, and the spec never re-sets it
+    expect(merged['SUI_PRIVATE_KEY']).toBe(USER_MINER_KEY);
+    expect(merged['REGISTRATION_MODE']).toBe('voting'); // user-miner re-sets its own
+    expect(merged['PATH']).toBe('/usr/bin'); // non-identity inherited vars pass through
+  });
+
+  it('keeps a leaked REGISTRATION_MODE=voting off a pre-registered infra validator', () => {
+    const val = byName(plan(), 'val-0');
+    const merged = mergeChildEnv({ REGISTRATION_MODE: 'voting' }, val);
+    // val-0 must NOT inherit voting mode — it is pre-registered infra (cap set).
+    expect('REGISTRATION_MODE' in merged).toBe(false);
+    expect(merged['VALIDATOR_CAP_ID']).toBe(fakeKeys().validators[0]!.capId);
+  });
+
+  it('overrides a leaked CP_KEYPAIR with the cp spec own identity (scrubbed then set)', () => {
+    const cp = byName(plan(), 'cp-2');
+    const merged = mergeChildEnv({ CP_KEYPAIR: '0xleaked', CP_CAP_ID: '0xleaked' }, cp);
+    expect(merged['CP_KEYPAIR']).toBe(fakeKeys().cps[2]!.secretKey); // its OWN key, not the leak
+    expect(merged['CP_CAP_ID']).toBe(fakeKeys().cps[2]!.capId);
   });
 });
