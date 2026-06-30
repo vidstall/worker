@@ -515,8 +515,10 @@ export function createSignalingServer(
    * by the wiring layer (index.ts) from StandbyWarmPipeCoordinator's onLocalProducer.
    *
    * REQ-RMS-034 (part-3 reverse leg) — widened to 4-arg: the publisher-binding
-   * `??` resolution moved from the caller INTO the body (behavior-neutral for the
-   * shipped forward leg; Task C1 replaces it with the cross-relay E2EE gate).
+   * `??` resolution lives in the body. REQ-RMS-038 (C1) — the body applies the
+   * cross-relay E2EE fail-closed gate: in an E2EE room a producer with no ORIGINAL
+   * publisher id is DROPPED (never bound to the relayId); an open room keeps the
+   * `producerPeerId ?? peerRelayId` graceful fallback.
    */
   fanLocalProducer: (
     roomId: string,
@@ -1656,7 +1658,12 @@ export function createSignalingServer(
     // undefined) ⇒ unaffected (M2/M3 non-regression).
     const e2ee = roomConfigs.get(mapping.roomId)?.e2ee ?? false;
     if (e2ee && reg !== undefined && reg.producerPeerId === undefined) {
-      sendJson(ws, { type: 'error', reason: 'e2ee-missing-producer-peer-id', producerId });
+      sendJson(ws, {
+        type: 'error',
+        reason: 'e2ee-missing-producer-peer-id',
+        message: 'E2EE room: cross-relay producer missing publisher id',
+        producerId,
+      });
       logger.warn(
         { roomId: mapping.roomId, producerId, peerId: mapping.peerId },
         'REQ-RMS-038 fail-closed: E2EE cross-relay consume missing publisher id — refusing',
