@@ -219,7 +219,7 @@ async function registerMiner(
   return { minerId, minerCapId, cpCapId, stakeId };
 }
 
-interface CpHandle {
+export interface CpHandle {
   kp: Ed25519Keypair;
   minerId: string;
   cpCapId: string;
@@ -235,7 +235,7 @@ interface CpHandle {
  *   - control_plane_registry.move:82-87 register_cp(net_reg, registry, cap, stake) [ctx implicit]
  *   - revote-localnet-helpers.ts:232-238 bootstrapCp (identical order)
  */
-async function bootstrapCp(client: SuiClient, config: NetworkConfig, logger: Logger): Promise<CpHandle> {
+export async function bootstrapCp(client: SuiClient, config: NetworkConfig, logger: Logger): Promise<CpHandle> {
   const kp = await createFundedKeypair(client, logger);
   const reg = await registerMiner(client, kp, config, CP_STAKE_MIST, logger);
   if (reg.cpCapId === null) {
@@ -489,7 +489,7 @@ function roleCodeFor(role: DaemonRole): number {
  *   3. miner applies apply_voted_role -> flips MinerCap+profile+stake to the role
  *   4. miner enrolls in the role-specific registry
  */
-async function voteAndApplyMiner(
+export async function voteAndApplyMiner(
   client: SuiClient,
   cp: CpHandle,
   role: DaemonRole,
