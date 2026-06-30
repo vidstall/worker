@@ -1208,7 +1208,11 @@ export function createSignalingServer(
     // signaling.ts:863), so this loop re-announces them to fresh primary-homed
     // joiners too -- for free (DESIGN-1, REQ-RMS-037).
     if (interRelay) {
+      const roomE2ee = roomConfigs.get(roomId)?.e2ee ?? false;
       for (const fwd of interRelay.registry.listForRoom(roomId)) {
+        // REQ-RMS-038 E2EE fail-closed (C1): never re-announce a cross-relay
+        // producer that lacks the ORIGINAL publisher id into an E2EE room.
+        if (roomE2ee && fwd.producerPeerId === undefined) continue;
         sendJson(ws, {
           type: 'newProducer',
           peerId: fwd.producerPeerId ?? fwd.producerId,
@@ -1633,20 +1637,40 @@ export function createSignalingServer(
       return;
     }
 
+    // REQ-RMS-029 — resolve the ORIGINAL publisher by the FINAL producerId (the one
+    // passed to createConsumer), not resolve(roomId). resolve(roomId) reads only the
+    // DEFAULT bucket and misses a cross-relay MESH announce (bucketed per peerRelayId),
+    // so the consume RESPONSE used to omit producerPeerId on the mesh. The producerId-
+    // keyed lookup scans every per-peer bucket and returns THIS producer's own publisher,
+    // so multi-publisher attribution via the response holds on the mesh path. The `??
+    // undefined` normalizes the registry's `null` miss → so the gate below treats a
+    // LOCAL consume (no registry entry) as "not cross-relay" rather than NPE-ing on null.
+    const reg =
+      interRelay?.registry.resolveByProducerId(mapping.roomId, producerId) ?? undefined;
+
+    // REQ-RMS-038 E2EE fail-closed (C1, cross-relay scope): a CROSS-RELAY producer
+    // (a registry entry EXISTS) whose ORIGINAL publisher id is MISSING must NOT be
+    // consumed in an E2EE room — without the publisher binding the client can't
+    // attribute/decrypt the SFrame. Fail closed BEFORE createConsumer to avoid a
+    // dangling consumer. A same-relay LOCAL consume has NO registry entry (reg ===
+    // undefined) ⇒ unaffected (M2/M3 non-regression).
+    const e2ee = roomConfigs.get(mapping.roomId)?.e2ee ?? false;
+    if (e2ee && reg !== undefined && reg.producerPeerId === undefined) {
+      sendJson(ws, { type: 'error', reason: 'e2ee-missing-producer-peer-id', producerId });
+      logger.warn(
+        { roomId: mapping.roomId, producerId, peerId: mapping.peerId },
+        'REQ-RMS-038 fail-closed: E2EE cross-relay consume missing publisher id — refusing',
+      );
+      return;
+    }
+
     const consumer = await createConsumer(room, peer, producerId, msg.rtpCapabilities, logger);
     if (!consumer) {
       sendJson(ws, { type: 'error', message: 'Cannot consume producer' });
       return;
     }
 
-    // REQ-RMS-029 — resolve the ORIGINAL publisher by the FINAL producerId (the one
-    // passed to createConsumer), not resolve(roomId). resolve(roomId) reads only the
-    // DEFAULT bucket and misses a cross-relay MESH announce (bucketed per peerRelayId),
-    // so the consume RESPONSE used to omit producerPeerId on the mesh. The producerId-
-    // keyed lookup scans every per-peer bucket and returns THIS producer's own publisher,
-    // so multi-publisher attribution via the response holds on the mesh path.
-    const announcedPeer =
-      interRelay?.registry.resolveByProducerId(mapping.roomId, producerId)?.producerPeerId;
+    const announcedPeer = reg?.producerPeerId;
 
     sendJson(ws, {
       type: 'consumed',
@@ -1930,12 +1954,14 @@ export function createSignalingServer(
   /**
    * REQ-RMS-027 (L1.3-b, Bridge B) — fan a standby-minted LOCAL forwarded producer
    * to the room's OWN local WebRTC clients. The wiring layer (index.ts) backs the
-   * StandbyWarmPipeCoordinator's onLocalProducer callback with this, passing
-   * `producerPeerId ?? peerRelayId` as `peerId` so the clients bind to the ORIGINAL
-   * publisher. Delegates to the shipped `notifyNewProducer` SFU fan-out (the client
-   * then consumes the producer DIRECTLY off room.router — proven by the L1.2
-   * active-forward integration test), so NO explicit RoomState/PeerState
-   * registration is needed.
+   * StandbyWarmPipeCoordinator's onLocalProducer callback with this, passing the RAW
+   * `producerPeerId` (+ the cascade `peerRelayId`). The body resolves the bind peer
+   * (`producerPeerId ?? peerRelayId`) so the clients bind to the ORIGINAL publisher,
+   * AND applies the REQ-RMS-038 E2EE fail-closed gate (C1): an E2EE producer with no
+   * publisher id is DROPPED here rather than bound to the relayId. Delegates to the
+   * shipped `notifyNewProducer` SFU fan-out (the client then consumes the producer
+   * DIRECTLY off room.router — proven by the L1.2 active-forward integration test),
+   * so NO explicit RoomState/PeerState registration is needed.
    *
    * DEFERRED (RMS M4) — audio-lastN: when a standby runs with AUDIO_LASTN_K>0,
    * notifyNewProducer SUPPRESSES a forwarded AUDIO producer whose id is not in the
@@ -1956,12 +1982,33 @@ export function createSignalingServer(
       logger.warn({ roomId }, 'fanLocalProducer: room not found');
       return;
     }
-    // R-A: bind to the ORIGINAL publisher when present, else the cascade relayId.
-    // This MOVES the `??` resolution from the forward caller (index.ts) INTO the
-    // body — behavior-neutral for the shipped forward leg (REQ-RMS-027/028/029).
-    // (Task C1 replaces this with the cross-relay E2EE fail-closed gate.)
-    const peerId = producerPeerId ?? peerRelayId ?? '';
-    void notifyNewProducer(room, peerId, producer, logger).catch((err) =>
+    // REQ-RMS-038 E2EE fail-closed (C1): in an E2EE room a cross-relay producer
+    // whose ORIGINAL publisher id is MISSING must be DROPPED — never bound to a
+    // relayId — or the client cannot attribute/decrypt the SFrame. We pass the RAW
+    // producerPeerId in so this gate fires HERE. (Same-relay LOCAL produce never
+    // reaches fanLocalProducer — handleProduce fans it via notifyNewProducer
+    // directly — so the shipped M2/M3 single-relay E2EE call is unaffected.)
+    const e2ee = roomConfigs.get(roomId)?.e2ee ?? false;
+    if (e2ee && producerPeerId === undefined) {
+      logger.warn(
+        { roomId, producerId: producer.id },
+        'REQ-RMS-038 fail-closed: E2EE producer missing publisher id — dropping',
+      );
+      return;
+    }
+    // Open-room graceful fallback: bind to the ORIGINAL publisher when present, else
+    // the cascade relayId. (Drops the prior `?? ''` fail-OPEN tail — the
+    // e2ee-undefined case is now caught by the gate ABOVE; in every real open-room
+    // call producerPeerId or peerRelayId is defined, so this never falls through.)
+    const bindPeer = producerPeerId ?? peerRelayId;
+    if (bindPeer === undefined) {
+      logger.warn(
+        { roomId, producerId: producer.id },
+        'fanLocalProducer: no bind peer (open room, no publisher id or relayId) — dropping',
+      );
+      return;
+    }
+    void notifyNewProducer(room, bindPeer, producer, logger).catch((err) =>
       logger.warn({ err, roomId }, 'fanLocalProducer: fan failed'),
     );
   }
@@ -1978,9 +2025,11 @@ export function createSignalingServer(
    * REQ-RMS-034/035/036 (part-3 reverse leg) — record a primary-minted reverse
    * hub producer in the per-room originRegistry (for hub-fan exclusion + loop
    * prevention) and propagate it BOTH ways from the hub:
-   *   1. fanLocalProducer — fan to this relay's OWN local WebRTC clients. The
-   *      E2EE fail-closed gate fires INSIDE fanLocalProducer because we pass the
-   *      RAW producerPeerId.
+   *   1. fanLocalProducer — fan to this relay's OWN local WebRTC clients. We pass
+   *      the RAW producerPeerId so the REQ-RMS-038 E2EE fail-closed gate fires
+   *      INSIDE fanLocalProducer: in an E2EE room a reverse-minted producer with no
+   *      ORIGINAL publisher id is DROPPED (never bound to the originRelayId); an
+   *      open room keeps the graceful relayId fallback.
    *   2. hub-fan DOWN (REQ-RMS-035/036) — drive onPrimaryProducer for every
    *      attached standby EXCEPT the origin (originRelayId is excluded so the
    *      stream is never echoed back to the standby it came from). Reuses the
