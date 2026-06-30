@@ -221,7 +221,7 @@ export async function bootstrapCp(
   const kp = await createFundedKeypair(logger);
   const reg = await registerMiner(client, kp, config, stakeMist, logger);
   if (reg.cpCapId === null) {
-    throw new Error('bootstrapCp: expected a ControlPlaneCap from a 0.6 SUI register, got none');
+    throw new Error(`bootstrapCp: expected a ControlPlaneCap from a ${stakeMist} MIST register, got none`);
   }
   const cpCapId = reg.cpCapId;
 
