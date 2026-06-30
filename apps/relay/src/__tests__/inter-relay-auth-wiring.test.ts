@@ -465,4 +465,56 @@ describe('inter-relay re-fan-on-attach + standby UP re-announce (REQ-RMS-037, Ta
 
     client.close();
   });
+
+  it('RED-RB-6b1: re-fan-on-attach replays REVERSE-MINTED hub copies DOWN to a new standby, EXCLUDING any whose origin IS that standby (REQ-RMS-036)', async () => {
+    // GAP COVERAGE (ledger B4b #2): RED-RB-4a exercises the LOCAL-producer re-fan
+    // arm (signaling.ts:780-784) with an EMPTY originRegistry. THIS test isolates
+    // the REVERSE-MINTED arm (signaling.ts:790-795) -- the hub copies of OTHER
+    // standbys' streams -- and proves the exclude-origin guard (line 793) never
+    // echoes a producer back to the standby it came from.
+    const onPrimaryProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onPrimaryProducer,
+      attachPeerSocket: vi.fn(),
+    };
+    const { wss, port, factory } = await startServer(interRelay, 'relay-secret');
+    server = wss;
+
+    // A local client joins to CREATE the room (registerReverseMinted no-ops on an
+    // unknown room). It does NOT produce -- so the LOCAL-producer re-fan arm
+    // contributes ZERO onPrimaryProducer calls and we observe the reverse arm alone.
+    const client = await connectPlain(port);
+    await sendAndAwait(client, { type: 'join', roomId: 'roomA', peerId: 'clientLocal' }, 'routerRtpCapabilities');
+    await tick();
+
+    // Seed the originRegistry with TWO reverse-minted hub copies via the real seam:
+    //   - one whose origin is standbyC (a DIFFERENT relay -> MUST be re-fanned to B)
+    //   - one whose origin is standbyB (the relay about to attach -> MUST be excluded)
+    const mintedFromC = { id: 'rev-minted-C', kind: 'video' as const, on: vi.fn() } as any;
+    const mintedFromB = { id: 'rev-minted-B', kind: 'video' as const, on: vi.fn() } as any;
+    factory.registerReverseMinted('roomA', mintedFromC, 'ws://standbyC', 'clientC');
+    factory.registerReverseMinted('roomA', mintedFromB, 'ws://standbyB', 'clientB');
+
+    // registerReverseMinted hub-fans immediately to ALREADY-attached peers (none
+    // yet) -- clear so we count ONLY the re-fan triggered by the attach below.
+    onPrimaryProducer.mockClear();
+
+    // standbyB attaches as a TAGGED inter-relay peer -> triggers re-fan-on-attach.
+    const standby = await connectInterRelay(port, 'relay-secret', 'ws://standbyB');
+    await tick();
+
+    // Exactly ONE reverse-minted re-fan reaches standbyB: the standbyC-origin copy.
+    const calls = onPrimaryProducer.mock.calls.filter((c) => c[3] === 'ws://standbyB');
+    expect(calls.length).toBe(1);
+    expect(calls[0]![2]).toBe(mintedFromC);  // the live minted Producer handle
+    expect(calls[0]![4]).toBe('clientC');    // original publisher (REQ-RMS-029)
+    // EXCLUDE-ORIGIN (REQ-RMS-036): the standbyB-origin copy is NEVER echoed back.
+    expect(calls.some((c) => c[2] === mintedFromB)).toBe(false);
+
+    client.close();
+    standby.close();
+  });
 });
