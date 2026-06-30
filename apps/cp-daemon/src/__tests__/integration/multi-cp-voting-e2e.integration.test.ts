@@ -46,7 +46,10 @@ import {
   type TxStatusLike,
 } from './revote-localnet-helpers.js';
 
-/** Short epoch (2000ms stable on Windows); shared with B3/B4 which advance epochs. */
+/**
+ * bootLocalnet requires an epoch duration; 2000ms is stable on Windows (and lets
+ * later idle-advance tests progress quickly).
+ */
 const EPOCH_DURATION_MS = 2000;
 
 /** Number of distinct CPs stood up — the active-CP count that fixes the quorum. */
@@ -66,12 +69,21 @@ const CP_STAKE_HEADROOM_MIST = 1_000_000_000n;
 const EXPECTED_THRESHOLD = '4';
 
 /**
- * Negative-assertion wait. waitForRoleAssignment polls every 3000ms, so this
- * rejects after ~3 polls (~9s) once it confirms NO assignment is written.
+ * Votes accumulated at finalize == required here (4 distinct CPs crossed the
+ * 4-of-5 quorum). vote_count and threshold are DISTINCT concepts that only
+ * coincide at the assignment boundary, so they get separate consts.
+ */
+const EXPECTED_VOTE_COUNT = '4';
+
+/**
+ * Negative-assertion wait. The 8000ms deadline bounds the poll loop;
+ * waitForRoleAssignment polls every 3000ms, so it stops after the first poll
+ * past the deadline. Observed wall-time is ~12s (devInspect RPC latency stacks
+ * on top of each 3000ms sleep) — the bound is the deadline, not the wall-time.
  */
 const NEGATIVE_WAIT_MS = 8_000;
 
-/** find a single emitted event whose fully-qualified type ends with `suffix`. */
+/** find a single emitted event whose fully-qualified type contains `suffix`. */
 function findEvent(result: TxStatusLike, suffix: string): { type?: string; parsedJson?: unknown } | undefined {
   return (result.events ?? []).find((e) => (e.type ?? '').includes(suffix));
 }
@@ -116,7 +128,8 @@ describe('Multi-CP role voting — 4-of-5 live quorum (GD-1)', () => {
         );
       }
 
-      // On-chain threshold is fixed from the FIRST cast: required==4 even though only
+      // required is already 4 as of the FIRST cast (recomputed from active_cp_count=5
+      // on every cast — role_voting.move:273-275, not snapshotted) even though only
       // 1 vote is present. This is the live read of the 5-active-CP quorum.
       const firstCast = findEvent(castResults[0], '::role_voting::RoleVoteCast');
       expect(firstCast).toBeDefined();
@@ -159,7 +172,7 @@ describe('Multi-CP role voting — 4-of-5 live quorum (GD-1)', () => {
         threshold: string;
       };
       expect(normalizeSuiAddress(ra.miner_id)).toBe(minerId);
-      expect(ra.vote_count).toBe(EXPECTED_THRESHOLD); // 4 votes accumulated
+      expect(ra.vote_count).toBe(EXPECTED_VOTE_COUNT); // 4 votes accumulated at finalize
       expect(ra.threshold).toBe(EXPECTED_THRESHOLD); // 4 = the live 2/3-of-5 quorum
       // role is a Move u8 → BCS-decoded as a JS number (no string coercion).
       expect(ra.role).toBe(MinerRole.Relay);
