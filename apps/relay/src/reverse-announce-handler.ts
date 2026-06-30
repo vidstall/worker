@@ -90,7 +90,8 @@ export function makeOnReverseAnnounce(deps: ReverseAnnounceDeps) {
     // RESIDUAL double-race (Stage R-B / Task B4 carryover): the rarer ordering where
     // standbyParams are ALSO not yet present when this announce arrives -> ensure is
     // a no-op (deferred) -> reverseMint QUEUES the announce. drainReverseMints (run
-    // by a later onStandbyConnectParams/onProducer) WILL mint it, but it CANNOT FAN
+    // by ensureReverseLeg -- its SOLE caller -- on a later reverse announce / peer
+    // attach) WILL mint it, but it CANNOT FAN
     // it because queue entries carry no producerPeerId. B4 threads producerPeerId
     // into reverseMintPending + fans on drain to close that residual leg.
     await deps.ensureReverseLeg(roomId, room.router, origin);

@@ -517,4 +517,90 @@ describe('inter-relay re-fan-on-attach + standby UP re-announce (REQ-RMS-037, Ta
     client.close();
     standby.close();
   });
+
+  it('RED-RB-6b2: a reverse-minted producer whose @close fired is dropped from the originRegistry and is NOT re-fanned on a later attach (REQ-RMS-036 cleanup teeth)', async () => {
+    // TEETH for the @close cleanup arm (signaling.ts:2003). Prior units mocked
+    // minted.on = vi.fn() so @close NEVER fired -> the cleanup was uncovered. Here
+    // the fake Producer CAPTURES the '@close' handler the factory registers, fires
+    // it (as the real Producer would on close), and proves the entry is gone so the
+    // dead handle is never replayed to a freshly-attached standby.
+    const onPrimaryProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onPrimaryProducer,
+      attachPeerSocket: vi.fn(),
+    };
+    const { wss, port, factory } = await startServer(interRelay, 'relay-secret');
+    server = wss;
+
+    const client = await connectPlain(port);
+    await sendAndAwait(client, { type: 'join', roomId: 'roomA', peerId: 'clientLocal' }, 'routerRtpCapabilities');
+    await tick();
+
+    const closeHandlers: Array<() => void> = [];
+    const mintedFromC = {
+      id: 'rev-minted-C',
+      kind: 'video' as const,
+      closed: false,
+      on: (ev: string, cb: () => void) => { if (ev === '@close') closeHandlers.push(cb); },
+    } as any;
+    factory.registerReverseMinted('roomA', mintedFromC, 'ws://standbyC', 'clientC');
+
+    // The @close arm MUST be wired (teeth: drop this assertion's target -> RED).
+    expect(closeHandlers.length).toBe(1);
+    closeHandlers.forEach((cb) => cb()); // producer closes -> originRegistry entry dropped
+    onPrimaryProducer.mockClear();
+
+    const standby = await connectInterRelay(port, 'relay-secret', 'ws://standbyB');
+    await tick();
+
+    // The closed producer is GONE from the registry -> never replayed to standbyB.
+    expect(onPrimaryProducer.mock.calls.some((c) => c[2] === mintedFromC)).toBe(false);
+
+    client.close();
+    standby.close();
+  });
+
+  it('RED-RB-6b3: re-fan-on-attach SKIPS a .closed reverse-minted producer even if its registry entry survived (defense-in-depth guard); a live sibling is still re-fanned', async () => {
+    // Defense-in-depth for a REGRESSED/missed @close: if the cleanup ever fails to
+    // drop a closed producer, the re-fan loop must not echo a dead handle. `on:
+    // vi.fn()` NEVER fires @close, so the entry SURVIVES; setting .closed=true
+    // simulates the closed-but-still-registered state. The guard skips ONLY the
+    // closed one -- the live sibling is still re-fanned (selective, not a blanket).
+    const onPrimaryProducer = vi.fn();
+    const interRelay: InterRelayContext = {
+      role: 'primary',
+      registry: new InterRelayProducerRegistry(),
+      announceProducer: vi.fn(),
+      onPrimaryProducer,
+      attachPeerSocket: vi.fn(),
+    };
+    const { wss, port, factory } = await startServer(interRelay, 'relay-secret');
+    server = wss;
+
+    const client = await connectPlain(port);
+    await sendAndAwait(client, { type: 'join', roomId: 'roomA', peerId: 'clientLocal' }, 'routerRtpCapabilities');
+    await tick();
+
+    // Both origins differ from the attaching standbyB (so neither is excluded by origin).
+    const mintedClosed = { id: 'rev-closed', kind: 'video' as const, closed: false, on: vi.fn() } as any;
+    const mintedLive = { id: 'rev-live', kind: 'video' as const, closed: false, on: vi.fn() } as any;
+    factory.registerReverseMinted('roomA', mintedClosed, 'ws://standbyC', 'clientC');
+    factory.registerReverseMinted('roomA', mintedLive, 'ws://standbyD', 'clientD');
+
+    mintedClosed.closed = true; // closed, but its entry was NOT cleaned up (regression sim)
+    onPrimaryProducer.mockClear();
+
+    const standby = await connectInterRelay(port, 'relay-secret', 'ws://standbyB');
+    await tick();
+
+    const toB = onPrimaryProducer.mock.calls.filter((c) => c[3] === 'ws://standbyB');
+    expect(toB.some((c) => c[2] === mintedClosed)).toBe(false); // RED today: re-fanned w/o the guard
+    expect(toB.some((c) => c[2] === mintedLive)).toBe(true);    // live sibling still re-fanned
+
+    client.close();
+    standby.close();
+  });
 });

@@ -791,6 +791,7 @@ export function createSignalingServer(
           if (originBucket) {
             for (const entry of originBucket.values()) {
               if (entry.originRelayId === peerRelayId) continue; // REQ-RMS-036 — no echo to origin
+              if (entry.producer.closed) continue; // defense-in-depth: a missed '@close' must never replay a dead handle to the new peer
               interRelay.onPrimaryProducer?.(reRoomId, reRoom.router, entry.producer, peerRelayId, entry.producerPeerId);
             }
           }
