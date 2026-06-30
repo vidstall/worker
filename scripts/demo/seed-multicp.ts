@@ -127,6 +127,9 @@ async function readU64Count(
     throw new Error(`devInspect ${moduleName}::${fn} returned no value`);
   }
   const bytes = new Uint8Array(returnValues[0][0] as number[]); // BCS u64: 8 bytes LE
+  if (bytes.length !== 8) {
+    throw new Error(`devInspect ${moduleName}::${fn} returned ${bytes.length} bytes, expected 8 (u64)`);
+  }
   let v = 0n;
   for (let i = bytes.length - 1; i >= 0; i--) {
     v = (v << 8n) | BigInt(bytes[i] ?? 0);
@@ -187,15 +190,18 @@ async function main(): Promise<void> {
   for (let i = 0; i < N_VALIDATORS; i++) {
     validators.push(await voteAndApplyMiner(client, cp1, 'validator', config, logger));
   }
-  // 2 relays. relay_registry dedups by miner_id (relay_registry.move:118), NOT by
-  // endpoint_url — two 'relay' calls (each a fresh keypair) are two distinct relay
-  // entries even though the seeded endpoint_url metadata matches; C3 assigns the
-  // real per-process ports at launch.
+  // N_RELAYS relays. relay_registry dedups by miner_id (relay_registry.move:118),
+  // NOT by endpoint_url — repeated 'relay' calls (each a fresh keypair) are distinct
+  // relay entries even though the seeded endpoint_url metadata matches; C3 assigns
+  // the real per-process ports at launch.
   const relays: SeededKey[] = [];
-  relays.push(await voteAndApplyMiner(client, cp1, 'relay', config, logger));
-  relays.push(await voteAndApplyMiner(client, cp1, 'relay', config, logger));
+  for (let i = 0; i < N_RELAYS; i++) {
+    relays.push(await voteAndApplyMiner(client, cp1, 'relay', config, logger));
+  }
   const signaling: SeededKey[] = [];
-  signaling.push(await voteAndApplyMiner(client, cp1, 'signaling', config, logger));
+  for (let i = 0; i < N_SIGNALING; i++) {
+    signaling.push(await voteAndApplyMiner(client, cp1, 'signaling', config, logger));
+  }
 
   // 3. Scale CPs to N=5 — CP#2..#5 only register (no infra needed). After this,
   //    required = ceil(5 * 2/3) = 4, so the demo's role-vote/pairing are a genuine
