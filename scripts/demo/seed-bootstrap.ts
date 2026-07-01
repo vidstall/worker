@@ -569,8 +569,16 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((err) => {
-  // Fail LOUD: a non-zero exit blocks the daemons' `depends_on: service_completed_successfully`.
-  process.stderr.write(`seed-bootstrap: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
-  process.exit(1);
-});
+// Run main() ONLY when invoked directly (mirrors escrow-driver.ts:233 /
+// run-multicp-voting.ts:699). seed-multicp.ts VALUE-imports bootstrapCp/
+// voteAndApplyMiner from here (added in C1) — WITHOUT this guard, seed-bootstrap's
+// own N=1 seed fired on import and raced seed-multicp's cascade, inflating
+// active_cp_count so the N=1 single-vote infra seed (required must be 1) aborted
+// 707 (consume_assignment: no assignment) in apply_voted_role.
+if (process.argv[1]?.endsWith('seed-bootstrap.ts')) {
+  main().catch((err) => {
+    // Fail LOUD: a non-zero exit blocks the daemons' `depends_on: service_completed_successfully`.
+    process.stderr.write(`seed-bootstrap: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+}
