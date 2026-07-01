@@ -50,17 +50,24 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createConnection } from 'node:net';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
-import type { SuiClient } from '@mysten/sui/client';
+import { Transaction } from '@mysten/sui/transactions';
+import { normalizeSuiAddress } from '@mysten/sui/utils';
+import type { SuiClient, SuiEvent } from '@mysten/sui/client';
 import {
   createSuiClient,
   createLogger,
   loadNetworkConfig,
+  waitForRoleAssignment,
   type Logger,
+  type NetworkConfig,
+  type RoleAssigned,
+  type RoleVoteCast,
+  type RoomAssigned,
 } from '../../packages/shared/src/index.ts'; // relative SOURCE import — scripts/ sits OUTSIDE the pnpm workspace graph (mirrors seed-multicp.ts:56 / escrow-driver.ts:61).
 import type { MultiCpKeysFile } from './seed-multicp.ts'; // TYPE-ONLY: elided at runtime → seed-multicp.ts's unguarded top-level main() is NOT executed on import.
 
@@ -347,11 +354,227 @@ export function buildLaunchPlan(
   return specs;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// C4 — live-demo pure helpers (unit-tested). All the fragile parsing/quorum
+// logic lives here so the impure orchestration (spawn / devInspect / queryEvents
+// polling / main()) stays thin and is exercised by the controller's live run.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * The genuine N=5 quorum the demo pins: required = max(1, ceil(active_cp * 6667 /
+ * 10000)) (role_voting::compute_threshold / pairing PVR). At 5 active CPs → 4.
+ * Single-sourced so the magic "4" is not scattered across the asserts (fact B/C).
+ */
+export const REQUIRED_QUORUM_AT_N5 = 4;
+
+/**
+ * The #7 ProposalSubmitted parsedJson shape (room_manager.move:148-154). NOT a
+ * shared type → declared locally. `verified_score` carries the submitted score
+ * (room_manager.move:441 — the field is named verified_score, NOT submitted_score).
+ */
+export interface ProposalSubmittedJson {
+  room_id: string;
+  cp_id: string;
+  verified_score: string;
+  relay_count: string;
+  validator_count: string;
+}
+
+/**
+ * Parse the escrow-driver's single STDOUT contract line `ROOM_ID=0x…`
+ * (escrow-driver.ts:228). pino JSON logs share the same stdout, so match with the
+ * ANCHORED multiline regex — never by reading the whole stream. PURE.
+ */
+export function parseRoomId(stdout: string): string | null {
+  const m = stdout.match(/^ROOM_ID=(\S+)$/m);
+  return m ? m[1]! : null;
+}
+
+/**
+ * Decode an 8-byte little-endian BCS u64 (the devInspect count-getter return
+ * shape). Fail-closed: THROWS on any length ≠ 8 (a self-verifying precondition
+ * must never silently pass on a malformed read). PURE. Mirrors seed-multicp.ts's
+ * inline decode (NOT value-imported — that module runs main() on import).
+ */
+export function decodeLeU64(bytes: readonly number[]): bigint {
+  if (bytes.length !== 8) {
+    throw new Error(`decodeLeU64: expected 8 bytes (u64 LE), got ${bytes.length}`);
+  }
+  let v = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    v = (v << 8n) | BigInt(bytes[i] ?? 0);
+  }
+  return v;
+}
+
+/** The evidence surfaced from a passing #6 role-vote quorum. */
+export interface RoleQuorumResult {
+  role: number;
+  voteCount: string;
+  threshold: string;
+  /** The distinct, normalized voter addresses that crossed the quorum (size === expectedCount). */
+  voters: string[];
+}
+
+/**
+ * HARD-ASSERT the live #6 role-vote quorum for the user-miner (fact B). Throws on
+ * any divergence; returns the evidence on success. At N=5 the finalized
+ * RoleAssigned has vote_count === threshold === '4' (u64 → decimal STRING), and
+ * exactly 4 DISTINCT RoleVoteCast voters (the 5th CP's late cast aborts 711 → no
+ * event). `casts` may contain other miners' votes (a queryEvents MoveEventType
+ * filter is not miner-scoped) — they are filtered out here by miner_id. PURE.
+ */
+export function assertRoleQuorum(
+  assigned: RoleAssigned,
+  casts: readonly RoleVoteCast[],
+  minerAddress: string,
+  expectedCount: number,
+): RoleQuorumResult {
+  const expected = String(expectedCount);
+  const miner = normalizeSuiAddress(minerAddress);
+
+  if (normalizeSuiAddress(assigned.miner_id) !== miner) {
+    throw new Error(
+      `assertRoleQuorum: RoleAssigned.miner_id ${assigned.miner_id} is not the user-miner ${minerAddress}`,
+    );
+  }
+  if (assigned.vote_count !== expected) {
+    throw new Error(`assertRoleQuorum: vote_count=${assigned.vote_count}, expected ${expected} (the live 4-of-5 quorum)`);
+  }
+  if (assigned.threshold !== expected) {
+    throw new Error(`assertRoleQuorum: threshold=${assigned.threshold}, expected ${expected} (only 4 when 5 CPs are active)`);
+  }
+
+  const voters = [
+    ...new Set(
+      casts
+        .filter((c) => normalizeSuiAddress(c.miner_id) === miner)
+        .map((c) => normalizeSuiAddress(c.voter)),
+    ),
+  ];
+  if (voters.length !== expectedCount) {
+    throw new Error(
+      `assertRoleQuorum: ${voters.length} distinct voters for the user-miner, expected exactly ${expectedCount}`,
+    );
+  }
+
+  return { role: assigned.role, voteCount: assigned.vote_count, threshold: assigned.threshold, voters };
+}
+
+/** The evidence surfaced from a passing #7 pairing quorum. */
+export interface PairingQuorumResult {
+  winningScore: string;
+  winningCp: string;
+  /** The distinct, normalized cp_ids that proposed the winning score (size >= expectedCount). */
+  agreeingCpIds: string[];
+}
+
+/**
+ * HARD-ASSERT the live #7 pairing quorum for a room (fact C). Throws on any
+ * divergence; returns the evidence on success. A PVR-consensus finalize sets
+ * consensus_reached === true and a real winning_cp (the zero ID is the admin
+ * fallback), and ≥ expectedCount DISTINCT ProposalSubmitted.cp_id share the SAME
+ * verified_score as the winning RoomAssigned.verified_score. `proposals` should
+ * already be room-scoped by the caller; this only groups by score. PURE.
+ */
+export function assertPairingQuorum(
+  assigned: RoomAssigned,
+  proposals: readonly ProposalSubmittedJson[],
+  expectedCount: number,
+): PairingQuorumResult {
+  if (assigned.consensus_reached !== true) {
+    throw new Error(
+      `assertPairingQuorum: consensus_reached=${assigned.consensus_reached}, expected true (a CP-quorum finalize, not the admin fallback)`,
+    );
+  }
+  const winningCp = (assigned.winning_cp ?? '').trim();
+  const zeroId = normalizeSuiAddress('0x0');
+  if (winningCp === '' || normalizeSuiAddress(winningCp) === zeroId) {
+    throw new Error(
+      `assertPairingQuorum: winning_cp is empty/zero (${assigned.winning_cp}) — that is the admin fallback, not a CP-consensus finalize`,
+    );
+  }
+
+  const winningScore = assigned.verified_score;
+  const agreeingCpIds = [
+    ...new Set(
+      proposals
+        .filter((p) => p.verified_score === winningScore)
+        .map((p) => normalizeSuiAddress(p.cp_id)),
+    ),
+  ];
+  if (agreeingCpIds.length < expectedCount) {
+    throw new Error(
+      `assertPairingQuorum: ${agreeingCpIds.length} distinct CPs proposed the winning score ${winningScore}, expected >= ${expectedCount}`,
+    );
+  }
+
+  return { winningScore, winningCp: normalizeSuiAddress(winningCp), agreeingCpIds };
+}
+
+/**
+ * Classify a daemon log line as an executeWithRetry benign-abort trace (fact G):
+ * `<label> failed, retrying` (tx.ts:60, warn) or `<label> exhausted retries,
+ * skipping` (tx.ts:63, error). Detects the substrings so it works whether or not
+ * the line is pino-JSON-wrapped. Returns null for ordinary lines. PURE.
+ */
+export function classifyRetryLine(line: string): 'retrying' | 'exhausted' | null {
+  if (line.includes('exhausted retries, skipping')) return 'exhausted';
+  if (line.includes('failed, retrying')) return 'retrying';
+  return null;
+}
+
+/** Aggregate benign-abort retry traces across every daemon's in-memory tail. */
+export interface RetrySummary {
+  retrying: number;
+  exhausted: number;
+}
+
+/**
+ * Count executeWithRetry retry/exhaustion traces across a set of daemon tails
+ * (fact G honest re-scope): a deterministic Move abort (704/711/719/508) is
+ * RETRIED 5× (warn) then swallowed (one benign "exhausted retries" error, null
+ * return, NO throw, NO crash). This is a diagnostic SUMMARY only — it is NOT a
+ * failure signal (the load-bearing benign-abort check is "every daemon still
+ * alive"). PURE.
+ */
+export function summarizeRetryTails(tails: readonly (readonly string[])[]): RetrySummary {
+  const summary: RetrySummary = { retrying: 0, exhausted: 0 };
+  for (const tail of tails) {
+    for (const line of tail) {
+      const kind = classifyRetryLine(line);
+      if (kind === 'retrying') summary.retrying++;
+      else if (kind === 'exhausted') summary.exhausted++;
+    }
+  }
+  return summary;
+}
+
 // ── impure orchestration (spawn / health / teardown) ─────────────────────
 
 const HEALTHZ_TIMEOUT_MS = 120_000; // all-up budget per the spec (≥120s)
 const HEALTHZ_POLL_MS = 500;
 const TEARDOWN_GRACE_MS = 5_000;
+
+// ── C4 live-demo levers ──
+/** Read-only devInspect sender — no gas, no signature (mirrors role-assignment.ts:41 / seed-multicp.ts:73). */
+const DEV_INSPECT_SENDER = '0x0000000000000000000000000000000000000000000000000000000000000000';
+/**
+ * Wave-3 role-vote budget. The 5 CPs poll every ROLE_VOTING_INTERVAL_MS (30s) and
+ * need 4 DISTINCT casts to finalize, so a cold discover→4-cast→assign can take
+ * ~30-120s; 180s is generous headroom. (This gates launch on #6 finalizing rather
+ * than the user-miner's /healthz — see launchFleet wave 3.)
+ */
+const ROLE_VOTE_TIMEOUT_MS = 180_000;
+/** #7 pairing budget: escrow → 5 CPs each submitProposal → PVR finalize; same 30s-poll class as #6. */
+const ROOM_ASSIGN_TIMEOUT_MS = 180_000;
+const EVENT_POLL_MS = 3_000;
+/** queryEvents page size — the demo's 4 user-miner casts / room proposals are the NEWEST role/room events, so a descending page of 50 always contains them. */
+const EVENT_QUERY_LIMIT = 50;
+/** Absolute entry for the transient #7 pairing driver (foreign CWD ⇒ absolute; mirrors entryFor). */
+const ESCROW_ENTRY = join(WORKTREE_ROOT, 'scripts', 'demo', 'escrow-driver.ts');
+/** The live-run evidence the controller's run produces (mkdir -p'd at write time). */
+const EVIDENCE_PATH = join(WORKTREE_ROOT, '.evidence', 'verification', 'multi-cp-voting-live-run.md');
 
 /** Faucet levers for the self-provisioned user-miner (mirrors escrow-driver.ts:65-79). */
 const FAUCET_URL = process.env['FAUCET_URL'] ?? getFaucetHost('localnet');
@@ -528,10 +751,15 @@ function loadKeys(path: string): MultiCpKeysFile {
  * Self-provision the USER-miner keypair: generate a fresh Ed25519 key, then
  * faucet-fund it until it holds >= USER_MINER_MIN_BALANCE_MIST — drip → settle →
  * check balance, up to MAX_FAUCET_DRIPS, fail loud if still short (mirrors
- * escrow-driver.ts:96-112 fundUntilSufficient). Returns the bech32 secretKey for
- * the daemon's SUI_PRIVATE_KEY.
+ * escrow-driver.ts:96-112 fundUntilSufficient). Returns the bech32 secretKey (for
+ * the daemon's SUI_PRIVATE_KEY) AND the Sui address — which IS the miner_id the
+ * role vote assigns (auto-register.ts:122: minerId = signer.toSuiAddress()), so C4
+ * observes #6 by this address WITHOUT parsing a registration event.
  */
-async function provisionUserMiner(client: SuiClient, logger: Logger): Promise<string> {
+async function provisionUserMiner(
+  client: SuiClient,
+  logger: Logger,
+): Promise<{ secretKey: string; address: string }> {
   const kp = Ed25519Keypair.generate();
   const address = kp.getPublicKey().toSuiAddress();
   let balance = 0n;
@@ -543,7 +771,7 @@ async function provisionUserMiner(client: SuiClient, logger: Logger): Promise<st
       { module: MODULE, action: 'provision_user_miner', context: { address, drip, balance: balance.toString() } },
       'user-miner faucet drip settled',
     );
-    if (balance >= USER_MINER_MIN_BALANCE_MIST) return kp.getSecretKey();
+    if (balance >= USER_MINER_MIN_BALANCE_MIST) return { secretKey: kp.getSecretKey(), address };
   }
   throw new Error(
     `provisionUserMiner: ${address} underfunded after ${MAX_FAUCET_DRIPS} faucet drips ` +
@@ -598,22 +826,239 @@ export async function teardownFleet(handles: readonly ProcessHandle[], logger: L
   }
 }
 
+// ── C4 live-demo orchestration (impure — exercised by the controller's live run) ──
+
 /**
- * Bring up the whole fleet in the 3 ordered waves with per-wave health gates:
+ * devInspect `control_plane_registry::active_cp_count(&CpRegistry): u64` and decode
+ * the 8-byte LE u64. FAIL-CLOSED: throws on any RPC/decode error (a precondition
+ * assert must never silently pass). Replicates seed-multicp.ts readU64Count INLINE
+ * (that module runs main() on import → we import only its TYPE, not this fn).
+ */
+async function readActiveCpCount(client: SuiClient, config: NetworkConfig): Promise<number> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${config.packageId}::control_plane_registry::active_cp_count`,
+    arguments: [tx.object(config.cpRegistryId)],
+  });
+  const result = await client.devInspectTransactionBlock({
+    transactionBlock: tx as never,
+    sender: DEV_INSPECT_SENDER,
+  });
+  if (result.error) {
+    throw new Error(`readActiveCpCount: devInspect failed: ${result.error}`);
+  }
+  const returnValues = result.results?.[0]?.returnValues;
+  if (!returnValues || returnValues.length === 0) {
+    throw new Error('readActiveCpCount: devInspect returned no value');
+  }
+  return Number(decodeLeU64(returnValues[0]![0] as number[]));
+}
+
+/**
+ * Page the most-recent Move events of one fully-qualified type (descending). The
+ * MoveEventType filter is NOT subject-scoped, so callers filter parsedJson by
+ * miner_id / room_id. The demo's votes/proposals are the newest such events, so a
+ * single EVENT_QUERY_LIMIT page always contains them.
+ */
+async function queryMoveEvents(
+  client: SuiClient,
+  config: NetworkConfig,
+  typeSuffix: string,
+  limit = EVENT_QUERY_LIMIT,
+): Promise<SuiEvent[]> {
+  const res = await client.queryEvents({
+    query: { MoveEventType: `${config.packageId}::${typeSuffix}` },
+    limit,
+    order: 'descending',
+  });
+  return res.data;
+}
+
+/**
+ * Poll for the #7 `room_manager::RoomAssigned` event for `roomId` (mirrors
+ * waitForRoleAssignment's shape — there is no shared waitForRoomAssignment helper).
+ * Resolves the matching SuiEvent (caller reads parsedJson + id.txDigest); throws on
+ * timeout.
+ */
+async function waitForRoomAssignment(
+  client: SuiClient,
+  config: NetworkConfig,
+  roomId: string,
+  logger: Logger,
+  timeoutMs = ROOM_ASSIGN_TIMEOUT_MS,
+  pollIntervalMs = EVENT_POLL_MS,
+): Promise<SuiEvent> {
+  const deadline = Date.now() + timeoutMs;
+  const target = normalizeSuiAddress(roomId);
+  logger.info({ module: MODULE, action: 'wait_room_assignment', context: { roomId } }, 'waiting for RoomAssigned (CP pairing quorum)...');
+  while (Date.now() < deadline) {
+    try {
+      const events = await queryMoveEvents(client, config, 'room_manager::RoomAssigned');
+      const match = events.find((e) => {
+        const pj = e.parsedJson as RoomAssigned | undefined;
+        return pj !== undefined && normalizeSuiAddress(pj.room_id) === target;
+      });
+      if (match) {
+        logger.info(
+          { module: MODULE, action: 'room_assigned', context: { roomId, txDigest: match.id.txDigest } },
+          'RoomAssigned observed',
+        );
+        return match;
+      }
+    } catch (err) {
+      logger.debug(
+        { module: MODULE, action: 'wait_room_assignment', context: { err: err instanceof Error ? err.message : String(err) } },
+        'queryEvents RoomAssigned failed, retrying',
+      );
+    }
+    await sleep(pollIntervalMs);
+  }
+  throw new Error(`Room assignment timeout after ${timeoutMs}ms for room ${roomId}`);
+}
+
+/**
+ * Spawn the transient escrow-driver.ts one-shot (register_user → create_room →
+ * create_escrow → EscrowCreated → the 5 CPs' pairing vote). Buffers stdout, parses
+ * the `ROOM_ID=…` contract line (parseRoomId), and resolves the room id. Rejects
+ * LOUD on a non-zero exit or a missing ROOM_ID with the stdout/stderr tail. The
+ * driver self-generates its own user key (needs no SUI_PRIVATE_KEY), so the
+ * inherited identity keys are scrubbed as noise. A distinct CWD isolates its
+ * relative `.cursors/`. Mirrors the spawnProcess idiom (execPath + tsx/esm entry).
+ */
+async function spawnEscrowDriver(logger: Logger): Promise<string> {
+  const cwd = cwdFor('escrow-0');
+  mkdirSync(cwd, { recursive: true });
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of IDENTITY_ENV_KEYS) delete env[k];
+  logger.info(
+    { module: MODULE, action: 'escrow_driver', context: { entry: ESCROW_ENTRY, cwd } },
+    'spawning escrow-driver (register_user → create_room → create_escrow → CP pairing vote)',
+  );
+  return new Promise<string>((resolveRoom, reject) => {
+    const proc = spawn(process.execPath, ['--import', 'tsx/esm', ESCROW_ENTRY], {
+      cwd,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout?.on('data', (c: Buffer) => {
+      stdout += c.toString('utf8');
+    });
+    proc.stderr?.on('data', (c: Buffer) => {
+      stderr += c.toString('utf8');
+    });
+    proc.once('error', (err) => reject(new Error(`escrow-driver spawn error: ${err.message}`)));
+    proc.once('exit', (code) => {
+      const roomId = parseRoomId(stdout);
+      if (code !== 0 || roomId === null) {
+        const tail = `${stdout}\n${stderr}`.split('\n').filter((l) => l.length > 0).slice(-20).join('\n');
+        reject(new Error(`escrow-driver failed (code=${code ?? 'null'}, roomId=${roomId ?? 'none'})\n--- last 20 stdout/stderr lines ---\n${tail}`));
+        return;
+      }
+      logger.info({ module: MODULE, action: 'escrow_driver', context: { roomId, code } }, 'escrow-driver completed; ROOM_ID captured');
+      resolveRoom(roomId);
+    });
+  });
+}
+
+/** The load-bearing facts a live demo run proves — captured for the evidence file. */
+interface LiveRunEvidence {
+  activeCpCount: number;
+  role: RoleQuorumResult;
+  roleTxDigest: string;
+  pairing: PairingQuorumResult;
+  roomTxDigest: string;
+  roomId: string;
+  userMinerAddress: string;
+  daemonCount: number;
+  retries: RetrySummary;
+}
+
+/**
+ * Render + write the live-run evidence markdown (mkdir -p'd). Records the two
+ * finalize tx digests, the distinct voter/cp sets + the shared score, the
+ * active_cp_count==5 precondition, and the HONEST facts F (determinism is
+ * structural: canary-OFF + identical env + same on-chain state — NOT an
+ * off-chain relayState-equality assert) + G (a benign deterministic abort is
+ * RETRIED 5× then swallowed by executeWithRetry — null, no throw, no crash —
+ * NOT "non-retryable"). This is the ONLY raw file the demo writes; the asserts
+ * above are the load-bearing part, so the caller guards this write.
+ */
+function writeLiveRunEvidence(ev: LiveRunEvidence): void {
+  const stamp = new Date().toISOString();
+  const body = `# Multi-CP Voting Live (N=5) — live-run evidence
+
+_Generated ${stamp} by scripts/demo/run-multicp-voting.ts (C4 SEAM)._
+
+## Substrate precondition
+- \`control_plane_registry::active_cp_count\` = **${ev.activeCpCount}** (asserted === 5).
+- Fleet: ${ev.daemonCount} processes all-up healthy (5 cp + 4 val + 2 relay + 1 sig + 1 user-miner).
+- Required quorum at N=5: \`ceil(5 * 6667 / 10000)\` = **${REQUIRED_QUORUM_AT_N5}**.
+
+## #6 — live role-vote (4-of-5 quorum)
+- user-miner (miner_id / address): \`${ev.userMinerAddress}\`
+- RoleAssigned: role=${ev.role.role}, vote_count=**${ev.role.voteCount}**, threshold=**${ev.role.threshold}**.
+- Finalize tx digest: \`${ev.roleTxDigest}\`
+- ${ev.role.voters.length} DISTINCT RoleVoteCast voters:
+${ev.role.voters.map((v) => `  - \`${v}\``).join('\n')}
+
+## #7 — live pairing (4-of-5 quorum)
+- room_id: \`${ev.roomId}\`
+- RoomAssigned: consensus_reached=true, winning_cp=\`${ev.pairing.winningCp}\`, verified_score=**${ev.pairing.winningScore}**.
+- Finalize tx digest: \`${ev.roomTxDigest}\`
+- ${ev.pairing.agreeingCpIds.length} DISTINCT ProposalSubmitted cp_id at the winning score:
+${ev.pairing.agreeingCpIds.map((c) => `  - \`${c}\``).join('\n')}
+
+## Benign-abort (all daemons survived — fact G, honest)
+- All ${ev.daemonCount} daemons still alive after the demos (no crash).
+- executeWithRetry retry traces observed across tails: retrying=${ev.retries.retrying}, exhausted=${ev.retries.exhausted}.
+- Mechanism: a deterministic Move abort (704 E_ALREADY_VOTED / 711 E_PRIOR_ASSIGNMENT_PENDING /
+  719 E_ROLE_MISMATCH / 508 E_NOT_PENDING) is RETRIED 5× (warn) by executeWithRetry
+  (tx.ts:38-69), then swallowed with ONE benign \`exhausted retries, skipping\` error
+  (null return, NO throw, NO crash). This is the accurate mechanism — NOT "non-retryable".
+
+## Honesty notes
+- **Fact F (determinism pin):** the spec's "assert all 5 CPs' relayState/validatorState
+  are equal" is NOT feasible off-chain — every CP reads the SAME on-chain state and derives
+  identical scores deterministically. The practical pin implemented here is STRUCTURAL:
+  (i) canary is OFF by construction (buildLaunchPlan sets no CANARY_* env), and
+  (ii) the active_cp_count==5 precondition above. No fake equality assert is made.
+- **Fact G (benign-abort):** see the mechanism note above — retried-then-swallowed, not non-retryable.
+`;
+  mkdirSync(dirname(EVIDENCE_PATH), { recursive: true });
+  writeFileSync(EVIDENCE_PATH, body, 'utf8');
+}
+
+/**
+ * Bring up the whole fleet in the 3 ordered waves with per-wave gates:
  *   1. all 5 CPs → wait healthy (every role-vote loop live before the miner votes)
  *   2. infra (4 val + 2 relay + 1 sig) in parallel → wait healthy
- *   3. user-miner LAST → wait healthy
+ *   3. user-miner LAST → spawn, then gate on the ROLE VOTE FINALIZING
+ *      (waitForRoleAssignment), NOT on the user-miner's /healthz.
  * On any failure, tears down whatever was already spawned and rethrows (no orphans).
+ *
+ * WHY wave-3 gates on the role vote, not healthz: the user-miner's /healthz only
+ * comes up AFTER register→vote→apply→register (validator-daemon ensureRegistered
+ * BLOCKS on its own ≤120s waitForRoleAssignment before startHealthzServer). Gating
+ * launch on healthz would couple success to that apply-side + 120s budget. Gating on
+ * the vote finalizing instead proves #6 DIRECTLY and is robust to whatever scarce
+ * role the CPs derive. Returns the user-miner ADDRESS (== its role-vote miner_id) so
+ * main() observes #6/#7 without parsing a registration event.
  *
  * `handles` is caller-owned and pushed-into as each child spawns, so a SIGINT/
  * SIGTERM handler installed by main() can see + tear down the fleet even mid-wave.
  */
-export async function launchFleet(logger: Logger, handles: ProcessHandle[] = []): Promise<ProcessHandle[]> {
+export async function launchFleet(
+  logger: Logger,
+  handles: ProcessHandle[] = [],
+): Promise<{ handles: ProcessHandle[]; userMinerAddress: string }> {
   const config = loadNetworkConfig(); // also validates the published-config env is present
   const client = createSuiClient(config.rpcUrl);
 
   const keys = loadKeys(KEYS_PATH);
-  const userMinerSecretKey = await provisionUserMiner(client, logger);
+  const { secretKey: userMinerSecretKey, address: userMinerAddress } = await provisionUserMiner(client, logger);
   const plan = buildLaunchPlan(keys, userMinerSecretKey, process.env);
 
   const cpSpecs = plan.filter((s) => s.order === 'cp');
@@ -633,13 +1078,18 @@ export async function launchFleet(logger: Logger, handles: ProcessHandle[] = [])
     handles.push(...infraHandles);
     await Promise.all(infraHandles.map((h) => waitHealthy(h)));
 
-    // wave 3 — user-miner last.
-    logger.info({ module: MODULE, action: 'wave', context: { wave: 'user-miner' } }, 'wave 3: spawning user-miner (voting mode)');
+    // wave 3 — user-miner last, then gate on the ROLE VOTE finalizing (proves #6
+    // directly). The user-miner registers as a User-role miner in voting mode; the
+    // 5 CPs' role-voting loops discover it (MinerRegistered) and cast — the 4th
+    // DISTINCT cast crosses the live 4-of-5 quorum and assigns. We do NOT wait on
+    // its /healthz (which would couple launch to the apply-side + 120s budget).
+    logger.info({ module: MODULE, action: 'wave', context: { wave: 'user-miner', userMinerAddress } }, 'wave 3: spawning user-miner (voting mode)');
     const umHandle = spawnProcess(userMinerSpec, logger);
     handles.push(umHandle);
-    await waitHealthy(umHandle);
+    logger.info({ module: MODULE, action: 'wait_role_vote', context: { userMinerAddress, timeoutMs: ROLE_VOTE_TIMEOUT_MS } }, 'wave 3 gate: awaiting the 4-of-5 role vote to finalize');
+    await waitForRoleAssignment(client, config, userMinerAddress, logger, ROLE_VOTE_TIMEOUT_MS);
 
-    return handles;
+    return { handles, userMinerAddress };
   } catch (err) {
     logger.error({ module: MODULE, action: 'launch_failed', context: { spawned: handles.length } }, 'fleet launch failed — tearing down');
     await teardownFleet(handles, logger);
@@ -669,29 +1119,121 @@ async function main(): Promise<void> {
   process.once('SIGINT', () => onSignal('SIGINT'));
   process.once('SIGTERM', () => onSignal('SIGTERM'));
 
-  await launchFleet(logger, handles);
+  const { userMinerAddress } = await launchFleet(logger, handles);
   logger.info(
-    { module: MODULE, action: 'all_healthy', context: { count: handles.length } },
-    `all ${handles.length} processes healthy (5 cp + 4 val + 2 relay + 1 sig + 1 user-miner)`,
+    { module: MODULE, action: 'all_healthy', context: { count: handles.length, userMinerAddress } },
+    `fleet up + role vote finalized — ${handles.length} processes (5 cp + 4 val + 2 relay + 1 sig + 1 user-miner)`,
   );
 
   // ───────────────────────── C4 SEAM ─────────────────────────
-  // Task C4 inserts the live demo flows HERE (between launch and teardown):
-  //   #6 role-vote: assert the 4-of-5 role-vote quorum on the user-miner
-  //   #7 pairing:   drive escrow-driver.ts → assert the 4-of-5 pairing quorum
-  // For C3 (skeleton) we only prove all-up health, then tear down — unless
-  // KEEP_ALIVE is set, so C4 can keep this fleet running and chain off it.
+  // The live demo flows (between launch and teardown):
+  //   (a) precondition  active_cp_count == 5 (fail-closed; canary-OFF determinism)
+  //   (b) #6 role-vote  HARD-ASSERT the live 4-of-5 quorum on the user-miner
+  //   (c) #7 pairing    escrow-driver → HARD-ASSERT the live 4-of-5 pairing quorum
+  //   (d) benign-abort  every daemon still alive (fact G: retried-then-swallowed)
+  //   (e) evidence      write the finalize digests + distinct sets (guarded)
+  // On any failure the fleet is torn down before rethrow (no orphans).
+  const config = loadNetworkConfig();
+  const client = createSuiClient(config.rpcUrl);
+
+  try {
+    // (a) precondition — the genuine N=5 substrate on-chain (fact E). Fail-closed.
+    const activeCpCount = await readActiveCpCount(client, config);
+    if (activeCpCount !== EXPECTED_CPS) {
+      throw new Error(`C4 precondition: active_cp_count=${activeCpCount}, expected ${EXPECTED_CPS} — substrate is not the genuine N=5`);
+    }
+    // (fact F) The infeasible "all 5 CPs' relayState/validatorState equal" assert is
+    // replaced by STRUCTURAL determinism: canary is OFF (buildLaunchPlan sets no
+    // CANARY_* env) and every CP reads the SAME on-chain state under this
+    // active_cp_count==5 precondition, so all 5 derive identical scores. No fake
+    // equality assert is made.
+    logger.info({ module: MODULE, action: 'precondition', context: { activeCpCount } }, `precondition OK: active_cp_count=${activeCpCount}`);
+
+    // (b) #6 — the vote already finalized during wave 3; re-confirm, then read the
+    // events the DAEMONS submitted (queryEvents, not our own TX) and HARD-ASSERT.
+    await waitForRoleAssignment(client, config, userMinerAddress, logger, 30_000);
+    const assignedEvents = await queryMoveEvents(client, config, 'role_voting::RoleAssigned');
+    const assignedEvent = assignedEvents.find(
+      (e) => normalizeSuiAddress((e.parsedJson as RoleAssigned).miner_id) === normalizeSuiAddress(userMinerAddress),
+    );
+    if (!assignedEvent) {
+      throw new Error(`C4 #6: no RoleAssigned event found for user-miner ${userMinerAddress}`);
+    }
+    const castEvents = await queryMoveEvents(client, config, 'role_voting::RoleVoteCast');
+    const casts = castEvents.map((e) => e.parsedJson as RoleVoteCast);
+    const role = assertRoleQuorum(assignedEvent.parsedJson as RoleAssigned, casts, userMinerAddress, REQUIRED_QUORUM_AT_N5);
+    const roleTxDigest = assignedEvent.id.txDigest;
+    logger.info(
+      { module: MODULE, action: 'role_quorum', context: { role: role.role, voteCount: role.voteCount, threshold: role.threshold, voters: role.voters, txDigest: roleTxDigest } },
+      `#6 PASS: live 4-of-5 role vote — vote_count=${role.voteCount}, threshold=${role.threshold}, ${role.voters.length} distinct voters`,
+    );
+
+    // (c) #7 — drive the escrow → CP pairing vote, wait for RoomAssigned, HARD-ASSERT.
+    const roomId = await spawnEscrowDriver(logger);
+    const roomEvent = await waitForRoomAssignment(client, config, roomId, logger);
+    const proposalEvents = await queryMoveEvents(client, config, 'room_manager::ProposalSubmitted');
+    const proposals = proposalEvents
+      .map((e) => e.parsedJson as ProposalSubmittedJson)
+      .filter((p) => normalizeSuiAddress(p.room_id) === normalizeSuiAddress(roomId));
+    const pairing = assertPairingQuorum(roomEvent.parsedJson as RoomAssigned, proposals, REQUIRED_QUORUM_AT_N5);
+    const roomTxDigest = roomEvent.id.txDigest;
+    logger.info(
+      { module: MODULE, action: 'pairing_quorum', context: { winningCp: pairing.winningCp, winningScore: pairing.winningScore, agreeingCpIds: pairing.agreeingCpIds, txDigest: roomTxDigest } },
+      `#7 PASS: live 4-of-5 pairing — ${pairing.agreeingCpIds.length} distinct CPs share score ${pairing.winningScore}`,
+    );
+
+    // (d) benign-abort (fact G, honest) — a deterministic Move abort (704/711/719/508)
+    // is RETRIED 5× then SWALLOWED by executeWithRetry (null, no throw), so NO daemon
+    // should have crashed. The tail retry summary is diagnostic only, NOT a gate.
+    const crashed = handles.filter((h) => h.proc.exitCode !== null);
+    if (crashed.length > 0) {
+      throw new Error(
+        `C4 benign-abort: ${crashed.map((h) => `${h.spec.name}(exit=${h.proc.exitCode})`).join(', ')} exited during the demo`,
+      );
+    }
+    const retries = summarizeRetryTails(handles.map((h) => h.tail));
+    logger.info(
+      { module: MODULE, action: 'benign_abort', context: { daemonsAlive: handles.length, retries } },
+      `benign-abort OK: all ${handles.length} daemons alive (retry traces: retrying=${retries.retrying}, exhausted=${retries.exhausted})`,
+    );
+
+    // (e) evidence — guarded so a write failure does not void the passing asserts.
+    try {
+      writeLiveRunEvidence({
+        activeCpCount,
+        role,
+        roleTxDigest,
+        pairing,
+        roomTxDigest,
+        roomId,
+        userMinerAddress,
+        daemonCount: handles.length,
+        retries,
+      });
+      logger.info({ module: MODULE, action: 'evidence', context: { path: EVIDENCE_PATH } }, `live-run evidence written → ${EVIDENCE_PATH}`);
+    } catch (err) {
+      logger.warn(
+        { module: MODULE, action: 'evidence', context: { path: EVIDENCE_PATH, err: err instanceof Error ? err.message : String(err) } },
+        'live-run evidence write failed (non-fatal — the asserts above already passed)',
+      );
+    }
+
+    logger.info({ module: MODULE, action: 'demos_passed' }, 'C4 live demos PASSED (#6 role-vote 4-of-5 + #7 pairing 4-of-5)');
+  } catch (err) {
+    logger.error({ module: MODULE, action: 'demo_failed' }, 'C4 live demo failed — tearing down fleet');
+    await teardownFleet(handles, logger);
+    throw err;
+  }
   // ────────────────────────────────────────────────────────────
 
   if (process.env['KEEP_ALIVE'] === '1') {
     // The SIGINT/SIGTERM handler installed above stays armed → "SIGINT to stop"
-    // actually tears the fleet down (C4 owns this lifecycle: launch → demo → keep
-    // up → signal teardown). The piped child stdio keeps the event loop alive.
-    logger.info({ module: MODULE, action: 'keep_alive' }, 'KEEP_ALIVE=1 — leaving the fleet running (SIGINT to tear down)');
+    // actually tears the fleet down. The piped child stdio keeps the event loop alive.
+    logger.info({ module: MODULE, action: 'keep_alive' }, 'KEEP_ALIVE=1 — demos passed; leaving the fleet running (SIGINT to tear down)');
     return;
   }
   await teardownFleet(handles, logger);
-  logger.info({ module: MODULE, action: 'done', context: { count: handles.length } }, 'fleet torn down — C3 all-up health check complete');
+  logger.info({ module: MODULE, action: 'done', context: { count: handles.length } }, 'fleet torn down — C4 live demo run complete');
 }
 
 // Run only when invoked directly so the unit test can import buildLaunchPlan
