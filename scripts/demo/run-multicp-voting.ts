@@ -383,10 +383,12 @@ export interface ProposalSubmittedJson {
 /**
  * Parse the escrow-driver's single STDOUT contract line `ROOM_ID=0x…`
  * (escrow-driver.ts:228). pino JSON logs share the same stdout, so match with the
- * ANCHORED multiline regex — never by reading the whole stream. PURE.
+ * ANCHORED multiline regex — never by reading the whole stream. The optional `\r?`
+ * before `$` tolerates CRLF line endings (under /m, `$` matches before `\n`, so a
+ * bare `$` would fail on a `\r\n` line). PURE.
  */
 export function parseRoomId(stdout: string): string | null {
-  const m = stdout.match(/^ROOM_ID=(\S+)$/m);
+  const m = stdout.match(/^ROOM_ID=(\S+)\r?$/m);
   return m ? m[1]! : null;
 }
 
@@ -509,7 +511,17 @@ export function assertPairingQuorum(
     );
   }
 
-  return { winningScore, winningCp: normalizeSuiAddress(winningCp), agreeingCpIds };
+  // The winning CP is the FIRST CP to submit the winning score (fact C) → its cp_id
+  // MUST be in the agreeing set; otherwise the RoomAssigned.winning_cp is inconsistent
+  // with the ProposalSubmitted record we tallied.
+  const normalizedWinner = normalizeSuiAddress(winningCp);
+  if (!agreeingCpIds.includes(normalizedWinner)) {
+    throw new Error(
+      `assertPairingQuorum: winning_cp ${winningCp} did not propose the winning score ${winningScore} (not among the ${agreeingCpIds.length} agreeing CPs)`,
+    );
+  }
+
+  return { winningScore, winningCp: normalizedWinner, agreeingCpIds };
 }
 
 /**
@@ -568,6 +580,8 @@ const DEV_INSPECT_SENDER = '0x00000000000000000000000000000000000000000000000000
 const ROLE_VOTE_TIMEOUT_MS = 180_000;
 /** #7 pairing budget: escrow → 5 CPs each submitProposal → PVR finalize; same 30s-poll class as #6. */
 const ROOM_ASSIGN_TIMEOUT_MS = 180_000;
+/** Hard cap on the transient escrow-driver one-shot — a hung driver (RPC stall) must not wedge the launcher with all 13 daemons up. */
+const ESCROW_DRIVER_TIMEOUT_MS = 180_000;
 const EVENT_POLL_MS = 3_000;
 /** queryEvents page size — the demo's 4 user-miner casts / room proposals are the NEWEST role/room events, so a descending page of 50 always contains them. */
 const EVENT_QUERY_LIMIT = 50;
@@ -580,7 +594,14 @@ const EVIDENCE_PATH = join(WORKTREE_ROOT, '.evidence', 'verification', 'multi-cp
 const FAUCET_URL = process.env['FAUCET_URL'] ?? getFaucetHost('localnet');
 const FAUCET_SETTLE_MS = 1_500; // let the drip tx settle before reading balance
 const MAX_FAUCET_DRIPS = 2;
-/** 1 SUI: clears any voted-role stake floor (relay 0.25 / validator 0.1 / signaling 0.05) + register/apply gas + headroom. */
+/**
+ * 1 SUI wallet BALANCE for the user-miner: faucet-fund + register/apply/register GAS
+ * headroom. NOTE — balance ≠ stake: the daemon stakes a FIXED 0.1 SUI (auto-register.ts:59)
+ * regardless of wallet balance, so this 1 SUI does NOT clear a voted-role stake floor > 0.1
+ * (relay 0.25 / cp 0.5). If the CPs assign such a role, apply_voted_role aborts 713 (or the
+ * follow-on register aborts) and the subject daemon exits AFTER #6 — benign, and does NOT
+ * affect the #6/#7 proofs (read from on-chain events; see main() step d).
+ */
 const USER_MINER_MIN_BALANCE_MIST = 1_000_000_000n;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -661,6 +682,10 @@ export function spawnProcess(spec: ProcessSpec, logger: Logger): ProcessHandle {
   });
 
   const handle: ProcessHandle = { spec, proc, tail: [], killed: false };
+  // Best-effort line splitting: a log line straddling a chunk boundary is mis-split
+  // (no cross-chunk buffering). Acceptable here — the tail only feeds failure reporting
+  // + the DIAGNOSTIC summarizeRetryTails, never a gate; the load-bearing proofs read
+  // on-chain events, not this text.
   const onChunk = (chunk: Buffer): void => {
     for (const line of chunk.toString('utf8').split('\n')) {
       if (line.length === 0) continue;
@@ -920,10 +945,17 @@ async function waitForRoomAssignment(
  * Spawn the transient escrow-driver.ts one-shot (register_user → create_room →
  * create_escrow → EscrowCreated → the 5 CPs' pairing vote). Buffers stdout, parses
  * the `ROOM_ID=…` contract line (parseRoomId), and resolves the room id. Rejects
- * LOUD on a non-zero exit or a missing ROOM_ID with the stdout/stderr tail. The
+ * LOUD on a non-zero exit / a missing ROOM_ID / a spawn error / a timeout. The
  * driver self-generates its own user key (needs no SUI_PRIVATE_KEY), so the
  * inherited identity keys are scrubbed as noise. A distinct CWD isolates its
  * relative `.cursors/`. Mirrors the spawnProcess idiom (execPath + tsx/esm entry).
+ *
+ * Settle discipline: parse+resolve on `'close'` (fires AFTER the stdio pipes flush —
+ * `'exit'` alone can precede the final `\nROOM_ID=…\n` chunk → spurious reject), with
+ * the exit code captured in `'exit'`. `'error'` handles spawn failure (fires alone,
+ * without exit/close). A bounded timer kills a hung child (tree-kill on win32, where
+ * tsx may spawn) and rejects so main()'s catch tears the fleet down. `settle` guards
+ * against a double-settle (harmless no-op).
  */
 async function spawnEscrowDriver(logger: Logger): Promise<string> {
   const cwd = cwdFor('escrow-0');
@@ -943,22 +975,50 @@ async function spawnEscrowDriver(logger: Logger): Promise<string> {
     });
     let stdout = '';
     let stderr = '';
+    let exitCode: number | null = null;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
     proc.stdout?.on('data', (c: Buffer) => {
       stdout += c.toString('utf8');
     });
     proc.stderr?.on('data', (c: Buffer) => {
       stderr += c.toString('utf8');
     });
-    proc.once('error', (err) => reject(new Error(`escrow-driver spawn error: ${err.message}`)));
-    proc.once('exit', (code) => {
-      const roomId = parseRoomId(stdout);
-      if (code !== 0 || roomId === null) {
-        const tail = `${stdout}\n${stderr}`.split('\n').filter((l) => l.length > 0).slice(-20).join('\n');
-        reject(new Error(`escrow-driver failed (code=${code ?? 'null'}, roomId=${roomId ?? 'none'})\n--- last 20 stdout/stderr lines ---\n${tail}`));
-        return;
+
+    timer = setTimeout(() => {
+      if (proc.pid !== undefined) {
+        if (process.platform === 'win32') {
+          // Tree-kill (tsx/esm may spawn) — mirrors killHandle's win32 path.
+          spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { shell: false, stdio: 'ignore' });
+        } else {
+          proc.kill('SIGKILL');
+        }
       }
-      logger.info({ module: MODULE, action: 'escrow_driver', context: { roomId, code } }, 'escrow-driver completed; ROOM_ID captured');
-      resolveRoom(roomId);
+      settle(() => reject(new Error(`escrow-driver timed out after ${ESCROW_DRIVER_TIMEOUT_MS}ms (killed)`)));
+    }, ESCROW_DRIVER_TIMEOUT_MS);
+
+    proc.once('error', (err) => settle(() => reject(new Error(`escrow-driver spawn error: ${err.message}`))));
+    proc.once('exit', (code) => {
+      exitCode = code; // stdio may still be flushing → defer the parse to 'close'.
+    });
+    proc.once('close', () => {
+      settle(() => {
+        const roomId = parseRoomId(stdout);
+        if (exitCode !== 0 || roomId === null) {
+          const tail = `${stdout}\n${stderr}`.split('\n').filter((l) => l.length > 0).slice(-20).join('\n');
+          reject(new Error(`escrow-driver failed (code=${exitCode ?? 'null'}, roomId=${roomId ?? 'none'})\n--- last 20 stdout/stderr lines ---\n${tail}`));
+          return;
+        }
+        logger.info({ module: MODULE, action: 'escrow_driver', context: { roomId, code: exitCode } }, 'escrow-driver completed; ROOM_ID captured');
+        resolveRoom(roomId);
+      });
     });
   });
 }
@@ -972,7 +1032,10 @@ interface LiveRunEvidence {
   roomTxDigest: string;
   roomId: string;
   userMinerAddress: string;
-  daemonCount: number;
+  /** CP-fleet daemon count (excludes the user-miner) held to the alive gate. */
+  fleetCount: number;
+  /** user-miner (vote SUBJECT) exit code post-#6; null = still alive. Logged, NOT gated. */
+  userMinerExit: number | null;
   retries: RetrySummary;
 }
 
@@ -994,7 +1057,7 @@ _Generated ${stamp} by scripts/demo/run-multicp-voting.ts (C4 SEAM)._
 
 ## Substrate precondition
 - \`control_plane_registry::active_cp_count\` = **${ev.activeCpCount}** (asserted === 5).
-- Fleet: ${ev.daemonCount} processes all-up healthy (5 cp + 4 val + 2 relay + 1 sig + 1 user-miner).
+- Fleet: ${ev.fleetCount + 1} processes all-up (5 cp + 4 val + 2 relay + 1 sig + 1 user-miner).
 - Required quorum at N=5: \`ceil(5 * 6667 / 10000)\` = **${REQUIRED_QUORUM_AT_N5}**.
 
 ## #6 — live role-vote (4-of-5 quorum)
@@ -1011,8 +1074,16 @@ ${ev.role.voters.map((v) => `  - \`${v}\``).join('\n')}
 - ${ev.pairing.agreeingCpIds.length} DISTINCT ProposalSubmitted cp_id at the winning score:
 ${ev.pairing.agreeingCpIds.map((c) => `  - \`${c}\``).join('\n')}
 
-## Benign-abort (all daemons survived — fact G, honest)
-- All ${ev.daemonCount} daemons still alive after the demos (no crash).
+## Benign-abort (CP fleet survived — fact G, honest)
+- All ${ev.fleetCount} CP-fleet daemons still alive after the demos (no crash). The
+  user-miner (vote SUBJECT) is EXCLUDED from this gate — exit=${ev.userMinerExit ?? 'alive'}.
+- The user-miner's post-#6 exit is EXPECTED-and-benign when the vote lands in the
+  120-180s tail (its ensureRegistered uses the DEFAULT 120s waitForRoleAssignment,
+  auto-register.ts:123, vs the launcher's 180s gate) OR the CPs assign a role whose
+  stake floor > the FIXED 0.1 SUI it stakes (auto-register.ts:59; relay 0.25 / cp 0.5
+  → apply_voted_role aborts 713 / the follow-on register aborts). It does NOT affect
+  the #6/#7 proofs, which are read from the on-chain events, not from the subject
+  daemon staying up.
 - executeWithRetry retry traces observed across tails: retrying=${ev.retries.retrying}, exhausted=${ev.retries.exhausted}.
 - Mechanism: a deterministic Move abort (704 E_ALREADY_VOTED / 711 E_PRIOR_ASSIGNMENT_PENDING /
   719 E_ROLE_MISMATCH / 508 E_NOT_PENDING) is RETRIED 5× (warn) by executeWithRetry
@@ -1023,8 +1094,10 @@ ${ev.pairing.agreeingCpIds.map((c) => `  - \`${c}\``).join('\n')}
 - **Fact F (determinism pin):** the spec's "assert all 5 CPs' relayState/validatorState
   are equal" is NOT feasible off-chain — every CP reads the SAME on-chain state and derives
   identical scores deterministically. The practical pin implemented here is STRUCTURAL:
-  (i) canary is OFF by construction (buildLaunchPlan sets no CANARY_* env), and
-  (ii) the active_cp_count==5 precondition above. No fake equality assert is made.
+  (i) canary is off UNLESS a CANARY_* var is present in the launching environment —
+  buildLaunchPlan itself sets none, and mergeChildEnv does NOT scrub CANARY_* (it scrubs
+  only IDENTITY_ENV_KEYS), so children inherit any CANARY_* the launching shell exports;
+  and (ii) the active_cp_count==5 precondition above. No fake equality assert is made.
 - **Fact G (benign-abort):** see the mechanism note above — retried-then-swallowed, not non-retryable.
 `;
   mkdirSync(dirname(EVIDENCE_PATH), { recursive: true });
@@ -1043,9 +1116,12 @@ ${ev.pairing.agreeingCpIds.map((c) => `  - \`${c}\``).join('\n')}
  * comes up AFTER register→vote→apply→register (validator-daemon ensureRegistered
  * BLOCKS on its own ≤120s waitForRoleAssignment before startHealthzServer). Gating
  * launch on healthz would couple success to that apply-side + 120s budget. Gating on
- * the vote finalizing instead proves #6 DIRECTLY and is robust to whatever scarce
- * role the CPs derive. Returns the user-miner ADDRESS (== its role-vote miner_id) so
- * main() observes #6/#7 without parsing a registration event.
+ * the vote finalizing instead proves #6 DIRECTLY and the LAUNCHER's wait is robust to
+ * whatever scarce role the CPs derive. (The user-miner DAEMON, by contrast, is NOT
+ * robust to a non-validator role or a 120-180s-tail vote — it can exit(1) AFTER #6;
+ * that is benign and does not affect the proofs, which read on-chain events — see
+ * main() step d.) Returns the user-miner ADDRESS (== its role-vote miner_id) so main()
+ * observes #6/#7 without parsing a registration event.
  *
  * `handles` is caller-owned and pushed-into as each child spawns, so a SIGINT/
  * SIGTERM handler installed by main() can see + tear down the fleet even mid-wave.
@@ -1143,10 +1219,11 @@ async function main(): Promise<void> {
       throw new Error(`C4 precondition: active_cp_count=${activeCpCount}, expected ${EXPECTED_CPS} — substrate is not the genuine N=5`);
     }
     // (fact F) The infeasible "all 5 CPs' relayState/validatorState equal" assert is
-    // replaced by STRUCTURAL determinism: canary is OFF (buildLaunchPlan sets no
-    // CANARY_* env) and every CP reads the SAME on-chain state under this
-    // active_cp_count==5 precondition, so all 5 derive identical scores. No fake
-    // equality assert is made.
+    // replaced by STRUCTURAL determinism: canary is off UNLESS a CANARY_* var is present
+    // in the launching environment (buildLaunchPlan sets none, and mergeChildEnv scrubs
+    // only IDENTITY_ENV_KEYS — NOT CANARY_* — so children inherit any exported CANARY_*),
+    // and every CP reads the SAME on-chain state under this active_cp_count==5
+    // precondition, so all 5 derive identical scores. No fake equality assert is made.
     logger.info({ module: MODULE, action: 'precondition', context: { activeCpCount } }, `precondition OK: active_cp_count=${activeCpCount}`);
 
     // (b) #6 — the vote already finalized during wave 3; re-confirm, then read the
@@ -1154,13 +1231,13 @@ async function main(): Promise<void> {
     await waitForRoleAssignment(client, config, userMinerAddress, logger, 30_000);
     const assignedEvents = await queryMoveEvents(client, config, 'role_voting::RoleAssigned');
     const assignedEvent = assignedEvents.find(
-      (e) => normalizeSuiAddress((e.parsedJson as RoleAssigned).miner_id) === normalizeSuiAddress(userMinerAddress),
+      (e) => e.parsedJson != null && normalizeSuiAddress((e.parsedJson as RoleAssigned).miner_id) === normalizeSuiAddress(userMinerAddress),
     );
     if (!assignedEvent) {
       throw new Error(`C4 #6: no RoleAssigned event found for user-miner ${userMinerAddress}`);
     }
     const castEvents = await queryMoveEvents(client, config, 'role_voting::RoleVoteCast');
-    const casts = castEvents.map((e) => e.parsedJson as RoleVoteCast);
+    const casts = castEvents.filter((e) => e.parsedJson != null).map((e) => e.parsedJson as RoleVoteCast);
     const role = assertRoleQuorum(assignedEvent.parsedJson as RoleAssigned, casts, userMinerAddress, REQUIRED_QUORUM_AT_N5);
     const roleTxDigest = assignedEvent.id.txDigest;
     logger.info(
@@ -1173,6 +1250,7 @@ async function main(): Promise<void> {
     const roomEvent = await waitForRoomAssignment(client, config, roomId, logger);
     const proposalEvents = await queryMoveEvents(client, config, 'room_manager::ProposalSubmitted');
     const proposals = proposalEvents
+      .filter((e) => e.parsedJson != null)
       .map((e) => e.parsedJson as ProposalSubmittedJson)
       .filter((p) => normalizeSuiAddress(p.room_id) === normalizeSuiAddress(roomId));
     const pairing = assertPairingQuorum(roomEvent.parsedJson as RoomAssigned, proposals, REQUIRED_QUORUM_AT_N5);
@@ -1183,18 +1261,35 @@ async function main(): Promise<void> {
     );
 
     // (d) benign-abort (fact G, honest) — a deterministic Move abort (704/711/719/508)
-    // is RETRIED 5× then SWALLOWED by executeWithRetry (null, no throw), so NO daemon
-    // should have crashed. The tail retry summary is diagnostic only, NOT a gate.
-    const crashed = handles.filter((h) => h.proc.exitCode !== null);
+    // is RETRIED 5× then SWALLOWED by executeWithRetry (null, no throw), so NO CP-FLEET
+    // daemon should have crashed. The gate EXCLUDES the user-miner: it is the vote
+    // SUBJECT, not part of the swallowing fleet, and can legitimately exit(1) AFTER #6
+    // — (a) its ensureRegistered uses the DEFAULT 120s waitForRoleAssignment
+    // (auto-register.ts:123) vs the launcher's 180s gate, so a vote landing in the
+    // 120-180s tail times out the daemon's wait; (b) it stakes a FIXED 0.1 SUI
+    // (auto-register.ts:59), so a role whose floor > 0.1 (relay 0.25 / cp 0.5) aborts
+    // apply_voted_role(713) / the follow-on register. NONE of that affects #6/#7, which
+    // are proven by the on-chain events, NOT by the subject daemon staying up. So we GATE
+    // on the CP fleet, and LOG (not fail on) the user-miner's post-vote exit. The tail
+    // retry summary is diagnostic only, NOT a gate.
+    const fleet = handles.filter((h) => h.spec.order !== 'user-miner');
+    const crashed = fleet.filter((h) => h.proc.exitCode !== null);
     if (crashed.length > 0) {
       throw new Error(
         `C4 benign-abort: ${crashed.map((h) => `${h.spec.name}(exit=${h.proc.exitCode})`).join(', ')} exited during the demo`,
       );
     }
+    const userMinerExit = handles.find((h) => h.spec.order === 'user-miner')?.proc.exitCode ?? null;
+    if (userMinerExit !== null) {
+      logger.warn(
+        { module: MODULE, action: 'benign_abort', context: { userMinerExit } },
+        `user-miner (vote SUBJECT) exited post-#6 with code=${userMinerExit} — EXPECTED when the vote lands in the 120-180s tail or the assigned role's stake floor > 0.1 SUI; does NOT affect the #6/#7 proofs (read from on-chain events)`,
+      );
+    }
     const retries = summarizeRetryTails(handles.map((h) => h.tail));
     logger.info(
-      { module: MODULE, action: 'benign_abort', context: { daemonsAlive: handles.length, retries } },
-      `benign-abort OK: all ${handles.length} daemons alive (retry traces: retrying=${retries.retrying}, exhausted=${retries.exhausted})`,
+      { module: MODULE, action: 'benign_abort', context: { fleetAlive: fleet.length, userMinerExit, retries } },
+      `benign-abort OK: all ${fleet.length} CP-fleet daemons alive (user-miner exit=${userMinerExit ?? 'alive'}; retry traces: retrying=${retries.retrying}, exhausted=${retries.exhausted})`,
     );
 
     // (e) evidence — guarded so a write failure does not void the passing asserts.
@@ -1207,7 +1302,8 @@ async function main(): Promise<void> {
         roomTxDigest,
         roomId,
         userMinerAddress,
-        daemonCount: handles.length,
+        fleetCount: fleet.length,
+        userMinerExit,
         retries,
       });
       logger.info({ module: MODULE, action: 'evidence', context: { path: EVIDENCE_PATH } }, `live-run evidence written → ${EVIDENCE_PATH}`);

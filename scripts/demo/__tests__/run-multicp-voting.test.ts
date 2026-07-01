@@ -343,6 +343,11 @@ describe('parseRoomId — the escrow-driver STDOUT contract (pure)', () => {
     expect(parseRoomId('{"msg":"emitting ROOM_ID=0xnope on stdout"}')).toBeNull();
     expect(parseRoomId('XROOM_ID=0xnope')).toBeNull();
   });
+
+  it('tolerates CRLF line endings (\\r\\n) — the \\r? guard (M-2)', () => {
+    // Under /m, `$` sits before `\n`; a bare `$` would fail on the trailing `\r`.
+    expect(parseRoomId('some log line\r\nROOM_ID=0xc0ffee\r\n')).toBe('0xc0ffee');
+  });
 });
 
 describe('decodeLeU64 — 8-byte little-endian BCS u64 decode (pure)', () => {
@@ -445,7 +450,7 @@ function proposal(cp: number, score: string): ProposalSubmittedJson {
 }
 
 describe('assertPairingQuorum — the #7 4-of-5 hard assert (pure)', () => {
-  it('passes with consensus_reached, a set winning_cp, and >=4 distinct CPs at the winning score', () => {
+  it('passes with consensus_reached, a set winning_cp (a proposer), and >=4 distinct CPs at the winning score', () => {
     const props = [
       proposal(60, '1000'),
       proposal(61, '1000'),
@@ -453,10 +458,11 @@ describe('assertPairingQuorum — the #7 4-of-5 hard assert (pure)', () => {
       proposal(63, '1000'),
       proposal(64, '999'), // a dissenting score — must not count toward the quorum
     ];
-    const res = assertPairingQuorum(roomAssigned(), props, REQ);
+    // winning_cp MUST be one of the agreeing proposers (M-3): cp 60 proposed 1000.
+    const res = assertPairingQuorum(roomAssigned({ winning_cp: addr(60) }), props, REQ);
     expect(res.agreeingCpIds).toHaveLength(4);
     expect(res.winningScore).toBe('1000');
-    expect(res.winningCp).toBe(addr(40));
+    expect(res.winningCp).toBe(addr(60));
   });
 
   it('de-dups a CP that proposed the winning score twice', () => {
@@ -488,6 +494,18 @@ describe('assertPairingQuorum — the #7 4-of-5 hard assert (pure)', () => {
   it('throws when winning_cp is the zero ID (admin fallback)', () => {
     const props = [proposal(60, '1000'), proposal(61, '1000'), proposal(62, '1000'), proposal(63, '1000')];
     expect(() => assertPairingQuorum(roomAssigned({ winning_cp: '0x0' }), props, REQ)).toThrow(/winning_cp/);
+  });
+
+  it('throws when winning_cp did not propose the winning score (not among the agreeing CPs) (M-3)', () => {
+    // 4 distinct CPs share '1000' (passes the count), but the winner (cp 70) proposed '999'.
+    const props = [
+      proposal(60, '1000'),
+      proposal(61, '1000'),
+      proposal(62, '1000'),
+      proposal(63, '1000'),
+      proposal(70, '999'),
+    ];
+    expect(() => assertPairingQuorum(roomAssigned({ winning_cp: addr(70) }), props, REQ)).toThrow(/winning_cp|winning score/i);
   });
 });
 
