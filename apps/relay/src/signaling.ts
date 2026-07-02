@@ -345,6 +345,18 @@ export interface InterRelayContext {
      * (empty-keys) leg → byte-stable.
      */
     producerPeerId?: string,
+    /**
+     * T-B (REQ-RMS-044) — loop-guard hop budget. The tree DOWN-fan (fanToTreeNeighbors)
+     * threads it so the coordinator carries it into the DOWN announce; omitted on the shipped
+     * flat-STAR fanout (handleProduce) → byte-stable frame.
+     */
+    hopTtl?: number,
+    /**
+     * T-B (REQ-RMS-046) — the IMMUTABLE origin producerId, threaded unchanged across hops so a
+     * receiving node dedups per-room on it (the per-hop local id differs under RMS_TREE_ACTIVE).
+     * Omitted on the shipped path → byte-stable frame.
+     */
+    originProducerId?: string,
   ): void;
   /**
    * REQ-RMS-034 (part-3 reverse leg) — a STANDBY-homed local client produced. The
@@ -363,6 +375,16 @@ export interface InterRelayContext {
     router: msTypes.Router,
     producer: msTypes.Producer,
     producerPeerId?: string,
+    /**
+     * T-B (REQ-RMS-044) — loop-guard hop budget carried UP the reverse leg by the tree UP-fan
+     * (fanToTreeNeighbors). Omitted on the shipped local-client reverse path → byte-stable frame.
+     */
+    hopTtl?: number,
+    /**
+     * T-B (REQ-RMS-046) — the IMMUTABLE origin producerId, threaded unchanged UP so an internal
+     * node preserves the per-room dedup key. Omitted on the shipped path → byte-stable frame.
+     */
+    originProducerId?: string,
   ): void;
   /** REQ-RMS-034/035 — the PRIMARY received a reverse announce from a standby's
    *  local client. Mint locally + fan + hub-fan. Async (does mediasoup produce). */
@@ -395,6 +417,29 @@ export interface InterRelayContext {
    * attachPeerSocket? / onStandbyRoomReady? are guarded.
    */
   releaseRoom?(roomId: string): void;
+  /**
+   * T-B (REQ-RMS-042) — true when RMS_TREE_ACTIVE is set (cascade-tree data plane). The
+   * signaling layer reads it to choose the tree-aware fan over the shipped flat-STAR fan.
+   * Optional / additive — undefined (flag off / in-process bench) → the shipped STAR path.
+   */
+  treeActive?: boolean;
+  /**
+   * T-B (REQ-RMS-042/043/044) — re-forward a producer along THIS node's tree edges, edge-scoped
+   * + hop-guarded, in BOTH directions (DOWN to children, UP to the parent). relayId→URL id-space
+   * translation (B2 bridge) happens inside the wiring-layer implementation (index.ts). Bound only
+   * when RMS_TREE_ACTIVE; undefined otherwise so the shipped path never calls it (byte-stable).
+   *   receiveEdgeUrl  = the peer URL the producer arrived on (null for a local-origin produce).
+   *   inboundHopTtl   = the INBOUND hop budget (undefined at a local origin → seeded from diameter).
+   */
+  fanToTreeNeighbors?: (
+    roomId: string,
+    router: msTypes.Router,
+    producer: msTypes.Producer,
+    producerPeerId: string | undefined,
+    originProducerId: string,
+    receiveEdgeUrl: string | null,
+    inboundHopTtl: number | undefined,
+  ) => void;
 }
 
 /** Send a JSON message to a WebSocket. */

@@ -6,7 +6,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId, produceLocalFromPipe, InterRelayProducerRegistry, StandbyWarmPipeCoordinator } from '@dvconf/inter-relay-client';
 import type { RoomTopology } from '@dvconf/inter-relay-client';
-import { deriveTreePosition, fanTargets, nextHopTtl } from '../tree-position.js';
+import { deriveTreePosition, fanTargets, fanTargetUrls, nextHopTtl } from '../tree-position.js';
 
 describe('T-B byte-stability guards (REQ-RMS-048) — MUST stay green through every task', () => {
   it('a default announce frame has EXACTLY the shipped keys (no tree fields)', () => {
@@ -104,6 +104,14 @@ describe('fanTargets + nextHopTtl', () => {
   it('nextHopTtl decrements; undefined passes through; 1→0 signals drop', () => {
     expect(nextHopTtl(3)).toBe(2); expect(nextHopTtl(undefined)).toBeUndefined(); expect(nextHopTtl(1)).toBe(0);
   });
+});
+
+describe('fanTargetUrls — id-space bridge + edge-scope (T4, B2)', () => {
+  const resolve = (id: string) => ({ '0xA': 'ws://a:4000', '0xB': 'ws://b:4000', '0xC': null } as Record<string,string|null>)[id] ?? null;
+  it('translates relayIds → URLs and drops unresolved', () =>
+    expect(fanTargetUrls(['0xA','0xB','0xC'], resolve, null)).toEqual(['ws://a:4000','ws://b:4000']));
+  it('excludes the receive-edge URL', () =>
+    expect(fanTargetUrls(['0xA','0xB'], resolve, 'ws://a:4000')).toEqual(['ws://b:4000']));
 });
 
 // ── T6 (REQ-RMS-046/048) — flag-gated fresh LOCAL producerId + per-room origin dedup ──

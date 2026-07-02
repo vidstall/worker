@@ -75,8 +75,8 @@ import {
   createPipeLivenessObserver,
   type RoomTopology,
 } from '@dvconf/inter-relay-client';
-import { resolvePrimaryEndpoint, resolveTreeParentDial } from './relay-endpoint-resolver.js';
-import { deriveTreePosition, type TreePosition } from './tree-position.js';
+import { resolvePrimaryEndpoint, resolveTreeParentDial, resolveRelayEndpoint } from './relay-endpoint-resolver.js';
+import { deriveTreePosition, fanTargetUrls, type TreePosition } from './tree-position.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -556,13 +556,18 @@ if (isMainModule) {
       // socket via sendToPeer (DEFAULT peer → the legacy interRelayLink.socket).
       // REUSE createInterRelayAnnouncer to build the locked frame (producerPeerId +
       // peerRelayId + rtpParameters) and hand its bytes to sendToPeer.
-      announcer: (roomId, producer, producerPeerId, peerRelayId, rtpParameters) =>
+      // T-B (REQ-RMS-044/046): thread the trailing loop-guard budget + immutable origin so a
+      // tree DOWN announce carries them. Undefined on the shipped forward path → the builder
+      // omits both → byte-identical frame.
+      announcer: (roomId, producer, producerPeerId, peerRelayId, rtpParameters, hopTtl, originProducerId) =>
         createInterRelayAnnouncer({ send: (data) => sendToPeer(peerRelayId, data) })(
           roomId,
           producer,
           producerPeerId,
           peerRelayId,
           rtpParameters,
+          hopTtl,
+          originProducerId,
         ),
       portAllocator: pipePortAllocator,
       // REQ-RMS-028 (L1.3-b): the DOWN pipe-connect reply routes to the SAME
@@ -625,19 +630,27 @@ if (isMainModule) {
       // mints a per-peer pipe leg (DEFAULT/undefined → the legacy single leg).
       // REQ-RMS-029: also forward the ORIGINAL publisher's producerPeerId so the
       // coordinator drain threads it into the cascade announce.
-      onPrimaryProducer: (roomId, router, producer, peerRelayId, producerPeerId) =>
-        void primaryPipe.onProducer(roomId, router, producer, peerRelayId, producerPeerId),
+      // T-B (REQ-RMS-044/046): thread the trailing loop-guard budget + immutable origin into the
+      // coordinator so a tree DOWN fan carries them into the announce. Undefined on the shipped
+      // flat-STAR fanout (handleProduce) → byte-stable frame.
+      onPrimaryProducer: (roomId, router, producer, peerRelayId, producerPeerId, hopTtl, originProducerId) =>
+        void primaryPipe.onProducer(roomId, router, producer, peerRelayId, producerPeerId, hopTtl, originProducerId),
       // REQ-RMS-034 (part-3 reverse leg) STANDBY: a standby-homed LOCAL client
       // produced. Consume it onto the warm pipe UP toward the primary + announce UP
       // (the reverse dual of onPrimaryProducer). Key under THIS standby's own
       // interRelayPeerId (same value tagged on the outbound link + ensure()).
-      onStandbyProducer: (roomId, router, producer, producerPeerId) => {
+      // T-B (REQ-RMS-044/046): thread the trailing loop-guard budget + immutable origin so a tree
+      // UP fan carries them onto the reverse announce UP. Undefined on the shipped local-client
+      // reverse path (handleProduce) → byte-stable frame.
+      onStandbyProducer: (roomId, router, producer, producerPeerId, hopTtl, originProducerId) => {
         void standbyWarmPipe.onLocalClientProducer(
           roomId,
           router,
           producer,
           producerPeerId,
           interRelayPeerId,
+          hopTtl,
+          originProducerId,
         );
       },
       // REQ-RMS-034/035/037 (part-3 reverse leg) PRIMARY: a reverse announce arrived
@@ -764,9 +777,14 @@ if (isMainModule) {
     // the SAME UP link seam as the pipe-connect frame (standbyLinkManager.send),
     // NOT a primary per-peer send. The frame carries peerRelayId + rtpParameters
     // (REQ-RMS-026) so the primary mints the right per-(room,peer) hub copy.
-    standbyWarmPipe.setReverseAnnouncer((roomId, prod, producerPeerId, peerRelayId, rtpParameters) =>
+    // T-B (REQ-RMS-044/046): the reverse announcer now also carries the loop-guard budget +
+    // immutable origin UP. Undefined on the shipped reverse path → buildPipeProducerAnnounce
+    // omits both → byte-stable frame.
+    standbyWarmPipe.setReverseAnnouncer((roomId, prod, producerPeerId, peerRelayId, rtpParameters, hopTtl, originProducerId) =>
       standbyLinkManager.send(
-        JSON.stringify(buildPipeProducerAnnounce(roomId, prod, producerPeerId, peerRelayId, rtpParameters)),
+        JSON.stringify(
+          buildPipeProducerAnnounce(roomId, prod, producerPeerId, peerRelayId, rtpParameters, hopTtl, originProducerId),
+        ),
       ),
     );
 
@@ -867,6 +885,53 @@ if (isMainModule) {
       logger,
       { modules: ['relay_registry'] },
     );
+
+    /**
+     * T-B (REQ-RMS-042/043/044): re-forward a producer along THIS node's tree edges, edge-scoped +
+     * hop-guarded, in BOTH directions. The relayId→URL translation (B2 id-space bridge) happens
+     * here, where the endpoint cache + tree position + both legs are in scope.
+     *   receiveEdgeUrl = the peer URL the producer arrived on; null for a local-origin produce.
+     *   inboundHopTtl  = the INBOUND budget (undefined at a local origin → seeded from pos.diameter).
+     *
+     * NOTE (T4/Task 6): the helper is DEFINED + bound here but NOT yet wired to any fan site — the
+     * three fan sites (handleProduce forward, onLocalProducer, reverse) route through it in Task 7.
+     * Bound on interRelayContext only when RMS_TREE_ACTIVE (undefined otherwise → byte-stable).
+     */
+    function fanToTreeNeighbors(
+      roomId: string,
+      router: msTypes.Router,
+      producer: msTypes.Producer,
+      producerPeerId: string | undefined,
+      originProducerId: string,
+      receiveEdgeUrl: string | null,
+      inboundHopTtl: number | undefined,
+    ): void {
+      if (!RMS_TREE_ACTIVE) return;
+      const pos = roomTreePosition.get(roomId);
+      if (!pos) return;
+      // Seed the budget at a local origin (undefined inbound), else decrement the inbound budget.
+      const hop = inboundHopTtl === undefined ? pos.diameter : inboundHopTtl - 1;
+      if (hop <= 0) return; // loop guard: budget exhausted (local clients were already fanned by the caller)
+      const resolve = (id: string) => resolveRelayEndpoint(relayEndpointCache, id);
+      // DOWN to children (via the shipped primary pipe primitive).
+      const childUrls = fanTargetUrls(pos.children, resolve, receiveEdgeUrl);
+      for (const childUrl of childUrls) {
+        interRelayContext.onPrimaryProducer?.(roomId, router, producer, childUrl, producerPeerId, hop, originProducerId);
+      }
+      // UP to the parent (via the shipped reverse announcer) — a single up-link; skip if the
+      // producer arrived FROM the parent (edge-scope).
+      if (pos.parent) {
+        const parentUrl = resolve(pos.parent);
+        if (parentUrl && parentUrl !== receiveEdgeUrl) {
+          interRelayContext.onStandbyProducer?.(roomId, router, producer, producerPeerId, hop, originProducerId);
+        }
+      }
+    }
+    // T-B: bind the tree fan + the tree-active flag onto the signaling context so the fan sites
+    // (Task 7) can route through them. Flag OFF → fanToTreeNeighbors undefined → the shipped
+    // flat-STAR data plane is untouched (byte-stable).
+    interRelayContext.fanToTreeNeighbors = RMS_TREE_ACTIVE ? fanToTreeNeighbors : undefined;
+    interRelayContext.treeActive = RMS_TREE_ACTIVE;
 
     // Step 7: Poll room_manager events for MCU room assignments
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);

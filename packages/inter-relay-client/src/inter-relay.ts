@@ -356,9 +356,13 @@ export function createInterRelayAnnouncer(
   producerPeerId?: string,
   peerRelayId?: string,
   rtpParameters?: msTypes.RtpParameters,
+  hopTtl?: number,
+  originProducerId?: string,
 ) => void {
-  return (roomId, producer, producerPeerId, peerRelayId, rtpParameters) => {
-    const frame = buildPipeProducerAnnounce(roomId, producer, producerPeerId, peerRelayId, rtpParameters);
+  return (roomId, producer, producerPeerId, peerRelayId, rtpParameters, hopTtl, originProducerId) => {
+    const frame = buildPipeProducerAnnounce(
+      roomId, producer, producerPeerId, peerRelayId, rtpParameters, hopTtl, originProducerId,
+    );
     try {
       sender.send(JSON.stringify(frame));
     } catch {
@@ -783,6 +787,16 @@ export type ReverseUpAnnouncer = (
   producerPeerId?: string,
   peerRelayId?: string,
   rtpParameters?: msTypes.RtpParameters,
+  /**
+   * REQ-RMS-044 (cascade-tree) — loop-guard hop budget carried UP the reverse leg. Additive
+   * trailing (default-omit) so an existing 5-arg reverse announce is byte-identical.
+   */
+  hopTtl?: number,
+  /**
+   * REQ-RMS-046 (cascade-tree) — the IMMUTABLE origin producerId, threaded unchanged so an
+   * internal node forwarding UP preserves the per-room dedup key. Additive trailing (default-omit).
+   */
+  originProducerId?: string,
 ) => void;
 
 /**
@@ -843,7 +857,15 @@ export class StandbyWarmPipeCoordinator {
    */
   private readonly reversePending = new Map<
     string,
-    Array<{ producer: Pick<msTypes.Producer, 'id' | 'kind'>; producerPeerId?: string }>
+    Array<{
+      producer: Pick<msTypes.Producer, 'id' | 'kind'>;
+      producerPeerId?: string;
+      // T-B (REQ-RMS-044/046) — the loop-guard budget + immutable origin carried on a
+      // reverse producer queued before the leg connected, so drainReverse announces them UP
+      // unchanged. Optional → a shipped (non-tree) queued entry omits them (byte-stable).
+      hopTtl?: number;
+      originProducerId?: string;
+    }>
   >();
   /**
    * REQ-RMS-034 — producerIds already consumed onto the reverse pipe, keyed by
@@ -1386,17 +1408,24 @@ export class StandbyWarmPipeCoordinator {
     producer: Pick<msTypes.Producer, 'id' | 'kind'>,
     producerPeerId?: string,
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+    // T-B (REQ-RMS-044/046) — additive trailing loop-guard budget + immutable origin. The
+    // tree UP-fan (index.ts fanToTreeNeighbors → onStandbyProducer) threads them so they reach
+    // the reverse announce UP. Undefined on the shipped local-client path → byte-stable frame.
+    hopTtl?: number,
+    originProducerId?: string,
   ): Promise<void> {
     const key = meshKey(roomId, peerRelayId);
     const transport = this.states.get(key)?.topology.pipeTransport ?? null;
     if (transport === null) {
       // Not connected yet — QUEUE; drainReverse re-drives on connect (no double-pipe).
       const q = this.reversePending.get(key) ?? [];
-      q.push({ producer, producerPeerId });
+      q.push({ producer, producerPeerId, hopTtl, originProducerId });
       this.reversePending.set(key, q);
       return;
     }
-    await this.reverseConsumeAndAnnounce(roomId, key, peerRelayId, transport, producer, producerPeerId);
+    await this.reverseConsumeAndAnnounce(
+      roomId, key, peerRelayId, transport, producer, producerPeerId, hopTtl, originProducerId,
+    );
   }
 
   /**
@@ -1421,6 +1450,10 @@ export class StandbyWarmPipeCoordinator {
     transport: msTypes.PipeTransport,
     producer: Pick<msTypes.Producer, 'id' | 'kind'>,
     producerPeerId?: string,
+    // T-B (REQ-RMS-044/046) — additive trailing loop-guard budget + immutable origin threaded
+    // onto the reverse announce UP. Undefined on the shipped path → the frame omits both.
+    hopTtl?: number,
+    originProducerId?: string,
   ): Promise<void> {
     let seen = this.reverseConsumedIds.get(key);
     if (!seen) {
@@ -1438,13 +1471,19 @@ export class StandbyWarmPipeCoordinator {
       // REQ-RMS-026 — the announce carries the pipe CONSUMER's rtpParameters (the
       // REMAPPED SSRC across the pipe), NOT the source producer's.
       pipedConsumer = await pipeProducerOntoPrimaryTransport(transport, producer.id);
-      this.reverseAnnouncer?.(
-        roomId,
-        { id: pipedConsumer.id, kind: pipedConsumer.kind },
-        producerPeerId,
-        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
-        pipedConsumer.rtpParameters,
-      );
+      // T-B (REQ-RMS-044/046) — carry the loop-guard budget + immutable origin UP. Widen the
+      // reverse announce to 7-arg ONLY when a tree hop actually set them; the shipped reverse
+      // path (both undefined) keeps its original 5-arg call so it is byte-identical (the frame
+      // AND the announcer arity — the RED-RA-2* assertions hold). The builder omits both anyway.
+      const scopedPeer = peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId;
+      const piped = { id: pipedConsumer.id, kind: pipedConsumer.kind };
+      if (hopTtl === undefined && originProducerId === undefined) {
+        this.reverseAnnouncer?.(roomId, piped, producerPeerId, scopedPeer, pipedConsumer.rtpParameters);
+      } else {
+        this.reverseAnnouncer?.(
+          roomId, piped, producerPeerId, scopedPeer, pipedConsumer.rtpParameters, hopTtl, originProducerId,
+        );
+      }
     } catch (err) {
       // Mirror forward Fix 1 — discriminate a benign duplicate (keep marked; a
       // defensive belt since consume() does not throw on duplicate) from a TRANSIENT
@@ -1498,7 +1537,9 @@ export class StandbyWarmPipeCoordinator {
     const pend = this.reversePending.get(key) ?? [];
     this.reversePending.set(key, []);
     for (const p of pend) {
-      await this.reverseConsumeAndAnnounce(roomId, key, peerRelayId, transport, p.producer, p.producerPeerId);
+      await this.reverseConsumeAndAnnounce(
+        roomId, key, peerRelayId, transport, p.producer, p.producerPeerId, p.hopTtl, p.originProducerId,
+      );
     }
   }
 
@@ -1656,6 +1697,11 @@ export interface PrimaryPipeCoordinatorDeps {
     producerPeerId?: string,
     peerRelayId?: string,
     rtpParameters?: msTypes.RtpParameters,
+    // T-B (REQ-RMS-044/046) — additive trailing loop-guard budget + immutable origin threaded
+    // from onProducer's pending entry into the DOWN announce. Undefined on the shipped forward
+    // path → buildPipeProducerAnnounce omits both → byte-stable frame.
+    hopTtl?: number,
+    originProducerId?: string,
   ) => void;
   /**
    * Per-(room,peer,role) port allocator. Keyed `${roomId}:primary` for the legacy
@@ -1715,7 +1761,16 @@ interface PrimaryPipeState {
    * (not per-state): a multi-user room queues several producers from DIFFERENT
    * publishers on one (room,peer) state, so each pending entry carries its own id.
    */
-  pendingProducers: Array<Pick<msTypes.Producer, 'id' | 'kind'> & { producerPeerId?: string }>;
+  pendingProducers: Array<
+    Pick<msTypes.Producer, 'id' | 'kind'> & {
+      producerPeerId?: string;
+      // T-B (REQ-RMS-044/046) — the loop-guard budget + immutable origin carried per pending
+      // producer so drain() threads them into the DOWN announce. Optional → the shipped forward
+      // path queues them undefined (byte-stable frame).
+      hopTtl?: number;
+      originProducerId?: string;
+    }
+  >;
   /** The standby's pipe-connect params once received; null until they arrive. */
   standbyParams: PipeConnectParams | null;
   /** The allocator port held for `${roomId}:primary` (for release on clear). */
@@ -1823,12 +1878,18 @@ export class PrimaryPipeCoordinator {
     // deps.announcer's (producerPeerId, peerRelayId). drain() bridges the two.
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
     producerPeerId?: string,
+    // T-B (REQ-RMS-044/046) — additive trailing loop-guard budget + immutable origin. The tree
+    // DOWN-fan (index.ts fanToTreeNeighbors → onPrimaryProducer) threads them so they reach the
+    // DOWN announce; queued per-entry so a later drain preserves them. Undefined on the shipped
+    // forward path → byte-stable frame.
+    hopTtl?: number,
+    originProducerId?: string,
   ): Promise<void> {
     const s = this.getState(roomId, peerRelayId);
     // REQ-RMS-029: queue a SELF-CONTAINED entry carrying the ORIGINAL publisher
     // peerId so the drain can thread it into the cascade announce (undefined on
     // the DEFAULT/legacy leg → byte-stable frame). Per-entry, not per-state.
-    s.pendingProducers.push({ id: producer.id, kind: producer.kind, producerPeerId });
+    s.pendingProducers.push({ id: producer.id, kind: producer.kind, producerPeerId, hopTtl, originProducerId });
 
     if (s.standbyParams === null) {
       // params-not-yet: keep queued; a later onStandbyConnectParams → onProducer
@@ -1929,13 +1990,31 @@ export class PrimaryPipeCoordinator {
       // Pass peerRelayId only for a cascade peer; DEFAULT → omitted (legacy frame).
       // REQ-RMS-026: also pass the piped consumer's rtpParameters so the standby
       // can call transport.produce() with the SSRC-remapped codec parameters.
-      this.deps.announcer(
-        roomId,
-        { id: pipedConsumer.id, kind: pipedConsumer.kind },
-        producer.producerPeerId,
-        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
-        pipedConsumer.rtpParameters,
-      );
+      // T-B (REQ-RMS-044/046) — carry the loop-guard budget + immutable origin DOWN. Widen the
+      // announce to 7-arg ONLY when a tree hop actually set them; the shipped forward path (both
+      // undefined) keeps its original 5-arg call so it is byte-identical end-to-end (the frame,
+      // AND the coordinator's own announce arity — REQ-RMS-029 assertions hold). The builder omits
+      // both anyway, so the ONLY effect of the guard is not perturbing the shipped call shape.
+      const scopedPeer = peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId;
+      if (producer.hopTtl === undefined && producer.originProducerId === undefined) {
+        this.deps.announcer(
+          roomId,
+          { id: pipedConsumer.id, kind: pipedConsumer.kind },
+          producer.producerPeerId,
+          scopedPeer,
+          pipedConsumer.rtpParameters,
+        );
+      } else {
+        this.deps.announcer(
+          roomId,
+          { id: pipedConsumer.id, kind: pipedConsumer.kind },
+          producer.producerPeerId,
+          scopedPeer,
+          pipedConsumer.rtpParameters,
+          producer.hopTtl,
+          producer.originProducerId,
+        );
+      }
       this.deps.logger?.info(
         { roomId, sourceProducerId: producer.id, pipedConsumerId: pipedConsumer.id },
         'F1: piped producer onto primary pipe + announced PIPED consumer id',

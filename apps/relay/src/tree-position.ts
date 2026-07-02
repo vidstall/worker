@@ -50,6 +50,19 @@ export function fanTargets(neighbors: string[], receiveEdge: string | null): str
   return receiveEdge === null ? [...neighbors] : neighbors.filter((n) => n !== receiveEdge);
 }
 
+/**
+ * PURE (T-B, B2 id-space bridge). Translate tree-neighbor canonical relayIds → endpoint URLs
+ * via `resolve`, drop the unresolved (endpoint not yet observed on chain), then edge-scope the
+ * result against the receive-edge URL (delegates to {@link fanTargets}). Keeps the relayId→URL
+ * translation OUT of the fan primitive so `fanTargets` stays id-space-agnostic.
+ */
+export function fanTargetUrls(
+  neighbors: string[], resolve: (id: string) => string | null, receiveEdgeUrl: string | null,
+): string[] {
+  const urls = neighbors.map(resolve).filter((u): u is string => u !== null);
+  return fanTargets(urls, receiveEdgeUrl);
+}
+
 /** PURE. Decrement the hop budget; undefined (flag-off) passes through. */
 export function nextHopTtl(hopTtl: number | undefined): number | undefined {
   return hopTtl === undefined ? undefined : hopTtl - 1;
