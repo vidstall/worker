@@ -975,6 +975,8 @@ export class StandbyWarmPipeCoordinator {
       // Dedup key: tree mode keys on the IMMUTABLE origin (falls back to the per-hop id
       // when a pre-tree/absent-origin frame arrives → still correct single-hop); the
       // shipped path keys on the producerId (byte-stable, same-id mint below).
+      // M1 — the per-room set may therefore hold BOTH origin-ids and (fallback) per-hop
+      // ids; both are globally-unique mediasoup uuids, so they never collide across kinds.
       const dedupId = this.treeActive
         ? (announced.originProducerId ?? announced.producerId)
         : announced.producerId;
@@ -1195,10 +1197,15 @@ export class StandbyWarmPipeCoordinator {
     // later room with the same key re-mints cleanly (the producers themselves are
     // owned + closed by the wiring layer / their transport teardown).
     this.producedIds.delete(key);
-    // T6/B4 — drop the PER-ROOM origin dedup set (keyed by roomId, not meshKey) so a
-    // later room with the same id re-mints cleanly. Idempotent across per-peer clears
-    // (clearRoom calls clear() once per leg → the first delete drops it, the rest no-op).
-    this.producedOrigins.delete(roomId);
+    // T6/B4/I1 — the PER-ROOM origin dedup set (keyed by roomId, NOT meshKey) is NOT
+    // dropped here: this is per-LEG teardown, and in a tree a room has multiple live legs.
+    // Wiping the room's origin set on a single-leg clear would let a re-drive on a
+    // SURVIVING sibling leg re-mint a still-live origin — and under freshId=true there is
+    // no "already exists" throw to catch it (silent double-produce, the exact case B4
+    // guards). Its lifecycle is room-scoped → dropped in clearRoom() instead. Retaining
+    // the set across a single-leg clear costs at most bounded memory (origin ids are
+    // globally-unique mediasoup uuids, so a reused roomId gets fresh origins → no
+    // false-skip).
     // part-3 reverse leg — the leg's pipe transport is being torn down: drop the
     // reverse consume-dedup + any queued local producers so a later room/leg with
     // the same key re-consumes onto a fresh pipe cleanly.
@@ -1223,6 +1230,10 @@ export class StandbyWarmPipeCoordinator {
     ])) {
       this.clear(roomId, peerRelayId);
     }
+    // T6/B4/I1 — the origin dedup set is keyed per-ROOM, so its teardown belongs HERE
+    // (room-wide close), AFTER every leg is cleared — NOT in the per-leg clear() above,
+    // which would drop a still-in-use room's origins when only one sibling leg tears down.
+    this.producedOrigins.delete(roomId);
   }
 
   /**

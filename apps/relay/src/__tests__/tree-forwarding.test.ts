@@ -200,3 +200,41 @@ describe('per-room origin dedup at the forward drain (T6/B4, N4)', () => {
     expect(totalProduce).toBe(2); // distinct origins → distinct mints
   });
 });
+
+describe('producedOrigins teardown lifecycle (T6/B4, I1)', () => {
+  const ROOM = 'room-i1';
+  it('per-leg clear() does NOT drop the room origin set → a surviving sibling leg does NOT re-mint the still-live origin', async () => {
+    const registry = new InterRelayProducerRegistry();
+    // Two legs of ONE room carrying the SAME immutable origin (distinct per-hop ids).
+    registry.record({ type: 'pipe-producer', roomId: ROOM, producerId: 'hop-A', kind: 'video', peerRelayId: 'relay-A', rtpParameters: rtp(11), originProducerId: 'ORIGIN-1' } as never);
+    registry.record({ type: 'pipe-producer', roomId: ROOM, producerId: 'hop-B', kind: 'video', peerRelayId: 'relay-B', rtpParameters: rtp(22), originProducerId: 'ORIGIN-1' } as never);
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, vi.fn(), true, true);
+    const rA = makeMockRouter();
+    const rB = makeMockRouter();
+    // Leg A drains + mints ORIGIN-1 once.
+    await coord.ensure(makeStandbyTopology(ROOM), rA.router as never, 40000, 'relay-A');
+    // Tear down ONLY leg A (per-leg clear) — leg B is still live.
+    coord.clear(ROOM, 'relay-A');
+    // Drive the SURVIVING sibling leg B for the SAME origin.
+    await coord.ensure(makeStandbyTopology(ROOM), rB.router as never, 40001, 'relay-B');
+    const totalProduce = [...rA.transports, ...rB.transports].reduce((n, t) => n + t.produce.mock.calls.length, 0);
+    // The per-room origin set survived the per-leg clear → NO silent double-produce (the
+    // freshId path has no "already exists" throw to catch it). A buggy per-leg delete → 2.
+    expect(totalProduce).toBe(1);
+  });
+  it('clearRoom() DOES drop the room origin set → a fresh drive of the same origin re-mints', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({ type: 'pipe-producer', roomId: ROOM, producerId: 'hop-A', kind: 'video', peerRelayId: 'relay-A', rtpParameters: rtp(11), originProducerId: 'ORIGIN-1' } as never);
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, vi.fn(), true, true);
+    const r1 = makeMockRouter();
+    const r2 = makeMockRouter();
+    // First drive mints ORIGIN-1.
+    await coord.ensure(makeStandbyTopology(ROOM), r1.router as never, 40000, 'relay-A');
+    // Room-wide teardown drops the origin set.
+    coord.clearRoom(ROOM);
+    // A fresh drive of the SAME origin now re-mints (the reused room started clean).
+    await coord.ensure(makeStandbyTopology(ROOM), r2.router as never, 40000, 'relay-A');
+    const totalProduce = [...r1.transports, ...r2.transports].reduce((n, t) => n + t.produce.mock.calls.length, 0);
+    expect(totalProduce).toBe(2); // clearRoom cleared the set → re-mint
+  });
+});
