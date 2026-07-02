@@ -75,7 +75,8 @@ import {
   createPipeLivenessObserver,
   type RoomTopology,
 } from '@dvconf/inter-relay-client';
-import { resolvePrimaryEndpoint } from './relay-endpoint-resolver.js';
+import { resolveDialTarget } from './relay-endpoint-resolver.js';
+import { deriveTreePosition, type TreePosition } from './tree-position.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -87,6 +88,14 @@ const INTER_RELAY_TOKEN = process.env['INTER_RELAY_TOKEN'];
 // paused-keepalive (M1 / relay-overlap 2-relay failover) bandwidth saving; set to '1'
 // in mesh mode (the run-rms-live-local demo sets it alongside cp-daemon RMS_KR_MIN>1).
 const RMS_ACTIVE_FORWARD = process.env['RMS_ACTIVE_FORWARD'] === '1';
+// Cascade-tree (T-B) flags. Default OFF → the shipped flat-STAR data-plane is untouched
+// (byte-stable). RMS_TREE_ACTIVE gates deriving+storing each room's tree position and
+// re-targeting the inter-relay dial from slot-0 to the tree PARENT (N1). RMS_TREE_DEGREE
+// is the B1 SHAPING degree (D = min(shapingDegree, live-capacity-cap)); RMS_TREE_MAX_HEIGHT
+// is the diameter bound H (REQ-RMS-041).
+const RMS_TREE_ACTIVE = process.env['RMS_TREE_ACTIVE'] === '1';
+const RMS_TREE_MAX_HEIGHT = parseInt(process.env['RMS_TREE_MAX_HEIGHT'] ?? '3', 10);
+const RMS_TREE_DEGREE = parseInt(process.env['RMS_TREE_DEGREE'] ?? '2', 10); // B1 shaping degree
 
 /**
  * P17 M2a-P11 — assemble + start the relay's F61 HealthMonitor (DOH-014/016/017/018).
@@ -368,6 +377,9 @@ if (isMainModule) {
      * demo scope holds today).
      */
     const standbyLink: { primaryUrl: string | null } = { primaryUrl: null };
+    // T-B: this relay's tree position per room, derived on RoomAssigned (RMS_TREE_ACTIVE).
+    // Read by the standby dial (resolveDialTarget → tree PARENT) and, later, fanToTreeNeighbors.
+    const roomTreePosition = new Map<string, TreePosition>();
     /**
      * REQ-RMS-028 (L1.3-b, Bridge A) — the per-peer inter-relay socket map, OWNED
      * here and SHARED into createSignalingServer (its tagged-peer attach writes
@@ -880,6 +892,26 @@ if (isMainModule) {
           // RO-020: reflect the live role on the /api/probe state box.
           probeLiveness.role = role;
 
+          // T-B (REQ-RMS-042): derive + store THIS relay's deterministic tree position for
+          // the room (same tree every assigned relay derives). Flag-gated (RMS_TREE_ACTIVE,
+          // default OFF) so the shipped flat-STAR path is byte-identical. No forwarding change
+          // here — the tree-aware fan is a later task; this only records position + re-targets
+          // the dial (Step 5b, N1). assumes tree root == slot-0 primary (design §3.1).
+          if (RMS_TREE_ACTIVE && relayIds.length > 0 && roomId) {
+            const cWorker = parseInt(process.env['RMS_C_WORKER_PATHS'] ?? '300', 10);
+            // Capacity cap is an UPPER bound only; P is unknown at assignment → omit it (the
+            // SHAPING degree governs, B1). A future task threads a LIVE P via cWorker.
+            void cWorker;
+            const pos = deriveTreePosition(relayIds, myMinerId, RMS_TREE_DEGREE, RMS_TREE_MAX_HEIGHT);
+            roomTreePosition.set(roomId, pos);
+            if (!pos.withinDiameterBound) {
+              logger.warn({ roomId, K: relayIds.length, maxHeight: RMS_TREE_MAX_HEIGHT },
+                'T-B: tree exceeds maxHeight — over capacity for the height bound (defer-and-flag, REQ-RMS-041)');
+            }
+            logger.info({ roomId, role: pos.role, parent: pos.parent, children: pos.children, diameter: pos.diameter },
+              'T-B: derived tree position for room');
+          }
+
           if (role === 'primary') {
             // F1: PRIMARY for this room. The live pipe is driven at the produce
             // event (interRelayContext.onPrimaryProducer → PrimaryPipeCoordinator):
@@ -898,14 +930,20 @@ if (isMainModule) {
             // (resolves the real producerId, else placeholder) and on each inbound
             // announce standbyWarmPipe.onAnnounce(roomId) re-runs the warm pipe with
             // the real id. The record + resolve + re-run contract is unit-tested
-            // (inter-relay-warmpipe.test.ts); resolvePrimaryEndpoint is unit-tested
+            // (inter-relay-warmpipe.test.ts); resolveDialTarget is unit-tested
             // (relay-endpoint-resolver.test.ts).
-            const primaryUrl = resolvePrimaryEndpoint(relayEndpointCache, relayIds);
+            // T-B (N1): when the tree is active a non-root node dials its PARENT (child→parent
+            // live link) instead of slot-0; the root (pos.parent===null) resolves null → dials
+            // nobody = accept-only, exactly today's primary. Flag OFF → shipped slot-0 path.
+            const treePos = RMS_TREE_ACTIVE && roomId ? roomTreePosition.get(roomId) : undefined;
+            const primaryUrl = resolveDialTarget(
+              treePos, relayEndpointCache, relayIds, RMS_TREE_ACTIVE && roomId !== undefined,
+            );
             standbyLink.primaryUrl = primaryUrl;
-            // G3.2b: OPEN the live inter-relay link to the primary. The primary
-            // pushes pipe-producer announces down it; each cuts the warm pipe over
-            // to the real producerId. The paused warm pipe is opened on first peer
-            // join (onStandbyRoomReady). Skipped until the URL resolves from chain.
+            // G3.2b: OPEN the live inter-relay link to the primary (tree parent under T-B).
+            // The upstream pushes pipe-producer announces down it; each cuts the warm pipe
+            // over to the real producerId. The paused warm pipe is opened on first peer join
+            // (onStandbyRoomReady). Skipped until the URL resolves from chain.
             if (primaryUrl !== null) standbyLinkManager.connectTo(primaryUrl);
             logger.info(
               { roomId, relayMode, role, primaryUrl, resolved: primaryUrl !== null },

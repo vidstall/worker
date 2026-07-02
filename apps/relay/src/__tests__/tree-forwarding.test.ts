@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId } from '@dvconf/inter-relay-client';
+import { deriveTreePosition, fanTargets, nextHopTtl } from '../tree-position.js';
 
 describe('T-B byte-stability guards (REQ-RMS-048) — MUST stay green through every task', () => {
   it('a default announce frame has EXACTLY the shipped keys (no tree fields)', () => {
@@ -71,5 +72,35 @@ describe('hopTtl + originProducerId on PipeProducerAnnounce (T5, REQ-RMS-044/046
   });
   it('guard REJECTS a non-string originProducerId', () => {
     expect(isPipeProducerAnnounce({ type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video', originProducerId: 42 })).toBe(false);
+  });
+});
+
+describe('deriveTreePosition — SHAPING degree governs (B1)', () => {
+  const ids = ['0x02', '0x00', '0x04', '0x01', '0x03']; // unsorted
+  it('shapingDegree=2 with NO capacity signal → a real depth-2 tree (internal node exists)', () => {
+    const p = deriveTreePosition(ids, '0x01', 2, 3); // capacityCap omitted
+    expect(p.parent).toBe('0x' + '0'.repeat(63) + '0'); // R0 canonical
+    expect(p.children.length).toBeGreaterThan(0);
+    expect(p.role).toBe('internal');
+  });
+  it('a huge capacityCap does NOT widen the tree (shape still governs)', () => {
+    const wide = deriveTreePosition(ids, '0x01', 2, 3, 300);
+    expect(wide.role).toBe('internal'); // NOT collapsed to a star
+  });
+  it('capacity LOWERS D below the shape (saturated worker → fewer children)', () => {
+    const p = deriveTreePosition(['0x00','0x01','0x02','0x03'], '0x00', 3, 3, 1); // cap=1 → D=1 chain
+    expect(p.children.length).toBeLessThanOrEqual(1);
+  });
+  it('order-independent', () => {
+    expect(deriveTreePosition(['0x00','0x01','0x02'], '0x01', 2, 3))
+      .toEqual(deriveTreePosition(['0x02','0x01','0x00'], '0x01', 2, 3));
+  });
+});
+
+describe('fanTargets + nextHopTtl', () => {
+  it('local origin (null) fans all', () => expect(fanTargets(['a','b'], null)).toEqual(['a','b']));
+  it('excludes the receive edge', () => expect(fanTargets(['a','b','c'], 'b')).toEqual(['a','c']));
+  it('nextHopTtl decrements; undefined passes through; 1→0 signals drop', () => {
+    expect(nextHopTtl(3)).toBe(2); expect(nextHopTtl(undefined)).toBeUndefined(); expect(nextHopTtl(1)).toBe(0);
   });
 });

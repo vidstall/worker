@@ -14,7 +14,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { InMemoryRelayEndpointCache } from '@dvconf/shared';
-import { resolvePrimaryEndpoint } from '../relay-endpoint-resolver.js';
+import { resolvePrimaryEndpoint, resolveRelayEndpoint, resolveDialTarget } from '../relay-endpoint-resolver.js';
+import type { TreePosition } from '../tree-position.js';
 
 describe('resolvePrimaryEndpoint (G3.2a relay-side resolution)', () => {
   it('resolves relayIds[0] → the primary relay’s cached WS URL', () => {
@@ -65,5 +66,45 @@ describe('resolvePrimaryEndpoint (G3.2a relay-side resolution)', () => {
     const url = 'ws://chain-registered.test:4000';
     cache.onRelayRegistered('0xprimary', Array.from(Buffer.from(url, 'utf8')));
     expect(resolvePrimaryEndpoint(cache, ['0xprimary', '0xstandby'])).toBe(url);
+  });
+});
+
+describe('resolveRelayEndpoint (T-B: resolve ANY relayId, e.g. a tree parent/child)', () => {
+  it('returns the cached url for the relayId', () => {
+    const cache = { getUrl: (id: string) => (id === '0xparent' ? 'ws://parent:4000' : null) } as never;
+    expect(resolveRelayEndpoint(cache, '0xparent')).toBe('ws://parent:4000');
+  });
+  it('null for an unknown relayId', () => {
+    expect(resolveRelayEndpoint({ getUrl: () => null } as never, '0xnope')).toBeNull();
+  });
+});
+
+describe('resolveDialTarget (T-B N1: child dials its tree PARENT; root/off → slot-0 or null)', () => {
+  const pos = (parent: string | null): TreePosition => ({
+    parent, children: [], role: parent === null ? 'root' : 'leaf', diameter: 0, withinDiameterBound: true,
+  });
+  const mkCache = () => {
+    const c = new InMemoryRelayEndpointCache();
+    c.setUrl('0xparent', 'ws://parent:4000');
+    c.setUrl('0xprimary', 'ws://primary:4000');
+    return c;
+  };
+
+  it('tree active + internal/leaf (parent set) → the PARENT url', () => {
+    expect(resolveDialTarget(pos('0xparent'), mkCache(), ['0xprimary', '0xself'], true))
+      .toBe('ws://parent:4000');
+  });
+  it('tree active + ROOT (parent===null) → null (accept-only, dials nobody)', () => {
+    expect(resolveDialTarget(pos(null), mkCache(), ['0xprimary'], true)).toBeNull();
+  });
+  it('tree active + NO position (undefined) → null', () => {
+    expect(resolveDialTarget(undefined, mkCache(), ['0xprimary'], true)).toBeNull();
+  });
+  it('tree active + parent not yet cached → null', () => {
+    expect(resolveDialTarget(pos('0xuncached'), mkCache(), ['0xprimary'], true)).toBeNull();
+  });
+  it('tree INACTIVE → the shipped slot-0 primary path (ignores pos)', () => {
+    expect(resolveDialTarget(pos('0xparent'), mkCache(), ['0xprimary', '0xself'], false))
+      .toBe('ws://primary:4000');
   });
 });
