@@ -51,3 +51,22 @@ describe('toCanonicalRelayId (REQ-RMS-039)', () => {
   it('throws on oversized hex (>64 chars) rather than silently truncating', () =>
     expect(() => toCanonicalRelayId('0x' + 'a'.repeat(65))).toThrow());
 });
+
+describe('hopTtl + originProducerId on PipeProducerAnnounce (T5, REQ-RMS-044/046)', () => {
+  it('builder OMITS both when not passed (byte-stable default)', () => {
+    const f = buildPipeProducerAnnounce('r', { id: 'p', kind: 'video' });
+    expect('hopTtl' in f).toBe(false);
+    expect('originProducerId' in f).toBe(false);
+  });
+  it('builder INCLUDES both when passed', () => {
+    const f = buildPipeProducerAnnounce('r', { id: 'p', kind: 'video' }, 'peerA', 'ws://relay', undefined, 3, 'origin-1');
+    expect(f.hopTtl).toBe(3);
+    expect(f.originProducerId).toBe('origin-1');
+  });
+  it('guard accepts numeric hopTtl + string originProducerId', () => {
+    expect(isPipeProducerAnnounce({ type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video', hopTtl: 2, originProducerId: 'o' })).toBe(true);
+  });
+  it('guard REJECTS a non-numeric hopTtl', () => {
+    expect(isPipeProducerAnnounce({ type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video', hopTtl: 'x' })).toBe(false);
+  });
+});

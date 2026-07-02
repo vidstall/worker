@@ -178,6 +178,12 @@ export interface PipeProducerAnnounce {
    * codec + encoding parameters after piping.
    */
   rtpParameters?: msTypes.RtpParameters;
+  /** REQ-RMS-044 (cascade-tree) — loop-guard hop budget. Additive/back-compat (default-omit),
+   *  init TreeLayout.diameter at the origin, decremented per hop, dropped at <= 0. */
+  hopTtl?: number;
+  /** REQ-RMS-046 (cascade-tree) — the IMMUTABLE origin producerId (first hop's id), threaded
+   *  unchanged across hops. Per-room dedup key (the local producerId now differs per hop). */
+  originProducerId?: string;
 }
 
 /** Type guard for an inbound JSON frame on the relay WS server. */
@@ -195,6 +201,10 @@ export function isPipeProducerAnnounce(msg: unknown): msg is PipeProducerAnnounc
     &&
     (m['rtpParameters'] === undefined
       || (typeof m['rtpParameters'] === 'object' && m['rtpParameters'] !== null))
+    &&
+    (m['hopTtl'] === undefined || typeof m['hopTtl'] === 'number')
+    &&
+    (m['originProducerId'] === undefined || typeof m['originProducerId'] === 'string')
   );
 }
 
@@ -208,6 +218,8 @@ export function buildPipeProducerAnnounce(
   producerPeerId?: string,
   peerRelayId?: string,
   rtpParameters?: msTypes.RtpParameters,
+  hopTtl?: number,
+  originProducerId?: string,
 ): PipeProducerAnnounce {
   return {
     type: 'pipe-producer',
@@ -217,6 +229,8 @@ export function buildPipeProducerAnnounce(
     ...(producerPeerId !== undefined ? { producerPeerId } : {}),
     ...(peerRelayId !== undefined ? { peerRelayId } : {}),
     ...(rtpParameters !== undefined ? { rtpParameters } : {}),
+    ...(hopTtl !== undefined ? { hopTtl } : {}),
+    ...(originProducerId !== undefined ? { originProducerId } : {}),
   };
 }
 
