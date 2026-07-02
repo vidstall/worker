@@ -901,7 +901,7 @@ if (isMainModule) {
           // the dial. The dial is now a PURE function of tree position (I1): the tree root is the
           // sorted-min canonical id, which need NOT equal chain slot-0 (survives promote_relay /
           // unsorted relay_ids) — so the dial below does not gate on role === 'primary'.
-          if (RMS_TREE_ACTIVE && relayIds.length > 0 && roomId) {
+          if (RMS_TREE_ACTIVE && roomId) {
             // TODO(T-B capacity task): compute a capacityCap via deriveDegreeCap(RMS_C_WORKER_PATHS, uLocal, producersPerPeer) and pass it as deriveTreePosition's 5th arg. Omitted now → shape governs (B1).
             const pos = deriveTreePosition(relayIds, myMinerId, RMS_TREE_DEGREE, RMS_TREE_MAX_HEIGHT);
             roomTreePosition.set(roomId, pos);
@@ -921,6 +921,7 @@ if (isMainModule) {
             // chain-primary never dialing its tree parent. Every node with a parent dials it (child->
             // parent live link); the true tree root (pos.parent===null) dials nobody = accept-only.
             // The WS accept path is unchanged (a node accepts its children's dials automatically).
+            // TODO(Task 9): the pure dial (resolveTreeParentDial) is unit-tested, but this HANDLER wiring — that the dial runs for a non-root chain-primary (not re-gated on role==='primary') — is only guarded by review until the hermetic depth-2 tree integration test (plan Task 9) asserts a chain-slot-0-non-root node dials its tree parent.
             const pos = roomTreePosition.get(roomId);
             const dialUrl = resolveTreeParentDial(pos, relayEndpointCache);
             standbyLink.primaryUrl = dialUrl;
