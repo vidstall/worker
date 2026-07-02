@@ -447,14 +447,6 @@ export interface InterRelayContext {
     receiveEdgeUrl: string | null,
     inboundHopTtl: number | undefined,
   ) => void;
-  /**
-   * T-B (REQ-RMS-044) — this room's tree diameter (from roomTreePosition, bound in index.ts). The
-   * leaf/internal OWN-produce UP-announce (handleProduce standby branch) reads it to SEED the exact-
-   * diameter hop budget on the reverse announce (the origin node has no inbound budget to decrement).
-   * Returns undefined off-tree (flag off / room not derived) → the standby branch falls back to the
-   * shipped 4-arg onStandbyProducer call (byte-stable). Bound only when RMS_TREE_ACTIVE.
-   */
-  treeDiameterFor?: (roomId: string) => number | undefined;
 }
 
 /** Send a JSON message to a WebSocket. */
@@ -1605,23 +1597,31 @@ export function createSignalingServer(
     // both would double-announce (producer.id + the piped id). When onPrimaryProducer
     // is absent (in-process bench / no coordinator), fall back to the legacy direct
     // announce so the bench path is unaffected.
-    if (interRelay && interRelay.role === 'primary') {
-      if (interRelay.treeActive && interRelay.fanToTreeNeighbors) {
-        // T-B (REQ-RMS-042/043/044) — TREE root's OWN local produce. Route the DOWN fan through the
-        // single edge-scoped + hop-guarded helper instead of the flat-STAR interRelaySockets.keys()
-        // flood: local-origin produce → receiveEdgeUrl = null (fan ALL tree neighbors) + inboundHopTtl
-        // = undefined → fanToTreeNeighbors SEEDS the budget from pos.diameter. originProducerId = this
-        // producer's id (an OWN produce IS the origin). The root has no parent, so fanToTreeNeighbors
-        // fans DOWN to children only; a chain-primary that is actually a tree-INTERNAL node (I1: tree
-        // root = sorted-min id may diverge from chain slot-0) additionally fans UP to its tree parent.
-        interRelay.fanToTreeNeighbors(
-          mapping.roomId, room.router, producer, mapping.peerId, producer.id, null, undefined,
-        );
-        logger.info(
-          { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId, producerPeerId: mapping.peerId },
-          'T-B: routed primary OWN-produce DOWN fan through fanToTreeNeighbors (tree active)',
-        );
-      } else if (interRelay.onPrimaryProducer) {
+    if (interRelay?.treeActive && interRelay.fanToTreeNeighbors) {
+      // UNIFORM (§3.3, T-B T7 follow-up — concern #1/#2) — ANY own local produce fans through the
+      // single edge-scoped + hop-guarded helper to ALL tree neighbors (UP to parent + DOWN to
+      // children), driven by TREE position (pos), INDEPENDENT of chain role. Closes two gaps the old
+      // role-branched wiring left: (#1) an INTERNAL node's own produce now reaches its OWN subtree —
+      // it was UP-only, and the root's reverse hub-fan EXCLUDES the origin edge, so R1's children never
+      // saw R1's media; (#2) a tree ROOT that is a chain-STANDBY (I1: tree root = sorted-min id may
+      // diverge from chain slot-0 after promote_relay / unsorted relay_ids) now fans DOWN correctly
+      // instead of announcing UP to a non-existent parent. fanToTreeNeighbors reads pos → root
+      // (parent=null) fans DOWN only; internal fans UP+DOWN; leaf (children=∅) fans UP only. Local-
+      // origin produce → receiveEdgeUrl = null (fan ALL neighbors) + inboundHopTtl = undefined → the
+      // helper SEEDS the budget from pos.diameter; originProducerId = this producer's id (an OWN
+      // produce IS the origin). onPrimaryProducer/onStandbyProducer are daemon-level bindings (NOT
+      // role-gated), so a chain-standby internal node drives BOTH legs = the intended dual-role
+      // (§3.1/§3.2). Flag OFF → treeActive undefined → the two role branches below are byte-for-byte
+      // the shipped path.
+      interRelay.fanToTreeNeighbors(
+        mapping.roomId, room.router, producer, mapping.peerId, producer.id, null, undefined,
+      );
+      logger.info(
+        { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId, producerPeerId: mapping.peerId },
+        'T-B: routed OWN-produce fan through fanToTreeNeighbors — uniform, tree-position-driven (tree active)',
+      );
+    } else if (interRelay && interRelay.role === 'primary') {
+      if (interRelay.onPrimaryProducer) {
         // REQ-RMS-028 (L1.3-b, Bridge A) — N-1 mesh fanout. Fan onPrimaryProducer
         // to every attached inter-relay peer (interRelaySockets.keys()), each on
         // its own per-peer pipe leg. interRelaySockets is a PER-DAEMON map (keyed
@@ -1677,24 +1677,11 @@ export function createSignalingServer(
       // Gated on the hook being present (mirrors the primary onPrimaryProducer block):
       // until A4 wires it (and on the in-process bench) the hook is absent — without the
       // guard the "drove..." log would over-claim a reverse hop that never happened.
+      // NOTE (T-B T7 follow-up): under the tree the OWN-produce fan is handled UNIFORMLY above
+      // (treeActive branch → fanToTreeNeighbors, tree-position-driven). This role==='standby' branch
+      // is therefore reached ONLY flag-off → it stays byte-for-byte the shipped UP-only announce.
       if (interRelay.onStandbyProducer) {
-        // T-B (REQ-RMS-042/044/046) — a leaf/internal node's OWN local produce announces UP to its
-        // tree parent. SEED the exact-diameter hop budget + carry the immutable origin (an OWN produce
-        // IS the origin) so the parent's hub-fan decrements a real budget and dedups on the origin.
-        // The origin has no inbound budget to decrement, so we seed pos.diameter (a global tree
-        // property, same on every node) via the treeDiameterFor accessor. Off-tree (flag off / room
-        // not derived → undefined) the branch falls back to the shipped 4-arg call → byte-stable frame
-        // AND announcer arity (the RED-RA-2* reverse-announcer assertions hold).
-        const treeDiameter = interRelay.treeActive
-          ? interRelay.treeDiameterFor?.(mapping.roomId)
-          : undefined;
-        if (treeDiameter !== undefined) {
-          interRelay.onStandbyProducer(
-            mapping.roomId, room.router, producer, mapping.peerId, treeDiameter, producer.id,
-          );
-        } else {
-          interRelay.onStandbyProducer(mapping.roomId, room.router, producer, mapping.peerId);
-        }
+        interRelay.onStandbyProducer(mapping.roomId, room.router, producer, mapping.peerId);
         logger.info(
           { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId, producerPeerId: mapping.peerId },
           'Inter-relay: drove reverse consume-onto-pipe at produce (standby) — announces UP to primary',

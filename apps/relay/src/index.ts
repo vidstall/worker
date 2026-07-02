@@ -76,7 +76,7 @@ import {
   type RoomTopology,
 } from '@dvconf/inter-relay-client';
 import { resolvePrimaryEndpoint, resolveTreeParentDial, resolveRelayEndpoint } from './relay-endpoint-resolver.js';
-import { deriveTreePosition, fanTargetUrls, seedOrDecrementHop, type TreePosition } from './tree-position.js';
+import { deriveTreePosition, computeTreeFanPlan, type TreePosition } from './tree-position.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -931,23 +931,22 @@ if (isMainModule) {
       if (!RMS_TREE_ACTIVE) return;
       const pos = roomTreePosition.get(roomId);
       if (!pos) return;
-      // Seed the budget at a local origin (undefined inbound), else decrement the inbound budget
-      // (pure + unit-tested — see seedOrDecrementHop / tree-forwarding.test.ts).
-      const hop = seedOrDecrementHop(inboundHopTtl, pos.diameter);
-      if (hop <= 0) return; // loop guard: budget exhausted (local clients were already fanned by the caller)
+      // Compute the tree-position-driven fan PLAN (pure + unit-tested — computeTreeFanPlan /
+      // tree-forwarding.test.ts): the post-transition hop budget + edge-scoped DOWN child URLs +
+      // the (optional) UP parent URL. hop <= 0 → empty plan (loop guard: budget exhausted; local
+      // clients were already fanned by the caller). ROOT → parentUrl null (DOWN only); INTERNAL →
+      // both legs; LEAF → childUrls empty (UP only) — this is the §3.3 uniform, role-independent fan.
       const resolve = (id: string) => resolveRelayEndpoint(relayEndpointCache, id);
+      const plan = computeTreeFanPlan(pos, receiveEdgeUrl, inboundHopTtl, resolve);
+      if (plan.hop <= 0) return;
       // DOWN to children (via the shipped primary pipe primitive).
-      const childUrls = fanTargetUrls(pos.children, resolve, receiveEdgeUrl);
-      for (const childUrl of childUrls) {
-        interRelayContext.onPrimaryProducer?.(roomId, router, producer, childUrl, producerPeerId, hop, originProducerId);
+      for (const childUrl of plan.childUrls) {
+        interRelayContext.onPrimaryProducer?.(roomId, router, producer, childUrl, producerPeerId, plan.hop, originProducerId);
       }
-      // UP to the parent (via the shipped reverse announcer) — a single up-link; skip if the
-      // producer arrived FROM the parent (edge-scope).
-      if (pos.parent) {
-        const parentUrl = resolve(pos.parent);
-        if (parentUrl && parentUrl !== receiveEdgeUrl) {
-          interRelayContext.onStandbyProducer?.(roomId, router, producer, producerPeerId, hop, originProducerId);
-        }
+      // UP to the parent (via the shipped reverse announcer) — a single up-link (null = root /
+      // unresolved / arrived-from-parent edge-scope).
+      if (plan.parentUrl !== null) {
+        interRelayContext.onStandbyProducer?.(roomId, router, producer, producerPeerId, plan.hop, originProducerId);
       }
     }
     // T-B: bind the tree fan + the tree-active flag onto the signaling context so the fan sites
@@ -960,12 +959,6 @@ if (isMainModule) {
     // live / multi-host environment until Task 7 routes the three fan sites through the helper.
     interRelayContext.fanToTreeNeighbors = RMS_TREE_ACTIVE ? fanToTreeNeighbors : undefined;
     interRelayContext.treeActive = RMS_TREE_ACTIVE;
-    // T-B (REQ-RMS-044): the leaf/internal OWN-produce UP-announce (handleProduce standby branch)
-    // reads this to SEED the exact-diameter hop budget. Bound only when RMS_TREE_ACTIVE (undefined
-    // otherwise → the standby branch falls back to the shipped 4-arg onStandbyProducer, byte-stable).
-    interRelayContext.treeDiameterFor = RMS_TREE_ACTIVE
-      ? (roomId: string) => roomTreePosition.get(roomId)?.diameter
-      : undefined;
 
     // Step 7: Poll room_manager events for MCU room assignments
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);

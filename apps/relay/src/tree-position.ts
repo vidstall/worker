@@ -84,3 +84,43 @@ export function seedOrDecrementHop(inboundHopTtl: number | undefined, diameter: 
   // number|undefined for the pass-through-undefined contract the flag-off path relies on).
   return inboundHopTtl === undefined ? diameter : nextHopTtl(inboundHopTtl)!;
 }
+
+/** The edge-scoped + hop-guarded fan PLAN for one node (fanToTreeNeighbors drives it). */
+export interface TreeFanPlan {
+  /** Hop budget AFTER this node's transition (seed at a local origin, else decrement). */
+  hop: number;
+  /** Resolved child endpoint URLs to fan DOWN, minus the receive edge (empty when hop <= 0). */
+  childUrls: string[];
+  /** Resolved parent endpoint URL to fan UP, or null (root / unresolved / arrived-from-parent). */
+  parentUrl: string | null;
+}
+
+/**
+ * PURE (T-B T7 follow-up, §3.3) — compute the tree-position-driven fan PLAN: the post-transition hop
+ * budget + the edge-scoped DOWN child URLs + the (optional) UP parent URL. Extracted from the index.ts
+ * `fanToTreeNeighbors` driver so the fan SHAPE is unit-testable WITHOUT the live endpoint cache /
+ * mediasoup wiring. The SHAPE is driven by TREE position (NOT chain role), which is the whole point of
+ * the §3.3 uniform own-produce fan:
+ *   - ROOT (parent === null) → parentUrl null → fans DOWN to children only;
+ *   - INTERNAL (parent ≠ null, children ≠ ∅) → parentUrl set AND childUrls non-empty → fans BOTH ways;
+ *   - LEAF (children === ∅) → childUrls empty → fans UP to the parent only.
+ * hop <= 0 (budget exhausted) → an EMPTY plan (the caller still fanned local clients; it just does NOT
+ * re-forward to tree edges). The parent is edge-scoped (dropped when it equals the receive edge) so a
+ * producer that arrived FROM the parent is never echoed back UP.
+ */
+export function computeTreeFanPlan(
+  pos: Pick<TreePosition, 'parent' | 'children' | 'diameter'>,
+  receiveEdgeUrl: string | null,
+  inboundHopTtl: number | undefined,
+  resolve: (id: string) => string | null,
+): TreeFanPlan {
+  const hop = seedOrDecrementHop(inboundHopTtl, pos.diameter);
+  if (hop <= 0) return { hop, childUrls: [], parentUrl: null };
+  const childUrls = fanTargetUrls(pos.children, resolve, receiveEdgeUrl);
+  let parentUrl: string | null = null;
+  if (pos.parent !== null) {
+    const resolvedParent = resolve(pos.parent);
+    if (resolvedParent !== null && resolvedParent !== receiveEdgeUrl) parentUrl = resolvedParent;
+  }
+  return { hop, childUrls, parentUrl };
+}
