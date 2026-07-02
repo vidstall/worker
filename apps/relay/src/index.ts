@@ -455,6 +455,9 @@ if (isMainModule) {
       // Default false preserves the REQ-RO-005 paused-keepalive BW saving for M1 /
       // relay-overlap 2-relay failover rooms where the flag is not set.
       RMS_ACTIVE_FORWARD,
+      // T6 (REQ-RMS-046): cascade-tree data plane — fresh local id per hop + per-room
+      // origin dedup. Default false (flag off) → the shipped star mint stays byte-stable.
+      RMS_TREE_ACTIVE,
     );
 
     // ── G3.2b: live cross-daemon inter-relay LINK glue ───────────────────────
@@ -590,6 +593,9 @@ if (isMainModule) {
       // producerPeerId carried on the queue entry.
       onReverseMinted: (roomId, minted, originRelayId, producerPeerId) =>
         signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId),
+      // T6 (REQ-RMS-046): cascade-tree reverse hub mint uses a fresh local id per hop.
+      // Default false (flag off) → the shipped same-id reverse mint stays byte-stable.
+      treeActive: RMS_TREE_ACTIVE,
       logger,
     });
     const interRelayContext: InterRelayContext = {

@@ -3,8 +3,9 @@
  * REQ-RMS-042 / 044 / 046 / 048.
  * All pure/synchronous — no mediasoup, no I/O.
  */
-import { describe, it, expect } from 'vitest';
-import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId } from '@dvconf/inter-relay-client';
+import { describe, it, expect, vi } from 'vitest';
+import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId, produceLocalFromPipe, InterRelayProducerRegistry, StandbyWarmPipeCoordinator } from '@dvconf/inter-relay-client';
+import type { RoomTopology } from '@dvconf/inter-relay-client';
 import { deriveTreePosition, fanTargets, nextHopTtl } from '../tree-position.js';
 
 describe('T-B byte-stability guards (REQ-RMS-048) — MUST stay green through every task', () => {
@@ -102,5 +103,100 @@ describe('fanTargets + nextHopTtl', () => {
   it('excludes the receive edge', () => expect(fanTargets(['a','b','c'], 'b')).toEqual(['a','c']));
   it('nextHopTtl decrements; undefined passes through; 1→0 signals drop', () => {
     expect(nextHopTtl(3)).toBe(2); expect(nextHopTtl(undefined)).toBeUndefined(); expect(nextHopTtl(1)).toBe(0);
+  });
+});
+
+// ── T6 (REQ-RMS-046/048) — flag-gated fresh LOCAL producerId + per-room origin dedup ──
+
+describe('flag-gated fresh LOCAL producerId (T6, REQ-RMS-046/048)', () => {
+  function fakeTransport(seen: Record<string, unknown>[]) {
+    return { produce: async (o: Record<string, unknown>) => { seen.push(o); return { id: 'local-' + seen.length } as never; } } as never;
+  }
+  it('freshId=false (default/shipped) PINS the announced id (byte-stable)', async () => {
+    const seen: Record<string, unknown>[] = [];
+    await produceLocalFromPipe(fakeTransport(seen), { producerId: 'origin-1', kind: 'video', rtpParameters: {} as never });
+    expect(seen[0]!['id']).toBe('origin-1');
+  });
+  it('freshId=true (tree active) OMITS the id → fresh per hop', async () => {
+    const seen: Record<string, unknown>[] = [];
+    await produceLocalFromPipe(fakeTransport(seen), { producerId: 'origin-1', kind: 'video', rtpParameters: {} as never }, { freshId: true });
+    expect(seen[0]!['id']).toBeUndefined();
+  });
+});
+
+describe('registry.record preserves originProducerId + hopTtl for the drain (B4)', () => {
+  it('copies both immutable-origin fields off the inbound announce', () => {
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'r', producerId: 'hop-2', kind: 'video', peerRelayId: 'ws://peer', originProducerId: 'ORIGIN-1', hopTtl: 2 } as never);
+    const [a] = reg.resolveAll('r', 'ws://peer');
+    expect((a as { originProducerId?: string }).originProducerId).toBe('ORIGIN-1');
+    expect((a as { hopTtl?: number }).hopTtl).toBe(2);
+  });
+  it('a pre-tree announce (no origin/hopTtl) records them undefined (byte-stable)', () => {
+    const reg = new InterRelayProducerRegistry();
+    reg.record({ type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'audio' } as never);
+    const [a] = reg.resolveAll('r');
+    expect('originProducerId' in (a as object)).toBe(false);
+    expect('hopTtl' in (a as object)).toBe(false);
+  });
+});
+
+// ── coordinator drain harness (compact mirror of inter-relay-warmpipe.test.ts) ──
+
+function makeMockConsumer() {
+  return { id: `c-${Math.random().toString(36).slice(2)}`, paused: false, pause: vi.fn().mockResolvedValue(undefined), resume: vi.fn().mockResolvedValue(undefined), close: vi.fn() };
+}
+function makeMockRouter() {
+  const transports: Array<{ produce: ReturnType<typeof vi.fn> }> = [];
+  const router = {
+    id: `router-${Math.random().toString(36).slice(2)}`,
+    createPipeTransport: vi.fn().mockImplementation(async () => {
+      const t = {
+        id: `pt-${Math.random().toString(36).slice(2)}`,
+        consume: vi.fn().mockResolvedValue(makeMockConsumer()),
+        connect: vi.fn().mockResolvedValue(undefined),
+        produce: vi.fn(async (o: { id?: string; kind: string }) => ({ id: o.id ?? `fresh-${Math.random().toString(36).slice(2)}`, kind: o.kind, close: vi.fn() })),
+        tuple: { localIp: '127.0.0.1', localPort: 40000 },
+        close: vi.fn(),
+      };
+      transports.push(t);
+      return t;
+    }),
+    rtpCapabilities: {} as never,
+  };
+  return { router, transports };
+}
+function makeStandbyTopology(roomId: string): RoomTopology {
+  return { roomId, role: 'standby', primaryEndpoint: 'ws://primary:4000', standbyEndpoint: 'ws://standby:4000', pipePort: 40000, pipeConsumer: null, pipeTransport: null } as RoomTopology;
+}
+const rtp = (ssrc: number): never => ({ codecs: [{ mimeType: 'video/VP8', payloadType: 101, clockRate: 90000, parameters: {}, rtcpFeedback: [] }], encodings: [{ ssrc }] } as never);
+
+describe('per-room origin dedup at the forward drain (T6/B4, N4)', () => {
+  const ROOM = 'room-b4';
+  it('same originProducerId on two edges → exactly ONE local mint (per-room dedup)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    // Two parent edges: DISTINCT peerRelayId + DISTINCT per-hop producerId, SAME immutable origin.
+    registry.record({ type: 'pipe-producer', roomId: ROOM, producerId: 'hop-A', kind: 'video', peerRelayId: 'relay-A', rtpParameters: rtp(11), originProducerId: 'ORIGIN-1' } as never);
+    registry.record({ type: 'pipe-producer', roomId: ROOM, producerId: 'hop-B', kind: 'video', peerRelayId: 'relay-B', rtpParameters: rtp(22), originProducerId: 'ORIGIN-1' } as never);
+    // treeActive: true (5th positional flag).
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, vi.fn(), true, true);
+    const rA = makeMockRouter();
+    const rB = makeMockRouter();
+    await coord.ensure(makeStandbyTopology(ROOM), rA.router as never, 40000, 'relay-A');
+    await coord.ensure(makeStandbyTopology(ROOM), rB.router as never, 40001, 'relay-B');
+    const totalProduce = [...rA.transports, ...rB.transports].reduce((n, t) => n + t.produce.mock.calls.length, 0);
+    expect(totalProduce).toBe(1); // the double-parent collapses to ONE origin mint
+  });
+  it('two DISTINCT originProducerIds → two mints', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({ type: 'pipe-producer', roomId: ROOM, producerId: 'hop-A', kind: 'video', peerRelayId: 'relay-A', rtpParameters: rtp(11), originProducerId: 'ORIGIN-1' } as never);
+    registry.record({ type: 'pipe-producer', roomId: ROOM, producerId: 'hop-B', kind: 'video', peerRelayId: 'relay-B', rtpParameters: rtp(22), originProducerId: 'ORIGIN-2' } as never);
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, vi.fn(), true, true);
+    const rA = makeMockRouter();
+    const rB = makeMockRouter();
+    await coord.ensure(makeStandbyTopology(ROOM), rA.router as never, 40000, 'relay-A');
+    await coord.ensure(makeStandbyTopology(ROOM), rB.router as never, 40001, 'relay-B');
+    const totalProduce = [...rA.transports, ...rB.transports].reduce((n, t) => n + t.produce.mock.calls.length, 0);
+    expect(totalProduce).toBe(2); // distinct origins → distinct mints
   });
 });

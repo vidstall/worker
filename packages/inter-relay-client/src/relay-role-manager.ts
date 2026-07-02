@@ -326,9 +326,15 @@ export async function ensureWarmPipe(
 export async function produceLocalFromPipe(
   transport: msTypes.PipeTransport,
   announced: { producerId: string; kind: msTypes.MediaKind; rtpParameters: msTypes.RtpParameters },
+  opts: { freshId?: boolean } = {},
 ): Promise<msTypes.Producer> {
+  // T6 (REQ-RMS-046): tree mode mints a FRESH local id per hop (omit id) so a producer
+  // crossing two internal nodes never collides; the client binds on the ORIGINAL
+  // producerPeerId (Task 2 / design §6.2). Default (freshId=false) keeps the shipped
+  // same-id mint → the RMS_ACTIVE_FORWARD path stays byte-stable (REQ-RMS-048): the
+  // integration guards that assert `producer.id === announced.producerId` still hold.
   return transport.produce({
-    id: announced.producerId,
+    ...(opts.freshId ? {} : { id: announced.producerId }),
     kind: announced.kind,
     rtpParameters: announced.rtpParameters,
   } as Parameters<msTypes.PipeTransport['produce']>[0]);

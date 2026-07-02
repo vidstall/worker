@@ -440,6 +440,15 @@ export interface AnnouncedProducer {
   producerPeerId?: string;
   /** REQ-RMS-026 — the piped consumer's RtpParameters, when the announce carried it (additive). */
   rtpParameters?: msTypes.RtpParameters;
+  /**
+   * REQ-RMS-046 (cascade-tree, B4) — the IMMUTABLE origin producerId threaded unchanged
+   * across hops. Copied off the inbound announce so the forward drain can dedup PER-ROOM
+   * on it (the local producerId now differs per hop under RMS_TREE_ACTIVE, so the per-hop
+   * id is NOT a stable dedup key across two parent edges). Undefined on a pre-tree frame.
+   */
+  originProducerId?: string;
+  /** REQ-RMS-044 (cascade-tree) — loop-guard hop budget carried from the announce (additive). */
+  hopTtl?: number;
 }
 
 /**
@@ -478,6 +487,13 @@ export class InterRelayProducerRegistry {
       ...(announce.rtpParameters !== undefined
         ? { rtpParameters: announce.rtpParameters }
         : {}),
+      // B4 — carry the immutable origin id + hop budget to the drain so it can dedup
+      // PER-ROOM on originProducerId (the per-hop local id now differs under
+      // RMS_TREE_ACTIVE). Optional → a pre-tree frame records them undefined (byte-stable).
+      ...(announce.originProducerId !== undefined
+        ? { originProducerId: announce.originProducerId }
+        : {}),
+      ...(announce.hopTtl !== undefined ? { hopTtl: announce.hopTtl } : {}),
     });
   }
 
@@ -804,6 +820,17 @@ export class StandbyWarmPipeCoordinator {
   private readonly producedIds = new Map<string, Set<string>>();
 
   /**
+   * T6/B4 (REQ-RMS-046) — origins already minted for a room, keyed by roomId →
+   * Set<originProducerId>. Per-ROOM (NOT meshKey) so a transient cross-edge double-parent
+   * collapses to ONE key: under RMS_TREE_ACTIVE each hop mints a FRESH local id, so the
+   * per-hop `producedIds` set (keyed by meshKey) can't stop the same origin arriving on
+   * two parent edges from double-producing. Only the immutable originProducerId is stable
+   * across edges. Tree-mode ONLY; the flag-off path keeps using producedIds. Cleared with
+   * the room in clear().
+   */
+  private readonly producedOrigins = new Map<string, Set<string>>();
+
+  /**
    * REQ-RMS-034 (part-3 reverse leg) — the UP-announcer that pushes a reverse
    * announce to the primary. Bound by setReverseAnnouncer (wiring layer); null
    * until wired so a forward/keepalive-only room is byte-stable (never announces UP).
@@ -863,6 +890,14 @@ export class StandbyWarmPipeCoordinator {
       peerRelayId: string,
     ) => void,
     private readonly activeForward: boolean = false,
+    /**
+     * T6 (REQ-RMS-046) — cascade-tree data plane. When true, the forward drain mints a
+     * FRESH local id per hop (produceLocalFromPipe freshId) and dedups PER-ROOM on the
+     * immutable originProducerId (B4). Default false (mirrors activeForward) → the shipped
+     * star path is byte-stable: same-id mint + per-meshKey producedIds dedup. index.ts
+     * opts in via RMS_TREE_ACTIVE.
+     */
+    private readonly treeActive: boolean = false,
   ) {}
 
   /**
@@ -909,18 +944,41 @@ export class StandbyWarmPipeCoordinator {
       // forward onto. onAnnounce re-drives once the pipe is established.
       return;
     }
-    const key = meshKey(roomId, peerRelayId);
-    let produced = this.producedIds.get(key);
-    if (!produced) {
-      produced = new Set<string>();
-      this.producedIds.set(key, produced);
+    // T6/B4 — select the dedup surface by mode. Tree mode dedups PER-ROOM on the
+    // immutable originProducerId (a FRESH local id is minted per hop, so the per-hop id
+    // is not a stable key across two parent edges — a transient double-parent would
+    // otherwise double-produce). The shipped star path dedups per (room,peer) on the
+    // producerId with a same-id mint → byte-stable (REQ-RMS-048). Both branches share
+    // the SAME mint + error/retry discipline below (only the set + key differ).
+    let produced: Set<string>;
+    if (this.treeActive) {
+      let originsForRoom = this.producedOrigins.get(roomId);
+      if (!originsForRoom) {
+        originsForRoom = new Set<string>();
+        this.producedOrigins.set(roomId, originsForRoom);
+      }
+      produced = originsForRoom;
+    } else {
+      const key = meshKey(roomId, peerRelayId);
+      let byKey = this.producedIds.get(key);
+      if (!byKey) {
+        byKey = new Set<string>();
+        this.producedIds.set(key, byKey);
+      }
+      produced = byKey;
     }
     for (const announced of this.registry.resolveAll(roomId, peerRelayId)) {
       if (announced.rtpParameters === undefined) {
         // Legacy primary — no rtpParameters to produce from. Skip (keepalive intact).
         continue;
       }
-      if (produced.has(announced.producerId)) {
+      // Dedup key: tree mode keys on the IMMUTABLE origin (falls back to the per-hop id
+      // when a pre-tree/absent-origin frame arrives → still correct single-hop); the
+      // shipped path keys on the producerId (byte-stable, same-id mint below).
+      const dedupId = this.treeActive
+        ? (announced.originProducerId ?? announced.producerId)
+        : announced.producerId;
+      if (produced.has(dedupId)) {
         // Already minted on a prior ensure/onAnnounce — no double-produce.
         continue;
       }
@@ -930,7 +988,7 @@ export class StandbyWarmPipeCoordinator {
           producerId: announced.producerId,
           kind: announced.kind,
           rtpParameters: announced.rtpParameters,
-        });
+        }, { freshId: this.treeActive });
       } catch (err) {
         // Fix 1 — discriminate a benign duplicate-id throw (idempotent belt-and-
         // suspenders: a concurrent re-run already minted this id) from a TRANSIENT
@@ -938,8 +996,9 @@ export class StandbyWarmPipeCoordinator {
         const message = String((err as Error)?.message ?? err);
         const dup = /already exists|duplicate/i.test(message);
         if (dup) {
-          // Mark + skip so we never retry a known-minted id.
-          produced.add(announced.producerId);
+          // Mark + skip so we never retry a known-minted id (dedupId: origin in tree
+          // mode, per-hop producerId on the shipped path).
+          produced.add(dedupId);
           this.logger?.debug(
             { roomId, producerId: announced.producerId, error: message },
             'REQ-RMS-025: produceLocalFromPipe skipped — producer id already exists (idempotent)',
@@ -954,7 +1013,7 @@ export class StandbyWarmPipeCoordinator {
         }
         continue;
       }
-      produced.add(announced.producerId);
+      produced.add(dedupId);
       this.logger?.info(
         { roomId, producerId: producer.id, kind: producer.kind, peerRelayId },
         'REQ-RMS-025: standby minted a LOCAL producer from the cross-process pipe (active forward)',
@@ -1136,6 +1195,10 @@ export class StandbyWarmPipeCoordinator {
     // later room with the same key re-mints cleanly (the producers themselves are
     // owned + closed by the wiring layer / their transport teardown).
     this.producedIds.delete(key);
+    // T6/B4 — drop the PER-ROOM origin dedup set (keyed by roomId, not meshKey) so a
+    // later room with the same id re-mints cleanly. Idempotent across per-peer clears
+    // (clearRoom calls clear() once per leg → the first delete drops it, the rest no-op).
+    this.producedOrigins.delete(roomId);
     // part-3 reverse leg — the leg's pipe transport is being torn down: drop the
     // reverse consume-dedup + any queued local producers so a later room/leg with
     // the same key re-consumes onto a fresh pipe cleanly.
@@ -1616,6 +1679,14 @@ export interface PrimaryPipeCoordinatorDeps {
     originRelayId: string,
     producerPeerId?: string,
   ) => void;
+  /**
+   * T6 (REQ-RMS-046, cascade-tree) — when true, the reverse hub mint uses a FRESH local id
+   * per hop (produceLocalFromPipe freshId) so a producer that crosses two internal nodes on
+   * the UP leg never collides. OPTIONAL → undefined/false keeps the shipped same-id reverse
+   * mint (byte-stable). Per-leg reverseMintedIds dedup (on the announced producerId, which
+   * is the stable key on the reverse path) is unchanged. index.ts passes RMS_TREE_ACTIVE.
+   */
+  treeActive?: boolean;
   logger?: Logger;
 }
 
@@ -1925,7 +1996,9 @@ export class PrimaryPipeCoordinator {
     if (seen.has(announced.producerId)) return null;
     seen.add(announced.producerId);
     try {
-      return await produceLocalFromPipe(transport, announced);
+      // T6 — tree mode mints a FRESH local id per hop (freshId); default keeps the
+      // shipped same-id reverse mint byte-stable. Dedup above stays on the announced id.
+      return await produceLocalFromPipe(transport, announced, { freshId: this.deps.treeActive === true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (/already exists|duplicate/i.test(message)) return null; // benign idempotent dup
