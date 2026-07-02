@@ -129,7 +129,11 @@ export function neighborsOf(layout: TreeLayout, id: RelayId): RelayId[] {
 /** The forwarding role of a node in the tree. */
 export type TreeRole = 'root' | 'internal' | 'leaf';
 
-/** PURE. Classify a node's forwarding role. Unknown id → 'leaf' (fail-safe: never re-forward). */
+/**
+ * PURE. Classify a node's forwarding role. Unknown id → 'leaf' (fail-safe: never re-forward).
+ * A lone/childless root (parent===null AND no children, e.g. a single-node tree) classifies
+ * as 'leaf' (no forwarding targets).
+ */
 export function treeRoleOf(layout: TreeLayout, id: RelayId): TreeRole {
   const node = layout.nodes.get(normalizeId(id));
   if (!node) return 'leaf';
@@ -142,5 +146,6 @@ export function treeRoleOf(layout: TreeLayout, id: RelayId): TreeRole {
 export function toCanonicalRelayId(id: RelayId): RelayId {
   const lower = id.trim().toLowerCase();
   const hex = lower.startsWith('0x') ? lower.slice(2) : lower;
+  if (hex.length > 64) throw new Error(`toCanonicalRelayId: oversized hex (${hex.length} chars): ${id}`);
   return '0x' + hex.padStart(64, '0');
 }

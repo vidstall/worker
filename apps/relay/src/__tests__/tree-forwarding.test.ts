@@ -22,11 +22,16 @@ describe('T-B byte-stability guards (REQ-RMS-048) — MUST stay green through ev
 
 describe('treeRoleOf (REQ-RMS-042)', () => {
   const ids = ['0x00', '0x01', '0x02', '0x03', '0x04'];
-  const layout = deriveTree(ids, { degreeCap: 2, maxHeight: 3 }); // D=2: R0 root; {0x01,0x02}; {0x03,0x04}
+  // D=2: 0x00 root; children {0x01 [internal], 0x02 [leaf]}; 0x01's children {0x03,0x04 [leaves]}
+  const layout = deriveTree(ids, { degreeCap: 2, maxHeight: 3 });
   it('root → "root"', () => expect(treeRoleOf(layout, '0x00')).toBe('root'));
   it('internal (parent AND children) → "internal"', () => expect(treeRoleOf(layout, '0x01')).toBe('internal'));
   it('leaf (parent, no children) → "leaf"', () => expect(treeRoleOf(layout, '0x03')).toBe('leaf'));
   it('unknown id → "leaf" (fail-safe)', () => expect(treeRoleOf(layout, '0xZZ')).toBe('leaf'));
+  it('single-node tree root (parent===null, no children) → "leaf" (no forwarding targets)', () => {
+    const solo = deriveTree(['0x00'], { degreeCap: 2, maxHeight: 3 });
+    expect(treeRoleOf(solo, '0x00')).toBe('leaf');
+  });
 });
 
 describe('toCanonicalRelayId (REQ-RMS-039)', () => {
@@ -41,4 +46,8 @@ describe('toCanonicalRelayId (REQ-RMS-039)', () => {
     const full = '0x' + 'a'.repeat(64);
     expect(toCanonicalRelayId(full)).toBe(full);
   });
+  it('pads a bare hex id with no 0x prefix', () =>
+    expect(toCanonicalRelayId('ab')).toBe('0x' + '0'.repeat(62) + 'ab'));
+  it('throws on oversized hex (>64 chars) rather than silently truncating', () =>
+    expect(() => toCanonicalRelayId('0x' + 'a'.repeat(65))).toThrow());
 });
