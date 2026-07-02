@@ -435,6 +435,9 @@ if (isMainModule) {
         minted: msTypes.Producer,
         originRelayId: string,
         producerPeerId?: string,
+        // T-B (REQ-RMS-043/044/046) — immutable origin + inbound hop budget for the tree hub-fan.
+        originProducerId?: string,
+        inboundHopTtl?: number,
       ) => void;
       // REQ-RMS-037 (Task B4b): STANDBY re-announce-on-reopen — back-fill local
       // producers UP after an outbound-link flap (late-bound like the rest).
@@ -449,8 +452,25 @@ if (isMainModule) {
       // REQ-RMS-034: pass RAW producerPeerId + peerRelayId — the publisher-binding
       // `??` resolution now lives INSIDE fanLocalProducer (behavior-neutral for the
       // shipped forward leg; C1 later replaces it with the E2EE gate).
-      (roomId, producer, producerPeerId, peerRelayId) =>
-        signalingRef.fanLocalProducer?.(roomId, producerPeerId, producer, peerRelayId),
+      (roomId, producer, producerPeerId, peerRelayId, originProducerId, inboundHopTtl) => {
+        signalingRef.fanLocalProducer?.(roomId, producerPeerId, producer, peerRelayId);
+        // T-B (REQ-RMS-042/043/044) — INTERNAL-node received-DOWN re-forward (the dual role). The
+        // standby coordinator just minted a FRESH local producer from its PARENT's pipe; re-forward
+        // it DOWN this node's tree edges via fanToTreeNeighbors. peerRelayId is the edge (URL) it
+        // arrived on = the PARENT link, so the helper edge-scopes it (fans to CHILDREN only, never
+        // echoes back UP the parent). origin id = the IMMUTABLE origin off the announce (NOT
+        // producer.id — Task 5 mints a fresh local id per hop); router from getRoom (NOT a fabricated
+        // producer.appData.router); inboundHopTtl decrements + the helper's `<= 0` guard terminates a
+        // leaf / exhausted budget. Flag OFF → return before any tree work (shipped star path
+        // byte-identical: this is exactly the prior single fanLocalProducer call).
+        if (!RMS_TREE_ACTIVE) return;
+        const room = signalingRef.getRoom?.(roomId);
+        if (!room) return;
+        fanToTreeNeighbors(
+          roomId, room.router, producer, producerPeerId,
+          originProducerId ?? producer.id, peerRelayId, inboundHopTtl,
+        );
+      },
       // L1.4: opt in to active-forward only in mesh mode (RMS_ACTIVE_FORWARD='1').
       // Default false preserves the REQ-RO-005 paused-keepalive BW saving for M1 /
       // relay-overlap 2-relay failover rooms where the flag is not set.
@@ -668,8 +688,10 @@ if (isMainModule) {
         reverseMint: (roomId, router, announced, peerRelayId) =>
           primaryPipe.reverseMint(roomId, router, announced, peerRelayId),
         getRoom: (roomId) => signalingRef.getRoom?.(roomId),
-        registerReverseMinted: (roomId, minted, originRelayId, producerPeerId) =>
-          signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId),
+        // T-B (REQ-RMS-043/044/046): thread the immutable origin + inbound hop budget the handler
+        // read off the reverse announce into the tree hub-fan (undefined on a pre-tree frame).
+        registerReverseMinted: (roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl) =>
+          signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl),
       }),
       // F1 (REQ-RO-003/008): the standby's UP pipe-connect frame, delivered through
       // the SAME interRelayPeers token gate as pipe-producer announces. PRIMARY
@@ -938,6 +960,12 @@ if (isMainModule) {
     // live / multi-host environment until Task 7 routes the three fan sites through the helper.
     interRelayContext.fanToTreeNeighbors = RMS_TREE_ACTIVE ? fanToTreeNeighbors : undefined;
     interRelayContext.treeActive = RMS_TREE_ACTIVE;
+    // T-B (REQ-RMS-044): the leaf/internal OWN-produce UP-announce (handleProduce standby branch)
+    // reads this to SEED the exact-diameter hop budget. Bound only when RMS_TREE_ACTIVE (undefined
+    // otherwise → the standby branch falls back to the shipped 4-arg onStandbyProducer, byte-stable).
+    interRelayContext.treeDiameterFor = RMS_TREE_ACTIVE
+      ? (roomId: string) => roomTreePosition.get(roomId)?.diameter
+      : undefined;
 
     // Step 7: Poll room_manager events for MCU room assignments
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);

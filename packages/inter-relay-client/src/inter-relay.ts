@@ -910,6 +910,15 @@ export class StandbyWarmPipeCoordinator {
       producer: msTypes.Producer,
       producerPeerId: string | undefined,
       peerRelayId: string,
+      // T-B (REQ-RMS-042/044/046) — the internal-node received-DOWN re-forward. The wiring layer
+      // (index.ts) uses these to re-forward the freshly-minted producer DOWN the tree via
+      // fanToTreeNeighbors: `originProducerId` is the IMMUTABLE origin (NOT this hop's fresh mint id)
+      // and `inboundHopTtl` is the budget carried on the announce this mint was drained from. Both
+      // OPTIONAL + trailing → the shipped 4-arg callers (index.ts star path + the arity-pinned
+      // inter-relay-warmpipe assertions) stay byte-stable; the fire site guard-widens to 6-arg only
+      // when a tree hop actually set them.
+      originProducerId?: string,
+      inboundHopTtl?: number,
     ) => void,
     private readonly activeForward: boolean = false,
     /**
@@ -1044,8 +1053,19 @@ export class StandbyWarmPipeCoordinator {
       );
       // Fix 4 — a throwing L1.3 callback must NOT abort the loop or skip the
       // remaining producers (this one is already minted + marked).
+      // T-B (REQ-RMS-042/044/046) — thread the IMMUTABLE origin + inbound hop budget so the wiring
+      // layer can re-forward this freshly-minted producer DOWN the tree. Guard-widen: the shipped
+      // star path (no origin/hop on the announce) keeps the EXACT 4-arg call the inter-relay-warmpipe
+      // arity assertions pin (byte-stable); a tree hop (either field set) widens to 6-arg.
       try {
-        this.onLocalProducer?.(roomId, producer, announced.producerPeerId, peerRelayId);
+        if (announced.originProducerId === undefined && announced.hopTtl === undefined) {
+          this.onLocalProducer?.(roomId, producer, announced.producerPeerId, peerRelayId);
+        } else {
+          this.onLocalProducer?.(
+            roomId, producer, announced.producerPeerId, peerRelayId,
+            announced.originProducerId, announced.hopTtl,
+          );
+        }
       } catch (cbErr) {
         this.logger?.warn(
           { roomId, producerId: producer.id, error: String((cbErr as Error)?.message ?? cbErr) },

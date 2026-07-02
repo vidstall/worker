@@ -47,12 +47,18 @@ export interface ReverseAnnounceDeps {
   ) => Promise<msTypes.Producer | null>;
   /** Room lookup (returns undefined before the signaling server is live). */
   getRoom: (roomId: string) => RoomState | undefined;
-  /** Seed + fan the hub-minted reverse producer to this relay's local clients. */
+  /** Seed + fan the hub-minted reverse producer to this relay's local clients.
+   *  T-B (REQ-RMS-043/044/046): the trailing IMMUTABLE origin + inbound hop budget are read off
+   *  the reverse announce and threaded so the tree hub-fan (registerReverseMinted → fanToTreeNeighbors)
+   *  re-forwards edge-scoped + hop-guarded on the immutable origin (NOT the fresh per-hop hub mint id).
+   *  Both OPTIONAL → the shipped star hub-fan passes neither (byte-stable flood path unchanged). */
   registerReverseMinted: (
     roomId: string,
     minted: msTypes.Producer,
     originRelayId: string,
     producerPeerId?: string,
+    originProducerId?: string,
+    inboundHopTtl?: number,
   ) => void;
 }
 
@@ -68,6 +74,12 @@ export function makeOnReverseAnnounce(deps: ReverseAnnounceDeps) {
     rtpParameters: msTypes.RtpParameters | undefined,
     peerRelayId: string | undefined,
     producerPeerId: string | undefined,
+    // T-B (REQ-RMS-043/044/046) — the IMMUTABLE origin + loop-guard budget carried on the inbound
+    // reverse PipeProducerAnnounce. Threaded straight into registerReverseMinted so the tree hub-fan
+    // is edge-scoped + hop-guarded on the immutable origin. Undefined on a pre-tree/star announce →
+    // registerReverseMinted's star flood path is byte-stable.
+    originProducerId?: string,
+    hopTtl?: number,
   ): Promise<void> {
     const room = deps.getRoom(roomId);
     // Fail-safe guards: a missing room (server not live yet / unknown room) or an
@@ -105,6 +117,16 @@ export function makeOnReverseAnnounce(deps: ReverseAnnounceDeps) {
       { producerId, kind, rtpParameters, producerPeerId },
       origin,
     );
-    if (minted) deps.registerReverseMinted(roomId, minted, origin, producerPeerId);
+    // T-B (REQ-RMS-043/044/046): thread the immutable origin + inbound hop budget so the tree
+    // hub-fan re-forwards on the ORIGIN id (the fresh per-hop hub mint's own id is NOT the dedup
+    // key) and decrements the loop guard. Guard-widen: the shipped star path (both undefined) keeps
+    // the EXACT 4-arg call so its byte-stable flood is untouched; a tree hop widens to 6-arg.
+    if (minted) {
+      if (originProducerId === undefined && hopTtl === undefined) {
+        deps.registerReverseMinted(roomId, minted, origin, producerPeerId);
+      } else {
+        deps.registerReverseMinted(roomId, minted, origin, producerPeerId, originProducerId, hopTtl);
+      }
+    }
   };
 }

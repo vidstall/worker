@@ -395,6 +395,13 @@ export interface InterRelayContext {
     rtpParameters: msTypes.RtpParameters | undefined,
     peerRelayId: string | undefined,
     producerPeerId: string | undefined,
+    /**
+     * T-B (REQ-RMS-043/044/046) — the IMMUTABLE origin + loop-guard budget read off the inbound
+     * reverse PipeProducerAnnounce and threaded into the tree hub-fan (registerReverseMinted →
+     * fanToTreeNeighbors). Omitted on a pre-tree / star announce → the shipped hub-flood path.
+     */
+    originProducerId?: string,
+    hopTtl?: number,
   ): Promise<void>;
   /**
    * REQ-RMS-037 (part-3 reverse leg, Task B4b) — eagerly ensure the PRIMARY's
@@ -440,6 +447,14 @@ export interface InterRelayContext {
     receiveEdgeUrl: string | null,
     inboundHopTtl: number | undefined,
   ) => void;
+  /**
+   * T-B (REQ-RMS-044) — this room's tree diameter (from roomTreePosition, bound in index.ts). The
+   * leaf/internal OWN-produce UP-announce (handleProduce standby branch) reads it to SEED the exact-
+   * diameter hop budget on the reverse announce (the origin node has no inbound budget to decrement).
+   * Returns undefined off-tree (flag off / room not derived) → the standby branch falls back to the
+   * shipped 4-arg onStandbyProducer call (byte-stable). Bound only when RMS_TREE_ACTIVE.
+   */
+  treeDiameterFor?: (roomId: string) => number | undefined;
 }
 
 /** Send a JSON message to a WebSocket. */
@@ -581,6 +596,8 @@ export function createSignalingServer(
     minted: msTypes.Producer,
     originRelayId: string,
     producerPeerId?: string,
+    originProducerId?: string,
+    inboundHopTtl?: number,
   ) => void;
   /**
    * REQ-RMS-037 (part-3 reverse leg, Task B4b) — STANDBY re-announce-on-reopen:
@@ -994,9 +1011,20 @@ export function createSignalingServer(
     // standby's reverse announce (standby path stays record-only → byte-stable).
     if (interRelay?.role === 'primary' && interRelay.onReverseAnnounce) {
       try {
-        await interRelay.onReverseAnnounce(
-          msg.roomId, msg.producerId, msg.kind, msg.rtpParameters, msg.peerRelayId, msg.producerPeerId,
-        );
+        // T-B (REQ-RMS-043/044/046) — thread the IMMUTABLE origin + loop-guard budget off the inbound
+        // reverse announce into the tree hub-fan. Guard-widen: a pre-tree/star frame (both undefined)
+        // keeps the EXACT 6-arg call the RED-RA-3a wiring assertion pins (byte-stable); a tree frame
+        // (either field present) widens to 8-arg.
+        if (msg.originProducerId === undefined && msg.hopTtl === undefined) {
+          await interRelay.onReverseAnnounce(
+            msg.roomId, msg.producerId, msg.kind, msg.rtpParameters, msg.peerRelayId, msg.producerPeerId,
+          );
+        } else {
+          await interRelay.onReverseAnnounce(
+            msg.roomId, msg.producerId, msg.kind, msg.rtpParameters, msg.peerRelayId, msg.producerPeerId,
+            msg.originProducerId, msg.hopTtl,
+          );
+        }
       } catch (err) {
         logger.warn({ err, roomId: msg.roomId }, 'reverse-announce mint failed');
       }
@@ -1578,7 +1606,22 @@ export function createSignalingServer(
     // is absent (in-process bench / no coordinator), fall back to the legacy direct
     // announce so the bench path is unaffected.
     if (interRelay && interRelay.role === 'primary') {
-      if (interRelay.onPrimaryProducer) {
+      if (interRelay.treeActive && interRelay.fanToTreeNeighbors) {
+        // T-B (REQ-RMS-042/043/044) — TREE root's OWN local produce. Route the DOWN fan through the
+        // single edge-scoped + hop-guarded helper instead of the flat-STAR interRelaySockets.keys()
+        // flood: local-origin produce → receiveEdgeUrl = null (fan ALL tree neighbors) + inboundHopTtl
+        // = undefined → fanToTreeNeighbors SEEDS the budget from pos.diameter. originProducerId = this
+        // producer's id (an OWN produce IS the origin). The root has no parent, so fanToTreeNeighbors
+        // fans DOWN to children only; a chain-primary that is actually a tree-INTERNAL node (I1: tree
+        // root = sorted-min id may diverge from chain slot-0) additionally fans UP to its tree parent.
+        interRelay.fanToTreeNeighbors(
+          mapping.roomId, room.router, producer, mapping.peerId, producer.id, null, undefined,
+        );
+        logger.info(
+          { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId, producerPeerId: mapping.peerId },
+          'T-B: routed primary OWN-produce DOWN fan through fanToTreeNeighbors (tree active)',
+        );
+      } else if (interRelay.onPrimaryProducer) {
         // REQ-RMS-028 (L1.3-b, Bridge A) — N-1 mesh fanout. Fan onPrimaryProducer
         // to every attached inter-relay peer (interRelaySockets.keys()), each on
         // its own per-peer pipe leg. interRelaySockets is a PER-DAEMON map (keyed
@@ -1635,7 +1678,23 @@ export function createSignalingServer(
       // until A4 wires it (and on the in-process bench) the hook is absent — without the
       // guard the "drove..." log would over-claim a reverse hop that never happened.
       if (interRelay.onStandbyProducer) {
-        interRelay.onStandbyProducer(mapping.roomId, room.router, producer, mapping.peerId);
+        // T-B (REQ-RMS-042/044/046) — a leaf/internal node's OWN local produce announces UP to its
+        // tree parent. SEED the exact-diameter hop budget + carry the immutable origin (an OWN produce
+        // IS the origin) so the parent's hub-fan decrements a real budget and dedups on the origin.
+        // The origin has no inbound budget to decrement, so we seed pos.diameter (a global tree
+        // property, same on every node) via the treeDiameterFor accessor. Off-tree (flag off / room
+        // not derived → undefined) the branch falls back to the shipped 4-arg call → byte-stable frame
+        // AND announcer arity (the RED-RA-2* reverse-announcer assertions hold).
+        const treeDiameter = interRelay.treeActive
+          ? interRelay.treeDiameterFor?.(mapping.roomId)
+          : undefined;
+        if (treeDiameter !== undefined) {
+          interRelay.onStandbyProducer(
+            mapping.roomId, room.router, producer, mapping.peerId, treeDiameter, producer.id,
+          );
+        } else {
+          interRelay.onStandbyProducer(mapping.roomId, room.router, producer, mapping.peerId);
+        }
         logger.info(
           { producerId: producer.id, kind: producer.kind, roomId: mapping.roomId, producerPeerId: mapping.peerId },
           'Inter-relay: drove reverse consume-onto-pipe at produce (standby) — announces UP to primary',
@@ -2093,6 +2152,12 @@ export function createSignalingServer(
     minted: msTypes.Producer,
     originRelayId: string,
     producerPeerId?: string,
+    // T-B (REQ-RMS-043/044/046) — the IMMUTABLE origin + inbound loop-guard budget carried off the
+    // reverse announce (threaded via onReverseAnnounce). PASSED IN — NOT read off minted.appData
+    // (which is empty). Undefined on the shipped star hub-fan / the double-race drain path → the
+    // legacy keys() flood below is byte-stable.
+    originProducerId?: string,
+    inboundHopTtl?: number,
   ): void {
     const room = rooms.get(roomId);
     if (!room) return;
@@ -2104,16 +2169,21 @@ export function createSignalingServer(
     bucket.set(minted.id, { originRelayId, kind: minted.kind, producerPeerId, producer: minted });
     minted.on('@close', () => originRegistry.get(roomId)?.delete(minted.id));
     fanLocalProducer(roomId, producerPeerId, minted, originRelayId);
-    // REQ-RMS-035/036 (Task B1) — hub-fan DOWN: forward the reverse-minted
-    // producer to every OTHER standby (exclude origin to prevent echo-back).
-    // Reuses onPrimaryProducer (DRY-1) so the receiving standby mints + fans
-    // via its normal forward path without a new pipe-creation route.
-    // MULTI-ROOM CARRY-FORWARD: interRelaySockets is a PER-DAEMON map (keyed by
-    // peerRelayId), NOT per-room — fine under the single-room demo scope (every
-    // attached peer is a standby of this room), but a per-(room,peer) fan filter
-    // is needed before multi-room (out-of-scope for part-3; see the plan's
-    // Out-of-scope section). Mirrors the same caveat on the UP fanout above.
-    if (interRelay?.onPrimaryProducer) {
+    // T-B (REQ-RMS-043/044/046) — TREE hub-fan. The reverse-minted producer arrived FROM the child
+    // edge `originRelayId` (already a URL), so re-forward it edge-scoped + hop-guarded through the
+    // single fanToTreeNeighbors helper (DOWN to this node's OTHER children + UP to its tree parent),
+    // REPLACING the flat-STAR interRelaySockets.keys() flood. The origin id is the IMMUTABLE origin
+    // (fall back to minted.id ONLY when the announce truly had none — e.g. the rare double-race drain
+    // path), NEVER the fresh per-hop hub mint id. Flag off (treeActive undefined) → the legacy flood.
+    if (interRelay?.treeActive && interRelay.fanToTreeNeighbors) {
+      interRelay.fanToTreeNeighbors(
+        roomId, room.router, minted, producerPeerId, originProducerId ?? minted.id, originRelayId, inboundHopTtl,
+      );
+      logger.info(
+        { producerId: minted.id, kind: minted.kind, roomId, originRelayId, originProducerId: originProducerId ?? minted.id },
+        'T-B: hub-fanned reverse-minted producer through fanToTreeNeighbors (tree active)',
+      );
+    } else if (interRelay?.onPrimaryProducer) {
       let cascadePeers = 0;
       for (const p of interRelaySockets.keys()) {
         if (p === originRelayId) continue;           // REQ-RMS-036 -- never echo back to origin

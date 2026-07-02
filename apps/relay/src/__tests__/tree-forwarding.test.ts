@@ -7,6 +7,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId, produceLocalFromPipe, InterRelayProducerRegistry, StandbyWarmPipeCoordinator } from '@dvconf/inter-relay-client';
 import type { RoomTopology } from '@dvconf/inter-relay-client';
 import { deriveTreePosition, fanTargets, fanTargetUrls, nextHopTtl, seedOrDecrementHop } from '../tree-position.js';
+import { makeOnReverseAnnounce } from '../reverse-announce-handler.js';
 
 describe('T-B byte-stability guards (REQ-RMS-048) — MUST stay green through every task', () => {
   it('a default announce frame has EXACTLY the shipped keys (no tree fields)', () => {
@@ -253,5 +254,125 @@ describe('producedOrigins teardown lifecycle (T6/B4, I1)', () => {
     await coord.ensure(makeStandbyTopology(ROOM), r2.router as never, 40000, 'relay-A');
     const totalProduce = [...r1.transports, ...r2.transports].reduce((n, t) => n + t.produce.mock.calls.length, 0);
     expect(totalProduce).toBe(2); // clearRoom cleared the set → re-mint
+  });
+});
+
+// ── T7 (REQ-RMS-042/043/044/046) — route all 3 fan sites through fanToTreeNeighbors ──
+//
+// These unit-prove the THREADING each fan site depends on (the fanToTreeNeighbors
+// wiring itself is index.ts main-scoped → covered by the hermetic depth-2 tree
+// integration test, plan Task 9). Here we pin: (1) the reverse hub-fan preserves the
+// IMMUTABLE origin across the mint, (2) the internal-node received-DOWN re-forward
+// callback receives the immutable origin + inbound hop budget, (3) the OWN-produce UP
+// announce carries a seeded hop budget through the queued-then-drained path, and
+// (4) the cascade terminates (hop guard + per-room origin dedup, no double-consume).
+
+describe('T7 Step 3 — reverse hub-fan: originProducerId survives the reverse mint (REQ-RMS-043/046)', () => {
+  const room = { router: {} } as never; // truthy room so the handler proceeds to reverseMint
+  it('a reverse announce carrying originProducerId "O" + hopTtl 2 → registerReverseMinted receives "O" + 2 (NOT the fresh hub-mint id)', async () => {
+    const registerReverseMinted = vi.fn();
+    const mintedProducer = { id: 'fresh-hub-mint', kind: 'video' } as never; // fresh per-hop id ≠ origin
+    const onReverseAnnounce = makeOnReverseAnnounce({
+      ensureReverseLeg: vi.fn().mockResolvedValue(undefined),
+      reverseMint: vi.fn().mockResolvedValue(mintedProducer),
+      getRoom: () => room,
+      registerReverseMinted,
+    });
+    // onReverseAnnounce(roomId, producerId, kind, rtpParameters, peerRelayId, producerPeerId, originProducerId, hopTtl)
+    await onReverseAnnounce('roomZ', 'hop-3-id', 'video', rtp(42), 'ws://child', 'pub-1', 'O', 2);
+    expect(registerReverseMinted).toHaveBeenCalledTimes(1);
+    // registerReverseMinted(roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl)
+    expect(registerReverseMinted).toHaveBeenCalledWith('roomZ', mintedProducer, 'ws://child', 'pub-1', 'O', 2);
+  });
+  it('a pre-tree reverse announce (no origin/hopTtl) → registerReverseMinted called with the EXACT 4-arg tuple (byte-stable guard-widen)', async () => {
+    const registerReverseMinted = vi.fn();
+    const mintedProducer = { id: 'p', kind: 'video' } as never;
+    const onReverseAnnounce = makeOnReverseAnnounce({
+      ensureReverseLeg: vi.fn().mockResolvedValue(undefined),
+      reverseMint: vi.fn().mockResolvedValue(mintedProducer),
+      getRoom: () => room,
+      registerReverseMinted,
+    });
+    await onReverseAnnounce('roomZ', 'p', 'video', rtp(42), 'ws://child', 'pub-1');
+    expect(registerReverseMinted).toHaveBeenCalledWith('roomZ', mintedProducer, 'ws://child', 'pub-1');
+    expect(registerReverseMinted.mock.calls[0]!.length).toBe(4); // no trailing undefined origin/hop
+  });
+});
+
+describe('T7 Step 4 — internal-node received-DOWN re-forward: onLocalProducer threads origin + hopTtl (REQ-RMS-042/044/046)', () => {
+  it('a forwarded announce carrying originProducerId + hopTtl → onLocalProducer gets the immutable origin + inbound hop (6-arg) for the DOWN re-forward', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({ type: 'pipe-producer', roomId: 'rD', producerId: 'hop-2', kind: 'video', peerRelayId: 'ws://parent', rtpParameters: rtp(5), originProducerId: 'ORIGIN-1', hopTtl: 2 } as never);
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true, true);
+    const r = makeMockRouter();
+    await coord.ensure(makeStandbyTopology('rD'), r.router as never, 40000, 'ws://parent');
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
+    const call = onLocalProducer.mock.calls[0]!;
+    // (roomId, producer, producerPeerId, peerRelayId, originProducerId, inboundHopTtl)
+    expect(call[0]).toBe('rD');
+    expect(call[3]).toBe('ws://parent');            // the PARENT edge (receiveEdge for the DOWN re-forward)
+    expect(call[4]).toBe('ORIGIN-1');               // IMMUTABLE origin (NOT the fresh per-hop mint id)
+    expect(call[5]).toBe(2);                        // inbound hop budget threaded for the re-forward
+    expect((call[1] as { id: string }).id).not.toBe('ORIGIN-1'); // the minted producer has a FRESH id
+  });
+  it('a pre-tree forwarded announce (no origin/hopTtl) → onLocalProducer gets the EXACT 4-arg tuple (shipped star path byte-stable)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({ type: 'pipe-producer', roomId: 'rD2', producerId: 'p', kind: 'video', peerRelayId: 'ws://parent', rtpParameters: rtp(5) } as never);
+    const onLocalProducer = vi.fn();
+    // treeActive FALSE → shipped star path; onLocalProducer must fire the EXACT 4-arg tuple.
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true, false);
+    const r = makeMockRouter();
+    await coord.ensure(makeStandbyTopology('rD2'), r.router as never, 40000, 'ws://parent');
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer.mock.calls[0]!.length).toBe(4); // NO trailing undefined origin/hop
+  });
+});
+
+describe('T7 Step 2 — OWN-produce UP announce: seeded hopTtl + origin survive queue→drain (REQ-RMS-044/046)', () => {
+  const REMAPPED = rtp(987654);
+  it('a local produce QUEUED before the reverse leg connects, then drained, still emits hopTtl + originProducerId on the UP announce', async () => {
+    const upAnnounce = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), undefined, vi.fn(), true, true);
+    coord.setReverseAnnouncer(upAnnounce);
+    // QUEUE (no transport bound yet) — carry the seeded exact-diameter budget (4) + immutable origin.
+    await coord.onLocalClientProducer('rQ', {} as never, { id: 'local-1', kind: 'video' }, 'clientA', 'ws://parent', 4, 'ORIGIN-1');
+    expect(upAnnounce).not.toHaveBeenCalled();
+    // Bind the transport + drain (mirrors onPrimaryConnectParams after transport.connect()).
+    coord.bindPipeTransportForTest('rQ', 'ws://parent', { consume: vi.fn().mockResolvedValue({ id: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED }) } as never);
+    await coord.drainReverse('rQ', 'ws://parent');
+    expect(upAnnounce).toHaveBeenCalledTimes(1);
+    // 7-arg announce: (roomId, piped, producerPeerId, scopedPeer, rtpParameters, hopTtl, originProducerId)
+    expect(upAnnounce).toHaveBeenCalledWith('rQ', { id: 'piped-up-1', kind: 'video' }, 'clientA', 'ws://parent', REMAPPED, 4, 'ORIGIN-1');
+  });
+});
+
+describe('T7 N5 — cascade terminates: hop guard + per-room origin dedup (no double-consume) (REQ-RMS-044/046)', () => {
+  it('a forwarded producer with hopTtl 1 fires onLocalProducer (fan-local) but the re-forward hop resolves to 0 → the <= 0 guard drops the tree re-forward', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({ type: 'pipe-producer', roomId: 'rN5', producerId: 'hop-last', kind: 'video', peerRelayId: 'ws://parent', rtpParameters: rtp(9), originProducerId: 'ORIGIN-1', hopTtl: 1 } as never);
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true, true);
+    const r = makeMockRouter();
+    await coord.ensure(makeStandbyTopology('rN5'), r.router as never, 40000, 'ws://parent');
+    // fan-local STILL happens (the producer was minted + the callback fired) with hopTtl==1 ...
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
+    expect(onLocalProducer.mock.calls[0]![5]).toBe(1);
+    // ... but the re-forward the callback drives is hop-guarded: seedOrDecrementHop(1, D) == 0 →
+    // fanToTreeNeighbors' `<= 0` guard fires → NO re-forward to tree edges (cascade terminates).
+    expect(seedOrDecrementHop(1, 3)).toBe(0);
+  });
+  it('an internal node re-forward of a MINTED producer does NOT double-consume: the same origin on two parent edges is minted EXACTLY once (per-room origin dedup)', async () => {
+    const registry = new InterRelayProducerRegistry();
+    registry.record({ type: 'pipe-producer', roomId: 'rN5b', producerId: 'hop-A', kind: 'video', peerRelayId: 'ws://pA', rtpParameters: rtp(11), originProducerId: 'ORIGIN-1', hopTtl: 3 } as never);
+    registry.record({ type: 'pipe-producer', roomId: 'rN5b', producerId: 'hop-B', kind: 'video', peerRelayId: 'ws://pB', rtpParameters: rtp(22), originProducerId: 'ORIGIN-1', hopTtl: 3 } as never);
+    const onLocalProducer = vi.fn();
+    const coord = new StandbyWarmPipeCoordinator(registry, undefined, onLocalProducer, true, true);
+    const rA = makeMockRouter();
+    const rB = makeMockRouter();
+    await coord.ensure(makeStandbyTopology('rN5b'), rA.router as never, 40000, 'ws://pA');
+    await coord.ensure(makeStandbyTopology('rN5b'), rB.router as never, 40001, 'ws://pB');
+    // ONE mint + ONE onLocalProducer → the DOWN re-forward runs once (no double-consume of the origin).
+    expect(onLocalProducer).toHaveBeenCalledTimes(1);
   });
 });
