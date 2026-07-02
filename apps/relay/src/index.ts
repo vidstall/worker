@@ -75,7 +75,7 @@ import {
   createPipeLivenessObserver,
   type RoomTopology,
 } from '@dvconf/inter-relay-client';
-import { resolveDialTarget } from './relay-endpoint-resolver.js';
+import { resolvePrimaryEndpoint, resolveTreeParentDial } from './relay-endpoint-resolver.js';
 import { deriveTreePosition, type TreePosition } from './tree-position.js';
 
 const logger = createLogger('relay-daemon');
@@ -380,7 +380,7 @@ if (isMainModule) {
      */
     const standbyLink: { primaryUrl: string | null } = { primaryUrl: null };
     // T-B: this relay's tree position per room, derived on RoomAssigned (RMS_TREE_ACTIVE).
-    // Read by the standby dial (resolveDialTarget → tree PARENT) and, later, fanToTreeNeighbors.
+    // Read by the tree-active dial (resolveTreeParentDial → tree PARENT) and, later, fanToTreeNeighbors.
     const roomTreePosition = new Map<string, TreePosition>();
     /**
      * REQ-RMS-028 (L1.3-b, Bridge A) — the per-peer inter-relay socket map, OWNED
@@ -898,7 +898,9 @@ if (isMainModule) {
           // the room (same tree every assigned relay derives). Flag-gated (RMS_TREE_ACTIVE,
           // default OFF) so the shipped flat-STAR path is byte-identical. No forwarding change
           // here — the tree-aware fan is a later task; this only records position + re-targets
-          // the dial (Step 5b, N1). assumes tree root == slot-0 primary (design §3.1).
+          // the dial. The dial is now a PURE function of tree position (I1): the tree root is the
+          // sorted-min canonical id, which need NOT equal chain slot-0 (survives promote_relay /
+          // unsorted relay_ids) — so the dial below does not gate on role === 'primary'.
           if (RMS_TREE_ACTIVE && relayIds.length > 0 && roomId) {
             // TODO(T-B capacity task): compute a capacityCap via deriveDegreeCap(RMS_C_WORKER_PATHS, uLocal, producersPerPeer) and pass it as deriveTreePosition's 5th arg. Omitted now → shape governs (B1).
             const pos = deriveTreePosition(relayIds, myMinerId, RMS_TREE_DEGREE, RMS_TREE_MAX_HEIGHT);
@@ -911,7 +913,25 @@ if (isMainModule) {
               'T-B: derived tree position for room');
           }
 
-          if (role === 'primary') {
+          if (RMS_TREE_ACTIVE && roomId) {
+            // T-B (I1 / N1): under the tree the inter-relay DIAL is a PURE function of tree position,
+            // NOT the chain slot-0 role. The tree root (sorted-min canonical id) diverges from chain
+            // slot-0 after promote_relay or when relay_ids arrives unsorted (deriveTree is order-
+            // independent by design), so gating the dial on role==='primary' would leave a non-root
+            // chain-primary never dialing its tree parent. Every node with a parent dials it (child->
+            // parent live link); the true tree root (pos.parent===null) dials nobody = accept-only.
+            // The WS accept path is unchanged (a node accepts its children's dials automatically).
+            const pos = roomTreePosition.get(roomId);
+            const dialUrl = resolveTreeParentDial(pos, relayEndpointCache);
+            standbyLink.primaryUrl = dialUrl;
+            if (dialUrl !== null) standbyLinkManager.connectTo(dialUrl);
+            logger.info(
+              { roomId, relayMode, role, treeRole: pos?.role ?? 'unknown', dialUrl, resolved: dialUrl !== null },
+              dialUrl !== null
+                ? 'T-B: relay opened live inter-relay link to its TREE PARENT'
+                : 'T-B: relay is the TREE ROOT (or parent endpoint not yet resolvable) — accept-only, no dial',
+            );
+          } else if (role === 'primary') {
             // F1: PRIMARY for this room. The live pipe is driven at the produce
             // event (interRelayContext.onPrimaryProducer → PrimaryPipeCoordinator):
             // it mints+connects the primary pipe, pipes the producer, and announces
@@ -929,20 +949,14 @@ if (isMainModule) {
             // (resolves the real producerId, else placeholder) and on each inbound
             // announce standbyWarmPipe.onAnnounce(roomId) re-runs the warm pipe with
             // the real id. The record + resolve + re-run contract is unit-tested
-            // (inter-relay-warmpipe.test.ts); resolveDialTarget is unit-tested
+            // (inter-relay-warmpipe.test.ts); resolvePrimaryEndpoint is unit-tested
             // (relay-endpoint-resolver.test.ts).
-            // T-B (N1): when the tree is active a non-root node dials its PARENT (child→parent
-            // live link) instead of slot-0; the root (pos.parent===null) resolves null → dials
-            // nobody = accept-only, exactly today's primary. Flag OFF → shipped slot-0 path.
-            const treePos = RMS_TREE_ACTIVE && roomId ? roomTreePosition.get(roomId) : undefined;
-            const primaryUrl = resolveDialTarget(
-              treePos, relayEndpointCache, relayIds, RMS_TREE_ACTIVE && roomId !== undefined,
-            );
+            const primaryUrl = resolvePrimaryEndpoint(relayEndpointCache, relayIds);
             standbyLink.primaryUrl = primaryUrl;
-            // G3.2b: OPEN the live inter-relay link to the primary (tree parent under T-B).
-            // The upstream pushes pipe-producer announces down it; each cuts the warm pipe
-            // over to the real producerId. The paused warm pipe is opened on first peer join
-            // (onStandbyRoomReady). Skipped until the URL resolves from chain.
+            // G3.2b: OPEN the live inter-relay link to the primary. The primary
+            // pushes pipe-producer announces down it; each cuts the warm pipe over
+            // to the real producerId. The paused warm pipe is opened on first peer
+            // join (onStandbyRoomReady). Skipped until the URL resolves from chain.
             if (primaryUrl !== null) standbyLinkManager.connectTo(primaryUrl);
             logger.info(
               { roomId, relayMode, role, primaryUrl, resolved: primaryUrl !== null },

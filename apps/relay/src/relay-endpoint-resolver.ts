@@ -47,26 +47,21 @@ export function resolvePrimaryEndpoint(
 }
 
 /**
- * T-B (N1): decide which endpoint a standby/child relay should DIAL for a room.
+ * T-B (I1 / N1): the tree-active inter-relay DIAL target for a node — a PURE function of
+ * its TREE position, NOT its chain slot-0 role.
  *
- * PURE (given the cache lookup); unit-tested so the branch is provable without the
- * index.ts RoomAssigned glue.
+ *  - a position WITH a parent → dial the tree PARENT (child→parent link).
+ *  - the true tree root (`pos.parent === null`) OR no position → null (accept-only, dials nobody).
  *
- *  - tree active + a position WITH a parent → dial the tree PARENT (child→parent link).
- *  - tree active + root / no-parent / no position → null (root accepts only; dials nobody).
- *  - tree inactive → the shipped slot-0 primary path (byte-identical to before).
- *
- * assumes tree root == slot-0 primary (design §3.1); the tree branch is flag-gated
- * (RMS_TREE_ACTIVE) so the shipped star path is untouched.
+ * The tree root is the sorted-min canonical relayId (`deriveTree` is order-independent), which
+ * DIVERGES from chain slot-0 after `promote_relay` or when `relay_ids` arrives unsorted — so the
+ * dial MUST NOT be gated on `role === 'primary'`. A non-root chain-primary correctly dials its
+ * tree parent here while still accepting its children's dials via the unchanged WS accept path.
+ * Unit-tested (relay-endpoint-resolver.test.ts) with non-sorted relay_ids where slot-0 ≠ root.
  */
-export function resolveDialTarget(
+export function resolveTreeParentDial(
   pos: TreePosition | undefined,
   cache: RelayEndpointCache,
-  relayIds: string[],
-  treeActive: boolean,
 ): string | null {
-  if (treeActive) {
-    return pos && pos.parent ? resolveRelayEndpoint(cache, pos.parent) : null;
-  }
-  return resolvePrimaryEndpoint(cache, relayIds);
+  return pos && pos.parent ? resolveRelayEndpoint(cache, pos.parent) : null;
 }

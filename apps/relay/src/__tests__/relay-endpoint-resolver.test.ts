@@ -14,8 +14,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { InMemoryRelayEndpointCache } from '@dvconf/shared';
-import { resolvePrimaryEndpoint, resolveRelayEndpoint, resolveDialTarget } from '../relay-endpoint-resolver.js';
-import type { TreePosition } from '../tree-position.js';
+import { toCanonicalRelayId } from '@dvconf/inter-relay-client';
+import { resolvePrimaryEndpoint, resolveRelayEndpoint, resolveTreeParentDial } from '../relay-endpoint-resolver.js';
+import { deriveTreePosition, type TreePosition } from '../tree-position.js';
 
 describe('resolvePrimaryEndpoint (G3.2a relay-side resolution)', () => {
   it('resolves relayIds[0] → the primary relay’s cached WS URL', () => {
@@ -79,32 +80,47 @@ describe('resolveRelayEndpoint (T-B: resolve ANY relayId, e.g. a tree parent/chi
   });
 });
 
-describe('resolveDialTarget (T-B N1: child dials its tree PARENT; root/off → slot-0 or null)', () => {
+describe('resolveTreeParentDial (T-B I1/N1: dial is a PURE function of tree position)', () => {
   const pos = (parent: string | null): TreePosition => ({
     parent, children: [], role: parent === null ? 'root' : 'leaf', diameter: 0, withinDiameterBound: true,
   });
   const mkCache = () => {
     const c = new InMemoryRelayEndpointCache();
     c.setUrl('0xparent', 'ws://parent:4000');
-    c.setUrl('0xprimary', 'ws://primary:4000');
     return c;
   };
 
-  it('tree active + internal/leaf (parent set) → the PARENT url', () => {
-    expect(resolveDialTarget(pos('0xparent'), mkCache(), ['0xprimary', '0xself'], true))
-      .toBe('ws://parent:4000');
+  it('a position WITH a parent → the PARENT url (child→parent link)', () => {
+    expect(resolveTreeParentDial(pos('0xparent'), mkCache())).toBe('ws://parent:4000');
   });
-  it('tree active + ROOT (parent===null) → null (accept-only, dials nobody)', () => {
-    expect(resolveDialTarget(pos(null), mkCache(), ['0xprimary'], true)).toBeNull();
+  it('the true tree ROOT (parent===null) → null (accept-only, dials nobody)', () => {
+    expect(resolveTreeParentDial(pos(null), mkCache())).toBeNull();
   });
-  it('tree active + NO position (undefined) → null', () => {
-    expect(resolveDialTarget(undefined, mkCache(), ['0xprimary'], true)).toBeNull();
+  it('NO position (undefined) → null', () => {
+    expect(resolveTreeParentDial(undefined, mkCache())).toBeNull();
   });
-  it('tree active + parent not yet cached → null', () => {
-    expect(resolveDialTarget(pos('0xuncached'), mkCache(), ['0xprimary'], true)).toBeNull();
+  it('parent not yet cached → null', () => {
+    expect(resolveTreeParentDial(pos('0xuncached'), mkCache())).toBeNull();
   });
-  it('tree INACTIVE → the shipped slot-0 primary path (ignores pos)', () => {
-    expect(resolveDialTarget(pos('0xparent'), mkCache(), ['0xprimary', '0xself'], false))
-      .toBe('ws://primary:4000');
+});
+
+describe('I1 REGRESSION — the tree dial follows TREE-ROLE, not chain slot-0', () => {
+  // relay_ids NOT sorted: chain slot-0 (0x02) is NOT the tree root (0x00 = sorted-min canonical).
+  const relayIds = ['0x02', '0x00', '0x01'];
+  const cache = { getUrl: (id: string) => `ws://${id}:4000` } as never; // resolves ANY canonical id
+
+  it('a NON-root chain-primary (slot-0 = 0x02) dials its TREE PARENT (0x00), NOT nobody', () => {
+    const posPrimary = deriveTreePosition(relayIds, '0x02', 2, 3);
+    expect(posPrimary.parent).toBe(toCanonicalRelayId('0x00'));
+    expect(resolveTreeParentDial(posPrimary, cache)).toBe('ws://' + toCanonicalRelayId('0x00') + ':4000');
+  });
+  it('the TREE ROOT (0x00, a chain-standby slot-1) dials NOBODY (parent===null)', () => {
+    const posRoot = deriveTreePosition(relayIds, '0x00', 2, 3);
+    expect(posRoot.parent).toBeNull();
+    expect(resolveTreeParentDial(posRoot, cache)).toBeNull();
+  });
+  it('flag-OFF path is unchanged: the standby still resolves chain slot-0 directly', () => {
+    // The shipped flag-off standby branch calls resolvePrimaryEndpoint(cache, relayIds) → slot-0 = 0x02.
+    expect(resolvePrimaryEndpoint(cache, relayIds)).toBe('ws://0x02:4000');
   });
 });
