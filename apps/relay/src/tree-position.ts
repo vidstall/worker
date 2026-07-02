@@ -9,7 +9,7 @@
  * See docs/superpowers/specs cascade-tree Phase T-B design. REQ-RMS-042.
  */
 import {
-  deriveTree, deriveDegreeCap, treeRoleOf, childrenOf, parentOf,
+  deriveTree, treeRoleOf, childrenOf, parentOf,
   toCanonicalRelayId, type TreeRole,
 } from '@dvconf/inter-relay-client';
 
@@ -44,9 +44,10 @@ export function deriveTreePosition(
   };
 }
 
-/** PURE. Fan targets = neighbors minus the receive edge (null origin → all). Works in ANY id space. */
+/** PURE. Fan targets = neighbors minus the receive edge (null origin → all). Works in ANY id space.
+ *  Total: always returns a fresh array (never aliases the caller's `neighbors`). */
 export function fanTargets(neighbors: string[], receiveEdge: string | null): string[] {
-  return receiveEdge === null ? neighbors : neighbors.filter((n) => n !== receiveEdge);
+  return receiveEdge === null ? [...neighbors] : neighbors.filter((n) => n !== receiveEdge);
 }
 
 /** PURE. Decrement the hop budget; undefined (flag-off) passes through. */

@@ -94,8 +94,10 @@ const RMS_ACTIVE_FORWARD = process.env['RMS_ACTIVE_FORWARD'] === '1';
 // is the B1 SHAPING degree (D = min(shapingDegree, live-capacity-cap)); RMS_TREE_MAX_HEIGHT
 // is the diameter bound H (REQ-RMS-041).
 const RMS_TREE_ACTIVE = process.env['RMS_TREE_ACTIVE'] === '1';
-const RMS_TREE_MAX_HEIGHT = parseInt(process.env['RMS_TREE_MAX_HEIGHT'] ?? '3', 10);
-const RMS_TREE_DEGREE = parseInt(process.env['RMS_TREE_DEGREE'] ?? '2', 10); // B1 shaping degree
+// NaN-guard: a malformed operator value must fall back to the numeric default, never NaN —
+// deriveTree would index ids[NaN] and throw inside the RoomAssigned poller callback.
+const RMS_TREE_MAX_HEIGHT = ((n) => (Number.isFinite(n) ? n : 3))(parseInt(process.env['RMS_TREE_MAX_HEIGHT'] ?? '3', 10));
+const RMS_TREE_DEGREE = ((n) => (Number.isFinite(n) ? n : 2))(parseInt(process.env['RMS_TREE_DEGREE'] ?? '2', 10)); // B1 shaping degree
 
 /**
  * P17 M2a-P11 — assemble + start the relay's F61 HealthMonitor (DOH-014/016/017/018).
@@ -898,10 +900,7 @@ if (isMainModule) {
           // here — the tree-aware fan is a later task; this only records position + re-targets
           // the dial (Step 5b, N1). assumes tree root == slot-0 primary (design §3.1).
           if (RMS_TREE_ACTIVE && relayIds.length > 0 && roomId) {
-            const cWorker = parseInt(process.env['RMS_C_WORKER_PATHS'] ?? '300', 10);
-            // Capacity cap is an UPPER bound only; P is unknown at assignment → omit it (the
-            // SHAPING degree governs, B1). A future task threads a LIVE P via cWorker.
-            void cWorker;
+            // TODO(T-B capacity task): compute a capacityCap via deriveDegreeCap(RMS_C_WORKER_PATHS, uLocal, producersPerPeer) and pass it as deriveTreePosition's 5th arg. Omitted now → shape governs (B1).
             const pos = deriveTreePosition(relayIds, myMinerId, RMS_TREE_DEGREE, RMS_TREE_MAX_HEIGHT);
             roomTreePosition.set(roomId, pos);
             if (!pos.withinDiameterBound) {
