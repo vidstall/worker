@@ -89,3 +89,46 @@ describe('deriveTree — trivial sizes', () => {
     expect(t.diameter).toBe(0);
   });
 });
+
+describe('deriveTree — degree, height, diameter bounds (REQ-RMS-040/041)', () => {
+  const seven = ['0x01', '0x02', '0x03', '0x04', '0x05', '0x06', '0x07'];
+
+  it('no node exceeds the degree cap D', () => {
+    const t = deriveTree(seven, { degreeCap: 2, maxHeight: 10 });
+    for (const n of t.nodes.values()) expect(n.children.length).toBeLessThanOrEqual(2);
+  });
+  it('height correct for a complete binary tree of 7 (height 2, within bound)', () => {
+    const t = deriveTree(seven, { degreeCap: 2, maxHeight: 2 });
+    expect(t.height).toBe(2);
+    expect(t.withinDiameterBound).toBe(true);
+  });
+  it('diameter = longest leaf->root->leaf hop path (K=3 D=2 -> 2)', () => {
+    const t = deriveTree(['0x01', '0x02', '0x03'], { degreeCap: 2, maxHeight: 10 });
+    expect(t.diameter).toBe(2);
+  });
+  it('diameter of a complete binary tree of 7 = 4', () => {
+    const t = deriveTree(seven, { degreeCap: 2, maxHeight: 10 });
+    expect(t.diameter).toBe(4); // leaf -> ... -> root -> ... -> leaf = 4 edges
+  });
+  it('flags withinDiameterBound=false when deeper than maxHeight, but keeps ALL K (no orphan)', () => {
+    const t = deriveTree(seven, { degreeCap: 2, maxHeight: 1 });
+    expect(t.height).toBe(2);
+    expect(t.withinDiameterBound).toBe(false);
+    expect(t.nodes.size).toBe(7);
+  });
+  it('K=2 -> root + exactly one child (STAR shape), height 1, diameter 1 (REQ-RMS-048)', () => {
+    const t = deriveTree(['0x01', '0x02'], { degreeCap: 5, maxHeight: 3 });
+    expect(t.root).toBe('0x01');
+    expect(t.nodes.get('0x01')!.children).toEqual(['0x02']);
+    expect(t.nodes.get('0x02')!.parent).toBe('0x01');
+    expect(t.height).toBe(1);
+    expect(t.diameter).toBe(1);
+  });
+  it('D=0 (budget exhausted) builds a chain (D forced to 1), bound false for K>1', () => {
+    const t = deriveTree(['0x01', '0x02', '0x03'], { degreeCap: 0, maxHeight: 1 });
+    expect(t.nodes.get('0x02')!.parent).toBe('0x01');
+    expect(t.nodes.get('0x03')!.parent).toBe('0x02');
+    expect(t.height).toBe(2);
+    expect(t.withinDiameterBound).toBe(false);
+  });
+});
