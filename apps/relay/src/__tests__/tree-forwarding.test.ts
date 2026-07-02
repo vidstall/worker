@@ -69,4 +69,7 @@ describe('hopTtl + originProducerId on PipeProducerAnnounce (T5, REQ-RMS-044/046
   it('guard REJECTS a non-numeric hopTtl', () => {
     expect(isPipeProducerAnnounce({ type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video', hopTtl: 'x' })).toBe(false);
   });
+  it('guard REJECTS a non-string originProducerId', () => {
+    expect(isPipeProducerAnnounce({ type: 'pipe-producer', roomId: 'r', producerId: 'p', kind: 'video', originProducerId: 42 })).toBe(false);
+  });
 });

@@ -178,11 +178,15 @@ export interface PipeProducerAnnounce {
    * codec + encoding parameters after piping.
    */
   rtpParameters?: msTypes.RtpParameters;
-  /** REQ-RMS-044 (cascade-tree) — loop-guard hop budget. Additive/back-compat (default-omit),
-   *  init TreeLayout.diameter at the origin, decremented per hop, dropped at <= 0. */
+  /**
+   * REQ-RMS-044 (cascade-tree) — loop-guard hop budget. Additive/back-compat (default-omit),
+   * init TreeLayout.diameter at the origin, decremented per hop, dropped at <= 0.
+   */
   hopTtl?: number;
-  /** REQ-RMS-046 (cascade-tree) — the IMMUTABLE origin producerId (first hop's id), threaded
-   *  unchanged across hops. Per-room dedup key (the local producerId now differs per hop). */
+  /**
+   * REQ-RMS-046 (cascade-tree) — the IMMUTABLE origin producerId (first hop's id), threaded
+   * unchanged across hops. Per-room dedup key (the local producerId now differs per hop).
+   */
   originProducerId?: string;
 }
 
