@@ -4,7 +4,7 @@
  * All pure/synchronous — no mediasoup, no I/O.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId, produceLocalFromPipe, InterRelayProducerRegistry, StandbyWarmPipeCoordinator } from '@dvconf/inter-relay-client';
+import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId, produceLocalFromPipe, InterRelayProducerRegistry, StandbyWarmPipeCoordinator, makeReparentHarness } from '@dvconf/inter-relay-client';
 import type { RoomTopology } from '@dvconf/inter-relay-client';
 import { deriveTreePosition, fanTargets, fanTargetUrls, nextHopTtl, seedOrDecrementHop, computeTreeFanPlan } from '../tree-position.js';
 import { makeOnReverseAnnounce } from '../reverse-announce-handler.js';
@@ -444,5 +444,60 @@ describe('T7 N5 — cascade terminates: hop guard + per-room origin dedup (no do
     await coord.ensure(makeStandbyTopology('rN5b'), rB.router as never, 40001, 'ws://pB');
     // ONE mint + ONE onLocalProducer → the DOWN re-forward runs once (no double-consume of the origin).
     expect(onLocalProducer).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── T8 (REQ-RMS-046, §3.4) — make-before-break re-parent PRIMITIVE ──
+//
+// A SYNTHETIC layout diff (no real relay death, no live media path — that is T-C).
+// The invariant: the NEW parent edge is opened + producing BEFORE the OLD parent
+// edge is torn down, so local clients see continuous media (no gap). The per-hop
+// FRESH local id (Task 5/T6) + per-room origin dedup (Task 5/B4) guarantee the
+// transient double-parent during the overlap does NOT double-produce.
+
+describe('make-before-break re-parent (T6, REQ-RMS-046)', () => {
+  it('new parent edge produces BEFORE the old is closed (no gap)', async () => {
+    const events: string[] = [];
+    const h = makeReparentHarness({
+      openEdge: (id: string) => events.push(`open:${id}`),
+      produceOn: (id: string) => events.push(`produce:${id}`),
+      closeEdge: (id: string) => events.push(`close:${id}`),
+    });
+    await h.reparent('room1', 'oldParent', 'newParent');
+    expect(events).toEqual(['open:newParent', 'produce:newParent', 'close:oldParent']);
+  });
+
+  it('a node acquiring its FIRST parent (oldParentId=null) opens + produces but has NO old edge to close', async () => {
+    const events: string[] = [];
+    const h = makeReparentHarness({
+      openEdge: (id: string) => events.push(`open:${id}`),
+      produceOn: (id: string) => events.push(`produce:${id}`),
+      closeEdge: (id: string) => events.push(`close:${id}`),
+    });
+    await h.reparent('room1', null, 'newParent');
+    expect(events).toEqual(['open:newParent', 'produce:newParent']);
+  });
+
+  it('an UNCHANGED parent (old===new) is a complete no-op (never re-opens nor tears down the live edge)', async () => {
+    const events: string[] = [];
+    const h = makeReparentHarness({
+      openEdge: (id: string) => events.push(`open:${id}`),
+      produceOn: (id: string) => events.push(`produce:${id}`),
+      closeEdge: (id: string) => events.push(`close:${id}`),
+    });
+    await h.reparent('room1', 'sameParent', 'sameParent');
+    expect(events).toEqual([]);
+  });
+
+  it('AWAITS async effects so the strict ordering holds even when open/produce resolve late', async () => {
+    const events: string[] = [];
+    const defer = (label: string) => new Promise<void>((resolve) => setTimeout(() => { events.push(label); resolve(); }, 0));
+    const h = makeReparentHarness({
+      openEdge: (id: string) => defer(`open:${id}`),
+      produceOn: (id: string) => defer(`produce:${id}`),
+      closeEdge: (id: string) => defer(`close:${id}`),
+    });
+    await h.reparent('room1', 'oldParent', 'newParent');
+    expect(events).toEqual(['open:newParent', 'produce:newParent', 'close:oldParent']);
   });
 });

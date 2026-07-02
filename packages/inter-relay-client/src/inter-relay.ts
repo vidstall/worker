@@ -1608,6 +1608,83 @@ export class StandbyWarmPipeCoordinator {
   }
 }
 
+// ── Make-before-break re-parent primitive (T6 — §3.4, REQ-RMS-046) ──────
+
+/**
+ * §3.4 (REQ-RMS-046) — the injected EFFECTS a make-before-break re-parent drives.
+ * Kept as callbacks so the ORDERING primitive is unit-provable with a SYNTHETIC
+ * layout diff — no real relay death, no live media path (that wiring is T-C).
+ *
+ * Each effect is a VOID-returning callback so BOTH a sync effect (whose return
+ * value is ignored — e.g. `events.push(...)` returning a number) AND an async
+ * effect (returning a `Promise<void>`) assign cleanly (TS's void-return
+ * relaxation — a bare `void | Promise<void>` union would reject the number).
+ * `reparent` `await`s each call, so when an effect IS async the returned promise
+ * is awaited and the strict `open → produce → close` order still holds.
+ */
+export interface ReparentEffects {
+  /** Open + connect the NEW parent edge (mint local from the new pipe). */
+  openEdge: (parentId: string) => void;
+  /** Begin producing the room's media on the NEW (now-open) edge. */
+  produceOn: (parentId: string) => void;
+  /** Tear down the OLD parent edge — driven ONLY after the new edge is producing. */
+  closeEdge: (parentId: string) => void;
+}
+
+/** The make-before-break re-parent primitive (see {@link makeReparentHarness}). */
+export interface ReparentHarness {
+  /**
+   * Re-parent a room from `oldParentId` to `newParentId` make-before-break.
+   * `oldParentId === null` = the node is acquiring its FIRST parent (nothing to
+   * close). `oldParentId === newParentId` = the parent did not change → complete
+   * no-op (the live edge is neither re-opened nor torn down).
+   */
+  reparent(
+    roomId: string,
+    oldParentId: string | null,
+    newParentId: string,
+  ): Promise<void>;
+}
+
+/**
+ * §3.4 (REQ-RMS-046) — build a make-before-break re-parent primitive over the three
+ * injected {@link ReparentEffects}. When a node's tree parent changes (layout
+ * re-derivation), the node MUST keep local clients on continuous media (no gap):
+ *
+ *   1. open + connect the NEW parent edge and begin producing on it, THEN
+ *   2. ONLY AFTER the new edge is producing, tear down the OLD parent edge.
+ *
+ * The overlap window (both parents live) is safe: each hop mints a FRESH local id
+ * (Task 5/T6 `produceLocalFromPipe` freshId) and the forward drain dedups PER-ROOM
+ * on the immutable `originProducerId` (Task 5/B4 `producedOrigins`), so the transient
+ * double-parent does NOT double-produce — local clients see the old minted producer
+ * until the new one is up.
+ *
+ * MECHANISM ONLY — this is a thin ordering primitive with injected effects, unit-proven
+ * against a synthetic layout diff. It is NOT wired to a real relay death, RoomAssigned
+ * handler, or any live fan site; T-C (T7) drives it from a real re-derivation. No retry /
+ * error-recovery beyond the strict await-ordering (a throwing effect propagates to the
+ * caller, who owns the re-derivation retry).
+ */
+export function makeReparentHarness(effects: ReparentEffects): ReparentHarness {
+  return {
+    async reparent(roomId, oldParentId, newParentId): Promise<void> {
+      // Parent unchanged → the re-derivation did not move this node: no-op. Never
+      // re-open nor tear down the already-live edge (a re-open+close would gap it).
+      if (oldParentId === newParentId) return;
+      // MAKE: bring the NEW parent edge fully up (open + connect, then produce) FIRST.
+      // Await each so the order holds even when the injected effects are async.
+      await effects.openEdge(newParentId);
+      await effects.produceOn(newParentId);
+      // BREAK: ONLY NOW tear down the OLD parent edge. A node acquiring its FIRST
+      // parent (oldParentId === null) has no old edge to close.
+      if (oldParentId !== null) {
+        await effects.closeEdge(oldParentId);
+      }
+    },
+  };
+}
+
 // ── Primary-side pipe half (Phase 5.3 spike — the missing production half) ──
 
 /**
