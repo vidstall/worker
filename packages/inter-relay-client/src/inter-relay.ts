@@ -1755,6 +1755,12 @@ export interface PrimaryPipeCoordinatorDeps {
     minted: msTypes.Producer,
     originRelayId: string,
     producerPeerId?: string,
+    // T-B (REQ-RMS-043/044/046, T7 I-1) — the IMMUTABLE origin + inbound loop-guard budget carried on
+    // the queued reverse announce, threaded through the DRAIN so the tree hub-fan re-forwards on the
+    // origin (NOT the fresh per-hop mint) with the real budget (NOT a reseeded full diameter). Both
+    // OPTIONAL → the immediate path + shipped star drain stay byte-stable (fired 4-arg when absent).
+    originProducerId?: string,
+    hopTtl?: number,
   ) => void;
   /**
    * T6 (REQ-RMS-046, cascade-tree) — when true, the reverse hub mint uses a FRESH local id
@@ -1827,6 +1833,12 @@ export class PrimaryPipeCoordinator {
       kind: msTypes.MediaKind;
       rtpParameters: msTypes.RtpParameters;
       producerPeerId?: string;
+      // T-B (REQ-RMS-043/044/046, T7 I-1) — the IMMUTABLE origin + inbound hop budget carried on the
+      // queued announce (same inbound-announce source the immediate reverse path reads), so a queued-
+      // then-drained mint threads them into onReverseMinted → registerReverseMinted. Undefined on the
+      // shipped star / pre-tree path → the drain fires onReverseMinted 4-arg (byte-stable).
+      originProducerId?: string;
+      hopTtl?: number;
     }>
   >();
   // REQ-RMS-034 — per-leg dedup of reverse-minted producer ids (mint exactly once).
@@ -2063,6 +2075,11 @@ export class PrimaryPipeCoordinator {
       kind: msTypes.MediaKind;
       rtpParameters: msTypes.RtpParameters;
       producerPeerId?: string;
+      // T-B (REQ-RMS-043/044/046, T7 I-1) — carried onto the reverseMintPending entry so the DRAIN
+      // (Path B) preserves them for the tree hub-fan. reverseMint/mintOne never READ them (the mint is
+      // origin-agnostic); they only ride the queue. Undefined on the shipped path → byte-stable.
+      originProducerId?: string;
+      hopTtl?: number;
     },
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<msTypes.Producer | null> {
@@ -2152,7 +2169,15 @@ export class PrimaryPipeCoordinator {
           // ORIGINAL producerPeerId so the fan binds to the real publisher. Fires
           // exactly once per successful mint (inside `if (p)`); dedup'd upstream
           // by mintOne's reverseMintedIds set so a benign dup never re-fans.
-          this.deps.onReverseMinted?.(roomId, p, peerRelayId, a.producerPeerId);
+          // T-B (REQ-RMS-043/044/046, T7 I-1) — ALSO thread the IMMUTABLE origin + inbound hop budget
+          // the entry carried, so the tree hub-fan re-forwards on the origin (not the fresh mint id)
+          // with the real budget (not a reseeded full diameter). Guard-widen: the shipped star / pre-
+          // tree drain (both undefined) keeps the EXACT 4-arg call the coordinator arity test pins.
+          if (a.originProducerId === undefined && a.hopTtl === undefined) {
+            this.deps.onReverseMinted?.(roomId, p, peerRelayId, a.producerPeerId);
+          } else {
+            this.deps.onReverseMinted?.(roomId, p, peerRelayId, a.producerPeerId, a.originProducerId, a.hopTtl);
+          }
         }
       } catch (err) {
         this.deps.logger?.warn(

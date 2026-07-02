@@ -421,6 +421,28 @@ describe('PrimaryPipeCoordinator — REQ-RMS-034/037 reverseMint (part-3 reverse
     expect(fanSpy).toHaveBeenCalledTimes(1);                          // fanned -- RED today: drainReverseMints never fans
     expect(fanSpy).toHaveBeenCalledWith('roomA', expect.objectContaining({ id: 'piped-up-1' }), 'ws://standbyA', 'clientA'); // original producerPeerId preserved
   });
+
+  it('T7 I-1: a reverse mint QUEUED then DRAINED (Path B) threads the IMMUTABLE origin + inbound hopTtl into onReverseMinted (NOT the fresh mint id / not a reseeded budget)', async () => {
+    const fanSpy = vi.fn();
+    // treeActive → mintOne mints a FRESH local id per hop, so minted.id ('fresh-hub-mint') ≠ origin.
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn(), onReverseMinted: fanSpy, treeActive: true });
+    // QUEUE a reverse announce CARRYING the tree fields BEFORE the leg transport connects (double-race
+    // Path B — the immediate registerReverseMinted never ran because reverseMint returned null).
+    const r1 = await coord.reverseMint(
+      'roomA', fakeRouter,
+      { producerId: 'piped-up-1', kind: 'video', rtpParameters: REMAPPED_RTP, producerPeerId: 'clientA', originProducerId: 'ORIGIN-1', hopTtl: 3 },
+      'ws://standbyA',
+    );
+    expect(r1).toBeNull(); // queued
+    const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'fresh-hub-mint', kind: 'video', on: vi.fn() }) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    await coord.drainReverseMints('roomA', 'ws://standbyA');
+    // The drain fan carries the IMMUTABLE origin + inbound hop off the QUEUE ENTRY (6-arg), NOT the
+    // fresh mint id ('fresh-hub-mint') and NOT undefined (which would reseed the full diameter
+    // downstream). RED against the pre-I-1 4-arg drain binding (origin/hop were dropped on enqueue).
+    expect(fanSpy).toHaveBeenCalledTimes(1);
+    expect(fanSpy).toHaveBeenCalledWith('roomA', expect.objectContaining({ id: 'fresh-hub-mint' }), 'ws://standbyA', 'clientA', 'ORIGIN-1', 3);
+  });
 });
 
 // ── F. B6b (REQ-RMS-035) — FORWARD flap idempotency. onProducer re-queues a

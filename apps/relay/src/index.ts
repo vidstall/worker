@@ -466,6 +466,16 @@ if (isMainModule) {
         if (!RMS_TREE_ACTIVE) return;
         const room = signalingRef.getRoom?.(roomId);
         if (!room) return;
+        // M-3 observability — this producer was minted from the PARENT's pipe (cross-relay), so a
+        // MISSING originProducerId is a THREADING GAP (not a real local origin): the fallback to
+        // producer.id (the fresh per-hop mint) mislabels the origin → per-room dedup degrades. WARN as
+        // an anomaly (fires ~never once the announce carries originProducerId end-to-end).
+        if (originProducerId === undefined) {
+          logger.warn(
+            { roomId, mintedId: producer.id, peerRelayId },
+            'T-B: internal re-forward missing originProducerId — threading gap, dedup may degrade',
+          );
+        }
         fanToTreeNeighbors(
           roomId, room.router, producer, producerPeerId,
           originProducerId ?? producer.id, peerRelayId, inboundHopTtl,
@@ -616,8 +626,12 @@ if (isMainModule) {
       // fires onReverseMinted per drained mint -> registerReverseMinted fans it to
       // local clients + hub-fans DOWN, threading the ORIGINAL publisher's
       // producerPeerId carried on the queue entry.
-      onReverseMinted: (roomId, minted, originRelayId, producerPeerId) =>
-        signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId),
+      // T-B (REQ-RMS-043/044/046, T7 I-1): thread the IMMUTABLE origin + inbound hop budget the drain
+      // carried off the queued announce, so the DRAIN Path B feeds the tree hub-fan the SAME origin +
+      // budget the immediate path does — NOT minted.id / a reseeded full diameter. Undefined on a pre-
+      // tree drain → registerReverseMinted's flag-off flood path is byte-stable.
+      onReverseMinted: (roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl) =>
+        signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl),
       // T6 (REQ-RMS-046): cascade-tree reverse hub mint uses a fresh local id per hop.
       // Default false (flag off) → the shipped same-id reverse mint stays byte-stable.
       treeActive: RMS_TREE_ACTIVE,
@@ -933,12 +947,13 @@ if (isMainModule) {
       if (!pos) return;
       // Compute the tree-position-driven fan PLAN (pure + unit-tested — computeTreeFanPlan /
       // tree-forwarding.test.ts): the post-transition hop budget + edge-scoped DOWN child URLs +
-      // the (optional) UP parent URL. hop <= 0 → empty plan (loop guard: budget exhausted; local
-      // clients were already fanned by the caller). ROOT → parentUrl null (DOWN only); INTERNAL →
-      // both legs; LEAF → childUrls empty (UP only) — this is the §3.3 uniform, role-independent fan.
+      // the (optional) UP parent URL. ROOT → parentUrl null (DOWN only); INTERNAL → both legs; LEAF →
+      // childUrls empty (UP only) — this is the §3.3 uniform, role-independent fan. M-2: the hop-guard
+      // lives in ONE place — computeTreeFanPlan returns an EMPTY plan (childUrls [], parentUrl null)
+      // when hop <= 0, so the loop + UP-branch below no-op naturally (no redundant `plan.hop <= 0`
+      // guard here). Local clients were already fanned by the caller regardless.
       const resolve = (id: string) => resolveRelayEndpoint(relayEndpointCache, id);
       const plan = computeTreeFanPlan(pos, receiveEdgeUrl, inboundHopTtl, resolve);
-      if (plan.hop <= 0) return;
       // DOWN to children (via the shipped primary pipe primitive).
       for (const childUrl of plan.childUrls) {
         interRelayContext.onPrimaryProducer?.(roomId, router, producer, childUrl, producerPeerId, plan.hop, originProducerId);

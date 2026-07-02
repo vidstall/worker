@@ -27,6 +27,12 @@ interface ReverseAnnounced {
    *  double-race announce (queued before the leg connects) is fanned bound to the
    *  real publisher when drainReverseMints fires onReverseMinted. */
   producerPeerId?: string;
+  /** T-B (REQ-RMS-043/044/046, T7 I-1): the IMMUTABLE origin + inbound hop budget, carried onto the
+   *  reverseMintPending queue (via reverseMint) so the DRAIN Path B preserves them for the tree hub-
+   *  fan — the exact fields the IMMEDIATE path threads straight to registerReverseMinted. Omitted on a
+   *  pre-tree frame (conditional-spread at the call site → byte-stable descriptor + assertions). */
+  originProducerId?: string;
+  hopTtl?: number;
 }
 
 /** Collaborators the handler orchestrates (the PrimaryPipeCoordinator reverse-leg
@@ -114,7 +120,15 @@ export function makeOnReverseAnnounce(deps: ReverseAnnounceDeps) {
       // (double-race: leg + standby params both absent) preserves it for the drain
       // fan. The immediate path is unaffected -- mintOne ignores producerPeerId and
       // the `if (minted)` registerReverseMinted below already fans with it.
-      { producerId, kind, rtpParameters, producerPeerId },
+      // T-B (T7 I-1): ALSO carry the IMMUTABLE origin + inbound hop budget so the DRAIN Path B
+      // threads them into registerReverseMinted (mintOne ignores them; they only ride the queue).
+      // Conditional-spread → a pre-tree frame yields the EXACT { producerId, kind, rtpParameters,
+      // producerPeerId } descriptor the reverseMint arity assertions pin (byte-stable).
+      {
+        producerId, kind, rtpParameters, producerPeerId,
+        ...(originProducerId !== undefined ? { originProducerId } : {}),
+        ...(hopTtl !== undefined ? { hopTtl } : {}),
+      },
       origin,
     );
     // T-B (REQ-RMS-043/044/046): thread the immutable origin + inbound hop budget so the tree

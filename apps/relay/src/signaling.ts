@@ -2163,6 +2163,16 @@ export function createSignalingServer(
     // (fall back to minted.id ONLY when the announce truly had none — e.g. the rare double-race drain
     // path), NEVER the fresh per-hop hub mint id. Flag off (treeActive undefined) → the legacy flood.
     if (interRelay?.treeActive && interRelay.fanToTreeNeighbors) {
+      // M-3 observability — this producer arrived FROM another relay (originRelayId), so a MISSING
+      // originProducerId means a THREADING GAP (not a real local origin): the fallback to minted.id
+      // (the fresh per-hop mint) mislabels the origin → per-room dedup degrades. WARN as an anomaly
+      // (fires ~never once I-1 threads both the immediate + drain reverse paths).
+      if (originProducerId === undefined) {
+        logger.warn(
+          { roomId, mintedId: minted.id, originRelayId },
+          'T-B: reverse hub-fan missing originProducerId — threading gap, dedup may degrade',
+        );
+      }
       interRelay.fanToTreeNeighbors(
         roomId, room.router, minted, producerPeerId, originProducerId ?? minted.id, originRelayId, inboundHopTtl,
       );
