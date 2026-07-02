@@ -3,7 +3,11 @@
  * See docs/superpowers/specs/2026-07-02-cascade-tree-phase-A-derivation-design.md
  */
 
-/** A relay identity in the tree. On-chain Sui object ID as a normalized 0x-hex string. */
+/**
+ * A relay identity in the tree. On-chain Sui object ID, normalized to 0x-prefixed lowercase hex.
+ * MUST be the canonical zero-padded form (0x + 64 hex chars) so that lexical sort == numeric sort —
+ * derivation determinism depends on this. Callers are responsible for passing canonical IDs.
+ */
 export type RelayId = string;
 
 /**
@@ -22,10 +26,10 @@ export function deriveDegreeCap(
 }
 
 export interface TreeNode {
-  relayId: RelayId;
-  parent: RelayId | null; // null iff this node is the root
-  children: RelayId[];    // canonical order (sorted by RelayId); length <= degreeCap
-  depth: number;          // root = 0
+  readonly relayId: RelayId;
+  readonly parent: RelayId | null; // null iff this node is the root
+  readonly children: readonly RelayId[]; // canonical order (sorted by RelayId); length <= degreeCap
+  readonly depth: number;          // root = 0
 }
 
 export interface TreeLayout {
@@ -62,6 +66,13 @@ function computeDiameter(nodes: ReadonlyMap<RelayId, TreeNode>, root: RelayId): 
   return best;
 }
 
+interface MutableTreeNode {
+  relayId: RelayId;
+  parent: RelayId | null;
+  children: RelayId[];
+  depth: number;
+}
+
 /** PURE. Deterministic complete-D-ary spanning tree over the relay set, keyed by RelayId. */
 export function deriveTree(
   relayIds: readonly RelayId[],
@@ -77,7 +88,7 @@ export function deriveTree(
     };
   }
   const D = Math.max(1, degreeCap); // a build needs D >= 1; D==0 -> chain (infeasibility via bound)
-  const nodes = new Map<RelayId, TreeNode>();
+  const nodes = new Map<RelayId, MutableTreeNode>();
   for (let i = 0; i < K; i++) {
     const relayId = ids[i]!;
     const parent = i === 0 ? null : ids[Math.floor((i - 1) / D)]!;

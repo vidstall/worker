@@ -47,6 +47,10 @@ describe('deriveTree — determinism (REQ-RMS-039)', () => {
     const t = deriveTree(['0xaa', '0xaa', '0xbb'], { degreeCap: 2, maxHeight: H });
     expect(t.nodes.size).toBe(2);
   });
+  it('dedupes case-insensitively (normalizeId lowercases first)', () => {
+    const t = deriveTree(['0xAA', '0xaa', '0xBB'], { degreeCap: 2, maxHeight: H });
+    expect(t.nodes.size).toBe(2);
+  });
   it('root = min RelayId regardless of input order', () => {
     expect(deriveTree(['0x05', '0x02', '0x09'], { degreeCap: 2, maxHeight: H }).root).toBe('0x02');
   });
