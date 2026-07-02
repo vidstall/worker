@@ -4,7 +4,9 @@
  * All pure/synchronous — no mediasoup, no I/O.
  */
 import { describe, it, expect } from 'vitest';
-import { deriveDegreeCap, deriveTree, type TreeLayout } from '@dvconf/inter-relay-client';
+import {
+  deriveDegreeCap, deriveTree, parentOf, childrenOf, neighborsOf, type TreeLayout,
+} from '@dvconf/inter-relay-client';
 
 function serialize(t: TreeLayout) {
   return {
@@ -130,5 +132,29 @@ describe('deriveTree — degree, height, diameter bounds (REQ-RMS-040/041)', () 
     expect(t.nodes.get('0x03')!.parent).toBe('0x02');
     expect(t.height).toBe(2);
     expect(t.withinDiameterBound).toBe(false);
+  });
+});
+
+describe('tree helpers (edge-scoped fan support for T-B, REQ-RMS-043 precondition)', () => {
+  const t = deriveTree(['0x01', '0x02', '0x03', '0x04', '0x05'], { degreeCap: 2, maxHeight: 10 });
+  // sorted [01,02,03,04,05] D=2: 01 root; children(01)=[02,03]; children(02)=[04,05]; 03,04,05 leaves
+  it('parentOf / childrenOf', () => {
+    expect(parentOf(t, '0x01')).toBeNull();
+    expect(parentOf(t, '0x04')).toBe('0x02');
+    expect(childrenOf(t, '0x01')).toEqual(['0x02', '0x03']);
+  });
+  it('neighborsOf(root) = children only', () => {
+    expect(neighborsOf(t, '0x01')).toEqual(['0x02', '0x03']);
+  });
+  it('neighborsOf(leaf) = [parent]', () => {
+    expect(neighborsOf(t, '0x04')).toEqual(['0x02']);
+  });
+  it('neighborsOf(internal) = [parent, ...children]', () => {
+    expect(neighborsOf(t, '0x02')).toEqual(['0x01', '0x04', '0x05']);
+  });
+  it('helpers normalize the queried id and tolerate unknown ids', () => {
+    expect(parentOf(t, '0X04')).toBe('0x02'); // upper-case normalized
+    expect(childrenOf(t, '0xZZ')).toEqual([]);
+    expect(neighborsOf(t, '0xZZ')).toEqual([]);
   });
 });

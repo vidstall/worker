@@ -108,3 +108,20 @@ export function deriveTree(
     degreeCap,
   };
 }
+
+/** The parent RelayId of `id`, or null (root / unknown). */
+export function parentOf(layout: TreeLayout, id: RelayId): RelayId | null {
+  return layout.nodes.get(normalizeId(id))?.parent ?? null;
+}
+
+/** The child RelayIds of `id` (canonical order); [] for a leaf / unknown. */
+export function childrenOf(layout: TreeLayout, id: RelayId): readonly RelayId[] {
+  return layout.nodes.get(normalizeId(id))?.children ?? [];
+}
+
+/** Tree neighbors of `id` = [parent (if any), ...children]. T-B fans to neighbors minus the receive edge. */
+export function neighborsOf(layout: TreeLayout, id: RelayId): RelayId[] {
+  const node = layout.nodes.get(normalizeId(id));
+  if (!node) return [];
+  return [...(node.parent ? [node.parent] : []), ...node.children];
+}
