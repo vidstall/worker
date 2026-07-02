@@ -489,13 +489,18 @@ describe('make-before-break re-parent (T6, REQ-RMS-046)', () => {
     expect(events).toEqual([]);
   });
 
-  it('AWAITS async effects so the strict ordering holds even when open/produce resolve late', async () => {
+  it('AWAITS async effects sequentially — DESCENDING delays make forward order impossible unless each is awaited before the next is scheduled', async () => {
     const events: string[] = [];
-    const defer = (label: string) => new Promise<void>((resolve) => setTimeout(() => { events.push(label); resolve(); }, 0));
+    const defer = (label: string, ms: number) => new Promise<void>((resolve) => setTimeout(() => { events.push(label); resolve(); }, ms));
+    // DESCENDING delays: open(30ms) > produce(20ms) > close(10ms). Same-delay timers
+    // fire FIFO, so a broken "schedule all three up front, then await all" variant would
+    // still land forward-order with equal delays — but with descending delays that variant
+    // resolves close→produce→open (REVERSE). Forward order therefore holds ONLY if reparent
+    // awaits each effect (so the next timer is not even scheduled until the prior resolved).
     const h = makeReparentHarness({
-      openEdge: (id: string) => defer(`open:${id}`),
-      produceOn: (id: string) => defer(`produce:${id}`),
-      closeEdge: (id: string) => defer(`close:${id}`),
+      openEdge: (id: string) => defer(`open:${id}`, 30),
+      produceOn: (id: string) => defer(`produce:${id}`, 20),
+      closeEdge: (id: string) => defer(`close:${id}`, 10),
     });
     await h.reparent('room1', 'oldParent', 'newParent');
     expect(events).toEqual(['open:newParent', 'produce:newParent', 'close:oldParent']);

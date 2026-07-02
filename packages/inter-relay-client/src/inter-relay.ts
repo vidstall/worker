@@ -1665,6 +1665,29 @@ export interface ReparentHarness {
  * handler, or any live fan site; T-C (T7) drives it from a real re-derivation. No retry /
  * error-recovery beyond the strict await-ordering (a throwing effect propagates to the
  * caller, who owns the re-derivation retry).
+ *
+ * ⚠️ PARTIAL-FAILURE CAVEAT (no rollback). If a mid-sequence effect throws AFTER
+ * `openEdge(new)` already succeeded — i.e. `produceOn(new)` or `closeEdge(old)` throws —
+ * the exception propagates to the caller but the NEW parent edge is left OPEN with no
+ * rollback. A naive caller that just retries the re-derivation would call `openEdge(new)`
+ * AGAIN on an already-open edge → double-open / resource leak. Therefore **T-C MUST make
+ * `openEdge` idempotent OR close the orphaned new edge before any re-derivation retry.**
+ *
+ * T-C WIRING OBLIGATIONS (deferred design decisions — resolve these when wiring, do NOT
+ * inherit them silently):
+ *   - **Room-scoping (M-1):** `reparent(roomId, …)` carries `roomId` but the body never
+ *     reads it and the `(parentId) => void` effects can't see it. T-C must pick a model —
+ *     thread it (`openEdge(roomId, parentId)`) OR build a per-room harness via closures
+ *     (`makeReparentHarness({ openEdge: (pid) => openForRoom(roomId, pid) })`). `roomId` is
+ *     a forward-contract placeholder today (pinned by the plan's test signature).
+ *   - **Async self-documentation (M-2):** the effect type is `(parentId) => void` (chosen
+ *     so the plan's number-returning `events.push(...)` test compiles; `reparent` still
+ *     awaits each so async ordering holds). At T-C, consider `(parentId) => void |
+ *     Promise<void>` with block-body effects so the async contract is visible in the type,
+ *     not just this prose.
+ *   - **Root-promotion (M-5):** `newParentId` is non-nullable, so `X → null` (an internal
+ *     node promoted to root: close old, open none) is NOT representable. Add it if T-C
+ *     needs root-promotion.
  */
 export function makeReparentHarness(effects: ReparentEffects): ReparentHarness {
   return {
