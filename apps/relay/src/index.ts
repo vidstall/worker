@@ -76,7 +76,7 @@ import {
   type RoomTopology,
 } from '@dvconf/inter-relay-client';
 import { resolvePrimaryEndpoint, resolveTreeParentDial, resolveRelayEndpoint } from './relay-endpoint-resolver.js';
-import { deriveTreePosition, fanTargetUrls, type TreePosition } from './tree-position.js';
+import { deriveTreePosition, fanTargetUrls, seedOrDecrementHop, type TreePosition } from './tree-position.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -909,8 +909,9 @@ if (isMainModule) {
       if (!RMS_TREE_ACTIVE) return;
       const pos = roomTreePosition.get(roomId);
       if (!pos) return;
-      // Seed the budget at a local origin (undefined inbound), else decrement the inbound budget.
-      const hop = inboundHopTtl === undefined ? pos.diameter : inboundHopTtl - 1;
+      // Seed the budget at a local origin (undefined inbound), else decrement the inbound budget
+      // (pure + unit-tested — see seedOrDecrementHop / tree-forwarding.test.ts).
+      const hop = seedOrDecrementHop(inboundHopTtl, pos.diameter);
       if (hop <= 0) return; // loop guard: budget exhausted (local clients were already fanned by the caller)
       const resolve = (id: string) => resolveRelayEndpoint(relayEndpointCache, id);
       // DOWN to children (via the shipped primary pipe primitive).
@@ -930,6 +931,11 @@ if (isMainModule) {
     // T-B: bind the tree fan + the tree-active flag onto the signaling context so the fan sites
     // (Task 7) can route through them. Flag OFF → fanToTreeNeighbors undefined → the shipped
     // flat-STAR data plane is untouched (byte-stable).
+    // ⚠️ OPERATIONAL CAUTION: RMS_TREE_ACTIVE is NOT live-safe until Task 7 wires the fan sites.
+    // Enabling it at THIS commit yields a relay that dials its TREE PARENT (Task 4) + mints FRESH
+    // per-hop ids (Task 5) but STILL fans media via the flat-STAR interRelaySockets.keys() flood
+    // (nothing calls fanToTreeNeighbors yet) — a half-migrated data plane. Do NOT set it in a
+    // live / multi-host environment until Task 7 routes the three fan sites through the helper.
     interRelayContext.fanToTreeNeighbors = RMS_TREE_ACTIVE ? fanToTreeNeighbors : undefined;
     interRelayContext.treeActive = RMS_TREE_ACTIVE;
 

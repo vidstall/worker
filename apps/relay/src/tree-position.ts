@@ -67,3 +67,20 @@ export function fanTargetUrls(
 export function nextHopTtl(hopTtl: number | undefined): number | undefined {
   return hopTtl === undefined ? undefined : hopTtl - 1;
 }
+
+/**
+ * PURE (T-B, REQ-RMS-044) — the per-node hop-budget transition fanToTreeNeighbors applies before
+ * re-forwarding:
+ *   - a LOCAL origin (no inbound budget → `undefined`) SEEDS the budget at the tree `diameter`
+ *     (the exact-diameter TTL: a producer traverses at most `diameter` hops to reach every node);
+ *   - an inbound hop DECREMENTS by one (delegates to {@link nextHopTtl} so the decrement lives in
+ *     exactly one place — no duplicated `- 1`).
+ * The caller applies the `<= 0` drop-guard to the result (budget exhausted → stop forwarding), so
+ * a returned 0 means "this hop still fans local clients, but does NOT re-forward to tree edges".
+ */
+export function seedOrDecrementHop(inboundHopTtl: number | undefined, diameter: number): number {
+  // In the decrement branch inboundHopTtl is a number, so nextHopTtl returns a number (never
+  // undefined) — the non-null assertion just reflects that narrowing (nextHopTtl's signature is
+  // number|undefined for the pass-through-undefined contract the flag-off path relies on).
+  return inboundHopTtl === undefined ? diameter : nextHopTtl(inboundHopTtl)!;
+}

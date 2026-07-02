@@ -6,7 +6,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildPipeProducerAnnounce, isPipeProducerAnnounce, deriveTree, treeRoleOf, toCanonicalRelayId, produceLocalFromPipe, InterRelayProducerRegistry, StandbyWarmPipeCoordinator } from '@dvconf/inter-relay-client';
 import type { RoomTopology } from '@dvconf/inter-relay-client';
-import { deriveTreePosition, fanTargets, fanTargetUrls, nextHopTtl } from '../tree-position.js';
+import { deriveTreePosition, fanTargets, fanTargetUrls, nextHopTtl, seedOrDecrementHop } from '../tree-position.js';
 
 describe('T-B byte-stability guards (REQ-RMS-048) — MUST stay green through every task', () => {
   it('a default announce frame has EXACTLY the shipped keys (no tree fields)', () => {
@@ -104,6 +104,15 @@ describe('fanTargets + nextHopTtl', () => {
   it('nextHopTtl decrements; undefined passes through; 1→0 signals drop', () => {
     expect(nextHopTtl(3)).toBe(2); expect(nextHopTtl(undefined)).toBeUndefined(); expect(nextHopTtl(1)).toBe(0);
   });
+});
+
+describe('seedOrDecrementHop — hop-guard transition (REQ-RMS-044)', () => {
+  it('local origin (undefined inbound) SEEDS at the tree diameter', () =>
+    expect(seedOrDecrementHop(undefined, 4)).toBe(4));
+  it('an inbound hop DECREMENTS by one', () =>
+    expect(seedOrDecrementHop(3, 4)).toBe(2));
+  it('the last budgeted hop lands on 0 → the caller\'s <= 0 drop-guard fires', () =>
+    expect(seedOrDecrementHop(1, 4)).toBe(0));
 });
 
 describe('fanTargetUrls — id-space bridge + edge-scope (T4, B2)', () => {
