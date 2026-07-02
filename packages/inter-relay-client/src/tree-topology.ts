@@ -125,3 +125,22 @@ export function neighborsOf(layout: TreeLayout, id: RelayId): RelayId[] {
   if (!node) return [];
   return [...(node.parent ? [node.parent] : []), ...node.children];
 }
+
+/** The forwarding role of a node in the tree. */
+export type TreeRole = 'root' | 'internal' | 'leaf';
+
+/** PURE. Classify a node's forwarding role. Unknown id → 'leaf' (fail-safe: never re-forward). */
+export function treeRoleOf(layout: TreeLayout, id: RelayId): TreeRole {
+  const node = layout.nodes.get(normalizeId(id));
+  if (!node) return 'leaf';
+  const hasChildren = node.children.length > 0;
+  if (node.parent === null) return hasChildren ? 'root' : 'leaf';
+  return hasChildren ? 'internal' : 'leaf';
+}
+
+/** PURE. Canonical 0x + 64-lowercase-hex so lexical sort == numeric sort (deriveTree precondition). */
+export function toCanonicalRelayId(id: RelayId): RelayId {
+  const lower = id.trim().toLowerCase();
+  const hex = lower.startsWith('0x') ? lower.slice(2) : lower;
+  return '0x' + hex.padStart(64, '0');
+}
