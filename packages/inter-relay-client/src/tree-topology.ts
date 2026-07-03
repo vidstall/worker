@@ -149,3 +149,29 @@ export function toCanonicalRelayId(id: RelayId): RelayId {
   if (hex.length > 64) throw new Error(`toCanonicalRelayId: oversized hex (${hex.length} chars): ${id}`);
   return '0x' + hex.padStart(64, '0');
 }
+
+/** One-way latency parameters (ms). All analyst-supplied / eventually measured — see spec §5. */
+export interface LatencyParams {
+  lFixedMs: number;   // capture+encode+jitter+decode+render (non-network floor)
+  lastMileMs: number; // t_up + t_down combined (both user<->edge-relay legs)
+  tHopMs: number;     // ONE inter-relay hop, one-way (network + forward)
+}
+
+export interface LatencyEstimate {
+  worstMs: number;     // lFixed + lastMile + diameter*tHop
+  networkMs: number;   // lastMile + diameter*tHop
+  relayPathMs: number; // diameter*tHop (the part the TREE controls)
+  hops: number;        // = layout.diameter (echoed for the report)
+}
+
+/**
+ * PURE. Worst-case one-way latency of a layout. Reuses TreeLayout.diameter (no re-derivation):
+ * the worst pair is the tree's two farthest leaves = exactly layout.diameter.
+ */
+export function estimateLatency(layout: TreeLayout, params: LatencyParams): LatencyEstimate {
+  const hops = layout.diameter;
+  const relayPathMs = hops * params.tHopMs;
+  const networkMs = params.lastMileMs + relayPathMs;
+  const worstMs = params.lFixedMs + networkMs;
+  return { worstMs, networkMs, relayPathMs, hops };
+}

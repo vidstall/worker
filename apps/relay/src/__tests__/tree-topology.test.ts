@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveDegreeCap, deriveTree, parentOf, childrenOf, neighborsOf, type TreeLayout,
+  estimateLatency, deriveMaxDiameter, type LatencyParams,
 } from '@dvconf/inter-relay-client';
 
 function serialize(t: TreeLayout) {
@@ -156,5 +157,39 @@ describe('tree helpers (edge-scoped fan support for T-B, REQ-RMS-043 preconditio
     expect(parentOf(t, '0X04')).toBe('0x02'); // upper-case normalized
     expect(childrenOf(t, '0xZZ')).toEqual([]);
     expect(neighborsOf(t, '0xZZ')).toEqual([]);
+  });
+});
+
+describe('estimateLatency (REQ-RMS-049)', () => {
+  const P: LatencyParams = { lFixedMs: 100, lastMileMs: 40, tHopMs: 30 };
+
+  it('worstMs = lFixed + lastMile + diameter*tHop for a known diameter', () => {
+    // K=6, D=2 -> complete binary tree, diameter 4 (two depth-2 branches through root)
+    const tree = deriveTree(['0x01', '0x02', '0x03', '0x04', '0x05', '0x06'], { degreeCap: 2, maxHeight: 10 });
+    expect(tree.diameter).toBe(4);
+    const est = estimateLatency(tree, P);
+    expect(est.worstMs).toBe(100 + 40 + 4 * 30); // 260
+  });
+
+  it('decomposes relayPathMs / networkMs / hops', () => {
+    const tree = deriveTree(['0x01', '0x02', '0x03', '0x04', '0x05', '0x06'], { degreeCap: 2, maxHeight: 10 });
+    const est = estimateLatency(tree, P);
+    expect(est.hops).toBe(tree.diameter);       // 4
+    expect(est.relayPathMs).toBe(4 * 30);       // 120 — the part the TREE controls
+    expect(est.networkMs).toBe(40 + 4 * 30);    // 160 = lastMile + relayPath
+  });
+
+  it('K<=1 layout (diameter 0) -> worstMs = lFixed + lastMile (no relay hop)', () => {
+    const solo = deriveTree(['0x01'], { degreeCap: 2, maxHeight: 10 });
+    expect(solo.diameter).toBe(0);
+    expect(estimateLatency(solo, P).worstMs).toBe(140);
+    const empty = deriveTree([], { degreeCap: 2, maxHeight: 10 });
+    expect(estimateLatency(empty, P).worstMs).toBe(140);
+  });
+
+  it('K=2 star (diameter 1) -> exactly one hop added (single-standby latency)', () => {
+    const pair = deriveTree(['0x01', '0x02'], { degreeCap: 2, maxHeight: 10 });
+    expect(pair.diameter).toBe(1);
+    expect(estimateLatency(pair, P).worstMs).toBe(170); // 140 + 30
   });
 });
