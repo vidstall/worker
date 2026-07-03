@@ -56,8 +56,8 @@ export interface SweepRow {
 }
 
 function labelFor(cfg: SweepConfig): string {
-  const { params, audioRegime, budgetMs, degreeCap, cWorker, krMin, roomClass } = cfg;
-  return `class=${roomClass} audio=${audioRegime} D=${degreeCap} cWorker=${cWorker} krMin=${krMin} ` +
+  const { params, audioRegime, budgetMs, degreeCap, cWorker, krMin, roomClass, relayMode } = cfg;
+  return `class=${roomClass} mode=${relayMode} audio=${audioRegime} D=${degreeCap} cWorker=${cWorker} krMin=${krMin} ` +
     `lFixed=${params.lFixedMs} lastMile=${params.lastMileMs} tHop=${params.tHopMs} budget=${budgetMs}`;
 }
 

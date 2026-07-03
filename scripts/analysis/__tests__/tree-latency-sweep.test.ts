@@ -7,6 +7,9 @@ import { describe, it, expect } from 'vitest';
 // every workspace package so no pnpm symlink is reachable to resolve the bare value-import at runtime
 // (see scripts/demo/m2b-live-bhermetic-slash.ts precedent + the sweep module's import note).
 import { deriveTree, toCanonicalRelayId, type LatencyParams } from '../../../packages/inter-relay-client/src/index.ts';
+// Relative path (same reason as the barrel import above): scripts/ is outside the workspace, so the
+// bare `@dvconf` specifier has no symlink — import the cp-daemon admission helper by source path.
+import { estimateRoomLoad } from '../../../apps/cp-daemon/src/admission-capacity.js';
 import {
   sweepLatency, findNMax, audioTerm, synthesizeCanonicalIds, type SweepConfig,
 } from '../tree-latency-sweep.js';
@@ -39,6 +42,8 @@ describe('sweepLatency monotonicity + findNMax (REQ-RMS-051)', () => {
     const nMax = findNMax(rows);
     // every N <= nMax is within budget; every N > nMax is over budget (monotone)
     for (const r of rows) expect(r.withinBudget).toBe(r.n <= nMax);
+    expect(nMax).toBeGreaterThan(-1);                     // some N fits
+    expect(rows.some((r) => !r.withinBudget)).toBe(true); // and some N does not -> a real crossover
   });
 
   it('both audio regimes emit labeled rows', () => {
@@ -49,15 +54,54 @@ describe('sweepLatency monotonicity + findNMax (REQ-RMS-051)', () => {
   });
 });
 
-describe('synthesized-ID tree shape == real deriveTree (shape depends on count+degree, not id values)', () => {
-  it('synthesizeCanonicalIds(kR) fed to deriveTree matches a hand-built same-size tree', () => {
+describe('synthesizeCanonicalIds(kR): kR distinct canonical ids, no dedup drop', () => {
+  it('length=kR, distinct, canonical, deriveTree keeps all kR nodes', () => {
     for (const kR of [1, 2, 5, 13, 34]) {
       const ids = synthesizeCanonicalIds(kR);
       expect(ids.length).toBe(kR);
-      expect(new Set(ids).size).toBe(kR);                    // distinct
+      expect(new Set(ids).size).toBe(kR);                                 // distinct
       expect(ids.every((id) => id === toCanonicalRelayId(id))).toBe(true); // canonical
-      const tree = deriveTree(ids, { degreeCap: 4, maxHeight: BIG });
-      expect(tree.nodes.size).toBe(kR);                      // no dedup drop
+      expect(deriveTree(ids, { degreeCap: 4, maxHeight: BIG }).nodes.size).toBe(kR); // no dedup drop
+    }
+  });
+});
+
+describe('deriveTree shape depends on (count, degreeCap) — NOT on id VALUES', () => {
+  it('a disjoint-valued id set of the same size+degree yields identical diameter AND height', () => {
+    for (const kR of [2, 5, 13, 34]) {
+      const a = synthesizeCanonicalIds(kR); // ids 0x1..0xkR
+      const b = Array.from({ length: kR }, (_, i) =>
+        toCanonicalRelayId('0x' + (0x1000 + i + 1).toString(16))); // entirely different values
+      expect(new Set(b).size).toBe(kR);                  // b distinct
+      expect(new Set([...a, ...b]).size).toBe(2 * kR);   // a, b are value-disjoint
+      const ta = deriveTree(a, { degreeCap: 4, maxHeight: BIG });
+      const tb = deriveTree(b, { degreeCap: 4, maxHeight: BIG });
+      expect(tb.diameter).toBe(ta.diameter);             // shape invariant to id values
+      expect(tb.height).toBe(ta.height);
+    }
+  });
+});
+
+describe('sweepLatency fail-closed on loopback/degenerate tHop (spec §5 honesty rule)', () => {
+  it('refuses (throws) when tHopMs <= 0 — never emits an unlabeled loopback "pass"', () => {
+    expect(() => sweepLatency(baseCfg({ params: { ...P, tHopMs: 0 } }))).toThrow(/refus|loopback|floor/i);
+    expect(() => sweepLatency(baseCfg({ params: { ...P, tHopMs: -5 } }))).toThrow(/refus|loopback|floor/i);
+  });
+});
+
+describe('video-term reuse: estimateRoomLoad(class, 0, mode) yields the PURE video term', () => {
+  it('large/sfu pure video term is the pinned 270 (audio zeroed by passing 0)', () => {
+    expect(estimateRoomLoad('large', 0, 'sfu')).toBe(270);
+  });
+});
+
+describe('krMin=1 shipped default -> kR=1, no tree, flat N-independent floor', () => {
+  it('every row: kR=1, diameter=0, worstMs=lFixed+lastMile (no relay hop)', () => {
+    const rows = sweepLatency(baseCfg({ krMin: 1 }));
+    for (const r of rows) {
+      expect(r.kR).toBe(1);
+      expect(r.diameter).toBe(0);
+      expect(r.worstMs).toBe(100 + 40); // 140, flat — no cascade when krMin=1
     }
   });
 });
