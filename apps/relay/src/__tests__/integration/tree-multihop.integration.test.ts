@@ -28,14 +28,25 @@
  * │ scoped `fanToTreeNeighbors` closure (index.ts:936-966): it calls `computeTreeFanPlan`     │
  * │ + `resolveRelayEndpoint` identically, maps `plan.childUrls` → DOWN pipes (the             │
  * │ onPrimaryProducer leg) and `plan.parentUrl` → an UP pipe (the onStandbyProducer leg).     │
- * │ The main-scoped closure itself can't be imported without booting the daemon; its ~10-line │
- * │ dispatch glue is covered by review + the T7 unit suite (tree-forwarding.test.ts).         │
+ * │ HONEST SCOPE of the reconstruction (do NOT overclaim): the closure itself can't be        │
+ * │ imported without booting the daemon, so the two glue seams it stands in for are covered    │
+ * │ ELSEWHERE, not here:                                                                       │
+ * │   • the SIGNALING own-produce HOIST (handleProduce → fanToTreeNeighbors, §3.3) — the case  │
+ * │     a revert would break — is covered RED-on-revert by `tree-own-produce-hoist.test.ts`    │
+ * │     (a signaling-level spy on the REAL handleProduce; verified RED when the hoist is        │
+ * │     reverted). The C/D coordinator tests below are REAL end-to-end (no reconstruction).    │
+ * │   • the plan→leg dispatch INSIDE fanToTreeNeighbors (childUrls→onPrimaryProducer,          │
+ * │     parentUrl→onStandbyProducer) is REVIEW-ONLY here — NOT RED-on-revert covered (a T-C    │
+ * │     live obligation). The T7 unit suite (tree-forwarding.test.ts) covers the coordinator   │
+ * │     CALLBACK threading, NOT this plan→leg mapping.                                          │
  * │                                                                                          │
  * │ NOT claimed: this does NOT prove the daemon auto-BUILDS the live tree-link mesh (the      │
  * │ RoomAssigned → standbyLinkManager.connectTo(parentUrl) wiring, design §0.1). That is a    │
- * │ T-C live-run assertion; here the I1 test drives the handler's exact call SEQUENCE         │
+ * │ T-C live-run assertion. The I1 test below drives the handler's exact call SEQUENCE         │
  * │ (determineRole → deriveTreePosition → resolveTreeParentDial → connectTo) as a function    │
- * │ composition, NOT the booted poller. The byte-identity carry uses pipeToRouter (same-id    │
+ * │ composition, NOT the booted poller — it is REVIEW-ONLY (NOT RED-on-revert), and does NOT   │
+ * │ close index.ts:1037's handler-wiring TODO (still a T-C obligation). The byte-identity      │
+ * │ carry uses pipeToRouter (same-id                                                          │
  * │ across hops); the FRESH per-hop id (Task 5) is proven separately by the coordinator       │
  * │ dedup + reverse-drain tests below (produceLocalFromPipe freshId on real routers).         │
  * └──────────────────────────────────────────────────────────────────────────────────────────┘
@@ -373,12 +384,14 @@ describe('cascade-tree depth-2 (D=2 forces the shape) — REAL multi-router forw
     expect(drive.guardDrops).toContain(tree.nodes[2]!.url);
   }, 60_000);
 
-  it('internal own-produce reaches its OWN subtree (I-2): R1 own local produce is byte-identical at BOTH children R3 and R4 (FAILS if own-produce were UP-only)', async () => {
-    // handleProduce (treeActive) fans an OWN produce via
+  it('internal own-produce DECISION reaches its OWN subtree (I-2): the own-produce call shape into computeTreeFanPlan is byte-identical at BOTH children R3 and R4', async () => {
+    // SCOPE (honest): this drives the DECISION FN (computeTreeFanPlan) with handleProduce's EXACT
+    // own-produce call shape —
     //   fanToTreeNeighbors(roomId, router, producer, peerId, producer.id, /*receiveEdge*/ null, /*inboundHopTtl*/ undefined)
-    // — this test drives that EXACT own-produce call shape (receiveEdge=null, inboundHopTtl=undefined)
-    // into the faithful fan reconstruction. The pre-§3.3 UP-only wiring would pipe R1→R0 ONLY, so R3/R4
-    // (R1's children) would receive NOTHING → this test would FAIL. §3.3 makes it fan DOWN too.
+    // — and proves the plan fans DOWN to BOTH children (it would fail only if computeTreeFanPlan
+    // were UP-only, NOT if the signaling wiring were reverted — the reconstruction can't see the
+    // signaling dispatch). The SIGNALING HOIST that actually feeds this call shape (handleProduce
+    // → fanToTreeNeighbors, §3.3) is covered RED-on-revert by tree-own-produce-hoist.test.ts.
     const tree = await buildTree(['0x00', '0x01', '0x02', '0x03', '0x04'], videoCodecs);
     const R3 = tree.nodes[3]!.url, R4 = tree.nodes[4]!.url;
     const { sframes, sentBodiesB64, kid, keyLookup, ctrToPlain } = await buildSframes();
@@ -417,9 +430,12 @@ describe('cascade-tree depth-2 (D=2 forces the shape) — REAL multi-router forw
     expect(fannedAtR0).toHaveLength(2); // exactly the two children, no parent
   }, 60_000);
 
-  it('K≤2 with the flag ON = star, byte-identical to the shipped single-standby frames (REQ-RMS-048)', async () => {
-    // K=2 → deriveTree collapses to root + ONE leaf child (a star, diameter 1) — the shipped single-
-    // standby shape. Flag-ON forwarding is byte-identical to what the shipped star path delivers.
+  it('K≤2 with the flag ON collapses to a single-child STAR + forwards byte-identically (REQ-RMS-048)', async () => {
+    // SCOPE (honest — NOT a flag-OFF-vs-ON parity DIFF): this proves (a) deriveTree collapses K=2 to
+    // the shipped single-standby SHAPE (root + ONE leaf child, diameter 1) and (b) flag-ON forwarding
+    // through that star is byte-identical end-to-end. It does NOT measure a byte-diff against the
+    // flag-OFF star path (that path isn't driven by this tree harness); the shape-collapse + byte-
+    // identity together are the REQ-RMS-048 evidence that flag-ON at K≤2 is the star, not a fan-out.
     const tree = await buildTree(['0x00', '0x01'], videoCodecs);
     const [r0, r1] = tree.nodes as [TreeNode, TreeNode];
     expect(r0.pos.role).toBe('root');
@@ -432,9 +448,9 @@ describe('cascade-tree depth-2 (D=2 forces the shape) — REAL multi-router forw
     expect(cap).not.toBeNull();
     const a = await analyzeCapture(cap!.captured, kid, sentBodiesB64, keyLookup, ctrToPlain);
     // eslint-disable-next-line no-console
-    console.log(`[T-B K≤2 star parity R0→R1] mediaPackets=${a.mediaPackets} byteIdentical=${a.byteIdentical}`);
+    console.log(`[T-B K≤2 star R0→R1] mediaPackets=${a.mediaPackets} byteIdentical=${a.byteIdentical}`);
     expect(a.mediaPackets).toBeGreaterThan(0);
-    expect(a.byteIdentical).toBe(a.mediaPackets);   // star byte-identity == shipped single-standby
+    expect(a.byteIdentical).toBe(a.mediaPackets);   // byte-identical through the single-child star
     expect(a.decryptedOk).toBe(a.byteIdentical);
     try { cap!.consumer.close(); cap!.transport.close(); } catch { /* best-effort */ }
   }, 60_000);
@@ -442,12 +458,18 @@ describe('cascade-tree depth-2 (D=2 forces the shape) — REAL multi-router forw
 
 // ══════════════════════════════════════════════════════════════════════════════
 // B) I1 handler-wiring: a NON-root chain-primary DIALS its TREE PARENT (not re-gated on role)
+//    ⚠️ REVIEW-ONLY (NOT RED-on-revert). This is a function-COMPOSITION of the handler's decision
+//    fns, NOT the booted RoomAssigned poller — reverting the index.ts handler's dial wiring
+//    (index.ts:1029-1041) would NOT turn this red. It does NOT close index.ts:1037's handler-wiring
+//    TODO; that remains a T-C live obligation. The PURE dial (resolveTreeParentDial) is already
+//    RED-on-revert unit-covered (relay-endpoint-resolver.test.ts, incl. the non-sorted I1 regression).
 // ══════════════════════════════════════════════════════════════════════════════
-describe('I1 handler-wiring (REQ-RMS-042) — the tree dial follows TREE role, not chain slot-0', () => {
-  it('a non-root chain-primary dials its tree parent via the RoomAssigned sequence (determineRole→deriveTreePosition→resolveTreeParentDial→connectTo), NOT re-gated on role===primary', () => {
-    // DISCLOSURE: this drives the RoomAssigned handler's exact CALL SEQUENCE (index.ts:1000-1041) as a
-    // function composition — the main-scoped poller itself needs a booted daemon (T-C live). relay_ids
-    // are UNSORTED so chain slot-0 (0x02) is NOT the tree root (0x00 = sorted-min canonical).
+describe('I1 handler-wiring (REQ-RMS-042) — the tree dial follows TREE role, not chain slot-0 [composition, review-only]', () => {
+  it('composition: a non-root chain-primary would dial its tree parent via the RoomAssigned decision sequence (determineRole→deriveTreePosition→resolveTreeParentDial→connectTo), NOT re-gated on role===primary', () => {
+    // DISCLOSURE: this composes the RoomAssigned handler's DECISION FNS (index.ts:1000-1041) — it is
+    // NOT the booted poller (which needs a full daemon: chain client, EventPoller, standbyLinkManager),
+    // so it is REVIEW-ONLY, NOT RED-on-revert, and does NOT close index.ts:1037's TODO (T-C tracks it).
+    // relay_ids are UNSORTED so chain slot-0 (0x02) is NOT the tree root (0x00 = sorted-min canonical).
     const relayIds = ['0x02', '0x00', '0x01', '0x03', '0x04'];
     const myMinerId = '0x02'; // chain slot-0 → chain-PRIMARY, but NOT the tree root
     const cache = new InMemoryRelayEndpointCache();

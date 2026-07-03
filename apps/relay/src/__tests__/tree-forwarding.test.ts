@@ -327,14 +327,18 @@ describe('producedOrigins teardown lifecycle (T6/B4, I1)', () => {
   });
 });
 
-// ── T7 (REQ-RMS-042/043/044/046) — route all 3 fan sites through fanToTreeNeighbors ──
+// ── T7 (REQ-RMS-042/043/044/046) — the coordinator CALLBACK threading each fan site depends on ──
 //
-// These unit-prove the THREADING each fan site depends on (the fanToTreeNeighbors
-// wiring itself is index.ts main-scoped → covered by the hermetic depth-2 tree
-// integration test, plan Task 9). Here we pin: (1) the reverse hub-fan preserves the
-// IMMUTABLE origin across the mint, (2) the internal-node received-DOWN re-forward
-// callback receives the immutable origin + inbound hop budget, (3) the OWN-produce UP
-// announce carries a seeded hop budget through the queued-then-drained path, and
+// SCOPE (honest — no circular claim): these unit-prove the COORDINATOR CALLBACK THREADING only
+// (originProducerId + hopTtl survive the mint/queue/drain). They do NOT cover the fanToTreeNeighbors
+// plan→leg mapping (childUrls→onPrimaryProducer / parentUrl→onStandbyProducer), which is index.ts
+// main-scoped: that mapping is REVIEW-ONLY (a T-C live obligation), NOT covered by the Task 9
+// integration test (which RECONSTRUCTS the fan, so it can't see the signaling/index dispatch). The
+// one signaling seam that WOULD break on a revert — the handleProduce own-produce HOIST — is covered
+// RED-on-revert by tree-own-produce-hoist.test.ts (a spy on the REAL handleProduce). Here we pin:
+// (1) the reverse hub-fan preserves the IMMUTABLE origin across the mint, (2) the internal-node
+// received-DOWN re-forward callback receives the immutable origin + inbound hop budget, (3) the
+// OWN-produce UP announce carries a seeded hop budget through the queued-then-drained path, and
 // (4) the cascade terminates (hop guard + per-room origin dedup, no double-consume).
 
 describe('T7 Step 3 — reverse hub-fan: originProducerId survives the reverse mint (REQ-RMS-043/046)', () => {
