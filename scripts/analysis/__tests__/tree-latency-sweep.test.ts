@@ -11,7 +11,7 @@ import { deriveTree, toCanonicalRelayId, type LatencyParams } from '../../../pac
 // bare `@dvconf` specifier has no symlink — import the cp-daemon admission helper by source path.
 import { estimateRoomLoad } from '../../../apps/cp-daemon/src/admission-capacity.js';
 import {
-  sweepLatency, findNMax, audioTerm, synthesizeCanonicalIds, type SweepConfig,
+  sweepLatency, findNMax, audioTerm, synthesizeCanonicalIds, type SweepConfig, type AudioRegime,
 } from '../tree-latency-sweep.js';
 
 const P: LatencyParams = { lFixedMs: 100, lastMileMs: 40, tHopMs: 30 };
@@ -103,5 +103,39 @@ describe('krMin=1 shipped default -> kR=1, no tree, flat N-independent floor', (
       expect(r.diameter).toBe(0);
       expect(r.worstMs).toBe(100 + 40); // 140, flat — no cascade when krMin=1
     }
+  });
+});
+
+describe('§7 advisor-table pin — every row = REAL deriveTree+estimateLatency (guards the 2H overestimate)', () => {
+  // The six spec §7 rows. diameter/worstMs are the EXACT deriveTree output — NOT 2*height.
+  const ROWS: Array<{ n: number; regime: AudioRegime; D: number; kR: number; diameter: number; worstMs: number }> = [
+    { n: 60,  regime: 'linear',    D: 2, kR: 2,  diameter: 1, worstMs: 170 },
+    { n: 100, regime: 'linear',    D: 2, kR: 2,  diameter: 1, worstMs: 170 },
+    { n: 60,  regime: 'quadratic', D: 2, kR: 13, diameter: 6, worstMs: 320 },
+    { n: 60,  regime: 'quadratic', D: 3, kR: 13, diameter: 4, worstMs: 260 },
+    { n: 100, regime: 'quadratic', D: 3, kR: 34, diameter: 6, worstMs: 320 },
+    { n: 100, regime: 'quadratic', D: 4, kR: 34, diameter: 5, worstMs: 290 },
+  ];
+
+  it.each(ROWS)('N=$n $regime D=$D -> kR=$kR diameter=$diameter worst=$worstMs', (row) => {
+    const [only] = sweepLatency(baseCfg({
+      audioRegime: row.regime, degreeCap: row.D, nRange: [row.n],
+    }));
+    expect(only!.kR).toBe(row.kR);
+    expect(only!.diameter).toBe(row.diameter); // EXACT — a 2H proxy (e.g. 6 for the D=4 row) fails here
+    expect(only!.worstMs).toBe(row.worstMs);
+  });
+
+  it('the two load-bearing fixtures pin exact != 2H directly', () => {
+    // K=34,D=4 -> diameter 5 (NOT 2*height=6); K=34,D=3 -> diameter 6
+    expect(deriveTree(synthesizeCanonicalIds(34), { degreeCap: 4, maxHeight: BIG }).diameter).toBe(5);
+    expect(deriveTree(synthesizeCanonicalIds(34), { degreeCap: 3, maxHeight: BIG }).diameter).toBe(6);
+  });
+});
+
+describe('provenance label completeness (spec §5 honesty rule)', () => {
+  it('every emitted row carries a non-empty label containing the tHop param', () => {
+    const rows = sweepLatency(baseCfg({}));
+    expect(rows.every((r) => r.label.length > 0 && r.label.includes('tHop=30'))).toBe(true);
   });
 });

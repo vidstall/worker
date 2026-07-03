@@ -5,6 +5,7 @@
  * admission-capacity, so it lives in scripts/ (run via tsx, tested via vitest — no daemon boot).
  * See docs/superpowers/specs/2026-07-03-cascade-tree-latency-model-design.md §6/§7.
  */
+import { pathToFileURL } from 'node:url';
 import { estimateRoomLoad, type RoomClass } from '../../apps/cp-daemon/src/admission-capacity.js';
 // Relative SOURCE path (NOT the bare `@dvconf/inter-relay-client` specifier): scripts/ sits OUTSIDE
 // every workspace package, so no pnpm symlink is reachable from here to START bare resolution — a
@@ -101,3 +102,44 @@ export function findNMax(rows: readonly SweepRow[]): number {
   }
   return nMax;
 }
+
+// ---------------------------------------------------------------------------
+// CLI: analytical N_max report (the "đo max bằng công thức" advisor deliverable).
+// Run: npx tsx scripts/analysis/tree-latency-sweep.ts
+// Prints one labeled block per (audio regime, D) at the §5 representative params.
+// ---------------------------------------------------------------------------
+function formatReport(cfg: SweepConfig): string {
+  const rows = sweepLatency(cfg);
+  const nMax = findNMax(rows);
+  const head = rows[0]?.label ?? labelFor(cfg);
+  const body = rows
+    .map((r) => `  N=${String(r.n).padStart(4)}  kR=${String(r.kR).padStart(3)}  ` +
+      `diameter=${r.diameter}  worst=${String(r.worstMs).padStart(4)}ms  ${r.withinBudget ? 'OK' : 'OVER'}`)
+    .join('\n');
+  return `[${head}]\n${body}\n  => N_max (within budget) = ${nMax}`;
+}
+
+function main(): void {
+  const P: LatencyParams = { lFixedMs: 100, lastMileMs: 40, tHopMs: 30 }; // §5 WAN-regional representative
+  const nRange = Array.from({ length: 20 }, (_, i) => (i + 1) * 10); // 10..200
+  const base: Omit<SweepConfig, 'audioRegime' | 'degreeCap'> = {
+    roomClass: 'large', relayMode: 'sfu', cWorker: 300, krMin: 2,
+    maxHeight: 999, params: P, budgetMs: 300, nRange,
+  };
+  const blocks = [
+    { audioRegime: 'linear' as AudioRegime, degreeCap: 2 },
+    { audioRegime: 'quadratic' as AudioRegime, degreeCap: 3 },
+    { audioRegime: 'quadratic' as AudioRegime, degreeCap: 4 },
+  ];
+  // eslint-disable-next-line no-console
+  console.log('# T-L analytical latency sweep (worst-case, video budget 300ms)\n');
+  for (const b of blocks) {
+    // eslint-disable-next-line no-console
+    console.log(formatReport({ ...base, ...b }) + '\n');
+  }
+}
+
+// Run only when invoked directly (tsx), never on import (keeps the module test-pure).
+// pathToFileURL normalizes the Windows backslash argv[1] to a file:// URL so the strict === fires
+// (a raw `file://${process.argv[1]}` compare is FALSE on Windows and main() would never run).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
