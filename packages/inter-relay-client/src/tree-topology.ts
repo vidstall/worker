@@ -182,6 +182,9 @@ export function estimateLatency(layout: TreeLayout, params: LatencyParams): Late
  * Returns the SENTINEL -1 when budgetMs < lFixedMs + lastMileMs (the fixed floor alone exceeds the
  * budget -> not even a single-relay room fits; distinct from 0 = "only 0 hops fit"). Also -1 when
  * tHopMs <= 0 (loopback/degenerate; floor(x/0) would be Infinity), mirroring deriveDegreeCap's <=0 guards.
+ * Callers MUST test the result with `< 0` (NOT `<= 0`): 0 is a valid feasible cap
+ * ("only a 0-hop room fits"); only -1 is the infeasible sentinel. (Contrast sibling deriveDegreeCap,
+ * where 0 IS degenerate.)
  */
 export function deriveMaxDiameter(budgetMs: number, params: LatencyParams): number {
   if (params.tHopMs <= 0) return -1;

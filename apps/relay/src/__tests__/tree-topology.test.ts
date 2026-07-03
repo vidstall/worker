@@ -182,9 +182,10 @@ describe('estimateLatency (REQ-RMS-049)', () => {
   it('K<=1 layout (diameter 0) -> worstMs = lFixed + lastMile (no relay hop)', () => {
     const solo = deriveTree(['0x01'], { degreeCap: 2, maxHeight: 10 });
     expect(solo.diameter).toBe(0);
-    expect(estimateLatency(solo, P).worstMs).toBe(100 + 40); // lFixed + lastMile, no relay hop
-    expect(estimateLatency(solo, P).relayPathMs).toBe(0);    // zero-boundary: tree controls nothing
-    expect(estimateLatency(solo, P).networkMs).toBe(40);     // lastMile only
+    const est = estimateLatency(solo, P);
+    expect(est.worstMs).toBe(100 + 40);   // lFixed + lastMile, no relay hop
+    expect(est.relayPathMs).toBe(0);      // zero-boundary: tree controls nothing
+    expect(est.networkMs).toBe(40);       // lastMile only
     const empty = deriveTree([], { degreeCap: 2, maxHeight: 10 });
     expect(estimateLatency(empty, P).worstMs).toBe(100 + 40); // lFixed + lastMile, no relay hop
   });
@@ -222,10 +223,11 @@ describe('estimateLatency <-> deriveMaxDiameter round-trip (no floor off-by-one)
   const P: LatencyParams = { lFixedMs: 100, lastMileMs: 40, tHopMs: 30 };
 
   it('for budget >= floor: worstMs <= budget IFF diameter <= deriveMaxDiameter', () => {
-    // Sample trees with diameters 0,1,4 and budgets straddling each cap.
+    // Sample trees with diameters 0,1,2,4 and budgets straddling each cap.
     const trees = [
       deriveTree(['0x01'], { degreeCap: 2, maxHeight: 10 }),                                   // diameter 0
       deriveTree(['0x01', '0x02'], { degreeCap: 2, maxHeight: 10 }),                            // diameter 1
+      deriveTree(['0x01', '0x02', '0x03'], { degreeCap: 2, maxHeight: 10 }),                    // diameter 2
       deriveTree(['0x01', '0x02', '0x03', '0x04', '0x05', '0x06'], { degreeCap: 2, maxHeight: 10 }), // diameter 4
     ];
     for (const budget of [140, 170, 199, 200, 260, 320]) {
