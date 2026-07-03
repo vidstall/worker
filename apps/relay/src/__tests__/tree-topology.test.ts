@@ -182,14 +182,64 @@ describe('estimateLatency (REQ-RMS-049)', () => {
   it('K<=1 layout (diameter 0) -> worstMs = lFixed + lastMile (no relay hop)', () => {
     const solo = deriveTree(['0x01'], { degreeCap: 2, maxHeight: 10 });
     expect(solo.diameter).toBe(0);
-    expect(estimateLatency(solo, P).worstMs).toBe(140);
+    expect(estimateLatency(solo, P).worstMs).toBe(100 + 40); // lFixed + lastMile, no relay hop
+    expect(estimateLatency(solo, P).relayPathMs).toBe(0);    // zero-boundary: tree controls nothing
+    expect(estimateLatency(solo, P).networkMs).toBe(40);     // lastMile only
     const empty = deriveTree([], { degreeCap: 2, maxHeight: 10 });
-    expect(estimateLatency(empty, P).worstMs).toBe(140);
+    expect(estimateLatency(empty, P).worstMs).toBe(100 + 40); // lFixed + lastMile, no relay hop
   });
 
   it('K=2 star (diameter 1) -> exactly one hop added (single-standby latency)', () => {
     const pair = deriveTree(['0x01', '0x02'], { degreeCap: 2, maxHeight: 10 });
     expect(pair.diameter).toBe(1);
-    expect(estimateLatency(pair, P).worstMs).toBe(170); // 140 + 30
+    expect(estimateLatency(pair, P).worstMs).toBe(100 + 40 + 1 * 30); // one hop
+  });
+});
+
+describe('deriveMaxDiameter (REQ-RMS-050)', () => {
+  const P: LatencyParams = { lFixedMs: 100, lastMileMs: 40, tHopMs: 30 };
+
+  it('floor((budget - lFixed - lastMile) / tHop)', () => {
+    expect(deriveMaxDiameter(300, P)).toBe(5); // floor((300-140)/30) = floor(5.33) = 5
+  });
+
+  it('budget == lFixed+lastMile -> 0 (only a 0-hop / single-relay room fits)', () => {
+    expect(deriveMaxDiameter(140, P)).toBe(0);
+  });
+
+  it('budget < lFixed+lastMile -> -1 SENTINEL (even a single-relay room is over budget; distinct from 0)', () => {
+    expect(deriveMaxDiameter(139, P)).toBe(-1);
+    expect(deriveMaxDiameter(0, P)).toBe(-1);
+  });
+
+  it('tHop <= 0 (loopback/degenerate) -> -1 guard (floor(x/0) would be Infinity)', () => {
+    expect(deriveMaxDiameter(300, { ...P, tHopMs: 0 })).toBe(-1);
+    expect(deriveMaxDiameter(300, { ...P, tHopMs: -5 })).toBe(-1);
+  });
+});
+
+describe('estimateLatency <-> deriveMaxDiameter round-trip (no floor off-by-one)', () => {
+  const P: LatencyParams = { lFixedMs: 100, lastMileMs: 40, tHopMs: 30 };
+
+  it('for budget >= floor: worstMs <= budget IFF diameter <= deriveMaxDiameter', () => {
+    // Sample trees with diameters 0,1,4 and budgets straddling each cap.
+    const trees = [
+      deriveTree(['0x01'], { degreeCap: 2, maxHeight: 10 }),                                   // diameter 0
+      deriveTree(['0x01', '0x02'], { degreeCap: 2, maxHeight: 10 }),                            // diameter 1
+      deriveTree(['0x01', '0x02', '0x03', '0x04', '0x05', '0x06'], { degreeCap: 2, maxHeight: 10 }), // diameter 4
+    ];
+    for (const budget of [140, 170, 199, 200, 260, 320]) {
+      const cap = deriveMaxDiameter(budget, P);
+      for (const t of trees) {
+        const within = estimateLatency(t, P).worstMs <= budget;
+        expect(within).toBe(t.diameter <= cap);
+      }
+    }
+  });
+
+  it('boundary: budget < floor -> cap -1 AND worstMs(diameter 0) > budget (iff correctly scoped out)', () => {
+    const solo = deriveTree(['0x01'], { degreeCap: 2, maxHeight: 10 }); // diameter 0
+    expect(deriveMaxDiameter(139, P)).toBe(-1);
+    expect(estimateLatency(solo, P).worstMs).toBeGreaterThan(139); // 140 > 139
   });
 });
