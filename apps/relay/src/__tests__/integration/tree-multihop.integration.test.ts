@@ -46,9 +46,9 @@
  * │ (determineRole → deriveTreePosition → resolveTreeParentDial → connectTo) as a function    │
  * │ composition, NOT the booted poller — it is REVIEW-ONLY (NOT RED-on-revert), and does NOT   │
  * │ close index.ts:1037's handler-wiring TODO (still a T-C obligation). The byte-identity      │
- * │ carry uses pipeToRouter (same-id                                                          │
- * │ across hops); the FRESH per-hop id (Task 5) is proven separately by the coordinator       │
- * │ dedup + reverse-drain tests below (produceLocalFromPipe freshId on real routers).         │
+ * │ carry uses pipeToRouter (same-id across hops); the FRESH per-hop id (Task 5) is proven     │
+ * │ separately by the coordinator dedup + reverse-drain tests below (produceLocalFromPipe      │
+ * │ freshId on real routers).                                                                  │
  * └──────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * Run:

@@ -7,6 +7,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:relay": "vitest run --config vitest.relay-integration.config.ts",
     "test:demo:revote": "vitest run --config vitest.demo.config.ts",
     "bench:m2": "vitest run --config vitest.m2-bench.config.ts && tsx scripts/bench/report-m2-bench.ts",
     "bench:rms": "RMS_BENCH=1 SAT_BENCH=1 vitest run --config vitest.rms-bench.config.ts && tsx scripts/bench/report-rms-bench.ts",

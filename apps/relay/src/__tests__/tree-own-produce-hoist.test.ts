@@ -13,7 +13,7 @@
  *
  * RED-on-revert proof: comment out the treeActive branch (handleProduce) → an OWN produce
  * on a chain-STANDBY node hits `onStandbyProducer` (UP-only) → `fanToTreeNeighbors` is never
- * called AND `onStandbyProducer` IS → both assertions below flip. Restored → GREEN.
+ * called AND `onStandbyProducer` IS → the two hoist TESTS below fail. Restored → GREEN.
  *
  * Harness mirrors primary-produce-drive.test.ts (real createSignalingServer, mock manager).
  */

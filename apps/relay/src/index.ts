@@ -1034,7 +1034,7 @@ if (isMainModule) {
             // chain-primary never dialing its tree parent. Every node with a parent dials it (child->
             // parent live link); the true tree root (pos.parent===null) dials nobody = accept-only.
             // The WS accept path is unchanged (a node accepts its children's dials automatically).
-            // TODO(Task 9): the pure dial (resolveTreeParentDial) is unit-tested, but this HANDLER wiring — that the dial runs for a non-root chain-primary (not re-gated on role==='primary') — is only guarded by review until the hermetic depth-2 tree integration test (plan Task 9) asserts a chain-slot-0-non-root node dials its tree parent.
+            // TODO(T-C): the pure dial (resolveTreeParentDial) IS unit-covered RED-on-revert — relay-endpoint-resolver.test.ts pins the non-root chain-primary → tree-parent + root → nobody cases (incl. non-sorted relay_ids). This HANDLER wiring — that THIS RoomAssigned poller runs the dial for a non-root chain-primary, not re-gated on role==='primary' — is REVIEW-ONLY (Task 9's tree-multihop I1 test asserts it as a function COMPOSITION, NOT the booted poller); a RED-on-revert guard on the live handler needs a daemon boot and is a T-C obligation.
             const pos = roomTreePosition.get(roomId);
             const dialUrl = resolveTreeParentDial(pos, relayEndpointCache);
             standbyLink.primaryUrl = dialUrl;
