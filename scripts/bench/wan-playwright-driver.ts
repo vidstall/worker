@@ -6,7 +6,7 @@ interface DriverOpts {
 }
 
 function parse(argv: string[]): DriverOpts {
-  const g = (k: string, d: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1]! : d; };
+  const g = (k: string, d: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1]! : d; };
   return {
     sessions: parseInt(g('sessions', '30'), 10),
     pageBase: g('page', 'http://localhost:5173/bench/wan-measure-page.html'),
@@ -38,7 +38,7 @@ async function runSession(o: DriverOpts, i: number): Promise<void> {
   const consumer = await mk('consume');
   await new Promise((r) => setTimeout(r, o.holdMs));
   await producer.close(); await consumer.close(); await browser.close();
-  console.log(`session ${i}/${o.sessions} done (trace=${trace})`);
+  console.log(`session ${i + 1}/${o.sessions} done (trace=${trace})`);
 }
 
 async function main(): Promise<void> {
