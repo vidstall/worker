@@ -7,7 +7,10 @@ PORT="${1:-40001}"   # a port inside the mediasoup range 40000-49999 the NSG mus
 echo "[preflight] binding UDP :$PORT and waiting for an external probe..."
 echo "[preflight] from a DIFFERENT network, run:  nc -u <this-vm-public-ip> $PORT   then type + enter"
 # Listen for one datagram; succeed if anything arrives within 60s.
-if timeout 60 nc -u -l "$PORT" | head -c 1 | grep -q .; then
+# Capture OUTSIDE the pipeline: with `pipefail`, nc exiting non-zero on SIGPIPE
+# (busybox/netcat-traditional close head early) would falsely FAIL despite data.
+received=$(timeout 60 nc -u -l "$PORT" 2>/dev/null | head -c 1 || true)
+if [ -n "$received" ]; then
   echo "[preflight] PASS — inbound UDP :$PORT reachable (NSG + UFW open)."
 else
   echo "[preflight] FAIL — no inbound UDP on :$PORT. Check the NSG inbound rule + UFW. BLOCK the run."; exit 1
