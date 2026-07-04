@@ -55,14 +55,29 @@ import type { types as msTypes } from 'mediasoup';
 import { createRelayLatencyProbe, tHopNetworkFromRtt } from '../latency-probe.js';
 
 /**
- * Fake relay→client Consumer whose getStats resolves a single RTP-stream stat
- * carrying `roundTripTime` (the RTCP RR value). `L_relay_fwd` reads this — the
- * bare `Transport.getStats()` has NO `rtt` field (empirically proven), so the
- * metric is sourced from the Consumer, mirroring the t_hop Producer path.
+ * Fake relay→client Consumer whose getStats resolves a single `outbound-rtp`
+ * stat carrying `roundTripTime` (the RTCP RR value). `L_relay_fwd` is the
+ * relay→client SEND leg, so it reads the Consumer's OWN `outbound-rtp` stat —
+ * the bare `Transport.getStats()` has NO `rtt` field (empirically proven), so
+ * the metric is sourced from the Consumer, mirroring the t_hop Producer path.
  */
 function mockConsumer(roundTripTime: number | undefined) {
   return {
-    getStats: vi.fn().mockResolvedValue([{ type: 'inbound-rtp', roundTripTime }]),
+    getStats: vi.fn().mockResolvedValue([{ type: 'outbound-rtp', roundTripTime }]),
+    once: vi.fn(),
+    on: vi.fn(),
+  } as unknown as msTypes.Consumer;
+}
+
+/**
+ * Fake Consumer exposing BOTH legs `Consumer.getStats()` really returns: the
+ * Consumer's own send stream (`outbound-rtp`, relay→client) AND the underlying
+ * Producer's recv stream (`inbound-rtp`, upstream publisher→relay). `stats` lets
+ * the caller control the array ORDER to prove hop selection is order-independent.
+ */
+function mockConsumerWithBothLegs(stats: Array<{ type: string; roundTripTime: number }>) {
+  return {
+    getStats: vi.fn().mockResolvedValue(stats),
     once: vi.fn(),
     on: vi.fn(),
   } as unknown as msTypes.Consumer;
@@ -139,6 +154,40 @@ describe('createRelayLatencyProbe', () => {
       value_ms: 12.5,
       context: { roomId: 'r1', peerId: 'p1', transportId: 't1' },
     });
+  });
+
+  it('sample() reads the SEND leg (outbound-rtp 12.5), NOT the upstream inbound-rtp (99) — outbound first', async () => {
+    // Consumer.getStats() returns BOTH the send (outbound-rtp = relay→client,
+    // what L_relay_fwd means) AND the underlying producer recv (inbound-rtp =
+    // upstream) streams, both carrying roundTripTime. Must pick outbound only.
+    const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
+    const consumer = mockConsumerWithBothLegs([
+      { type: 'outbound-rtp', roundTripTime: 12.5 },
+      { type: 'inbound-rtp', roundTripTime: 99 },
+    ]);
+
+    await probe.sample(consumer, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
+
+    expect(harness.writeCalls).toHaveLength(1);
+    expect(harness.writeCalls[0]).toEqual({
+      metric: 'L_relay_fwd',
+      value_ms: 12.5,
+      context: { roomId: 'r1', peerId: 'p1', transportId: 't1' },
+    });
+  });
+
+  it('sample() reads the SEND leg (outbound-rtp 12.5), NOT the upstream inbound-rtp (99) — order reversed (order-independent)', async () => {
+    const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
+    const consumer = mockConsumerWithBothLegs([
+      { type: 'inbound-rtp', roundTripTime: 99 },
+      { type: 'outbound-rtp', roundTripTime: 12.5 },
+    ]);
+
+    await probe.sample(consumer, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
+
+    expect(harness.writeCalls).toHaveLength(1);
+    expect(harness.writeCalls[0]?.value_ms).toBe(12.5);
+    expect(harness.writeCalls[0]?.value_ms).not.toBe(99);
   });
 
   it('sample() skips emission when roundTripTime is undefined (no RTCP RR yet)', async () => {

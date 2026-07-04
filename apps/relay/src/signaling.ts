@@ -1756,7 +1756,7 @@ export function createSignalingServer(
       return;
     }
 
-    // #26-followup: L_relay_fwd sampler on the relay→client Consumer. RTCP RR
+    // #26-rtt-followup: L_relay_fwd sampler on the relay→client Consumer. RTCP RR
     // roundTripTime lives on the RTP stream (NOT the bare transport), so the
     // sampler must attach here, once a Consumer exists. BENCH_LATENCY off →
     // probe null → zero-cost branch.
@@ -1765,7 +1765,7 @@ export function createSignalingServer(
       const stop = probe.startSampler(consumer, {
         roomId: mapping.roomId,
         peerId: mapping.peerId,
-        transportId: peer.recvTransport?.id ?? consumer.id,
+        transportId: peer.recvTransport?.id,
         consumerId: consumer.id,
       });
       peer.samplerStops.set(consumer.id, stop);
