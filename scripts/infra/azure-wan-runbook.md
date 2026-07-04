@@ -367,6 +367,92 @@ npx tsx scripts/bench/wan-split-driver.ts --role <produce|consume> --start-epoch
 
 ---
 
+## Section 6B — Run (Lane B: inter-relay `t_hop_network`)
+
+Lane B measures the one-way **inter-relay** network hop `t_hop_network` on a LIVE
+cross-relay pipe, so `t_hop` flips from assumed → measured in the cascade-tree
+latency model. Unlike Lane A this is NOT "start two relays and point B at A": the
+PRIMARY/STANDBY topology is **chain-mediated** — the standby resolves the
+primary's endpoint from the on-chain `RoomAssigned` event (`relayIds[0]` →
+`primaryUrl`, `relay-endpoint-resolver.ts`) and dials the inter-relay link, opens
+a warm PlainTransport pipe, and mints a local producer via active-forward. The
+T7 probe samples RTCP RR `roundTripTime` on **that minted producer** (the
+receiver/`inbound-rtp` side) and emits `t_hop_network = rtt/2`
+(`apps/relay/src/index.ts:496-502` → `latency-probe.ts startRtpStreamSampler`).
+
+> **Prerequisite — the full native cross-relay stack.** Lane B needs the same
+> stack the RMS-live cross-relay run used: an on-chain package + validators +
+> cp-daemon with `RMS_KR_MIN>=2` (so a room is assigned ≥2 relays) + signaling +
+> **two relays on two hosts** + ≥1 browser producing into the room. Bring it up
+> with the canonical procedure (the `rms-live-local` path); the on-chain deploy is
+> NOT reproduced here. Reference: `.evidence/verification/rms-live-crossrelay-fix-liveproof.md`
+> and `apps/relay/src/__tests__/integration/live/rms-live-local.integration.test.ts`.
+> This is the heavier lane — budget accordingly.
+
+### 6B.1 — Two relay hosts (WAN deltas)
+
+Provision a SECOND VM (repeat Section 1 with a different `--name`, e.g.
+`dvconf-wan-bench-2`) so the inter-relay pipe crosses a real network hop. On EACH
+relay host, the relay process needs these env vars (the non-obvious WAN deltas
+over a loopback bring-up):
+
+| Env | Loopback default | WAN value | Why |
+|---|---|---|---|
+| `BENCH_LATENCY` | unset | `1` | turns on the T7 `t_hop` probe (off → null, zero-cost) |
+| `RMS_ACTIVE_FORWARD` | unset | `1` | standby mints the local producer the probe samples |
+| `RELAY_ENDPOINT_URL` | `ws://127.0.0.1:$WS_PORT` | `ws://<THIS-host-public-ip>:$WS_PORT` | published on-chain so the standby resolves a WAN-routable primary |
+| `ANNOUNCED_IP` | `127.0.0.1` | `<THIS-host-public-ip>` | the PlainTransport pipe address the peer relay connects back to — **without this the pipe is unreachable across the WAN** |
+| `WS_PORT` / `METRICS_PORT` | 4000 / 4001 | distinct per host (e.g. 4000/4001) | each host is its own machine, so ports need not differ between hosts, but must match its NSG rule |
+
+```bash
+# On EACH relay VM (values are THAT host's own public IP):
+ssh azureuser@"$RELAY_IP" "cd ~/dvconf-daemons && \
+  BENCH_LATENCY=1 BENCH_SCENARIO=s-wan-hop BENCH_TRACE_ID=${RUN_ID} \
+  RMS_ACTIVE_FORWARD=1 RMS_TREE_ACTIVE=0 \
+  RELAY_ENDPOINT_URL=ws://${RELAY_IP}:4000 ANNOUNCED_IP=${RELAY_IP} WS_PORT=4000 \
+    nohup pnpm --filter relay start > /tmp/relay-hop.log 2>&1 & \
+  sleep 6 && (pgrep -af 'tsx|src/index.ts' || true)"
+```
+
+### 6B.2 — NSG / firewall for the inter-relay pipe
+
+- **Pipe media (UDP):** `PIPE_PORT_RANGE` defaults to `40000-40100`, which is a
+  SUBSET of the mediasoup range `40000-49999` already opened in Section 2 — so no
+  new UDP rule is needed, but that range must be open **on both relay hosts** and
+  reachable **relay-to-relay** (the Section 2 rules allow it from any source).
+- **Inter-relay WS (TCP):** the standby dials `ws://<primary>:$WS_PORT`, so each
+  relay host's NSG must open its `WS_PORT` (TCP 4000) — the `allow-relay-ws` rule
+  from Section 2, applied to BOTH relay VMs' NSGs.
+- If you tighten the pipe range with `PIPE_PORT_RANGE=<min-max>`, open that exact
+  UDP range on both hosts instead.
+
+### 6B.3 — Drive a session and collect `t_hop_network`
+
+With the native stack up and a room assigned to ≥2 relays, have ≥1 browser join
+and PRODUCE into that room (the Lane-A produce page works, or any client). Once
+media flows, the primary pipes → the standby mints → the T7 probe samples. Verify
+the pipe is live on the standby, then pull the standby's bench file:
+
+```bash
+# On the STANDBY relay: confirm cross-relay bytes are flowing (peaks during the active window):
+ssh azureuser@"$STANDBY_IP" "curl -s http://localhost:4001/api/probe | grep -o '\"pipe_bytes_observed\":[0-9]*'"
+
+# t_hop_network is emitted by the STANDBY (source=relay). Pull + inspect:
+scp "azureuser@${STANDBY_IP}:~/dvconf-daemons/apps/relay/bench-output/s-wan-hop-relay-${RUN_ID}.jsonl" bench-output/"$RUN_ID"/
+grep -o '"metric":"t_hop_network"[^}]*"value_ms":[0-9.]*' bench-output/"$RUN_ID"/s-wan-hop-relay-"$RUN_ID".jsonl | head
+```
+
+> **Honest caveats (from the RMS-live cross-relay live-proof):** only ONE active
+> standby has been proven live; the cross-relay byte-flow is airtight (standby
+> received ~1.2 MB over `pipe_bytes_observed`), but `t_hop` on the WAN pipe is the
+> NEW magnitude this run establishes. The probe emits only once RTCP RR has
+> populated `roundTripTime` on the minted producer (a few seconds of media), so
+> keep the producing session alive ≥10 s. If `t_hop_network` rows are absent,
+> check the standby actually minted a producer (`REQ-RMS-025 ... active forward`
+> in `/tmp/relay-hop.log`) and that `pipe_bytes_observed` climbed.
+
+---
+
 ## Section 7 — Collect and Teardown
 
 ### 7.1 — Pull bench output and assemble
