@@ -21,7 +21,7 @@ export type LatencyScenario =
   | 's-loaded'
   | 'adhoc';
 
-/** Stable list of metrics — keep aligned with methodology §1. */
+/** Stable list of metrics — keep aligned with methodology §1 and the WAN-measurement spec §5. */
 export type LatencyMetric =
   | 'L_sig_rtt'
   | 'L_relay_fwd'
@@ -30,7 +30,22 @@ export type LatencyMetric =
   | 'L_cp_score'
   | 'L_validator_check'
   | 'L_g2g_optA'
-  | 'L_g2g_optB';
+  | 'L_g2g_optB'
+  // WAN-measurement (2026-07-04, spec `wan-latency-measurement`): Lane-A endpoint components …
+  | 'L_encode'
+  | 'L_jitterbuffer'
+  | 'L_decode'
+  | 'L_present'
+  | 'L_rtt_send'        // whole send-leg candidate-pair RTT (ms); join-g2g halves + sums both legs
+  | 'L_rtt_recv'        // whole recv-leg candidate-pair RTT (ms); join-g2g halves + sums both legs
+  | 'L_g2g_optB_full'   // the offline-joined one-way estimate (join-g2g.ts)
+  // … Lane-B inter-relay network hop (one-way RTT/2, a LOWER BOUND; ND-1). ONE canonical string —
+  //    the SAME 't_hop_network' is the enum member, the Task-7 writer.write() arg, AND the replay group key.
+  //    The `t_` prefix (vs the endpoint `L_` components above) is INTENTIONAL: this is an inter-relay
+  //    NETWORK hop time, not an endpoint pipeline-stage latency — the prefix break flags that distinction.
+  | 't_hop_network'
+  // … and the latent Node-harness metric, now registered (design §6 S5).
+  | 'L_g2g_RTT_proxy';
 
 /** Source daemon that emitted the event. */
 export type LatencySource =
