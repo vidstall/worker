@@ -10,6 +10,33 @@
 >
 > Docs language: English. All commands are real and executable.
 
+> **Live-run deviations (first real run — Azure for Students, 2026-07-04).** The
+> turnkey path below was validated end-to-end on an Azure-for-Students subscription;
+> that environment forced eight deviations from the original procedure. Each is
+> folded into its section as a `> DEVIATION` note. Summary:
+>
+> 1. **Region policy** — Students blocks `southeastasia`; the allowed set was
+>    `{centralindia, malaysiawest, koreacentral, japaneast, indonesiacentral}`.
+>    Used **malaysiawest** (closest to VN, `B2s_v2` unrestricted). → Section 1.
+> 2. **VM size** — `Standard_B2s` (v1) was absent in-region; used
+>    **`Standard_B2s_v2`** (x64, 2 vCPU / 8 GiB). → Section 1.
+> 3. **Quota not pre-checkable** — `az vm list-usage` returns **0 rows** on Students;
+>    provision-and-handle instead of gating on quota. → Section 3.
+> 4. **Bootstrap needs root** — `bootstrap-vm.sh` self-checks for root, so the
+>    `ssh … 'bash -s'` form fails; pipe to **`sudo bash -s`**. → Section 5.
+> 5. **pnpm version** — corepack pulls the latest pnpm (11.x, which needs Node ≥ 22.13
+>    → `node:sqlite` crash on the Node 20 the bootstrap installs). Pin
+>    **`corepack prepare pnpm@10.30.3 --activate`**. → Section 5.
+> 6. **mediasoup worker** — pnpm 10 ignores dependency build scripts, so the worker
+>    binary is not built by `pnpm install`; build it directly. → Section 5.
+> 7. **UFW ports** — bootstrap's UFW does not open the relay WS (4000) or bench sink
+>    (8081); add them explicitly (Section 5's manual step is REQUIRED, not optional).
+> 8. **Daemons require a live chain to BOOT** (the big one) — the relay registers
+>    on-chain at startup (`ensureRegistered()` → `process.exit(1)` on failure) and
+>    both daemons require 11 on-chain object IDs, so Section 6.1 is **not** "just
+>    start the daemons": a full localnet must be published on the VM first, and the
+>    start command needs `ANNOUNCED_IP` + the RTC port range. → Section 6.1.
+
 ---
 
 ## Prerequisites
@@ -21,23 +48,32 @@
 
 ```bash
 # One-time: create resource group (skip if it exists)
-az group create --name dvconf-bench --location southeastasia
+# DEVIATION 1: on Azure for Students southeastasia is policy-blocked; malaysiawest
+# is the closest allowed region (allowed set: centralindia, malaysiawest,
+# koreacentral, japaneast, indonesiacentral). The RG region is only metadata.
+az group create --name dvconf-bench --location malaysiawest
 ```
 
 ---
 
 ## Section 1 — Provision
 
-Create a B2s VM in Southeast Asia (closest to VN). Capture the public IP immediately.
+Create a 2-vCPU VM in the closest allowed region and capture the public IP immediately.
+
+> **DEVIATION 1 + 2 (Azure for Students):** `southeastasia` is policy-blocked and
+> `Standard_B2s` (v1) was absent in the allowed regions — so this uses
+> `--location malaysiawest` and `--size Standard_B2s_v2`. On a standard (non-Students)
+> subscription the original `southeastasia` / `Standard_B2s` values work; adjust back
+> if your subscription allows them. Confirm size availability with Section 3 first.
 
 ```bash
 # Provision the VM
 az vm create \
   --resource-group dvconf-bench \
   --name dvconf-wan-bench \
-  --location southeastasia \
+  --location malaysiawest \
   --image Ubuntu2204 \
-  --size Standard_B2s \
+  --size Standard_B2s_v2 \
   --admin-username azureuser \
   --ssh-key-values ~/.ssh/id_rsa.pub \
   --public-ip-sku Standard \
@@ -165,8 +201,14 @@ az network nsg rule create \
 
 ## Section 3 — Step-0(a): Quota / Region Check
 
-Verify that the B2s size is available in Southeast Asia and that the subscription has
-sufficient vCPU quota before provisioning (avoids a failed deployment).
+Verify that the chosen size is available in the target region and that the subscription
+has sufficient vCPU quota before provisioning (avoids a failed deployment).
+
+> **DEVIATION 3 (Azure for Students):** `az vm list-usage` returned **0 rows** on the
+> Students subscription — quota is not pre-checkable there. In that case skip the quota
+> gate and provision-and-handle: if `az vm create` fails on quota/availability, fall
+> back per Section 8. Also check `Standard_B2s_v2` (not `Standard_B2s`) availability in
+> `malaysiawest`.
 
 ```bash
 # Check vCPU quota for the region (Standard_B family uses "standardBSFamily")
@@ -230,9 +272,33 @@ echo "probe" | nc -u <VM_IP> 40001
 Run the existing bootstrap script which installs dependencies and configures UFW.
 Do NOT rewrite or inline its contents here — it is the authoritative source.
 
+> **DEVIATION 4:** `bootstrap-vm.sh` self-checks for root, so the plain `'bash -s'`
+> form fails ("must run as root"). Pipe it to `sudo bash -s`. It installs Node 20 by
+> default (`NODE_MAJOR=20`).
+
 ```bash
 source /tmp/dvconf-bench.env
-ssh azureuser@"$VM_IP" 'bash -s' < scripts/infra/bootstrap-vm.sh
+ssh azureuser@"$VM_IP" 'sudo bash -s' < scripts/infra/bootstrap-vm.sh
+```
+
+> **DEVIATION 5 + 6 (pnpm + mediasoup) — REQUIRED after bootstrap, before `pnpm install`.**
+> On Node 20, corepack's default pnpm is the latest (11.x, which needs Node ≥ 22.13 and
+> crashes on `node:sqlite`). Pin pnpm 10, then install. pnpm 10 ignores dependency build
+> scripts, so the mediasoup worker binary is NOT built by install — build it directly
+> (needs `python3-venv`), or the relay crashes at worker spawn.
+
+```bash
+ssh azureuser@"$VM_IP" 'bash -s' <<'REMOTE'
+set -e
+cd ~/dvconf-daemons
+corepack prepare pnpm@10.30.3 --activate      # DEVIATION 5: pin (matches lockfile v9)
+pnpm install --frozen-lockfile
+# DEVIATION 6: build the mediasoup worker from source (pnpm 10 skipped its postinstall)
+sudo apt-get install -y python3-venv
+cd node_modules/.pnpm/mediasoup@*/node_modules/mediasoup
+node npm-scripts.mjs postinstall
+ls -lh worker/out/Release/mediasoup-worker    # expect a ~9 MB linux-x64 binary
+REMOTE
 ```
 
 If the VM already has an existing firewall configuration and UFW would conflict, skip the
@@ -273,11 +339,81 @@ Each client machine needs BOTH repos and an NTP-synced clock:
 - The bench page is served on **localhost** (a browser secure context — required
   for `getUserMedia` on the produce side; `http://<VM_IP>:5173` would be blocked).
 
+### 6.1a — Bring up the on-chain localnet on the VM (REQUIRED — daemons will NOT boot without it)
+
+> **DEVIATION 8 — the daemons hard-require a live Sui chain to boot.** Both the relay
+> and the signaling daemon call `loadNetworkConfig()`, which requires 11 on-chain
+> object IDs, and the relay additionally runs `ensureRegistered()` at startup — an
+> on-chain registration transaction that `process.exit(1)`s on failure. There is **no
+> bench bypass**. The local `.env` IDs are bound to your local genesis and are NOT
+> reusable on the VM (a fresh genesis mints fresh IDs). So before Section 6.1 you must
+> stand up a full localnet on the VM and publish the contracts.
+>
+> Good news for **Lane A**: the relay serves rooms **ad-hoc** (`handleJoin` creates a
+> router on first join; the only admission gate is an optional room-password, which the
+> Lane-A driver does not send). So **cp-daemon and validators are NOT needed** — only
+> the relay + signaling must boot. Lane B (Section 6B) still needs the full native stack.
+
+Steps (run on the VM; the keypairs are **throwaway localnet keys**, safe only here):
+
+1. **Copy the contracts sources to the VM** (the `dvconf-contracts` repo — Move sources +
+   `scripts/demo/publish-and-init.sh`). A tarball or a git bundle both work, e.g.
+   `~/dvconf-contracts` on the VM.
+2. **Start the localnet** (`sui` 1.66.2 was already installed by bootstrap; it matches the
+   `publish-and-init.sh` comments):
+
+   ```bash
+   ssh azureuser@"$VM_IP" 'nohup sui start --with-faucet --force-regenesis > /tmp/sui.log 2>&1 & sleep 20 && sui client chain-identifier'
+   ```
+
+3. **Publish + init** — mirror `dvconf-contracts/scripts/demo/publish-and-init.sh` steps
+   **1–6** (configure client → new deployer address → faucet + poll gas →
+   `sui client test-publish --build-env localnet` → create the 6 admin-gated registries →
+   merge into `publish-output.json`). **Skip steps 7–9** (QuorumConfigState / cap-token /
+   admin-creds — not needed for the media bench). This yields the 10 fresh object IDs.
+   > NOTE: `publish-and-init.sh` is written for the docker localnet; on the VM you run the
+   > same six steps against the host `sui` directly. Map the published objects to env names
+   > with `dvconf-daemons/scripts/read-publish-output.sh`.
+4. **Write `~/dvconf-daemons/.env`** on the VM with the 10 fresh IDs
+   (`PACKAGE_ID`, `NETWORK_REGISTRY_ID`, `MINER_STORE_ID`, `USER_REGISTRY_ID`,
+   `RELAY_REGISTRY_ID`, `CP_REGISTRY_ID`, `VALIDATOR_REGISTRY_ID`, `ROOM_MANAGER_ID`,
+   `SIGNALING_REGISTRY_ID`, `ROLE_VOTE_BOX_ID`) + `SUI_NETWORK=localnet` + the four
+   throwaway keypairs (`PRIVATE_KEY`, `SIGNALING_KEYPAIR`, `CP_KEYPAIR`, `SUI_PRIVATE_KEY`).
+   Import + faucet `PRIVATE_KEY` and `SIGNALING_KEYPAIR` (the relay stakes 0.25 SUI at
+   registration, so its address needs gas).
+5. **DEVIATION 8a — acquire the relay/signaling ROLES via CP-voting.** `determine_role()`
+   in `staking.move` only ever returns `role_cp` or `role_user`, so the relay and signaling
+   nodes cannot get their role directly — a CP must vote them in. The live run used a helper,
+   `scripts/demo/wan-bootstrap.ts` (10 steps: register a CP → cast role votes for the relay
+   and signaling addresses → apply the voted roles → register in the relay and signaling
+   registries). Run it once after step 4:
+
+   ```bash
+   # wan-bootstrap.ts reads PRIVATE_KEY + SIGNALING_KEYPAIR (from .env) and DEPLOYER_ADDRESS
+   # (the deployer address minted in step 3). Replace <deployer-addr> with that address:
+   ssh azureuser@"$VM_IP" "cd ~/dvconf-daemons && set -a && . ./.env && set +a && DEPLOYER_ADDRESS=<deployer-addr> npx tsx scripts/demo/wan-bootstrap.ts"
+   ```
+
+   > `wan-bootstrap.ts` is committed at `dvconf-daemons/scripts/demo/wan-bootstrap.ts`. It
+   > reads all secrets / run-specific values from env (`PRIVATE_KEY`, `SIGNALING_KEYPAIR`,
+   > `DEPLOYER_ADDRESS`) and the object IDs from `~/publish-output.json` — nothing is
+   > hardcoded, so it is reusable across any localnet genesis.
+
+> **Ephemeral warning:** the localnet uses `--force-regenesis`, so it does not survive a VM
+> reboot — the object IDs change on restart. If the VM reboots, re-run steps 2–5 (re-publish
+> + re-write `.env` + re-run `wan-bootstrap.ts`) before starting the daemons.
+
 ### 6.1 — Start daemons on the VM
 
 Started via each package's `start` script (runs TypeScript directly under `tsx` —
 **no `dist/` build needed**). `BENCH_LATENCY=1` turns on the probes; the signaling
 sink listens on `BENCH_PORT=8081`; the relay serves plain `ws://` on `WS_PORT=4000`.
+
+> **DEVIATION 8b — the relay start command MUST set `ANNOUNCED_IP` and the RTC port range.**
+> Without `ANNOUNCED_IP=<VM public IP>` mediasoup advertises `127.0.0.1` in its ICE
+> candidates and remote WebRTC never connects. And `RTC_MIN_PORT`/`RTC_MAX_PORT` default to
+> `10000-10100`, which is OUTSIDE the `40000-49999` UDP range opened by the firewall
+> (Sections 2/5) — set them to `40000/40100` so the media ports are actually reachable.
 
 ```bash
 source /tmp/dvconf-bench.env
@@ -285,9 +421,10 @@ RUN_ID="wan-$(date +%Y%m%dT%H%M%S)"
 echo "Run ID: $RUN_ID"
 
 ssh azureuser@"$VM_IP" "cd ~/dvconf-daemons && \
-  BENCH_LATENCY=1 BENCH_SCENARIO=s-wan BENCH_TRACE_ID=${RUN_ID} \
+  BENCH_LATENCY=1 BENCH_SCENARIO=s-wan BENCH_TRACE_ID=${RUN_ID} BENCH_PORT=8081 \
     nohup pnpm --filter @dvconf/signaling start > /tmp/signaling.log 2>&1 & \
   BENCH_LATENCY=1 BENCH_SCENARIO=s-wan BENCH_TRACE_ID=${RUN_ID} WS_PORT=4000 \
+    ANNOUNCED_IP=${VM_IP} RTC_MIN_PORT=40000 RTC_MAX_PORT=40100 \
     nohup pnpm --filter relay start > /tmp/relay.log 2>&1 & \
   sleep 6 && echo 'daemons started:' && (pgrep -af 'tsx|src/index.ts' || true)"
 
@@ -295,6 +432,10 @@ ssh azureuser@"$VM_IP" "cd ~/dvconf-daemons && \
 ssh azureuser@"$VM_IP" "curl -s -o /dev/null -w 'bench-sink /bench/event -> HTTP %{http_code}\n' http://localhost:8081/bench/event; \
   (ss -ltn | grep -E ':4000|:8081') || true"
 ```
+
+> On first boot the relay runs its on-chain registration (a few seconds); watch
+> `/tmp/relay.log` for the `ensureRegistered` success and the minted `MINER_CAP_ID`.
+> Passing that `MINER_CAP_ID` back in on subsequent restarts skips re-registration.
 
 > Output location: `pnpm --filter <pkg> start` runs with cwd = the package dir, so
 > the JSONLs land in **`apps/signaling/bench-output/s-wan-client-${RUN_ID}.jsonl`**
@@ -506,17 +647,19 @@ az network public-ip delete --resource-group dvconf-bench --name dvconf-wan-benc
 
 ## Section 8 — Fallbacks
 
-### 8.1 — Region fallback: East Asia
+### 8.1 — Region fallback: koreacentral
 
-If Southeast Asia has no B2s quota or availability (Section 3 returns no rows):
+If malaysiawest has no availability, use another allowed region. **On Azure for Students
+`eastasia` is also policy-blocked** — pick from the allowed set (`centralindia`,
+`koreacentral`, `japaneast`, `indonesiacentral`); `koreacentral` was verified clean:
 
 ```bash
 az vm create \
   --resource-group dvconf-bench \
   --name dvconf-wan-bench \
-  --location eastasia \
+  --location koreacentral \
   --image Ubuntu2204 \
-  --size Standard_B2s \
+  --size Standard_B2s_v2 \
   --admin-username azureuser \
   --ssh-key-values ~/.ssh/id_rsa.pub \
   --public-ip-sku Standard \
@@ -570,8 +713,9 @@ ssh azureuser@"$VM_IP" "systemctl status coturn || (sudo apt-get install -y cotu
 | 0b. Inbound UDP | `bash scripts/infra/preflight-udp.sh 40001` | Script prints PASS |
 | 1. Provision | `az vm create` | VM running, IP captured in `$VM_IP` |
 | 2. NSG | `az network nsg rule create` x8 (incl. TCP 4000 relay-WS + TCP 8081 bench-sink) | All rules show `Succeeded` |
-| 3. UFW / bootstrap | `bootstrap-vm.sh` + allow 4000/8081/tcp | Exit 0, UFW active |
-| 4a. Daemons (VM) | `pnpm --filter @dvconf/signaling start` + `pnpm --filter relay start` (BENCH_LATENCY=1) | bench-sink → HTTP 405; :4000/:8081 listening |
+| 3. UFW / bootstrap | `sudo bash -s` < `bootstrap-vm.sh` + pin `pnpm@10.30.3` + build mediasoup worker + allow 4000/8081/tcp | Exit 0, UFW active, worker binary present |
+| 3b. Localnet (VM) | publish contracts + write `.env` (10 IDs) + `wan-bootstrap.ts` (CP-voting roles) | `sui client chain-identifier` OK; relay/signaling registered |
+| 4a. Daemons (VM) | signaling + relay `start` with `BENCH_LATENCY=1`, relay also `ANNOUNCED_IP=$VM_IP RTC_MIN_PORT=40000 RTC_MAX_PORT=40100` | bench-sink → HTTP 405; :4000/:8081 listening |
 | 4b. Page (each client) | `cd dvconf-client && pnpm dev` | vite on localhost:5173 |
 | 4c. Run | `wan-split-driver.ts --role produce\|consume --start-epoch <E>` on 2 ISPs (same E) | `session i/30 … done`; sink JSONL grows |
 | 5. Collect + assemble | `scp apps/*/bench-output/*.jsonl` → `join-g2g.ts <RUN_ID>` | ≥30 rows, per-session p50/p95/p99 printed |
