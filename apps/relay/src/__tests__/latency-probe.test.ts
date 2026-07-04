@@ -51,7 +51,7 @@ vi.mock('@dvconf/shared', async (importOriginal) => {
   };
 });
 
-import { createRelayLatencyProbe } from '../latency-probe.js';
+import { createRelayLatencyProbe, tHopNetworkFromRtt } from '../latency-probe.js';
 
 function mockTransport(rtt: number | undefined) {
   return {
@@ -165,5 +165,15 @@ describe('createRelayLatencyProbe', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('tHopNetworkFromRtt', () => {
+  it('halves the round-trip rtt into a one-way network hop', () => {
+    expect(tHopNetworkFromRtt(30)).toBe(15);
+  });
+  it('returns null for a non-positive rtt (no RTCP report yet)', () => {
+    expect(tHopNetworkFromRtt(0)).toBeNull();
+    expect(tHopNetworkFromRtt(-1)).toBeNull();
   });
 });

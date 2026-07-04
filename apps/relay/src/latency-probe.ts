@@ -33,6 +33,11 @@ export interface RelayLatencyProbe {
   close(): void;
 }
 
+/** PURE. One-way inter-relay network hop from a round-trip pipe RTT (ms). Null if rtt <= 0. */
+export function tHopNetworkFromRtt(rttMs: number): number | null {
+  return rttMs > 0 ? rttMs / 2 : null;
+}
+
 /**
  * Create a relay latency probe. Returns `null` if `BENCH_LATENCY` is unset
  * so call sites can branch trivially:
