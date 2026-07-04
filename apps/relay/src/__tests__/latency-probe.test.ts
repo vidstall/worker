@@ -54,20 +54,27 @@ vi.mock('@dvconf/shared', async (importOriginal) => {
 import type { types as msTypes } from 'mediasoup';
 import { createRelayLatencyProbe, tHopNetworkFromRtt } from '../latency-probe.js';
 
-function mockTransport(rtt: number | undefined) {
+/**
+ * Fake relay→client Consumer whose getStats resolves a single RTP-stream stat
+ * carrying `roundTripTime` (the RTCP RR value). `L_relay_fwd` reads this — the
+ * bare `Transport.getStats()` has NO `rtt` field (empirically proven), so the
+ * metric is sourced from the Consumer, mirroring the t_hop Producer path.
+ */
+function mockConsumer(roundTripTime: number | undefined) {
   return {
-    getStats: vi.fn().mockResolvedValue([{ rtt }]),
-  } as unknown as Parameters<
-    NonNullable<ReturnType<typeof createRelayLatencyProbe>>['sample']
-  >[0];
+    getStats: vi.fn().mockResolvedValue([{ type: 'inbound-rtp', roundTripTime }]),
+    once: vi.fn(),
+    on: vi.fn(),
+  } as unknown as msTypes.Consumer;
 }
 
-function mockFailingTransport() {
+/** Fake Consumer whose getStats rejects. */
+function mockFailingConsumer() {
   return {
-    getStats: vi.fn().mockRejectedValue(new Error('mediasoup getStats failed')),
-  } as unknown as Parameters<
-    NonNullable<ReturnType<typeof createRelayLatencyProbe>>['sample']
-  >[0];
+    getStats: vi.fn().mockRejectedValue(new Error('consumer getStats failed')),
+    once: vi.fn(),
+    on: vi.fn(),
+  } as unknown as msTypes.Consumer;
 }
 
 function mockLogger() {
@@ -120,11 +127,11 @@ describe('createRelayLatencyProbe', () => {
     expect(probe?.close).toBeInstanceOf(Function);
   });
 
-  it('sample() writes L_relay_fwd with rtt + room/peer/transport context', async () => {
+  it('sample() writes L_relay_fwd with raw rtt + room/peer/transport context', async () => {
     const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
-    const transport = mockTransport(12.5);
+    const consumer = mockConsumer(12.5);
 
-    await probe.sample(transport, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
+    await probe.sample(consumer, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
 
     expect(harness.writeCalls).toHaveLength(1);
     expect(harness.writeCalls[0]).toEqual({
@@ -134,29 +141,29 @@ describe('createRelayLatencyProbe', () => {
     });
   });
 
-  it('sample() skips emission when RTT is undefined (no RTCP report yet)', async () => {
+  it('sample() skips emission when roundTripTime is undefined (no RTCP RR yet)', async () => {
     const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
-    const transport = mockTransport(undefined);
+    const consumer = mockConsumer(undefined);
 
-    await probe.sample(transport, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
+    await probe.sample(consumer, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
 
     expect(harness.writeCalls).toHaveLength(0);
   });
 
   it('sample() skips emission when getStats() rejects', async () => {
     const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
-    const transport = mockFailingTransport();
+    const consumer = mockFailingConsumer();
 
-    await probe.sample(transport, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
+    await probe.sample(consumer, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
 
     expect(harness.writeCalls).toHaveLength(0);
   });
 
-  it('sample() skips emission when RTT is zero (treated as missing)', async () => {
+  it('sample() skips emission when roundTripTime is zero (treated as missing)', async () => {
     const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
-    const transport = mockTransport(0);
+    const consumer = mockConsumer(0);
 
-    await probe.sample(transport, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
+    await probe.sample(consumer, { roomId: 'r1', peerId: 'p1', transportId: 't1' });
 
     expect(harness.writeCalls).toHaveLength(0);
   });
@@ -165,9 +172,9 @@ describe('createRelayLatencyProbe', () => {
     vi.useFakeTimers();
     try {
       const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
-      const transport = mockTransport(20);
+      const consumer = mockConsumer(20);
 
-      const stop = probe.startSampler(transport, {
+      const stop = probe.startSampler(consumer, {
         roomId: 'r1',
         peerId: 'p1',
         transportId: 't1',

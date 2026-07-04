@@ -1,13 +1,16 @@
 /**
- * Relay-side latency probe — Task #26 (scope B).
+ * Relay-side latency probe — Task #26 (scope B) + `#26-rtt-followup`.
  *
- * Polls mediasoup `Transport.getStats()` and emits `L_relay_fwd` events.
+ * Emits `L_relay_fwd` (relay→client forwarding latency, ms) by reading the
+ * RTCP RR `roundTripTime` from the relay→client **Consumer**'s RTP-stream stat.
+ * NOTE: `Transport.getStats()` has NO `rtt` field on any transport type
+ * (empirically proven by two in-process mediasoup probes), so the metric is
+ * sourced from the Consumer — mirroring the `t_hop_network` Producer path.
+ * Wired in `signaling.ts handleConsume` (once a Consumer exists), NOT in
+ * `handleCreateTransport` (a bare transport carries no RTP object).
+ *
  * Off-by-default: returns `null` when `BENCH_LATENCY` env is unset, so the
  * call sites can be wired with zero overhead in production.
- *
- * Full activation (wire-in to room-handler / signaling.ts) is deferred to
- * `#26-followup`. The module ships now so #29 (capacity/multi-room stress)
- * inherits a stable API.
  *
  * Methodology: `docs/80-research/evaluation/m1-latency-methodology.md` §3.1
  */
@@ -20,15 +23,34 @@ import {
 } from '@dvconf/shared';
 
 export interface RelayLatencyProbe {
-  /** Poll one transport once and emit `L_relay_fwd`. Safe to call from a hot loop. */
+  /**
+   * Poll one relay→client Consumer once and emit `L_relay_fwd` = the Consumer's
+   * RTCP RR `roundTripTime` (RAW round-trip, ms — NOT halved). Safe to call from
+   * a hot loop; skips the sample until an RTCP RR has populated `roundTripTime`.
+   */
   sample(
-    transport: msTypes.Transport,
-    context: { roomId: string; peerId: string; transportId: string; nPeers?: number },
+    consumer: msTypes.Consumer,
+    context: {
+      roomId: string;
+      peerId: string;
+      transportId: string;
+      consumerId?: string;
+      nPeers?: number;
+    },
   ): Promise<void>;
-  /** Spawn a 1-second poller for the given transport. Returns a stop fn. */
+  /**
+   * Spawn a 1-second poller for the given relay→client Consumer, emitting
+   * `L_relay_fwd` from its RTCP RR `roundTripTime` (raw rtt). Returns a stop fn.
+   */
   startSampler(
-    transport: msTypes.Transport,
-    context: { roomId: string; peerId: string; transportId: string; nPeers?: number },
+    consumer: msTypes.Consumer,
+    context: {
+      roomId: string;
+      peerId: string;
+      transportId: string;
+      consumerId?: string;
+      nPeers?: number;
+    },
   ): () => void;
   /**
    * Lane-B inter-relay hop probe. Reads `roundTripTime` from the RECEIVER's
@@ -61,7 +83,7 @@ export function tHopNetworkFromRtt(rttMs: number): number | null {
  * so call sites can branch trivially:
  *
  *     const probe = createRelayLatencyProbe('relay-0xabc', logger);
- *     if (probe !== null) probe.startSampler(transport, {...});
+ *     if (probe !== null) probe.startSampler(consumer, {...});
  */
 export function createRelayLatencyProbe(
   instance: string,
@@ -78,64 +100,43 @@ export function createRelayLatencyProbe(
   );
 
   /**
-   * Lane-B — read `roundTripTime` from a piped Producer's inbound-rtp stat.
+   * Read `roundTripTime` (RTCP RR, ms) from an RTP-stream object's stats.
    *
-   * The RTT lives on the RECEIVER / `inbound-rtp` side (empirically verified:
-   * a probe on a REAL cross-worker pipe returned 0.0152587890625 ms on loopback
-   * after ~6 s of RTCP exchange). The Consumer / `outbound-rtp` side stays 0.
-   * Units = milliseconds (mediasoup reports fractional ms for sub-ms loopback).
+   * Serves BOTH metrics: a piped Producer (`t_hop_network`, Lane B) and a
+   * relay→client Consumer (`L_relay_fwd`, `#26-rtt-followup`). RTT lives on the
+   * RTP-stream stat, NOT on `Transport.getStats()` (which has no `rtt` field —
+   * empirically proven). For the Lane-B pipe it surfaced on the RECEIVER /
+   * `inbound-rtp` side: a probe on a REAL cross-worker pipe returned
+   * 0.0152587890625 ms on loopback after ~6 s of RTCP exchange. Units =
+   * milliseconds (mediasoup reports fractional ms for sub-ms loopback).
    */
-  async function readRttFromRtpStream(producer: msTypes.Producer): Promise<number | null> {
+  async function readRttFromRtpStream(
+    rtpObject: msTypes.Producer | msTypes.Consumer,
+  ): Promise<number | null> {
     try {
-      const stats = await producer.getStats();
+      const stats = await rtpObject.getStats();
       for (const s of stats) {
         const rtt = (s as { roundTripTime?: number }).roundTripTime;
         if (typeof rtt === 'number' && rtt > 0) return rtt;
       }
       return null;
     } catch (err) {
-      logger.debug({ err }, 'Producer getStats failed (t_hop sample skipped)');
-      return null;
-    }
-  }
-
-  /**
-   * Extract a forwarding-latency proxy from mediasoup transport stats.
-   *
-   * mediasoup `Transport.getStats()` returns an array of `TransportStat` with
-   * fields including `rtt` (ms, from RTCP receiver reports) and per-direction
-   * byte counters. We use `rtt` as the closest proxy for `L_relay_fwd` since
-   * the mediasoup-internal ingest→egress delta is not exposed.
-   *
-   * If no RTCP report has arrived yet, `rtt` is undefined; we skip the sample.
-   */
-  async function readRttFromStats(transport: msTypes.Transport): Promise<number | null> {
-    try {
-      const stats = await transport.getStats();
-      for (const s of stats) {
-        const rtt = (s as { rtt?: number }).rtt;
-        if (typeof rtt === 'number' && rtt > 0) {
-          return rtt;
-        }
-      }
-      return null;
-    } catch (err) {
-      logger.debug({ err }, 'Transport getStats failed (probe sample skipped)');
+      logger.debug({ err }, 'RTP-stream getStats failed (latency sample skipped)');
       return null;
     }
   }
 
   return {
-    async sample(transport, context) {
-      const rtt = await readRttFromStats(transport);
+    async sample(consumer, context) {
+      const rtt = await readRttFromRtpStream(consumer);
       if (rtt !== null) {
         writer.write('L_relay_fwd', rtt, context);
       }
     },
-    startSampler(transport, context) {
+    startSampler(consumer, context) {
       const intervalMs = parseInt(process.env['BENCH_SAMPLE_INTERVAL_MS'] ?? '1000', 10);
       const handle = setInterval(() => {
-        void readRttFromStats(transport).then((rtt) => {
+        void readRttFromRtpStream(consumer).then((rtt) => {
           if (rtt !== null) {
             writer.write('L_relay_fwd', rtt, context);
           }

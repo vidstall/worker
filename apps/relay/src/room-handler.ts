@@ -57,9 +57,11 @@ export interface PeerState {
   producers: msTypes.Producer[];
   consumers: msTypes.Consumer[];
   /**
-   * Per-transport latency-probe sampler stop fns (S23.1.A1, BENCH_LATENCY=1 only).
-   * Keyed by `transport.id`; called from `removePeer` before transport.close().
-   * Empty Map when `BENCH_LATENCY` is unset (probe singleton returns null).
+   * Per-stream latency-probe sampler stop fns (S23.1.A1 + `#26-followup`,
+   * BENCH_LATENCY=1 only). Keyed by `transport.id` or `consumer.id`; called from
+   * `removePeer` before the transports/consumers close (the guaranteed backstop
+   * for the per-consumer `@close` handler). Empty Map when `BENCH_LATENCY` is
+   * unset (probe singleton returns null).
    */
   samplerStops: Map<string, () => void>;
 }

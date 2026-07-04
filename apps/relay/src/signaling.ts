@@ -1459,18 +1459,6 @@ export function createSignalingServer(
       }
     }
 
-    // S23.1.A1: start a latency-probe sampler on this transport when
-    // BENCH_LATENCY=1. Probe is null otherwise — zero-cost branch.
-    const probe = ensureRelayProbe(logger);
-    if (probe !== null) {
-      const stop = probe.startSampler(transport, {
-        roomId: mapping.roomId,
-        peerId: mapping.peerId,
-        transportId: transport.id,
-      });
-      peer.samplerStops.set(transport.id, stop);
-    }
-
     let iceServers:
       | Array<{ urls: string | string[]; username?: string; credential?: string }>
       | undefined;
@@ -1766,6 +1754,25 @@ export function createSignalingServer(
     if (!consumer) {
       sendJson(ws, { type: 'error', message: 'Cannot consume producer' });
       return;
+    }
+
+    // #26-followup: L_relay_fwd sampler on the relay→client Consumer. RTCP RR
+    // roundTripTime lives on the RTP stream (NOT the bare transport), so the
+    // sampler must attach here, once a Consumer exists. BENCH_LATENCY off →
+    // probe null → zero-cost branch.
+    const probe = ensureRelayProbe(logger);
+    if (probe !== null) {
+      const stop = probe.startSampler(consumer, {
+        roomId: mapping.roomId,
+        peerId: mapping.peerId,
+        transportId: peer.recvTransport?.id ?? consumer.id,
+        consumerId: consumer.id,
+      });
+      peer.samplerStops.set(consumer.id, stop);
+      consumer.on('@close', () => {
+        stop();
+        peer.samplerStops.delete(consumer.id);
+      });
     }
 
     const announcedPeer = reg?.producerPeerId;
