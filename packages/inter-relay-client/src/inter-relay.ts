@@ -929,6 +929,19 @@ export class StandbyWarmPipeCoordinator {
      * opts in via RMS_TREE_ACTIVE.
      */
     private readonly treeActive: boolean = false,
+    /**
+     * Lane-B inter-relay `t_hop_network` sampler (REQ-WLM-08). When provided, starts a
+     * `roundTripTime`-based interval poller on each freshly-minted piped producer and wires
+     * `stop()` to the producer `'close'` event so it self-cleans. Null/undefined when
+     * `BENCH_LATENCY` is unset → zero-cost branch (byte-identical production behaviour).
+     *
+     * Accepts the raw `fromRelayId` (the `peerRelayId` of the source) and returns a stop fn;
+     * the wiring layer (index.ts) closes over the local `toRelay` identity in a thin closure.
+     */
+    private readonly startPipeProducerSampler?: (
+      producer: msTypes.Producer,
+      fromRelayId: string,
+    ) => () => void,
   ) {}
 
   /**
@@ -1051,6 +1064,13 @@ export class StandbyWarmPipeCoordinator {
         { roomId, producerId: producer.id, kind: producer.kind, peerRelayId },
         'REQ-RMS-025: standby minted a LOCAL producer from the cross-process pipe (active forward)',
       );
+      // Lane-B: start t_hop_network sampler on the freshly-minted piped producer.
+      // BENCH_LATENCY unset → startPipeProducerSampler is undefined → no-op.
+      if (this.startPipeProducerSampler !== undefined) {
+        const stop = this.startPipeProducerSampler(producer, peerRelayId);
+        // '@close' is the mediasoup internal close event on Producer (used by signaling.ts).
+        producer.on('@close', stop);
+      }
       // Fix 4 — a throwing L1.3 callback must NOT abort the loop or skip the
       // remaining producers (this one is already minted + marked).
       // T-B (REQ-RMS-042/044/046) — thread the IMMUTABLE origin + inbound hop budget so the wiring

@@ -48,7 +48,7 @@ import { createMediasoupManager } from './mediasoup-manager.js';
 import { createSignalingServer, type TurnContext, type InterRelayContext } from './signaling.js';
 import { MetricsTracker } from './metrics.js';
 import { startMetricsServer, type ProbeState } from './metrics-server.js';
-import { closeRelayProbe, type RoomState } from './room-handler.js';
+import { closeRelayProbe, ensureRelayProbe, type RoomState } from './room-handler.js';
 import { makeOnReverseAnnounce } from './reverse-announce-handler.js';
 import { deriveCoturnUrl } from './coturn-url.js';
 import { fetchTurnCredential } from './turn-fetcher.js';
@@ -488,6 +488,18 @@ if (isMainModule) {
       // T6 (REQ-RMS-046): cascade-tree data plane — fresh local id per hop + per-room
       // origin dedup. Default false (flag off) → the shipped star mint stays byte-stable.
       RMS_TREE_ACTIVE,
+      // Lane-B t_hop_network sampler (REQ-WLM-08). BENCH_LATENCY unset → probe is null
+      // → undefined passed → zero-cost no-op inside the coordinator (byte-identical).
+      // When enabled: starts a roundTripTime interval poller on the freshly-minted piped
+      // producer (RECEIVER/inbound-rtp stat, empirically verified). `endpointUrl` is this
+      // relay's stable unique identity (used as peerRelayId for the outbound link as well).
+      (() => {
+        const _benchProbe = ensureRelayProbe(logger);
+        if (_benchProbe === null) return undefined;
+        const _localRelayId = endpointUrl;
+        return (producer: import('mediasoup').types.Producer, fromRelayId: string): (() => void) =>
+          _benchProbe.startRtpStreamSampler(producer, { fromRelay: fromRelayId, toRelay: _localRelayId });
+      })(),
     );
 
     // ── G3.2b: live cross-daemon inter-relay LINK glue ───────────────────────

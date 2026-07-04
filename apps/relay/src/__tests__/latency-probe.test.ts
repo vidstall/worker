@@ -51,6 +51,7 @@ vi.mock('@dvconf/shared', async (importOriginal) => {
   };
 });
 
+import type { types as msTypes } from 'mediasoup';
 import { createRelayLatencyProbe, tHopNetworkFromRtt } from '../latency-probe.js';
 
 function mockTransport(rtt: number | undefined) {
@@ -79,6 +80,24 @@ function mockLogger() {
     trace: vi.fn(),
     child: vi.fn(() => mockLogger()),
   } as unknown as Parameters<typeof createRelayLatencyProbe>[1];
+}
+
+/** Fake producer whose getStats resolves a single inbound-rtp stat with roundTripTime. */
+function mockProducer(roundTripTime: number | undefined) {
+  return {
+    getStats: vi.fn().mockResolvedValue([{ type: 'inbound-rtp', roundTripTime }]),
+    once: vi.fn(),
+    on: vi.fn(),
+  } as unknown as msTypes.Producer;
+}
+
+/** Fake producer whose getStats rejects. */
+function mockFailingProducer() {
+  return {
+    getStats: vi.fn().mockRejectedValue(new Error('producer getStats failed')),
+    once: vi.fn(),
+    on: vi.fn(),
+  } as unknown as msTypes.Producer;
 }
 
 describe('createRelayLatencyProbe', () => {
@@ -175,5 +194,75 @@ describe('tHopNetworkFromRtt', () => {
   it('returns null for a non-positive rtt (no RTCP report yet)', () => {
     expect(tHopNetworkFromRtt(0)).toBeNull();
     expect(tHopNetworkFromRtt(-1)).toBeNull();
+  });
+});
+
+// ── Lane-B RTP-stream sampler (t_hop_network via piped-producer inbound-rtp roundTripTime) ──
+
+describe('probe.sampleRtpStream — t_hop_network via piped-producer inbound-rtp roundTripTime (Lane B)', () => {
+  beforeEach(() => {
+    harness.resetCalls();
+    harness.setBenchEnabled(true);
+  });
+
+  it('emits t_hop_network = rtt/2 (15) when roundTripTime = 30', async () => {
+    const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
+    const producer = mockProducer(30);
+
+    await probe.sampleRtpStream(producer, { fromRelay: 'relay-primary', toRelay: 'relay-standby' });
+
+    expect(harness.writeCalls).toHaveLength(1);
+    expect(harness.writeCalls[0]).toEqual({
+      metric: 't_hop_network',
+      value_ms: 15,
+      context: { fromRelay: 'relay-primary', toRelay: 'relay-standby', leg: 'inter-relay' },
+    });
+  });
+
+  it('emits nothing when roundTripTime is 0 (treated as missing)', async () => {
+    const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
+    const producer = mockProducer(0);
+
+    await probe.sampleRtpStream(producer, { fromRelay: 'relay-primary', toRelay: 'relay-standby' });
+
+    expect(harness.writeCalls).toHaveLength(0);
+  });
+
+  it('emits nothing when producer getStats rejects', async () => {
+    const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
+    const producer = mockFailingProducer();
+
+    await probe.sampleRtpStream(producer, { fromRelay: 'relay-primary', toRelay: 'relay-standby' });
+
+    expect(harness.writeCalls).toHaveLength(0);
+  });
+
+  it('startRtpStreamSampler returns a stop fn that halts further t_hop_network emissions', async () => {
+    vi.useFakeTimers();
+    try {
+      const probe = createRelayLatencyProbe('relay-test', mockLogger())!;
+      const producer = mockProducer(20);
+
+      const stop = probe.startRtpStreamSampler(producer, {
+        fromRelay: 'relay-primary',
+        toRelay: 'relay-standby',
+      });
+
+      await vi.advanceTimersByTimeAsync(1050);
+      const callsAfterOneTick = harness.writeCalls.length;
+      expect(callsAfterOneTick).toBeGreaterThanOrEqual(1);
+      // Every emission must be t_hop_network = 10 (rtt 20 / 2).
+      for (const c of harness.writeCalls) {
+        expect(c.metric).toBe('t_hop_network');
+        expect(c.value_ms).toBe(10);
+      }
+
+      stop();
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(harness.writeCalls.length).toBe(callsAfterOneTick);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
