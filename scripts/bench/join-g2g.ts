@@ -72,9 +72,13 @@ export function assembleOneWay(events: LatencyEvent[]): OneWayRow[] {
     const jitterBufferRecv = median(g.recv, 'L_jitterbuffer');
     const decodeRecv = median(g.recv, 'L_decode');
     const presentRecv = median(g.recv, 'L_present') ?? 0;
-    // L_present (requestVideoFrameCallback) is not universally supported; absent -> treated as 0,
-    // which makes oneWayMs a conservative LOWER BOUND for those sessions. Cite rVFC browser
-    // coverage before using in the manuscript table (same labeled standard as RESIDUAL_MS / ND-3).
+    // L_present (requestVideoFrameCallback) absent -> treated as 0, making oneWayMs a conservative
+    // LOWER BOUND for that session. Coverage (RESOLVED 2026-07-05): rVFC is Baseline "widely available"
+    // since Oct 2024 — Chrome/Edge 83+ (2020-05), Safari 15.4+ (2022-03), Firefox 132+ (2024-10) [MDN/
+    // caniuse]. The Playwright driver runs Chromium, so present_recv is ALWAYS captured for the >=30
+    // automatable sessions and this lower-bound branch does NOT trigger there; it only bites hypothetical
+    // pre-132 Firefox clients. So the manuscript row is exact for the automated harness (same labeled
+    // standard as RESIDUAL_MS / ND-3).
     if (
       encodeSend === undefined || rttSend === undefined || rttRecv === undefined ||
       jitterBufferRecv === undefined || decodeRecv === undefined
