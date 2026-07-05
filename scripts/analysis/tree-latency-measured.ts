@@ -1,19 +1,29 @@
 // scripts/analysis/tree-latency-measured.ts — REQ-WLM-09: T-L sweep at MEASURED params.
-// Driver scaffold only — Step 1 of Task 9 (WAN latency-measurement lane).
-// The MEASURED values below are PLACEHOLDERS; replace after the live WAN run produces real numbers.
+// Populated 2026-07-05 from the live Azure WAN run (Lane A + Lane B).
 // Do NOT edit tree-latency-sweep.ts — this file reuses its EXPORTS only.
+// Source of the numbers + fidelity caveats: docs/80-research/evaluation/star-wan-results.md.
 import { sweepLatency, findNMax, type SweepConfig, type AudioRegime } from './tree-latency-sweep.js';
 import type { LatencyParams } from '../../packages/inter-relay-client/src/index.ts';
 
-// PLACEHOLDER — replace with values derived from the live WAN run (Task 9 Step 1):
-//   lFixedMs   = Lane A: median(L_encode + L_jitterbuffer + L_decode + L_present)
-//   lastMileMs = Lane A: median(L_rtt_send/2) + median(L_rtt_recv/2)   // BOTH legs (B1)
-//   tHopMs     = Lane B: median(t_hop_network)                          // MUST be > 0
-// Until then these are 0/placeholders and the sweep is NOT authoritative.
+// MEASURED (LatencyParams contract, tree-topology.ts:155):
+//   lFixedMs   = capture + encode + jitter + decode + render (non-network floor)
+//   lastMileMs = t_up + t_down combined (both user<->edge-relay legs)
+//   tHopMs     = ONE inter-relay hop, one-way (network + forward)
+//
+// Lane A (S-baseline-internet, RUN wan-20260705T060736, n=30 sessions):
+//   encode 3.1 + jitterbuffer 8.36 + decode 1.06 + present 0(lower-bound) + display-scanout 12.5
+//     => lFixedMs = 25.0.  CAPTURE = 0 here (Chromium FAKE device) — REQ-WLM-01a real-camera is
+//     user-hands, so lFixedMs is a LOWER BOUND; a real webcam adds ~tens of ms (up to ~100 for USB).
+//   RTT_send/2 p50 19.5 + RTT_recv/2 p50 19.5 => lastMileMs = 39.0 (both legs, same-ISP reduced-fidelity).
+// Lane B (cross-relay, RUN wanhop-1783237350, n=116, malaysiawest<->koreacentral):
+//   t_hop_network p50 => tHopMs = 34.5 (one-way inter-relay forward; RTCP RTT/2 on the piped producer).
+//
+// Self-consistency: at diameter 0 (single relay) worstMs = lFixedMs+lastMileMs = 64.0 ms, matching the
+// Lane-A measured one-way p50 = 64.8 ms. Each added relay level costs tHopMs = 34.5 ms.
 const measured: LatencyParams = {
-  lFixedMs: 0,    /* TODO measured: Lane A fixed-pipeline floor (ms) */
-  lastMileMs: 0,  /* TODO measured: combined both-legs last-mile (ms) */
-  tHopMs: 1,      /* TODO measured: one-way inter-relay hop (ms); kept >0 so sweepLatency doesn't throw */
+  lFixedMs: 25.0,   // Lane A capture(0,fake)+encode+jitter+decode+render — LOWER BOUND (no real camera)
+  lastMileMs: 39.0, // Lane A both-legs last mile (RTT_send/2 + RTT_recv/2), same-ISP reduced-fidelity
+  tHopMs: 34.5,     // Lane B one-way inter-relay hop (t_hop_network p50, cross-region WAN)
 };
 
 const base: Omit<SweepConfig, 'audioRegime' | 'degreeCap'> = {
