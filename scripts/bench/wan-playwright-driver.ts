@@ -2,7 +2,7 @@
 import { chromium, type BrowserContext } from 'playwright';
 
 interface DriverOpts {
-  sessions: number; pageBase: string; relay: string; bench: string; realCamera: boolean; holdMs: number;
+  sessions: number; pageBase: string; relay: string; bench: string; realCamera: boolean; holdMs: number; e2ee: string;
 }
 
 function parse(argv: string[]): DriverOpts {
@@ -14,6 +14,7 @@ function parse(argv: string[]): DriverOpts {
     bench: g('bench', 'http://localhost:8081'),
     realCamera: argv.includes('--real-camera'),
     holdMs: parseInt(g('hold-ms', '20000'), 10), // ~20 samples/session at 1 Hz
+    e2ee: g('e2ee', 'off'), // P2: 'on' attaches the SFrame transform to both legs (glass-to-glass ON-vs-OFF)
   };
 }
 
@@ -30,6 +31,7 @@ async function runSession(o: DriverOpts, i: number): Promise<void> {
     u.searchParams.set('room', room); u.searchParams.set('relay', o.relay);
     u.searchParams.set('bench', o.bench); u.searchParams.set('peer', `${role}-${i}`);
     if (o.realCamera) u.searchParams.set('camera', 'real');
+    u.searchParams.set('e2ee', o.e2ee); // P2: both legs get the same flag (ON-vs-OFF glass-to-glass)
     await page.goto(u.toString());
     return ctx;
   };
