@@ -81,6 +81,14 @@ export interface StartQuorumClaimsOptions {
   logger: Logger;
   /** Env source (defaults to process.env). Drives QUORUM_CLAIMS_PORT + QUORUM_CLAIMS_AUTH_TOKEN. */
   env?: Record<string, string | undefined>;
+  /**
+   * OQ-7 cross-host boot-wiring: the network interface host to bind. Resolution order is
+   * `opts.bindHost` → `QUORUM_CLAIMS_BIND_HOST` env → `'127.0.0.1'` (the byte-identical loopback
+   * default — unreachable by a remote host, the single-host slice). Set to `'0.0.0.0'` (or a specific
+   * NIC IP) to EXPOSE the board to remote peers over the mTLS carrier (leader-hosts-board topology).
+   * Purely a bind target — no behavior change when unset.
+   */
+  bindHost?: string;
   /** Test-only token injection — bypasses the env read but NOT the fail-LOUD requirement. */
   authTokenOverride?: string;
   /** Override the single CORS origin (default QUORUM_CLAIMS_CORS_ORIGIN env). */
@@ -397,15 +405,18 @@ export async function startQuorumClaimsServer(
     }
   }
 
-  // ── LOOPBACK bind (127.0.0.1) — unreachable by a remote host (single-host slice). ──
+  // ── Bind host (OQ-7 cross-host boot-wiring). Default '127.0.0.1' → the byte-identical LOOPBACK
+  //    bind (unreachable by a remote host, the single-host slice). '0.0.0.0'/NIC-IP EXPOSES the board
+  //    to remote peers over the mTLS carrier (leader-hosts-board). Resolution: opts → env → loopback. ──
+  const bindHost = opts.bindHost ?? env['QUORUM_CLAIMS_BIND_HOST'] ?? '127.0.0.1';
   await new Promise<void>((resolve) => {
-    server.listen(port, '127.0.0.1', () => resolve());
+    server.listen(port, bindHost, () => resolve());
   });
 
   const boundPort = (server.address() as { port: number } | null)?.port ?? port;
   logger.info(
-    { port: boundPort, host: '127.0.0.1', corsOrigin, scheme: tlsEnabled ? 'https-mtls' : 'http' },
-    'quorum/claims carrier listening (loopback)',
+    { port: boundPort, host: bindHost, corsOrigin, scheme: tlsEnabled ? 'https-mtls' : 'http' },
+    'quorum/claims carrier listening',
   );
 
   return {
