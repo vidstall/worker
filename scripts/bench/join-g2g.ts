@@ -8,14 +8,29 @@
  *
  * BOTH candidate-pair RTTs are summed — each measures only its own last-mile
  * leg; a single RTT/2 drops one (~15-25 ms same-region), the defect in
- * mediasoup-client-harness.ts:289. Residual = camera-sensor + display-scanout,
- * a labeled/cited band, never folded silently (spec D3, ND-3).
+ * mediasoup-client-harness.ts:289. Residual = the recv-side display present/scan-out
+ * tail ONLY (see RESIDUAL_MS); camera-sensor+USB capture is NOT folded here — it is
+ * the dominant unmeasured term for real webcams and is reported separately, never
+ * folded silently (spec D3, ND-3).
  */
 import { loadTrace, percentile } from './replay.js';
 import type { LatencyEvent } from '@dvconf/shared';
 
-/** ND-3: working band midpoint until an authoritative citation is pinned (base-probe §6). */
-export const RESIDUAL_MS = 12.5; // ~5-20 ms (camera-sensor + display scan-out); label + cite before manuscript row.
+/**
+ * ND-3 (RESOLVED 2026-07-05): display present/scan-out residual — the recv-side tail
+ * AFTER present_recv (requestVideoFrameCallback fires at compositor hand-off, before
+ * photons). At 60 Hz the frame period is 1000/60 = 16.67 ms; scan-out adds ~half-frame
+ * (~8.3 ms) on average plus ~5 ms panel GtG, and an infinite-mirror teardown attributes
+ * up to ~17 ms to display refresh. 12.5 ms is the midpoint of that ~[8.3, 17] ms band.
+ *
+ * Camera-sensor+USB capture is deliberately NOT in this constant: RTCStats timing starts
+ * at the encoder, so the whole capture path is upstream of every measured term. Fake-device
+ * sessions have ~0 capture (residual = display only → this constant is exact); the
+ * REQ-WLM-01a real-camera subset must report capture as a measured/bounded term (~tens of ms,
+ * up to ~100 ms dominant for USB webcams), never folded into RESIDUAL_MS.
+ * Ref: Transitive Robotics, "WebRTC Latency: A Breakdown" (infinite-mirror measurement).
+ */
+export const RESIDUAL_MS = 12.5;
 
 export interface OneWayRow {
   roomId: string;
