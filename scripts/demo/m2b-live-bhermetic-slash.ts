@@ -111,6 +111,9 @@ import { createPrimaryPipeTransport, createStandbyPipeTransport } from '../../pa
 import { assertCanarySlash, type CanarySlashEvent } from './assert-canary-slash.ts';
 // B-WAN (REQ-MLW-B-12): the CANARY_PIPE_PARAMS_PATH writer the DEPLOYED peer validator index.ts reads.
 import { writeCanaryPipeParams } from './write-canary-pipe-params.ts';
+// Track-C: env-gated native-boot (no-docker) adapter — lets copyFromVolume skip `docker compose cp`
+// when native-bwan-bootstrap.ts pre-placed the file. Default (flag unset) = byte-identical docker path.
+import { shouldSkipVolumeCopy } from './native-artifacts.ts';
 
 const MOD = 'm2b-live-bhermetic-slash';
 
@@ -245,6 +248,10 @@ const COMPOSE_FILES = [
 
 /** Copy a file out of the booted-stack named `publish-output` volume (via the cp-daemon mount). */
 function copyFromVolume(containerPath: string, hostDest: string): void {
+  // Track-C (CANARY_NATIVE_ARTIFACTS): the Azure 2-VM native rig has no docker; native-bwan-bootstrap.ts
+  // pre-writes hostDest directly into .demo-shared. Skip the `docker compose cp` when the flag is on AND
+  // the file is already present (byte-identical default when the flag is unset — docker path unchanged).
+  if (shouldSkipVolumeCopy(!!process.env['CANARY_NATIVE_ARTIFACTS'], existsSync(hostDest))) return;
   const composeArgs: string[] = [];
   for (const f of COMPOSE_FILES) { composeArgs.push('-f', join(ROOT, f)); }
   // cp-daemon mounts publish-output:/shared:ro — the seed artifacts live under /shared/.
