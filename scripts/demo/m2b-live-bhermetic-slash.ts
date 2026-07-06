@@ -109,6 +109,8 @@ import { attachValidatorSink } from '../../apps/validator-daemon/src/canary/pipe
 import { createPrimaryPipeTransport, createStandbyPipeTransport } from '../../packages/inter-relay-client/src/index.ts';
 // On-chain assertion helper (daemons-internal, the same one Stage-5b uses).
 import { assertCanarySlash, type CanarySlashEvent } from './assert-canary-slash.ts';
+// B-WAN (REQ-MLW-B-12): the CANARY_PIPE_PARAMS_PATH writer the DEPLOYED peer validator index.ts reads.
+import { writeCanaryPipeParams } from './write-canary-pipe-params.ts';
 
 const MOD = 'm2b-live-bhermetic-slash';
 
@@ -192,6 +194,22 @@ const need = <T>(v: T | undefined | null, what: string): T => {
   if (v === undefined || v === null || v === '') throw new Error(`${MOD}: ${what} required`);
   return v;
 };
+
+/**
+ * B-WAN cross-host F1 endpoints (Task-7.1, REQ-MLW-B-11/14). Returns the relay host + peer validator
+ * host routable VPN/VNet iface IPs when the 2-host run is active, or null for the single-process
+ * loopback path (127.0.0.1, byte-identical default). Triggered ONLY by the NEW cross-host-only var
+ * CANARY_PEER_VPN_IP — so a stray ANNOUNCED_IP (e.g. the single-host realmedia compose sets 127.0.0.1)
+ * can NEVER flip the orchestrator off loopback. At live time need() hard-requires BOTH: a half-set env
+ * fails LOUD instead of silently binding loopback. Mirrors the PIPE_SRTP env-gate style (additive, OFF).
+ */
+function crossHostF1Endpoints(): { relayVpnIp: string; peerVpnIp: string } | null {
+  if (!process.env['CANARY_PEER_VPN_IP']) return null; // single-process loopback (byte-identical)
+  return {
+    relayVpnIp: need(process.env['ANNOUNCED_IP'], 'ANNOUNCED_IP (this relay host VPN/VNet iface — cross-host F1)'),
+    peerVpnIp: need(process.env['CANARY_PEER_VPN_IP'], 'CANARY_PEER_VPN_IP (peer validator host VPN/VNet iface — cross-host F1)'),
+  };
+}
 
 // ── run-log accumulation (written to .evidence/, gitignored) ─────────────────────────────────────
 const runLog: string[] = [];
@@ -315,12 +333,23 @@ async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: L
     });
 
     // F1: a primary pipe on the relay router connected to a standby pipe on the validator router.
+    // B-WAN (REQ-MLW-B-11/14, Task-7.1): env-gated cross-host F1 leg. crossHostF1Endpoints() is non-null
+    // ONLY in the 2-host run (CANARY_PEER_VPN_IP set) → the pair is announced on the routable VPN/VNet
+    // ifaces so the hop can traverse the WAN; PIPE_SRTP=1 wraps it (createPrimary/StandbyPipeTransport
+    // already read pipeSrtpEnabled()). Under cross-host the primary binds a FIXED port (CANARY_RELAY_PIPE_
+    // PORT, default 40000, inside PIPE_PORT_RANGE) so the deployed peer validator's SIGNED manifest
+    // relayPipe {ip,port} + the CANARY_PIPE_PARAMS_PATH file can reference a known endpoint. UNSET =>
+    // 127.0.0.1 + ephemeral port 0, BYTE-IDENTICAL to the single-process hermetic path.
+    const xhost = crossHostF1Endpoints();
     standbyPipe = await createStandbyPipeTransport(validatorRouter, 0);
-    primaryPipe = await createPrimaryPipeTransport(relayRouter, 0);
-    await primaryPipe.connect({ ip: '127.0.0.1', port: standbyPipe.tuple.localPort } as Parameters<
+    primaryPipe = await createPrimaryPipeTransport(
+      relayRouter,
+      xhost ? parseInt(process.env['CANARY_RELAY_PIPE_PORT'] ?? '40000', 10) : 0,
+    );
+    await primaryPipe.connect({ ip: xhost?.peerVpnIp ?? '127.0.0.1', port: standbyPipe.tuple.localPort } as Parameters<
       msTypes.PipeTransport['connect']
     >[0]);
-    await standbyPipe.connect({ ip: '127.0.0.1', port: primaryPipe.tuple.localPort } as Parameters<
+    await standbyPipe.connect({ ip: xhost?.relayVpnIp ?? '127.0.0.1', port: primaryPipe.tuple.localPort } as Parameters<
       msTypes.PipeTransport['connect']
     >[0]);
 
@@ -334,6 +363,38 @@ async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: L
       // TAMPER/HONEST legs leave CANARY_EVIL_DROP_EVERY_N unset => undefined => no drop, byte-identical.
       dropEveryN: Number(process.env['CANARY_EVIL_DROP_EVERY_N']) || undefined,
     });
+    // B-WAN (REQ-MLW-B-12, Task-7.2): in cross-host mode publish the relay primary {ip,port} + the
+    // piped-producer descriptor to CANARY_PIPE_PARAMS_PATH so the DEPLOYED validator-2 on the peer host
+    // (CANARY_LIVE_CAPTURE=pipe) brings up its OWN standby + captures the SAME forwarded media to attest
+    // independently (the ≥2-distinct-across-hosts headline). The file is transported OOB (scp) to the
+    // peer host. INV-C: kRoom/cellSecret are re-derivation factors written to a LOCAL file only, NEVER
+    // onto a socket. No-op on the loopback path (xhost === null) / when CANARY_PIPE_PARAMS_PATH is unset
+    // — byte-identical to the single-process hermetic run.
+    if (xhost && process.env['CANARY_PIPE_PARAMS_PATH']) {
+      const paramsPath = process.env['CANARY_PIPE_PARAMS_PATH'];
+      writeCanaryPipeParams(paramsPath, {
+        relay: { ip: xhost.relayVpnIp, port: primaryPipe.tuple.localPort },
+        piped: {
+          id: evil.pipedProducerId,
+          kind: evil.kind,
+          rtpParameters: evil.rtpParameters,
+          producerPaused: evil.producerPaused,
+        },
+        receiverMinerId: need(
+          process.env['CANARY_PIPE_RECEIVER_MINER_ID'],
+          'CANARY_PIPE_RECEIVER_MINER_ID (peer validator-2 miner_id — cross-host pipe params)',
+        ),
+        canaryKid: CANARY_KID,
+        expectedCtrs: CTRS,
+        kRoom: K_ROOM,
+        cellSecret: CELL_SECRET,
+      });
+      logger.info(
+        { module: MOD, action: 'wrote_pipe_params', context: { paramsPath, relayPort: primaryPipe.tuple.localPort } },
+        'B-WAN: wrote CANARY_PIPE_PARAMS_PATH for the deployed peer validator-2 (cross-host capture)',
+      );
+    }
+
     // Re-produce the piped descriptor on the validator side, then attach an UNPAUSED sink consumer.
     const pipedProducer = await standbyPipe.produce({
       id: evil.pipedProducerId,
