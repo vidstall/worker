@@ -23,6 +23,14 @@ const SFRAME_TRAILER_LEN = 14; // byte-frozen (config:1+kid:4+ctr:8+codecOffset:
 export interface EvilRelayForward {
   /** The piped producer id the validator standby side re-produces + consumes. */
   pipedProducerId: string;
+  /**
+   * Track-C: the id of the (possibly-corrupted) RE-PRODUCED evil output producer on relayRouter —
+   * the SAME source `pipeProducerOntoPrimaryTransport` piped onto `pipeTransport`. Exposed so a
+   * cross-host run can FAN the identical evil stream onto a SECOND primary pipe (vm2's leg) via
+   * `pipeProducerOntoPrimaryTransport(primary2, outProducerId)` — both hosts then capture byte-for-byte
+   * the same tampered forward and attest independently (the >=2-distinct-across-hosts headline).
+   */
+  outProducerId: string;
   /** The piped consumer's media kind (for the standby `pipeTransport.produce`). */
   kind: msTypes.MediaKind;
   /** The piped consumer's rtpParameters (for the standby `pipeTransport.produce`). */
@@ -75,6 +83,7 @@ export async function startEvilRelayForward(args: {
   const pipedConsumer = await pipeProducerOntoPrimaryTransport(pipeTransport, outProducer.id);
   return {
     pipedProducerId: pipedConsumer.id,
+    outProducerId: outProducer.id,
     kind: pipedConsumer.kind,
     rtpParameters: pipedConsumer.rtpParameters,
     producerPaused: pipedConsumer.producerPaused,

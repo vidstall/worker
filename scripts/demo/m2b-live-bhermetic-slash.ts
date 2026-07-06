@@ -115,7 +115,9 @@ import { attachValidatorSink } from '../../apps/validator-daemon/src/canary/pipe
 // Relative SOURCE path (NOT the bare `@dvconf/inter-relay-client` specifier): scripts/ sits OUTSIDE
 // the pnpm workspace package graph, so the bare name is unresolvable from root node_modules (only
 // apps/* carry the symlink) — same constraint as the @dvconf/shared import above (seed-bootstrap:61).
-import { createPrimaryPipeTransport, createStandbyPipeTransport } from '../../packages/inter-relay-client/src/index.ts';
+import { createPrimaryPipeTransport, createStandbyPipeTransport, pipeProducerOntoPrimaryTransport } from '../../packages/inter-relay-client/src/index.ts';
+// Track-C: the cross-host F1 SRTP-handshake return channel (vm2 standby params -> primary#2.connect).
+import { awaitPeerStandbyParams } from './cross-host-pipe.ts';
 // On-chain assertion helper (daemons-internal, the same one Stage-5b uses).
 import { assertCanarySlash, type CanarySlashEvent } from './assert-canary-slash.ts';
 // B-WAN (REQ-MLW-B-12): the CANARY_PIPE_PARAMS_PATH writer the DEPLOYED peer validator index.ts reads.
@@ -326,6 +328,10 @@ async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: L
   let sink: Awaited<ReturnType<typeof attachValidatorSink>> | undefined;
   let primaryPipe: msTypes.PipeTransport | undefined;
   let standbyPipe: msTypes.PipeTransport | undefined;
+  // Track-C cross-host leg (xhost only): a SECOND relay primary pipe to vm2 + the fan of the SAME evil
+  // output producer onto it. Both null on the loopback default (byte-identical single-host teardown).
+  let primaryPipe2: msTypes.PipeTransport | undefined;
+  let piped2Consumer: msTypes.Consumer | undefined;
 
   const captured: Buffer[] = [];
   let onRtp: ((pkt: Buffer) => void) | undefined;
@@ -357,17 +363,24 @@ async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: L
     // relayPipe {ip,port} + the CANARY_PIPE_PARAMS_PATH file can reference a known endpoint. UNSET =>
     // 127.0.0.1 + ephemeral port 0, BYTE-IDENTICAL to the single-process hermetic path.
     const xhost = crossHostF1Endpoints();
+    // LOCAL pair primary#1 <-> standby#1 is ALWAYS loopback (127.0.0.1, ephemeral port) — it is vm1's
+    // OWN capture leg for att1, on-host regardless of xhost. (Pre-Track-C the cross-host wiring tried to
+    // reuse THIS pair for vm2 by announcing peerVpnIp on a locally-bound port — an impossible 1:1 that
+    // never ran live; vm2's leg is now a SEPARATE primary#2 below.) Under PIPE_SRTP=1 the loopback pair
+    // still exchanges SRTP params (both handles are in-process); flag-OFF omits srtpParameters so
+    // connect() is byte-identical to the pre-Track-C single-host path.
     standbyPipe = await createStandbyPipeTransport(validatorRouter, 0);
-    primaryPipe = await createPrimaryPipeTransport(
-      relayRouter,
-      xhost ? parseInt(process.env['CANARY_RELAY_PIPE_PORT'] ?? '40000', 10) : 0,
-    );
-    await primaryPipe.connect({ ip: xhost?.peerVpnIp ?? '127.0.0.1', port: standbyPipe.tuple.localPort } as Parameters<
-      msTypes.PipeTransport['connect']
-    >[0]);
-    await standbyPipe.connect({ ip: xhost?.relayVpnIp ?? '127.0.0.1', port: primaryPipe.tuple.localPort } as Parameters<
-      msTypes.PipeTransport['connect']
-    >[0]);
+    primaryPipe = await createPrimaryPipeTransport(relayRouter, 0);
+    await primaryPipe.connect({
+      ip: '127.0.0.1',
+      port: standbyPipe.tuple.localPort,
+      ...(standbyPipe.srtpParameters !== undefined ? { srtpParameters: standbyPipe.srtpParameters } : {}),
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+    await standbyPipe.connect({
+      ip: '127.0.0.1',
+      port: primaryPipe.tuple.localPort,
+      ...(primaryPipe.srtpParameters !== undefined ? { srtpParameters: primaryPipe.srtpParameters } : {}),
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
 
     // The demo-only byzantine evil-relay taps the real producer → pipes onto the primary (INV-B reuse).
     evil = await startEvilRelayForward({
@@ -379,35 +392,63 @@ async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: L
       // TAMPER/HONEST legs leave CANARY_EVIL_DROP_EVERY_N unset => undefined => no drop, byte-identical.
       dropEveryN: Number(process.env['CANARY_EVIL_DROP_EVERY_N']) || undefined,
     });
-    // B-WAN (REQ-MLW-B-12, Task-7.2): in cross-host mode publish the relay primary {ip,port} + the
-    // piped-producer descriptor to CANARY_PIPE_PARAMS_PATH so the DEPLOYED validator-2 on the peer host
-    // (CANARY_LIVE_CAPTURE=pipe) brings up its OWN standby + captures the SAME forwarded media to attest
-    // independently (the ≥2-distinct-across-hosts headline). The file is transported OOB (scp) to the
-    // peer host. INV-C: kRoom/cellSecret are re-derivation factors written to a LOCAL file only, NEVER
-    // onto a socket. No-op on the loopback path (xhost === null) / when CANARY_PIPE_PARAMS_PATH is unset
-    // — byte-identical to the single-process hermetic run.
+    // Track-C GENUINE 2-host co-sign (REQ-MLW-B-12, Task-7.2): in cross-host mode stand up a SECOND relay
+    // primary pipe to vm2 and FAN the SAME evil output producer onto it (pipeProducerOntoPrimaryTransport)
+    // so vm2 captures the byte-identical tampered forward and attests INDEPENDENTLY (the >=2-distinct-
+    // across-hosts headline). primary#2 binds the FIXED CANARY_RELAY_PIPE_PORT (default 40000) + carries
+    // SRTP params under PIPE_SRTP=1. We publish {relayVpnIp, port, srtpParameters} + vm2's piped descriptor
+    // + the re-derivation secrets to CANARY_PIPE_PARAMS_PATH (scp'd OOB to vm2 — INV-C: kRoom/cellSecret
+    // are LOCAL-file factors, NEVER on a socket), then BLOCK on vm2's standby return (scp'd back) and
+    // connect primary#2 to it. No-op on the loopback path (xhost === null) — byte-identical single-host.
     if (xhost && process.env['CANARY_PIPE_PARAMS_PATH']) {
       const paramsPath = process.env['CANARY_PIPE_PARAMS_PATH'];
+      primaryPipe2 = await createPrimaryPipeTransport(
+        relayRouter,
+        parseInt(process.env['CANARY_RELAY_PIPE_PORT'] ?? '40000', 10),
+      );
+      // Fan the evil OUTPUT producer onto primary#2. Consuming pre-connect is fine (media flows once
+      // both ends connect); its descriptor is what vm2's standby re-produces to see the SAME bytes.
+      piped2Consumer = await pipeProducerOntoPrimaryTransport(primaryPipe2, evil.outProducerId);
       writeCanaryPipeParams(paramsPath, {
-        relay: { ip: xhost.relayVpnIp, port: primaryPipe.tuple.localPort },
+        relay: { ip: xhost.relayVpnIp, port: primaryPipe2.tuple.localPort },
+        // SRTP params for the cross-host hop (present only under PIPE_SRTP=1; omitted otherwise).
+        ...(primaryPipe2.srtpParameters !== undefined ? { srtpParameters: primaryPipe2.srtpParameters } : {}),
         piped: {
-          id: evil.pipedProducerId,
-          kind: evil.kind,
-          rtpParameters: evil.rtpParameters,
-          producerPaused: evil.producerPaused,
+          id: piped2Consumer.id,
+          kind: piped2Consumer.kind,
+          rtpParameters: piped2Consumer.rtpParameters,
+          producerPaused: piped2Consumer.producerPaused,
         },
         receiverMinerId: need(
           process.env['CANARY_PIPE_RECEIVER_MINER_ID'],
           'CANARY_PIPE_RECEIVER_MINER_ID (peer validator-2 miner_id — cross-host pipe params)',
         ),
+        roomId, // Track-C: so vm2 re-derives the identical expected canary hashes (verifyForwardedCanary)
         canaryKid: CANARY_KID,
         expectedCtrs: CTRS,
         kRoom: K_ROOM,
         cellSecret: CELL_SECRET,
       });
       logger.info(
-        { module: MOD, action: 'wrote_pipe_params', context: { paramsPath, relayPort: primaryPipe.tuple.localPort } },
-        'B-WAN: wrote CANARY_PIPE_PARAMS_PATH for the deployed peer validator-2 (cross-host capture)',
+        { module: MOD, action: 'wrote_pipe_params', context: { paramsPath, relayPort: primaryPipe2.tuple.localPort } },
+        'Track-C: wrote CANARY_PIPE_PARAMS_PATH for the peer host vm2 (cross-host primary#2 capture)',
+      );
+      // BLOCK for vm2's standby {ip,port,srtpParameters} return (the driver scps it back to vm1), then
+      // connect primary#2 cross-host so media flows to vm2. Fail-loud on timeout (CANARY_COSIGN_TIMEOUT_MS).
+      const returnPath = need(
+        process.env['CANARY_PIPE_RETURN_PATH'],
+        'CANARY_PIPE_RETURN_PATH (vm2 standby params return file — cross-host F1)',
+      );
+      const timeoutMs = Number(process.env['CANARY_COSIGN_TIMEOUT_MS']) || 120_000;
+      const peerStandby = await awaitPeerStandbyParams(returnPath, timeoutMs);
+      await primaryPipe2.connect({
+        ip: peerStandby.ip,
+        port: peerStandby.port,
+        ...(peerStandby.srtpParameters !== undefined ? { srtpParameters: peerStandby.srtpParameters } : {}),
+      } as Parameters<msTypes.PipeTransport['connect']>[0]);
+      logger.info(
+        { module: MOD, action: 'primary2_connected', context: { peerIp: peerStandby.ip, peerPort: peerStandby.port } },
+        'Track-C: primary#2 connected to vm2 standby (cross-host media path up)',
       );
     }
 
@@ -447,8 +488,10 @@ async function captureForwardedLeg(roomId: string, byzantine: boolean, logger: L
     try {
       sink?.close();
       evil?.close();
+      piped2Consumer?.close();
       primaryPipe?.close();
       standbyPipe?.close();
+      primaryPipe2?.close();
       producer?.close();
       relayRouter?.close();
       validatorRouter?.close();
