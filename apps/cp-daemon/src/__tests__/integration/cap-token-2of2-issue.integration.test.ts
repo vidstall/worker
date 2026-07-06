@@ -194,4 +194,81 @@ describe('Cap-token 2-of-2 LIVE issue (gap #3, direct-sign)', () => {
       'PASS: CapabilityIssued.issuer_quorum has 2 distinct CP addresses',
     );
   });
+
+  it('board-path: leader collects the follower attestation then submits a 2-of-2 issue', async () => {
+    const { InMemoryGenericClaimBoard } = await import('@dvconf/shared');
+    const { buildCapTokenIssueBoardConfig } = await import('../../cap-token-issuer.js');
+    const { collectIssueQuorum } = await import('../../bin/captoken-cosign-leader.js');
+    const { postAttestation } = await import('../../bin/captoken-cosign-attester.js');
+    const client = new SuiClient({ url: SUI_RPC_URL });
+
+    const peerKp = new Ed25519Keypair();
+    const peerPubkey = Array.from(peerKp.getPublicKey().toRawBytes());
+    const roomId =
+      '0x' + Buffer.from(new Ed25519Keypair().getPublicKey().toRawBytes()).toString('hex');
+    const expiresEpoch = BigInt((await client.getLatestSuiSystemState()).epoch) + 100n;
+    const req = { roomId, peerPubkey, role: 4, expiresEpoch, nonce: 2n };
+
+    const board = new InMemoryGenericClaimBoard([
+      buildCapTokenIssueBoardConfig({ minDistinct: 2, onUnquorumedExpiry: () => {} }),
+    ]);
+    const discoveredCps = [
+      { minerId: cpA.kp.toSuiAddress(), operator: cpA.kp.toSuiAddress() },
+      { minerId: cpB.kp.toSuiAddress(), operator: cpB.kp.toSuiAddress() },
+    ];
+
+    // Follower (cpB) polls the shared board and posts its attestation once the leader
+    // has opened the cell. currentEpoch=0n → passes expiry check for expiresEpoch>0n.
+    const followerJob = (async () => {
+      for (let i = 0; i < 400; i++) {
+        if (await postAttestation(board, cpB.kp, { currentEpoch: 0n })) return;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    })();
+
+    const quorum = await collectIssueQuorum({
+      board,
+      leaderKp: cpA.kp,
+      discoveredCps,
+      req,
+      minQuorum: 2,
+      pollIntervalMs: 5,
+      maxPollRounds: 400,
+    });
+    await followerJob;
+
+    // Submit the 2-of-2 issue TX.
+    const tx = new Transaction();
+    buildIssueQuorumTx(
+      tx,
+      {
+        packageId: handle.config.packageId,
+        networkRegistryId: handle.config.networkRegistryId,
+        cpRegistryId: handle.config.cpRegistryId,
+        quorumStateId,
+      },
+      req,
+      quorum,
+    );
+    tx.setGasBudget(100_000_000);
+    const res = await client.signAndExecuteTransaction({
+      signer: cpA.kp,
+      transaction: tx,
+      options: { showEffects: true },
+    });
+    await client.waitForTransaction({ digest: res.digest });
+    expect((res.effects?.status?.status as string)).toBe('success');
+
+    const issued = await pollForIssued(client, handle.config.packageId, peerPubkey, 30_000);
+    expect(issued).not.toBeNull();
+    expect(new Set(issued!.issuerQuorum).size).toBe(2);
+
+    logger.info(
+      {
+        module: 'captoken-2of2-e2e',
+        context: { digest: res.digest, issuerQuorum: issued!.issuerQuorum },
+      },
+      'PASS: board-path 2-of-2 issue TX confirmed',
+    );
+  });
 });
