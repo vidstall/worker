@@ -93,10 +93,19 @@ import {
   signSelfAttestation,
   assembleProofFromAttestations,
   canonicalProofMessage,          // proof.ts:126 — takes a DivergenceProofInput (needs sessionKeypairs spread)
+  distinctAttesterCount,          // proof.ts — Wallet-B pubkey de-dup count (peer co-sign quorum check)
+  MIN_ATTESTERS,                  // proof.ts — =2 (>=2 distinct enforced at assembly + on-chain)
   OBSERVED_HASH_MISSING,
   type DivergenceClaim,
+  type DivergenceAttestation,
+  type DivergenceProof,
 } from '../../apps/validator-daemon/src/canary/proof.ts';
 import { submitCanarySlash, type SlashCallOpts } from '../../apps/validator-daemon/src/canary/slash-submitter.ts';
+// Track-C GENUINE 2-host co-sign carrier: att2 arrives from the PEER host (vm2) over the /canary/claims
+// board instead of being self-signed in-process. HttpClaimBoard = the shipped OQ-7 HTTP client (bearer;
+// mTLS-capable); cellKey = the deterministic board key over the claim's 4 identifying fields.
+import { HttpClaimBoard } from '../../apps/validator-daemon/src/canary/claims-client.ts';
+import { cellKey } from '../../apps/validator-daemon/src/canary/claim-board.ts';
 // Capture topology (REUSED from Task 4A) — real browser producer + real signaling + the demo-only
 // byzantine evil-relay + the F1 pipe + the validator sink.
 import { startRealSignaling } from '../../apps/validator-daemon/src/canary/test-support/real-signaling-harness.ts';
@@ -113,7 +122,7 @@ import { assertCanarySlash, type CanarySlashEvent } from './assert-canary-slash.
 import { writeCanaryPipeParams } from './write-canary-pipe-params.ts';
 // Track-C: env-gated native-boot (no-docker) adapter — lets copyFromVolume skip `docker compose cp`
 // when native-bwan-bootstrap.ts pre-placed the file. Default (flag unset) = byte-identical docker path.
-import { shouldSkipVolumeCopy } from './native-artifacts.ts';
+import { shouldSkipVolumeCopy, shouldUsePeerCoSign, peerCoSignQuorumMet } from './native-artifacts.ts';
 
 const MOD = 'm2b-live-bhermetic-slash';
 
@@ -476,7 +485,7 @@ async function fundAddress(client: SuiClient, address: string): Promise<void> {
   }
 }
 
-interface ValidatorResult { minerId: string; sessionKp: Ed25519Keypair }
+interface ValidatorResult { minerId: string; sessionKp: Ed25519Keypair | null }
 
 /**
  * Full validator lifecycle + session-wallet binding (Approach B), mirroring
@@ -491,6 +500,7 @@ async function registerFreshValidatorWithSession(
   cp: { kp: Ed25519Keypair; cpCapId: string },
   config: NetworkConfig,
   logger: Logger,
+  boundSessionAddr?: string, // Track-C self-custody: bind the PEER host (vm2)'s session address; vm1 never holds its key
 ): Promise<ValidatorResult> {
   const minerKp = Ed25519Keypair.generate();
   await fundAddress(client, minerKp.getPublicKey().toSuiAddress());
@@ -596,9 +606,12 @@ async function registerFreshValidatorWithSession(
     logger,
   );
 
-  // bind a FRESH Wallet-B session keypair (validator_registry.move:143 self_assign_session_wallet).
-  const sessionKp = Ed25519Keypair.generate();
-  const sessionAddr = sessionKp.getPublicKey().toSuiAddress();
+  // bind a Wallet-B session keypair (validator_registry.move:143 self_assign_session_wallet). Track-C
+  // self-custody: when `boundSessionAddr` is supplied (the PEER host vm2's session Sui address), bind
+  // THAT — vm1 never holds vm2's signing key (sessionKp stays null; vm2 signs att2 itself, over its OWN
+  // captured bytes). Default (no arg) generates a fresh session keypair in-process (byte-identical).
+  const sessionKp = boundSessionAddr ? null : Ed25519Keypair.generate();
+  const sessionAddr = boundSessionAddr ?? sessionKp!.getPublicKey().toSuiAddress();
   await signAndAssert(
     client,
     minerKp,
@@ -620,6 +633,52 @@ async function registerFreshValidatorWithSession(
   logger.info({ module: MOD, action: 'register_validator', context: { minerId } },
     'fresh validator registered + session-wallet bound');
   return { minerId, sessionKp };
+}
+
+/**
+ * Track-C proof resolver — the GENUINE 2-host co-sign seam.
+ *
+ * DEFAULT (CLAIM_BOARD_URL unset) = BYTE-IDENTICAL to the shipped single-host path: v2 self-signs its
+ * attestation in-process and we assemble [att1, att2] directly. The single-host slash run is unchanged.
+ *
+ * PEER mode (CLAIM_BOARD_URL set) = the TRUE 2-host run: host-A (vm1) posts its OWN att1 to the
+ * `/canary/claims` board, then POLLS until the PEER host (vm2) — which independently captured the SAME
+ * forwarded media over the F1 pipe and signed with its OWN Wallet-B — posts a DISTINCT att2. Once the
+ * cell carries >= MIN_ATTESTERS distinct Wallet-B pubkeys we assemble the proof from the BOARD's
+ * attestations (not from a single-process dual-sign). vm1 cannot forge att2: it never held vm2's key.
+ */
+async function resolveDivergenceProof(
+  claim: DivergenceClaim,
+  msg: Uint8Array,
+  att1: DivergenceAttestation,
+  v2: ValidatorResult,
+  logLine: (s: string) => void,
+): Promise<DivergenceProof> {
+  const claimBoardUrl = process.env['CLAIM_BOARD_URL'];
+  if (!shouldUsePeerCoSign(claimBoardUrl)) {
+    const att2 = await signSelfAttestation(msg, need(v2.sessionKp, 'v2.sessionKp (single-host self-sign path)'));
+    return assembleProofFromAttestations(claim, [att1, att2]); // >=2-distinct enforced at assembly + on-chain
+  }
+  // TRUE 2-host: publish att1, await vm2's distinct att2 over the board.
+  const token = need(process.env['CLAIM_BOARD_AUTH_TOKEN'], 'CLAIM_BOARD_AUTH_TOKEN (peer co-sign bearer)');
+  const board = new HttpClaimBoard({ baseUrl: claimBoardUrl!, token });
+  await board.post(claim, att1, 0);
+  logLine(`[byzantine] posted host-A att1 → claim board ${claimBoardUrl}; awaiting peer host (vm2) att2…`);
+  const key = cellKey(claim);
+  const deadlineMs = Number(process.env['CANARY_COSIGN_TIMEOUT_MS'] ?? '120000');
+  const start = Date.now();
+  for (;;) {
+    const cell = await board.get(key);
+    const distinct = cell ? distinctAttesterCount(cell.attestations) : 0;
+    if (cell && peerCoSignQuorumMet(distinct, MIN_ATTESTERS)) {
+      logLine(`[byzantine] peer co-sign quorum: ${distinct} distinct Wallet-B attesters (host-A + vm2).`);
+      return assembleProofFromAttestations(claim, cell.attestations);
+    }
+    if (Date.now() - start >= deadlineMs) {
+      throw new Error(`${MOD}: peer co-sign TIMEOUT ${deadlineMs}ms — vm2 never posted a distinct att2 (check vm2 capture/verify + board reachability at ${claimBoardUrl})`);
+    }
+    await sleep(1000);
+  }
 }
 
 interface RelayResult { minerId: string; kp: Ed25519Keypair; stakeId: string }
@@ -817,7 +876,12 @@ async function main(): Promise<void> {
   logLine(`[setup] reusing seed CP as voter: ${cp.kp.getPublicKey().toSuiAddress()} cpCapId=${cp.cpCapId}`);
   logLine('[setup] registering 2 fresh validators (bound session wallets) + a fresh relay…');
   const v1 = await registerFreshValidatorWithSession(client, cp, config, logger);
-  const v2 = await registerFreshValidatorWithSession(client, cp, config, logger);
+  // Track-C: in the TRUE 2-host run vm2 self-custodies its session key — it publishes only its session
+  // ADDRESS (CANARY_PEER_SESSION_ADDR), which vm1 binds on-chain for v2. Default (unset) = vm1 generates
+  // v2's key in-process (byte-identical single-host path).
+  const peerSessionAddr = process.env['CANARY_PEER_SESSION_ADDR'];
+  const v2 = await registerFreshValidatorWithSession(client, cp, config, logger, peerSessionAddr);
+  if (peerSessionAddr) logLine(`[setup] v2 bound to PEER (vm2) self-custody session addr=${peerSessionAddr} (vm1 holds no v2 key)`);
   const freshRelay = await registerFreshRelay(client, cp, config, logger);
   logLine(`[setup] v1.minerId=${v1.minerId}`);
   logLine(`[setup] v2.minerId=${v2.minerId}`);
@@ -882,9 +946,10 @@ async function main(): Promise<void> {
     observedHash: div.observedHash,
   };
   const msg = canonicalProofMessage({ ...claim, sessionKeypairs: [] }); // 145-byte surface (INV-A); empty keypairs = msg-only build
-  const att1 = await signSelfAttestation(msg, v1.sessionKp); // signed by v1, over v1's captured bytes
-  const att2 = await signSelfAttestation(msg, v2.sessionKp); // signed by v2, over v2's captured bytes
-  const proof = assembleProofFromAttestations(claim, [att1, att2]); // >=2-distinct enforced at assembly + on-chain
+  const att1 = await signSelfAttestation(msg, need(v1.sessionKp, 'v1.sessionKp')); // host-A (vm1) self-signs its OWN captured leg
+  // att2 is either self-signed in-process (single-host, byte-identical) OR arrives from vm2 over the
+  // /canary/claims board (TRUE 2-host co-sign). resolveDivergenceProof gates on CLAIM_BOARD_URL.
+  const proof = await resolveDivergenceProof(claim, msg, att1, v2, logLine);
 
   logLine('[byzantine] submitting on-chain canary_audit::slash_for_canary_divergence (relay self-signs — W-E9)…');
   const slashResult = await withLockRetry('submitCanarySlash', () =>
