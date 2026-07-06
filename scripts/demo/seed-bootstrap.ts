@@ -219,7 +219,7 @@ async function registerMiner(
   return { minerId, minerCapId, cpCapId, stakeId };
 }
 
-interface CpHandle {
+export interface CpHandle {
   kp: Ed25519Keypair;
   minerId: string;
   cpCapId: string;
@@ -235,7 +235,7 @@ interface CpHandle {
  *   - control_plane_registry.move:82-87 register_cp(net_reg, registry, cap, stake) [ctx implicit]
  *   - revote-localnet-helpers.ts:232-238 bootstrapCp (identical order)
  */
-async function bootstrapCp(client: SuiClient, config: NetworkConfig, logger: Logger): Promise<CpHandle> {
+export async function bootstrapCp(client: SuiClient, config: NetworkConfig, logger: Logger): Promise<CpHandle> {
   const kp = await createFundedKeypair(client, logger);
   const reg = await registerMiner(client, kp, config, CP_STAKE_MIST, logger);
   if (reg.cpCapId === null) {
@@ -489,7 +489,7 @@ function roleCodeFor(role: DaemonRole): number {
  *   3. miner applies apply_voted_role -> flips MinerCap+profile+stake to the role
  *   4. miner enrolls in the role-specific registry
  */
-async function voteAndApplyMiner(
+export async function voteAndApplyMiner(
   client: SuiClient,
   cp: CpHandle,
   role: DaemonRole,
@@ -569,8 +569,16 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((err) => {
-  // Fail LOUD: a non-zero exit blocks the daemons' `depends_on: service_completed_successfully`.
-  process.stderr.write(`seed-bootstrap: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
-  process.exit(1);
-});
+// Run main() ONLY when invoked directly (mirrors escrow-driver.ts:233 /
+// run-multicp-voting.ts:699). seed-multicp.ts VALUE-imports bootstrapCp/
+// voteAndApplyMiner from here (added in C1) — WITHOUT this guard, seed-bootstrap's
+// own N=1 seed fired on import and raced seed-multicp's cascade, inflating
+// active_cp_count so the N=1 single-vote infra seed (required must be 1) aborted
+// 707 (consume_assignment: no assignment) in apply_voted_role.
+if (process.argv[1]?.endsWith('seed-bootstrap.ts')) {
+  main().catch((err) => {
+    // Fail LOUD: a non-zero exit blocks the daemons' `depends_on: service_completed_successfully`.
+    process.stderr.write(`seed-bootstrap: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+}
