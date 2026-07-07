@@ -826,6 +826,51 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-037 D3 reverse-announce frame-a
     await driveLocalClientProducer(coord, 'roomA', 'local-1');
     expect(coord.roomsWithStoredAnnounces()).toEqual(['roomA']);
   });
+
+  // Task-2 review fold (item 2): the e.peerRelayId per-leg filter in clear() was only proven
+  // single-leg. Two distinct legs of ONE room -> clear(room, legA) drops ONLY legA's stored
+  // entries; legB's still resends.
+  it('clear(roomId, legA) drops only legA\'s stored announces; legB still resends (per-leg filter)', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    const LEG_A = 'ws://relayA';
+    const LEG_B = 'ws://relayB';
+    coord.bindPipeTransportForTest('roomA', LEG_A, {
+      consume: vi.fn().mockResolvedValue({ id: 'piped-A', kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    coord.bindPipeTransportForTest('roomA', LEG_B, {
+      consume: vi.fn().mockResolvedValue({ id: 'piped-B', kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'srcA', kind: 'video' }, 'clientA', LEG_A);
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'srcB', kind: 'video' }, 'clientB', LEG_B);
+
+    coord.clear('roomA', LEG_A); // drop legA only
+
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    coord.resendReverseAnnounces('roomA');
+    // Exactly one resend — legB's — carrying piped-B / LEG_B (legA's entry is gone).
+    expect(announced).toHaveLength(1);
+    expect(announced[0]).toEqual(['roomA', { id: 'piped-B', kind: 'video' }, 'clientB', LEG_B, REMAPPED_RTP]);
+  });
+
+  // Task-2 review fold (item 3): the tree branch of the resend arity split (7-arg, hopTtl +
+  // originProducerId) was untested. Drive with the tree fields set -> the store + resend both
+  // take the 7-arg path and the re-delivered frame is byte-identical to the live announce.
+  it('records + resends the 7-arg tree frame (hopTtl + originProducerId) via the tree arity branch', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    coord.bindPipeTransportForTest('roomA', PRIMARY, {
+      consume: vi.fn().mockResolvedValue({ id: 'piped-tree', kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    // onLocalClientProducer(roomId, router, producer, producerPeerId, peerRelayId, hopTtl, originProducerId)
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'src-tree', kind: 'video' }, 'clientT', PRIMARY, 3, 'ORIGIN-1');
+    expect(announced).toHaveLength(1);
+    expect(announced[0]).toEqual(['roomA', { id: 'piped-tree', kind: 'video' }, 'clientT', PRIMARY, REMAPPED_RTP, 3, 'ORIGIN-1']);
+    coord.resendReverseAnnounces('roomA');
+    expect(announced).toHaveLength(2);
+    expect(announced[1]).toEqual(announced[0]); // tree branch re-sends the 7-arg frame verbatim
+  });
 });
 
 // ── F. REQ-RMS-036: Loop/echo prevention — minted producer never re-announces UP ──

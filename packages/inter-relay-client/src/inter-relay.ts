@@ -877,8 +877,11 @@ export class StandbyWarmPipeCoordinator {
    * trigger). GUARDRAIL: any FUTURE production path that REPLACES an established leg's
    * `topology.pipeTransport` in place — specifically `ensureWarmPipe`'s create-own
    * close+replace (relay-role-manager.ts:252-254) — MUST also clear `reverseConsumedIds`
-   * + `reversePending` for that key, or a re-consume onto the NEW pipe is silently
-   * dropped (the id stays marked against the dead transport). Not wired now: that
+   * + `reversePending` + `sentReverseAnnounces` for that key, or a re-consume onto the NEW
+   * pipe is silently dropped (the id stays marked against the dead transport) AND a later
+   * resendReverseAnnounces re-delivers the OLD pipe's now-stale consumer id + rtpParameters
+   * (REQ-RMS-037 D3 — the store holds the piped-consumer frame, which the replacement
+   * invalidates; drop or re-record that leg's entries in the same swap). Not wired now: that
    * close+replace is NOT on the reverse leg's live path (A2 scope), and `onAnnounce`'s
    * C3 path REUSES the bound transport instead of replacing it.
    */
@@ -891,7 +894,10 @@ export class StandbyWarmPipeCoordinator {
    * so on link RE-open the wiring layer calls resendReverseAnnounces(roomId): the stored args
    * are re-announced VERBATIM and the primary's reverseMintedIds dedup (mintOne) makes the
    * re-delivery idempotent. NEVER re-consumes the pipe (reverseConsumedIds untouched). Cleared
-   * with the leg in clear() (same lifecycle as reverseConsumedIds).
+   * with the leg in clear() (same lifecycle as reverseConsumedIds). RETENTION: an entry for an
+   * ENDED producer lingers until its leg/room is cleared (no per-producer close hook here) —
+   * bounded by the room lifecycle, and re-delivering a dead id on reopen is a harmless no-op
+   * (the primary's reverseMintedIds dedup + mediasoup dropping an unknown producer absorb it).
    */
   private readonly sentReverseAnnounces = new Map<
     string,
