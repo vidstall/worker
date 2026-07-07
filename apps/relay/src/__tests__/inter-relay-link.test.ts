@@ -68,12 +68,14 @@ afterEach(() => {
 // Extracted from index.ts glue so the dedup/reconnect logic is unit-tested with
 // an injected socket factory + fake timers (no real sockets/clock needed).
 
-/** Fake socket factory capturing each socket's close listener. */
+/** Fake socket factory capturing each socket's per-event listeners (close + open, D3). */
 interface FakeSocket {
   closeCb: (() => void) | null;
+  openCb: (() => void) | null;
   close: ReturnType<typeof vi.fn>;
-  on(event: 'close', cb: () => void): void;
+  on(event: 'close' | 'open', cb: () => void): void;
   fireClose(): void;
+  fireOpen(): void;
   // CONSISTENCY-FIX MEDIUM: StandbyLinkSocket now REQUIRES these — keep the
   // pre-existing connectTo tests type-valid against the widened interface.
   send: ReturnType<typeof vi.fn>;
@@ -84,12 +86,17 @@ function fakeSocketFactory() {
   const open = vi.fn((_url: string): FakeSocket => {
     const s: FakeSocket = {
       closeCb: null,
+      openCb: null,
       close: vi.fn(),
-      on(_event, cb) {
-        s.closeCb = cb;
+      on(event, cb) {
+        if (event === 'open') s.openCb = cb;
+        else s.closeCb = cb;
       },
       fireClose() {
         s.closeCb?.();
+      },
+      fireOpen() {
+        s.openCb?.();
       },
       send: vi.fn(),
       readyState: 1, // WebSocket.OPEN
@@ -140,6 +147,57 @@ describe('createStandbyLinkManager', () => {
     sockets[0]!.fireClose();
     vi.advanceTimersByTime(5000);
     expect(open).toHaveBeenCalledTimes(1); // no reconnect after shutdown
+  });
+
+  // REQ-RMS-037 (D3) — additive onOpen(url, isReopen): the wiring layer (index.ts) uses the
+  // isReopen=true edge to re-deliver reverse announces dropped during the down window.
+  it('fires onOpen(url, isReopen=false) on FIRST socket open, and isReopen=true after a reconnect', () => {
+    vi.useFakeTimers();
+    const { open, sockets } = fakeSocketFactory();
+    const events: Array<{ url: string; isReopen: boolean }> = [];
+    const mgr = createStandbyLinkManager({
+      open, reconnectMs: 1000,
+      onOpen: (url, isReopen) => events.push({ url, isReopen }),
+    });
+    mgr.connectTo('ws://a:4000');
+    sockets[0]!.fireOpen();
+    expect(events).toEqual([{ url: 'ws://a:4000', isReopen: false }]);
+    sockets[0]!.fireClose();
+    vi.advanceTimersByTime(1000);
+    sockets[1]!.fireOpen();
+    expect(events).toEqual([
+      { url: 'ws://a:4000', isReopen: false },
+      { url: 'ws://a:4000', isReopen: true },
+    ]);
+  });
+
+  it('a manager without onOpen is byte-stable (no throw when the socket opens)', () => {
+    const { open, sockets } = fakeSocketFactory();
+    const mgr = createStandbyLinkManager({ open, reconnectMs: 1000 });
+    mgr.connectTo('ws://a:4000');
+    expect(() => sockets[0]!.fireOpen()).not.toThrow();
+  });
+
+  // REQ-RMS-037 (D3, review fold #1) — a throwing onOpen callback must NOT escape the socket's
+  // 'open' emit (on a real `ws` socket that is an uncaught exception, violating the module's
+  // "a flaky link must never crash the standby daemon" posture — mirror the send() try/catch).
+  it('a throwing onOpen is swallowed + warn-logged; the socket loop still lives (reconnect fires)', () => {
+    vi.useFakeTimers();
+    const { open, sockets } = fakeSocketFactory();
+    const logger = mockLogger();
+    let opens = 0;
+    const mgr = createStandbyLinkManager({
+      open, reconnectMs: 1000, logger,
+      onOpen: () => { opens += 1; throw new Error('onOpen blew up'); },
+    });
+    mgr.connectTo('ws://a:4000');
+    expect(() => sockets[0]!.fireOpen()).not.toThrow(); // guard swallows — no uncaught escape
+    expect(opens).toBe(1);                              // the callback DID run
+    expect(logger.warn).toHaveBeenCalled();             // and was warn-logged
+    // Loop unbroken: a later close still schedules + fires the reconnect.
+    sockets[0]!.fireClose();
+    vi.advanceTimersByTime(1000);
+    expect(open).toHaveBeenCalledTimes(2);
   });
 });
 

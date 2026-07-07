@@ -760,6 +760,139 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-034 REVERSE leg (onLocalClientP
   });
 });
 
+// ── E2. REQ-RMS-037 D3 (static-mesh-hardening) — reverse-announce frame-arg store + resend ──
+//
+// The standby link send is fire-and-forget: frames are silently dropped while the WS is not
+// OPEN (inter-relay-link.ts:172-183). To recover announces lost during a down window, the
+// coordinator records the ARGS of every SENT reverse announce (the PIPED consumer id +
+// remapped rtpParameters — EXACTLY what reverseConsumeAndAnnounce puts on the wire, not the
+// source producer's), keyed per (leg + origin/producer id). On link RE-open the wiring layer
+// (Task 4) calls resendReverseAnnounces(roomId): each stored frame is re-announced VERBATIM and
+// the primary's reverseMintedIds dedup (Task 1 precondition) makes the re-delivery idempotent.
+// The store NEVER re-consumes the pipe (reverseConsumedIds untouched) and is dropped with the
+// leg in clear()/clearRoom (same lifecycle as reverseConsumedIds).
+
+describe('StandbyWarmPipeCoordinator — REQ-RMS-037 D3 reverse-announce frame-arg store + resend', () => {
+  const REMAPPED_RTP = rtpParams(555111) as msTypes.RtpParameters;
+  const fakeRouter = makeMockRouter().router as unknown as msTypes.Router;
+  const PRIMARY = 'ws://primary';
+
+  /** Bind a connected leg then drive one local-client producer through
+   *  reverseConsumeAndAnnounce (the path that records the store entry). */
+  async function driveLocalClientProducer(
+    coord: StandbyWarmPipeCoordinator,
+    roomId: string,
+    producerId: string,
+    pipedId = `piped-${producerId}`,
+  ): Promise<void> {
+    coord.bindPipeTransportForTest(roomId, PRIMARY, {
+      consume: vi.fn().mockResolvedValue({ id: pipedId, kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    await coord.onLocalClientProducer(roomId, fakeRouter, { id: producerId, kind: 'video' }, 'clientA', PRIMARY);
+  }
+
+  it('records announce args at announce time and resends them verbatim', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    await driveLocalClientProducer(coord, 'roomA', 'local-1');
+    expect(announced).toHaveLength(1); // the live announce
+    coord.resendReverseAnnounces('roomA');
+    expect(announced).toHaveLength(2); // re-delivered on reopen
+    expect(announced[1]).toEqual(announced[0]); // identical args -> identical frame downstream
+  });
+
+  it('resend is a no-op for a room with nothing stored', () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    coord.resendReverseAnnounces('0xno-such-room');
+    expect(announced).toHaveLength(0);
+  });
+
+  it('clearRoom drops the leg\'s stored announces so a later resend is a no-op', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    // Drive with the announcer UNSET: the live announce is a no-op but the store still records.
+    await driveLocalClientProducer(coord, 'roomA', 'local-1');
+    coord.clearRoom('roomA');
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    coord.resendReverseAnnounces('roomA');
+    expect(announced).toHaveLength(0);
+  });
+
+  it('roomsWithStoredAnnounces lists exactly the rooms holding entries', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    await driveLocalClientProducer(coord, 'roomA', 'local-1');
+    expect(coord.roomsWithStoredAnnounces()).toEqual(['roomA']);
+  });
+
+  // Task-2 review fold (item 2): the e.peerRelayId per-leg filter in clear() was only proven
+  // single-leg. Two distinct legs of ONE room -> clear(room, legA) drops ONLY legA's stored
+  // entries; legB's still resends.
+  it('clear(roomId, legA) drops only legA\'s stored announces; legB still resends (per-leg filter)', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    const LEG_A = 'ws://relayA';
+    const LEG_B = 'ws://relayB';
+    coord.bindPipeTransportForTest('roomA', LEG_A, {
+      consume: vi.fn().mockResolvedValue({ id: 'piped-A', kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    coord.bindPipeTransportForTest('roomA', LEG_B, {
+      consume: vi.fn().mockResolvedValue({ id: 'piped-B', kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'srcA', kind: 'video' }, 'clientA', LEG_A);
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'srcB', kind: 'video' }, 'clientB', LEG_B);
+
+    coord.clear('roomA', LEG_A); // drop legA only
+
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    coord.resendReverseAnnounces('roomA');
+    // Exactly one resend — legB's — carrying piped-B / LEG_B (legA's entry is gone).
+    expect(announced).toHaveLength(1);
+    expect(announced[0]).toEqual(['roomA', { id: 'piped-B', kind: 'video' }, 'clientB', LEG_B, REMAPPED_RTP]);
+  });
+
+  // Task-2 review fold (item 3): the tree branch of the resend arity split (7-arg, hopTtl +
+  // originProducerId) was untested. Drive with the tree fields set -> the store + resend both
+  // take the 7-arg path and the re-delivered frame is byte-identical to the live announce.
+  it('records + resends the 7-arg tree frame (hopTtl + originProducerId) via the tree arity branch', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    coord.bindPipeTransportForTest('roomA', PRIMARY, {
+      consume: vi.fn().mockResolvedValue({ id: 'piped-tree', kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    // onLocalClientProducer(roomId, router, producer, producerPeerId, peerRelayId, hopTtl, originProducerId)
+    await coord.onLocalClientProducer('roomA', fakeRouter, { id: 'src-tree', kind: 'video' }, 'clientT', PRIMARY, 3, 'ORIGIN-1');
+    expect(announced).toHaveLength(1);
+    expect(announced[0]).toEqual(['roomA', { id: 'piped-tree', kind: 'video' }, 'clientT', PRIMARY, REMAPPED_RTP, 3, 'ORIGIN-1']);
+    coord.resendReverseAnnounces('roomA');
+    expect(announced).toHaveLength(2);
+    expect(announced[1]).toEqual(announced[0]); // tree branch re-sends the 7-arg frame verbatim
+  });
+
+  // Task 4 end-to-end (spec §3.3): the LOAD-BEARING flap case — a producer created DURING the
+  // down window is consumed onto the live pipe but its announce is silently DROPPED; on reopen
+  // the wiring layer's onOpen(isReopen=true) calls resendReverseAnnounces and it is recovered.
+  it('REQ-RMS-037 D3 end-to-end: a producer announced while the link is DOWN is re-delivered on reopen', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    // Announcer models the link: DROPS while linkUp=false (mirrors the standby link's silent
+    // drop when the WS is not OPEN, inter-relay-link.ts:172-183).
+    let linkUp = true;
+    const delivered: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { if (linkUp) delivered.push(args); });
+
+    linkUp = false; // flap window opens
+    await driveLocalClientProducer(coord, 'roomA', 'during-window'); // consumed onto the live pipe, announce DROPPED
+    expect(delivered).toHaveLength(0);
+
+    linkUp = true; // reopen
+    coord.resendReverseAnnounces('roomA'); // what index.ts onOpen(isReopen=true) calls
+    expect(delivered).toHaveLength(1); // the during-window producer is recovered
+  });
+});
+
 // ── F. REQ-RMS-036: Loop/echo prevention — minted producer never re-announces UP ──
 //
 // The reverse UP-announcer (setReverseAnnouncer) fires ONLY from

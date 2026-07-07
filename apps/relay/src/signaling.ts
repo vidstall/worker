@@ -2208,14 +2208,14 @@ export function createSignalingServer(
   }
 
   /**
-   * REQ-RMS-037 (part-3 reverse leg, Task B4b) — STANDBY re-announce-on-reopen.
-   * Re-drive every existing LOCAL-client producer UP toward the primary (the A1
-   * reverse path) so a standby back-fills its producers after an outbound-link flap.
-   * Producers created BEFORE the first connect are already covered by the A2 reverse
-   * queue (reversePending → drainReverse); this covers the reopen of an already-
-   * drained leg. Guarded on role === 'standby' (a no-op on a primary). Reuses the
-   * onStandbyProducer hook (DRY — no new reverse path); ownerPeerId = the original
-   * local publisher (REQ-RMS-029/038 publisher binding).
+   * REQ-RMS-037 — full re-announce of a room's local producers UP the standby link.
+   * SUPERSEDED for the link-flap case by StandbyWarmPipeCoordinator.resendReverseAnnounces
+   * (static-mesh-hardening D3): a flap must RE-DELIVER stored announce frames, not re-drive
+   * this path (reverseConsumedIds would skip every already-consumed producer, so a producer
+   * created DURING the down window would never re-announce). Kept as an ops/manual utility;
+   * not wired to any production trigger. Guarded on role === 'standby' (a no-op on a primary);
+   * reuses the onStandbyProducer hook — ownerPeerId = the original local publisher
+   * (REQ-RMS-029/038 publisher binding).
    */
   function reannounceLocalProducersUp(roomId: string): void {
     if (interRelay?.role !== 'standby') return;
