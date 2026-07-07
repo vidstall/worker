@@ -344,3 +344,43 @@ describe('REQ-CFA-042 — startCanaryVerifyLoop survives a thrown round (crash-s
     expect(stunReads).toBeGreaterThan(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// REQ-RMS-022 (static-mesh-hardening D1) — the handle EXPOSES the per-relay accumulator so
+// the validator's /canary/load LoadStateProvider can serve it. Controller decision A
+// (approved plan deviation): the plan's cross-round `toBe()` identity assertion was DROPPED
+// because the loop REPLACES the accumulator each round (immutable style, runCanaryVerifyRound
+// :245-250) — the getter returns the LATEST object per call and callers MUST re-read (never
+// cache). These assertions pin that actual contract instead.
+// ─────────────────────────────────────────────────────────────────────────────────
+
+describe('REQ-RMS-022 (D1) — startCanaryVerifyLoop handle exposes the per-relay load accumulator', () => {
+  it('getAccumulator() returns the LATEST per-relay accumulator (re-read per call; the loop replaces it each round)', async () => {
+    const ctrs = [0, 1, 2, 3];
+    const dropped = new Set([2]); // one drop / 4 sends per round → observable cumulative content
+    const { deps } = makeDeps({ ctrs, dropped, stunLossBps: 0n });
+
+    const handle = startCanaryVerifyLoop({ deps, intervalMs: 1_000_000, logger: undefined });
+    // (a) from creation the getter is a DropAccumulator carrying a byRelay Map.
+    const accBefore = handle.getAccumulator();
+    expect(accBefore.byRelay).toBeInstanceOf(Map);
+
+    // drive the immediate fire + one more so the cumulative content is unambiguous.
+    await handle.runRoundForTest();
+    await handle.runRoundForTest();
+    handle.stop();
+
+    // (b) a fresh read reflects the LATEST round's accumulator (content grew: rounds folded in).
+    const accAfter = handle.getAccumulator();
+    expect(accAfter.byRelay).toBeInstanceOf(Map);
+    const row = accAfter.byRelay.get(RELAY_MINER);
+    expect(row).toBeDefined();
+    expect(row!.rounds).toBeGreaterThanOrEqual(1);
+    expect(row!.sends).toBeGreaterThanOrEqual(4);
+
+    // (c) SEMANTICS (documents the contract): the loop REPLACES the accumulator object each
+    // round (immutable style, runCanaryVerifyRound :245-250) → the post-round object is NOT the
+    // pre-round one, so the LoadStateProvider MUST re-read per HTTP request and never cache it.
+    expect(accAfter).not.toBe(accBefore);
+  });
+});
