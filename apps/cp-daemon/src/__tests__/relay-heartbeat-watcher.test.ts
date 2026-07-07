@@ -284,6 +284,22 @@ describe('RelayHeartbeatWatcher — N>=3 failover (REQ-RMS-024)', () => {
     expect(promotions).toEqual([{ roomId: '0xroom1', oldPrimary: '0xA', newPrimary: '0xC' }]);
   });
 
+  it('N=3: freshest wins among MULTIPLE fresh standbys -> promotes the smallest-gap one, not slot [1]', async () => {
+    // Discriminator for the SELECTION itself: [1]=B is fresh (gap 2) but [2]=C is fresher
+    // (gap 1). The 2-relay code promotes the hardcoded standby [1]=B; the N>=3 code must
+    // pick the freshest live standby, C. (test 1 only proves slot-[2] reachability when
+    // [1] is stale; this proves the freshness ORDERING when both are live.)
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n /*gap10 stale*/, '0xB': 98n /*gap2 fresh*/, '0xC': 99n /*gap1 fresh*/ },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toEqual([{ roomId: '0xroom1', oldPrimary: '0xA', newPrimary: '0xC' }]);
+  });
+
   it('N=3: freshest wins among multiple fresh standbys; equal gaps tie-break to the earlier slot', async () => {
     const reader = makeReader({ epoch: 100n, rooms: [{
       roomId: '0xroom1',
