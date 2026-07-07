@@ -177,6 +177,28 @@ describe('createStandbyLinkManager', () => {
     mgr.connectTo('ws://a:4000');
     expect(() => sockets[0]!.fireOpen()).not.toThrow();
   });
+
+  // REQ-RMS-037 (D3, review fold #1) — a throwing onOpen callback must NOT escape the socket's
+  // 'open' emit (on a real `ws` socket that is an uncaught exception, violating the module's
+  // "a flaky link must never crash the standby daemon" posture — mirror the send() try/catch).
+  it('a throwing onOpen is swallowed + warn-logged; the socket loop still lives (reconnect fires)', () => {
+    vi.useFakeTimers();
+    const { open, sockets } = fakeSocketFactory();
+    const logger = mockLogger();
+    let opens = 0;
+    const mgr = createStandbyLinkManager({
+      open, reconnectMs: 1000, logger,
+      onOpen: () => { opens += 1; throw new Error('onOpen blew up'); },
+    });
+    mgr.connectTo('ws://a:4000');
+    expect(() => sockets[0]!.fireOpen()).not.toThrow(); // guard swallows — no uncaught escape
+    expect(opens).toBe(1);                              // the callback DID run
+    expect(logger.warn).toHaveBeenCalled();             // and was warn-logged
+    // Loop unbroken: a later close still schedules + fires the reconnect.
+    sockets[0]!.fireClose();
+    vi.advanceTimersByTime(1000);
+    expect(open).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('openInterRelayLink', () => {

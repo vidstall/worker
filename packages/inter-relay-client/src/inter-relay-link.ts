@@ -129,6 +129,10 @@ export interface StandbyLinkManagerOptions {
    * FIRST open per target url (part-3 A2 reversePending drain already back-fills the
    * first connect — do NOT resend there), true on every later open (the silent-drop
    * window to recover: the wiring layer re-delivers stored reverse announces).
+   * A url switch and return (A→B→A) re-opens A with isReopen=true and re-sends its stored
+   * frames even if the A2 drain already back-filled them — harmless, the primary's
+   * reverseMintedIds dedup makes the duplicate announce an idempotent no-op.
+   * A throwing callback is caught inside the manager (never crashes the socket loop).
    */
   onOpen?: (url: string, isReopen: boolean) => void;
 }
@@ -162,7 +166,14 @@ export function createStandbyLinkManager(opts: StandbyLinkManagerOptions): Stand
       if (socket !== s) return; // stale socket raced a URL switch
       const isReopen = everOpened.has(target);
       everOpened.add(target);
-      opts.onOpen?.(target, isReopen);
+      try {
+        opts.onOpen?.(target, isReopen);
+      } catch (err) {
+        // REQ-RMS-037 (D3, review fold) — a throwing onOpen must NOT escape the socket's
+        // 'open' emit (uncaught on the real `ws` socket): a flaky link must never crash the
+        // standby daemon (mirrors the send() best-effort guard).
+        opts.logger?.warn({ err, url: target }, 'G3.2b: standby link onOpen callback threw (swallowed)');
+      }
     });
     s.on('close', () => {
       if (socket === s) socket = null;
