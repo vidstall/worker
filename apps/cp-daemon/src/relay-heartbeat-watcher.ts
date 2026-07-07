@@ -3,23 +3,26 @@
  *
  * Periodically scans on-chain `relay_registry.info_last_heartbeat` for each
  * room's assigned relays. When the primary relay's heartbeat age exceeds
- * `maxHeartbeatEpochs` AND the standby relay is still fresh, submits a
- * `promote_relay` PTB via the injected `PromoteSubmitter`.
+ * `maxHeartbeatEpochs` AND at least one standby relay is still fresh, submits a
+ * `promote_relay` PTB (for the freshest live standby) via the injected
+ * `PromoteSubmitter`. Generalized to N>=3 assigned relays (REQ-RMS-024).
  *
  * Design: clones the `RevoteWatcher` seam pattern from `revote-watcher.ts`
  * (F47 Phase 4.1, RV-013). All chain reads go through `RelayChainStateReader`
  * so the decision logic is unit-testable offline (no SuiClient / devInspect).
  * The live implementation wires a real chain reader at daemon startup.
  *
- * De-dup guard: once a promotion for a given room has been submitted in this
- * watcher's lifetime, it is tracked in `promotedRooms` (Set). Subsequent
- * `scanOnce()` calls skip that room until the watcher is recreated (mirrors
- * the `revote_eligible_since` cooldown mirror in `RevoteWatcher`).
+ * De-dup guard: once a promotion for a given (room, old-primary) has been
+ * submitted in this watcher's lifetime, it is tracked in `promotedRooms` (Set,
+ * keyed `${roomId}::${oldPrimary}`). Subsequent `scanOnce()` calls skip that
+ * (room, old-primary) pair — but a SECOND failover (the promoted relay later
+ * dies, making a NEW old-primary) is a distinct key and still fires (REQ-RMS-024).
+ * Mirrors the `revote_eligible_since` cooldown mirror in `RevoteWatcher`.
  *
- * If BOTH the primary AND standby relay are stale (both heartbeats dead), the
- * watcher logs a WARNING and skips promotion — there is no valid candidate for
- * the `new_primary` slot. The chain-level `promote_relay` entry's own precondition
- * would also reject this case, but we skip it here to avoid wasting gas.
+ * If the primary is stale AND ALL standby relays are also stale (no fresh
+ * candidate), the watcher logs a WARNING and skips promotion — there is no valid
+ * candidate for the `new_primary` slot. The chain-level `promote_relay` entry's own
+ * precondition would also reject this case, but we skip it here to avoid wasting gas.
  *
  * Structured logging: every action emits pino JSON with
  *   { trace_id, module: 'relay-heartbeat-watcher', action, context }
@@ -122,7 +125,11 @@ export interface RelayPromotion {
 export class RelayHeartbeatWatcher {
   private readonly maxHeartbeatEpochs: bigint;
   private readonly pollIntervalMs: number;
-  /** De-dup: rooms for which a promotion has already been submitted. */
+  /**
+   * De-dup: keys `${roomId}::${oldPrimary}` for which a promotion has already been
+   * submitted (REQ-RMS-024 — per-(room, oldPrimary), so a SECOND failover after the new
+   * primary later dies can still fire). Field name kept to avoid external-reference churn.
+   */
   private readonly promotedRooms = new Set<string>();
 
   constructor(
@@ -174,12 +181,14 @@ export class RelayHeartbeatWatcher {
   /**
    * Core detection logic — exposed for unit testing.
    *
-   * For each active room:
+   * For each active room (REQ-RMS-024 — generalized from the 2-relay model to N>=3):
    *   1. Read current epoch.
-   *   2. Read assigned_relays[0]=primary, [1]=standby.
-   *   3. If primary heartbeat gap > maxHeartbeatEpochs AND standby is fresh
-   *      AND room not already promoted → submit PTB, de-dup guard.
-   *   4. If BOTH stale → log warn, skip.
+   *   2. Read assigned_relays; [0]=primary. De-dup relay ids (promote_relay leaves the
+   *      promoted relay in its old slot, so the vector can carry a duplicate).
+   *   3. If the primary's heartbeat gap > maxHeartbeatEpochs, pick the FRESHEST live
+   *      standby (smallest gap, tie-break = earliest slot) excluding the current primary,
+   *      and submit a promote PTB — de-duped per (roomId, oldPrimary).
+   *   4. If the primary is stale but ALL standbys are also stale → log warn, skip.
    *
    * Returns the list of rooms that received a new promotion this scan.
    */
@@ -201,54 +210,57 @@ export class RelayHeartbeatWatcher {
     );
 
     for (const roomId of roomIds) {
-      // Skip rooms already promoted in this watcher's lifetime (de-dup guard)
-      if (this.promotedRooms.has(roomId)) {
+      const assignedRaw = await this.reader.getAssignedRelays(roomId);
+      if (assignedRaw.length < 2) {
+        continue; // single-relay or unassigned room — nothing to promote
+      }
+      const primaryId = assignedRaw[0]!;
+
+      // REQ-RMS-024 — dedup is per-(roomId, oldPrimary): a SECOND failover (the new
+      // primary later dies) must fire; only re-promoting away from the SAME dead primary
+      // is suppressed.
+      const dedupKey = `${roomId}::${primaryId}`;
+      if (this.promotedRooms.has(dedupKey)) {
         this.logger.debug(
-          { trace_id: traceId, module: MODULE, context: { roomId } },
-          'Relay heartbeat watcher: room already promoted — skipping',
+          { trace_id: traceId, module: MODULE, context: { roomId, primaryId } },
+          'Relay heartbeat watcher: this (room, primary) already promoted — skipping',
         );
         continue;
       }
 
-      const assignedRelays = await this.reader.getAssignedRelays(roomId);
-      if (assignedRelays.length < 2) {
-        // Single-relay or unassigned room — nothing to promote
-        continue;
-      }
-
-      const primaryId = assignedRelays[0]!;
-      const standbyId = assignedRelays[1]!;
+      // REQ-RMS-024 — duplicate-aware id set: promote_relay REPLACES slot 0 but leaves
+      // the promoted relay in its old slot ([A,B,C] -> [C,B,C], room_manager.move:886-888).
+      const uniqueRelays = [...new Set(assignedRaw)];
 
       const heartbeats = await this.reader.getRelayLastHeartbeats(roomId);
       const hbMap = new Map(heartbeats.map((h) => [h.relayId, h.lastHeartbeat]));
+      const gapOf = (id: string): bigint => {
+        const hb = hbMap.get(id) ?? 0n;
+        return epoch > hb ? epoch - hb : 0n;
+      };
 
-      const primaryHb = hbMap.get(primaryId) ?? 0n;
-      const standbyHb = hbMap.get(standbyId) ?? 0n;
-
-      const primaryGap = epoch > primaryHb ? epoch - primaryHb : 0n;
-      const standbyGap = epoch > standbyHb ? epoch - standbyHb : 0n;
-
-      const primaryStale = primaryGap > this.maxHeartbeatEpochs;
-      const standbyStale = standbyGap > this.maxHeartbeatEpochs;
-
-      if (!primaryStale) {
-        // Primary is fresh — no promotion needed
-        continue;
+      if (gapOf(primaryId) <= this.maxHeartbeatEpochs) {
+        continue; // primary fresh — no promotion needed
       }
 
-      if (standbyStale) {
-        // Both dead — no valid new primary
+      // Fresh candidates = unique standbys, never the current primary; freshest (smallest
+      // gap) wins, deterministic tie-break = earliest position in the deduped vector.
+      const candidates = uniqueRelays
+        .filter((id) => id !== primaryId)
+        .map((id, idx) => ({ id, idx, gap: gapOf(id) }))
+        .filter((c) => c.gap <= this.maxHeartbeatEpochs)
+        .sort((a, b) => (a.gap < b.gap ? -1 : a.gap > b.gap ? 1 : a.idx - b.idx));
+
+      if (candidates.length === 0) {
         this.logger.warn(
-          {
-            module: MODULE,
-            context: { roomId, primaryId, standbyId, primaryGap: primaryGap.toString(), standbyGap: standbyGap.toString() },
-          },
-          'Relay heartbeat watcher: both primary and standby stale — cannot promote',
+          { module: MODULE, context: { roomId, primaryId, relayCount: uniqueRelays.length, primaryGap: gapOf(primaryId).toString() } },
+          'Relay heartbeat watcher: primary stale but ALL standbys stale — cannot promote',
         );
         continue;
       }
+      const newPrimaryId = candidates[0]!.id;
 
-      // Primary stale, standby fresh → promote
+      // Primary stale — promote the freshest live standby (REQ-RMS-024).
       const promotionTraceId = randomUUID();
       this.logger.info(
         {
@@ -258,8 +270,8 @@ export class RelayHeartbeatWatcher {
           context: {
             roomId,
             oldPrimary: primaryId,
-            newPrimary: standbyId,
-            primaryGap: primaryGap.toString(),
+            newPrimary: newPrimaryId,
+            primaryGap: gapOf(primaryId).toString(),
             epoch: epoch.toString(),
           },
         },
@@ -267,15 +279,15 @@ export class RelayHeartbeatWatcher {
       );
 
       try {
-        await this.submitter(roomId, primaryId, standbyId, promotionTraceId);
-        this.promotedRooms.add(roomId);
-        promotions.push({ roomId, oldPrimary: primaryId, newPrimary: standbyId });
+        await this.submitter(roomId, primaryId, newPrimaryId, promotionTraceId);
+        this.promotedRooms.add(dedupKey);
+        promotions.push({ roomId, oldPrimary: primaryId, newPrimary: newPrimaryId });
         this.logger.info(
           {
             trace_id: promotionTraceId,
             module: MODULE,
             action: 'promote_submitted',
-            context: { roomId, oldPrimary: primaryId, newPrimary: standbyId },
+            context: { roomId, oldPrimary: primaryId, newPrimary: newPrimaryId },
           },
           'Relay heartbeat watcher: promote_relay PTB submitted',
         );

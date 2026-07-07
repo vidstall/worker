@@ -177,10 +177,12 @@ describe('RelayHeartbeatWatcher — stale heartbeat detection (REQ-RO-009)', () 
 
     expect(promotions).toHaveLength(0);
     expect(submitter).not.toHaveBeenCalled();
-    // A warn log MUST be emitted for the both-dead case
+    // A warn log MUST be emitted for the no-fresh-candidate case. (REQ-RMS-024 unified the
+    // 2-relay "both stale" and N>=3 "all standbys stale" paths into one warn; assert on the
+    // message-stable "cannot promote" substring rather than the retired word "both".)
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ module: 'relay-heartbeat-watcher' }),
-      expect.stringContaining('both'),
+      expect.stringContaining('cannot promote'),
     );
   });
 
@@ -264,6 +266,77 @@ describe('RelayHeartbeatWatcher — stale heartbeat detection (REQ-RO-009)', () 
     const promotions = await watcher.scanOnce();
     expect(promotions).toHaveLength(1);
     expect(submitter).toHaveBeenCalledOnce();
+  });
+});
+
+// ── Tests: N>=3 failover generalization (REQ-RMS-024) ────────────────────────
+
+describe('RelayHeartbeatWatcher — N>=3 failover (REQ-RMS-024)', () => {
+  it('N=3: primary stale, [1] stale, [2] fresh -> promotes [2] (freshest live standby)', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n /*gap10 stale*/, '0xB': 95n /*gap5 stale*/, '0xC': 99n /*gap1 fresh*/ },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toEqual([{ roomId: '0xroom1', oldPrimary: '0xA', newPrimary: '0xC' }]);
+  });
+
+  it('N=3: freshest wins among multiple fresh standbys; equal gaps tie-break to the earlier slot', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n, '0xB': 99n, '0xC': 99n }, // B and C tie at gap=1
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions[0]!.newPrimary).toBe('0xB'); // deterministic: earlier position
+  });
+
+  it('post-promotion duplicate vector [C,B,C]: candidates exclude the current primary and dedup ids', async () => {
+    // the on-chain shape promote_relay leaves behind (room_manager.move:886-888)
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xC', '0xB', '0xC'],
+      heartbeats: { '0xC': 90n /*current primary now stale*/, '0xB': 99n },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toEqual([{ roomId: '0xroom1', oldPrimary: '0xC', newPrimary: '0xB' }]); // NOT 0xC
+  });
+
+  it('second failover fires: dedup is per-(roomId, oldPrimary), not per-room-forever', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n, '0xB': 99n, '0xC': 98n },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    await watcher.scanOnce(); // promotes B (gap1 < C gap2)
+    // chain state after promotion: B replaced slot 0, B duplicated ([B,B,C]); later B dies too
+    reader.state.rooms[0]!.assignedRelays = ['0xB', '0xB', '0xC'];
+    reader.state.epoch = 110n;
+    reader.state.rooms[0]!.heartbeats = { '0xB': 100n /*gap10 stale*/, '0xC': 109n /*fresh*/ };
+    const second = await watcher.scanOnce();
+    expect(second).toEqual([{ roomId: '0xroom1', oldPrimary: '0xB', newPrimary: '0xC' }]);
+  });
+
+  it('all standbys stale -> warn + no promotion (existing behavior at N=3)', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n, '0xB': 90n, '0xC': 90n },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toHaveLength(0);
+    expect(submitter).not.toHaveBeenCalled();
   });
 });
 
