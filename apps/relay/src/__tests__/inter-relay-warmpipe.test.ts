@@ -871,6 +871,26 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-037 D3 reverse-announce frame-a
     expect(announced).toHaveLength(2);
     expect(announced[1]).toEqual(announced[0]); // tree branch re-sends the 7-arg frame verbatim
   });
+
+  // Task 4 end-to-end (spec §3.3): the LOAD-BEARING flap case — a producer created DURING the
+  // down window is consumed onto the live pipe but its announce is silently DROPPED; on reopen
+  // the wiring layer's onOpen(isReopen=true) calls resendReverseAnnounces and it is recovered.
+  it('REQ-RMS-037 D3 end-to-end: a producer announced while the link is DOWN is re-delivered on reopen', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    // Announcer models the link: DROPS while linkUp=false (mirrors the standby link's silent
+    // drop when the WS is not OPEN, inter-relay-link.ts:172-183).
+    let linkUp = true;
+    const delivered: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { if (linkUp) delivered.push(args); });
+
+    linkUp = false; // flap window opens
+    await driveLocalClientProducer(coord, 'roomA', 'during-window'); // consumed onto the live pipe, announce DROPPED
+    expect(delivered).toHaveLength(0);
+
+    linkUp = true; // reopen
+    coord.resendReverseAnnounces('roomA'); // what index.ts onOpen(isReopen=true) calls
+    expect(delivered).toHaveLength(1); // the during-window producer is recovered
+  });
 });
 
 // ── F. REQ-RMS-036: Loop/echo prevention — minted producer never re-announces UP ──
