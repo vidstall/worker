@@ -377,6 +377,14 @@ export interface CanaryVerifyLoopHandle {
    * round so a test can assert without a timer. The persisted accumulator is threaded internally.
    */
   runRoundForTest: () => Promise<void>;
+  /**
+   * REQ-RMS-022 (static-mesh-hardening D1) — returns the LATEST accumulator object (the loop
+   * REPLACES it each round — immutable style, see runCanaryVerifyRound); callers MUST call per
+   * read and never cache the returned reference. Read-only by contract. Feeds the validator's
+   * /canary/load LoadStateProvider. Rows stay EMPTY until canary M4b supplies live captures
+   * (DA-3) — the feed serving an empty relays[] is the honest, disclosed state.
+   */
+  getAccumulator: () => DropAccumulator;
 }
 
 /**
@@ -449,6 +457,9 @@ export function startCanaryVerifyLoop(args: {
       log.info('canary verify loop stopped');
     },
     runRoundForTest,
+    // REQ-RMS-022 (D1): latest per-relay accumulator for the /canary/load feed. The loop
+    // REPLACES `accumulator` each round (immutable style) — this returns whatever is current.
+    getAccumulator: () => accumulator,
   };
 }
 

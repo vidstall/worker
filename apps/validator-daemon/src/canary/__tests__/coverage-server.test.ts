@@ -141,4 +141,27 @@ describe('REQ-RMS-005/019 buildLoadPayload — per-relay attested forwarding-pat
     expect(p.relays[0]!.attestedLoadPaths).toBe(7);
     expect(p.relays[0]!.heartbeatFreshEpochs).toBe(0);
   });
+  // REQ-RMS-022 (static-mesh-hardening D1) — the validator boot wires a provider shaped exactly
+  // `() => ({ acc: state.canaryVerifyLoop?.getAccumulator() ?? { byRelay: new Map() }, ... })`
+  // (apps/validator-daemon/src/index.ts). This pins that closure's contract WITHOUT booting the
+  // HTTP server (this file is pure-only by convention — see the file header): the pre-verify-loop
+  // window (`undefined` handle) falls back to an EMPTY accumulator → honest empty relays[] (the
+  // strict-defer feed state), and once a round has folded, the seeded relay's cumulative `sends`
+  // surface as `attestedLoadPaths`.
+  it('REQ-RMS-022 (D1): the index.ts loadProvider closure defers to empty pre-loop, then surfaces a seeded row', () => {
+    let acc: DropAccumulator | undefined; // undefined models `state.canaryVerifyLoop` not yet set
+    const provider: LoadStateProvider = () => ({
+      acc: acc ?? { byRelay: new Map() }, // EXACT index.ts fallback
+      heartbeatFresh: new Map<string, number>(),
+    });
+    // pre-loop: empty accumulator → honest empty relays (feed served with no attested rows).
+    const pre = provider();
+    expect(buildLoadPayload(pre.acc, pre.heartbeatFresh, WALLET_A).relays).toEqual([]);
+    // after a round folds: the seeded relay's cumulative sends surface as attestedLoadPaths.
+    acc = { byRelay: new Map([['0xrelayZ', { drops: 2, sends: 42, rounds: 3 }]]) };
+    const post = provider();
+    const p = buildLoadPayload(post.acc, post.heartbeatFresh, WALLET_A);
+    expect(p.relays[0]!.relayMinerId).toBe('0xrelayZ');
+    expect(p.relays[0]!.attestedLoadPaths).toBe(42);
+  });
 });

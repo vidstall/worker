@@ -481,6 +481,21 @@ export function handleEvent(
         };
       });
 
+      // REQ-RMS-022 (static-mesh-hardening D1) — tri-state placement-capacity basis, asserted by
+      // the live run: legacy-self-report = no feed wired (flag OFF) | attested = wired + at least
+      // one candidate has a row | defer = wired but NO candidate has an attested row (strict
+      // no-attestation -> the pool-health gate below then defers the admission). Emitted BEFORE the
+      // gate so the basis is recorded even on the defer path. Structured-logging standard shape.
+      const basis = !feedActive
+        ? 'legacy-self-report'
+        : capacities.some((c) => c.canaryHealthy)
+          ? 'attested'
+          : 'defer';
+      logger.info(
+        { module: 'event-handler', action: 'placement_basis', context: { basis, feedRows: attestedLoad?.size ?? 0, candidates: capacities.length } },
+        'REQ-RMS-022: placement capacity basis',
+      );
+
       // REQ-RMS-018/021 — pool-health gate + K_r placement. STRICT env-gate: with RMS_KR_MIN unset (or <=1),
       // kR = 1 EXACTLY, so the M1 single-relay path + MIN_RELAY-padded ballot below is byte-identical to M1
       // (including M1's defer when roomLoad > cWorker). The LOCAL >=3-active demo sets RMS_KR_MIN=3 to force a
