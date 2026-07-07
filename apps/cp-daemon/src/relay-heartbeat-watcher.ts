@@ -67,7 +67,7 @@ export interface RelayChainStateReader {
 
   /**
    * Returns assigned_relays vector for the room.
-   * assigned_relays[0] = primary, [1] = standby (room_manager.move:55).
+   * assigned_relays[0] = primary, [1..] = standbys (room_manager.move:55).
    * Returns empty array if room is unassigned.
    */
   getAssignedRelays(roomId: string): Promise<string[]>;
@@ -271,6 +271,9 @@ export class RelayHeartbeatWatcher {
             roomId,
             oldPrimary: primaryId,
             newPrimary: newPrimaryId,
+            // REQ-RMS-024 — freshness ranking (freshest first) behind the pick; the live-run
+            // runbook asserts this ordering appears in the watcher log.
+            candidates: candidates.map((c) => ({ id: c.id, gap: c.gap.toString() })),
             primaryGap: gapOf(primaryId).toString(),
             epoch: epoch.toString(),
           },

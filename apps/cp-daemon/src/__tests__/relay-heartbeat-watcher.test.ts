@@ -357,10 +357,40 @@ describe('RelayHeartbeatWatcher — N>=3 failover (REQ-RMS-024)', () => {
       heartbeats: { '0xA': 90n, '0xB': 90n, '0xC': 90n },
     }]});
     const submitter = makeSubmitter();
-    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const logger = mockLogger();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, logger, { maxHeartbeatEpochs: 3n });
     const promotions = await watcher.scanOnce();
     expect(promotions).toHaveLength(0);
     expect(submitter).not.toHaveBeenCalled();
+    // REQ-RMS-024 — the no-fresh-candidate path MUST warn (the title's promise).
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'relay-heartbeat-watcher' }),
+      expect.stringContaining('cannot promote'),
+    );
+  });
+
+  it('N=3: promote_submit log carries the ranked candidate list (freshness ranking, for the live-run assert)', async () => {
+    // REQ-RMS-024 (D2, reviewer fold) — the live-run runbook asserts "watcher log shows the
+    // freshness ranking"; scanOnce must emit the sorted candidates (freshest first) in the
+    // promote_submit log context. Fixture: B gap2, C gap1 -> ranked [C, B].
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n /*stale*/, '0xB': 98n /*gap2*/, '0xC': 99n /*gap1*/ },
+    }]});
+    const logger = mockLogger();
+    const watcher = new RelayHeartbeatWatcher(reader, makeSubmitter(), logger, { maxHeartbeatEpochs: 3n });
+    await watcher.scanOnce();
+    const submitCall = (logger.info as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[0] === 'object' && c[0] !== null &&
+        (c[0] as Record<string, unknown>)['action'] === 'promote_submit',
+    );
+    expect(submitCall).toBeDefined();
+    expect((submitCall![0] as { context: { candidates: unknown } }).context.candidates).toEqual([
+      { id: '0xC', gap: '1' },
+      { id: '0xB', gap: '2' },
+    ]);
   });
 });
 
