@@ -90,4 +90,47 @@ describe('postAttestation (cap-token follower)', () => {
     const result = await postAttestation(board, Ed25519Keypair.generate(), { currentEpoch: 0n });
     expect(result).toBe(false);
   });
+
+  it('coerces a wire-number expiresEpoch (JSON round-trip) and still signs — HTTP-board wire-safety', async () => {
+    const board = new InMemoryGenericClaimBoard([
+      buildCapTokenIssueBoardConfig({ minDistinct: 2, onUnquorumedExpiry: () => {} }),
+    ]);
+    const cp2 = Ed25519Keypair.generate();
+    const roomId = '0x' + '44'.repeat(32);
+    const peerPubkey = new Array(32).fill(7);
+    const realExpires = 12345n;
+
+    // Build the claim exactly the way the FIXED leader does: canonicalMsgHex from the REAL
+    // bigint expiry, but expiresEpoch stored as a NUMBER so the claim is JSON-serializable.
+    const msg = buildIssueCanonicalMsg({ roomId, peerPubkey, role: 4, expiresEpoch: realExpires, nonce: 1 });
+    const leaderClaim: CapTokenIssueClaim = {
+      kind: 'captoken-issue',
+      roomId,
+      peerPubkey,
+      role: 4,
+      expiresEpoch: Number(realExpires) as unknown as bigint,
+      nonce: 1,
+      canonicalMsgHex: Buffer.from(msg).toString('hex'),
+    };
+
+    // A raw bigint would throw here; the wire-safe claim round-trips and stays a number.
+    const wireClaim = JSON.parse(JSON.stringify(leaderClaim)) as CapTokenIssueClaim;
+    expect(typeof (wireClaim as unknown as { expiresEpoch: unknown }).expiresEpoch).toBe('number');
+
+    await board.post(
+      'captoken-issue',
+      wireClaim,
+      { signature: new Array(64).fill(9), pubkey: new Array(32).fill(8), addr: '0xleader' },
+      0,
+    );
+
+    // Follower must coerce the wire number back to bigint, re-derive, byte-match, and sign.
+    const posted = await postAttestation(board, cp2, { currentEpoch: 0n });
+    expect(posted).toBe(true);
+
+    const open = await board.listOpen();
+    const cell = open.find((c) => c.kind === 'captoken-issue');
+    const addrs = (cell!.attestations as Array<{ addr: string }>).map((a) => a.addr);
+    expect(addrs).toContain(cp2.toSuiAddress());
+  });
 });

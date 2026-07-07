@@ -58,14 +58,22 @@ export async function postAttestation(
   const cells = await board.listOpen();
   for (const cell of cells) {
     if (cell.kind !== 'captoken-issue') continue;
-    const claim = cell.claim as CapTokenIssueClaim;
+    const raw = cell.claim as CapTokenIssueClaim;
+    // WIRE-SAFETY: a claim that round-tripped a JSON board (HttpQuorumClaimBoard) carries
+    // expiresEpoch as a NUMBER — the leader posts Number(...) because BigInt is not
+    // JSON-serializable. Coerce it back to bigint for re-derivation so rebuildCanonicalAndSignIfMatches
+    // reproduces identical bytes whether the board was in-memory (bigint) or HTTP (number).
+    // BigInt() is a no-op on a bigint and exact for the < 2^53 epoch range.
+    const claimForDerive: CapTokenIssueClaim = { ...raw, expiresEpoch: BigInt(raw.expiresEpoch) };
     const att = await rebuildCanonicalAndSignIfMatches(
-      claim,
+      claimForDerive,
       signer,
       opts?.currentEpoch !== undefined ? { currentEpoch: opts.currentEpoch } : undefined,
     );
     if (att) {
-      await board.post('captoken-issue', claim, att, cell.openedRound);
+      // Re-post the ORIGINAL wire-safe claim (expiresEpoch still a number) so this follower's
+      // own POST stays JSON-serializable over the HTTP board.
+      await board.post('captoken-issue', raw, att, cell.openedRound);
       return true;
     }
   }

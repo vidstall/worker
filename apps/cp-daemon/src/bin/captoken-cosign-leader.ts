@@ -44,7 +44,6 @@ import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
-import { SuiClient } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 import {
   createLogger,
@@ -125,13 +124,17 @@ export async function collectIssueQuorum(opts: {
   const canonicalMsgHex = toHex(canonicalMsg);
 
   // 2. Build a REAL claim (not advisory) so followers can re-derive + G4 byte-match.
-  //    CapTokenIssueClaim.nonce is number; opts.req.nonce is bigint — convert.
+  //    WIRE-SAFETY: BigInt is NOT JSON-serializable, and HttpQuorumClaimBoard posts the claim
+  //    via JSON.stringify — a bigint field would throw. So expiresEpoch/nonce are stored as
+  //    NUMBERs on the claim (exact for the < 2^53 epoch/nonce range). canonicalMsgHex above is
+  //    built from the REAL bigint request; the follower's postAttestation coerces expiresEpoch
+  //    back to bigint before re-deriving, so the G4 byte-match still reproduces these bytes.
   const claim: CapTokenIssueClaim = {
     kind: 'captoken-issue',
     roomId: opts.req.roomId,
     peerPubkey: opts.req.peerPubkey,
     role: opts.req.role,
-    expiresEpoch: opts.req.expiresEpoch,
+    expiresEpoch: Number(opts.req.expiresEpoch) as unknown as bigint,
     nonce: Number(opts.req.nonce),
     canonicalMsgHex,
   };
@@ -263,20 +266,21 @@ async function main(): Promise<void> {
       tlsKeyPath,
       'QUORUM_CLAIMS_TLS_KEY_PATH (required with QUORUM_CLAIMS_TLS_ENABLED=1)',
     );
+    const bundlePath = need(
+      manifestsPath,
+      'QUORUM_CLAIMS_MANIFEST_BUNDLE_PATH (required with QUORUM_CLAIMS_TLS_ENABLED=1 — the ' +
+        'SPKI-pin trust set; without it the client would silently fall back to plain-HTTP ' +
+        'against a TLS server)',
+    );
     const cert = readFileSync(certPath, 'utf8');
     const key = readFileSync(keyPath, 'utf8');
-
-    if (manifestsPath) {
-      const raw = JSON.parse(readFileSync(manifestsPath, 'utf8')) as SignedManifest[];
-      const verified = await loadManifests(raw);
-      trustedSpki = manifestsToTrustedSpki(verified);
-      logger.info(
-        { module: MOD, context: { trustedCount: trustedSpki.size } },
-        'mTLS mode: manifest-derived trust',
-      );
-    } else {
-      trustedSpki = new Set<string>();
-    }
+    const raw = JSON.parse(readFileSync(bundlePath, 'utf8')) as SignedManifest[];
+    const verified = await loadManifests(raw);
+    trustedSpki = manifestsToTrustedSpki(verified);
+    logger.info(
+      { module: MOD, context: { trustedCount: trustedSpki.size } },
+      'mTLS mode: manifest-derived trust',
+    );
     tlsConfig = { cert, key, trustedSpki };
   }
 
@@ -377,14 +381,22 @@ async function main(): Promise<void> {
     );
     tx.setGasBudget(100_000_000);
 
-    const res = await (suiClient as SuiClient).signAndExecuteTransaction({
+    const res = await suiClient.signAndExecuteTransaction({
       signer: leaderKp,
       transaction: tx,
       options: { showEffects: true, showEvents: true },
     });
-    await (suiClient as SuiClient).waitForTransaction({ digest: res.digest });
+    await suiClient.waitForTransaction({ digest: res.digest });
 
     const status = (res.effects?.status?.status as string) ?? 'unknown';
+    if (status !== 'success') {
+      // A reverted TX (Move abort 886 dup-signer / 906 intent-wrap / gas) must exit non-zero,
+      // NOT log "cap-token issued". Surface the abort for the live run.
+      throw new Error(
+        `${MOD}: issue_capability_token TX ${res.digest} did not succeed ` +
+          `(status=${status}, error=${res.effects?.status?.error ?? 'n/a'})`,
+      );
+    }
     logger.info(
       {
         module: MOD,
