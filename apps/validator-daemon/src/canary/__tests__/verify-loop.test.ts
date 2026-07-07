@@ -375,8 +375,11 @@ describe('REQ-RMS-022 (D1) — startCanaryVerifyLoop handle exposes the per-rela
     expect(accAfter.byRelay).toBeInstanceOf(Map);
     const row = accAfter.byRelay.get(RELAY_MINER);
     expect(row).toBeDefined();
-    expect(row!.rounds).toBeGreaterThanOrEqual(1);
-    expect(row!.sends).toBeGreaterThanOrEqual(4);
+    // Deterministic harness: immediate fire + 2× runRoundForTest = exactly 3 folded rounds,
+    // each +4 sends / +1 drop (ctrs=[0,1,2,3], dropped={2}). Exact values pin "latest" airtight.
+    expect(row!.rounds).toBe(3);
+    expect(row!.drops).toBe(3);
+    expect(row!.sends).toBe(12);
 
     // (c) SEMANTICS (documents the contract): the loop REPLACES the accumulator object each
     // round (immutable style, runCanaryVerifyRound :245-250) → the post-round object is NOT the
