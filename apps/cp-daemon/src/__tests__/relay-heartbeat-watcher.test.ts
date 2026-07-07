@@ -22,6 +22,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   RelayHeartbeatWatcher,
   startRelayHeartbeatWatcher,
+  resolveMaxHeartbeatEpochs,
   type RelayChainStateReader,
   type PromoteSubmitter,
 } from '../relay-heartbeat-watcher.js';
@@ -391,6 +392,27 @@ describe('RelayHeartbeatWatcher — N>=3 failover (REQ-RMS-024)', () => {
       { id: '0xC', gap: '1' },
       { id: '0xB', gap: '2' },
     ]);
+  });
+});
+
+// ── Tests: resolveMaxHeartbeatEpochs — Move-constant floor (REQ-RMS-024) ──────
+
+describe('resolveMaxHeartbeatEpochs (REQ-RMS-024 — Move-constant floor)', () => {
+  it('unset env -> the Move constant (3n)', () => {
+    expect(resolveMaxHeartbeatEpochs(undefined, mockLogger())).toBe(3n);
+  });
+  it('valid env >= 3 -> honored', () => {
+    expect(resolveMaxHeartbeatEpochs('5', mockLogger())).toBe(5n);
+  });
+  it('env below the Move floor -> CLAMPED to 3n + warn (promote_relay would abort E_RELAY_NOT_STALE=564)', () => {
+    const logger = mockLogger();
+    expect(resolveMaxHeartbeatEpochs('1', logger)).toBe(3n);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+  it('malformed env -> the Move constant + warn (never NaN/throw)', () => {
+    const logger = mockLogger();
+    expect(resolveMaxHeartbeatEpochs('banana', logger)).toBe(3n);
+    expect(logger.warn).toHaveBeenCalled();
   });
 });
 

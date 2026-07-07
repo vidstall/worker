@@ -39,6 +39,32 @@ const MODULE = 'relay-heartbeat-watcher';
 /** Default maximum epoch gap before a relay is considered to have missed heartbeats. */
 export const DEFAULT_MAX_HEARTBEAT_EPOCHS = 3n;
 
+/**
+ * REQ-RMS-024 — MIRROR of Move `room_manager.move:57` `MAX_HEARTBEAT_EPOCHS: u64 = 3`.
+ * promote_relay asserts `current_epoch - last_hb > MAX_HEARTBEAT_EPOCHS` (`:884`,
+ * E_RELAY_NOT_STALE=564): a watcher threshold BELOW this fires PTBs the chain aborts.
+ * If the Move constant ever changes, update this mirror in the same review.
+ */
+export const MOVE_MAX_HEARTBEAT_EPOCHS = 3n;
+
+/** Env resolver for RELAY_MAX_HEARTBEAT_EPOCHS: >= the Move floor, clamp + warn below it. */
+export function resolveMaxHeartbeatEpochs(raw: string | undefined, logger: Logger): bigint {
+  if (raw === undefined) return MOVE_MAX_HEARTBEAT_EPOCHS;
+  const parsed = parseInt(raw, 10);
+  if (Number.isNaN(parsed)) {
+    logger.warn({ module: MODULE, context: { raw } }, 'RELAY_MAX_HEARTBEAT_EPOCHS malformed — using the Move floor (3)');
+    return MOVE_MAX_HEARTBEAT_EPOCHS;
+  }
+  if (BigInt(parsed) < MOVE_MAX_HEARTBEAT_EPOCHS) {
+    logger.warn(
+      { module: MODULE, context: { raw, floor: MOVE_MAX_HEARTBEAT_EPOCHS.toString() } },
+      'RELAY_MAX_HEARTBEAT_EPOCHS below the Move MAX_HEARTBEAT_EPOCHS floor — clamped (promote_relay would abort E_RELAY_NOT_STALE)',
+    );
+    return MOVE_MAX_HEARTBEAT_EPOCHS;
+  }
+  return BigInt(parsed);
+}
+
 /** Default poll cadence (ms) when no `pollIntervalMs` is provided. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 
