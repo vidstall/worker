@@ -50,6 +50,7 @@ import { SuiChainStateReader } from './sui-chain-state-reader.js';
 import {
   startRelayHeartbeatWatcher,
   makePromoteSubmitter,
+  resolveMaxHeartbeatEpochs,
 } from './relay-heartbeat-watcher.js';
 import { LiveRelayChainStateReader } from './relay-chain-state-reader.js';
 import { startTurnIssuer } from './turn-issuer.js';
@@ -1001,7 +1002,12 @@ async function main(): Promise<void> {
     relayReader,
     makePromoteSubmitter(client, signer, config, logger),
     logger,
-    { pollIntervalMs: relayHeartbeatScanMs },
+    {
+      pollIntervalMs: relayHeartbeatScanMs,
+      // REQ-RMS-024 (D2) — env-tunable threshold, clamped to the Move MAX_HEARTBEAT_EPOCHS
+      // floor: a value below it would fire promote_relay PTBs the chain aborts (E_RELAY_NOT_STALE).
+      maxHeartbeatEpochs: resolveMaxHeartbeatEpochs(process.env['RELAY_MAX_HEARTBEAT_EPOCHS'], logger),
+    },
   );
   const stopRelayHeartbeatWatcher = (): void => relayHeartbeatWatcher.stop();
   logger.info(

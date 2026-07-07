@@ -22,6 +22,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   RelayHeartbeatWatcher,
   startRelayHeartbeatWatcher,
+  resolveMaxHeartbeatEpochs,
   type RelayChainStateReader,
   type PromoteSubmitter,
 } from '../relay-heartbeat-watcher.js';
@@ -177,10 +178,12 @@ describe('RelayHeartbeatWatcher — stale heartbeat detection (REQ-RO-009)', () 
 
     expect(promotions).toHaveLength(0);
     expect(submitter).not.toHaveBeenCalled();
-    // A warn log MUST be emitted for the both-dead case
+    // A warn log MUST be emitted for the no-fresh-candidate case. (REQ-RMS-024 unified the
+    // 2-relay "both stale" and N>=3 "all standbys stale" paths into one warn; assert on the
+    // message-stable "cannot promote" substring rather than the retired word "both".)
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ module: 'relay-heartbeat-watcher' }),
-      expect.stringContaining('both'),
+      expect.stringContaining('cannot promote'),
     );
   });
 
@@ -264,6 +267,152 @@ describe('RelayHeartbeatWatcher — stale heartbeat detection (REQ-RO-009)', () 
     const promotions = await watcher.scanOnce();
     expect(promotions).toHaveLength(1);
     expect(submitter).toHaveBeenCalledOnce();
+  });
+});
+
+// ── Tests: N>=3 failover generalization (REQ-RMS-024) ────────────────────────
+
+describe('RelayHeartbeatWatcher — N>=3 failover (REQ-RMS-024)', () => {
+  it('N=3: primary stale, [1] stale, [2] fresh -> promotes [2] (freshest live standby)', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n /*gap10 stale*/, '0xB': 95n /*gap5 stale*/, '0xC': 99n /*gap1 fresh*/ },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toEqual([{ roomId: '0xroom1', oldPrimary: '0xA', newPrimary: '0xC' }]);
+  });
+
+  it('N=3: freshest wins among MULTIPLE fresh standbys -> promotes the smallest-gap one, not slot [1]', async () => {
+    // CONTROLLER-MANDATED freshest-selection discriminator (team-lead Task 9 review).
+    // Both standbys are FRESH: [1]=B gap 2, [2]=C gap 1. The N>=3 code must pick the
+    // FRESHEST live standby (C) — NOT merely the first fresh slot.
+    // Analytic RED proof (the empirical RED window closed once impl landed at 93fd6e6):
+    // the pre-change scanOnce hardcoded `standbyId = assignedRelays[1]` and promoted it
+    // whenever fresh, never reading slot [2] —
+    //   `git show 3a19177:apps/cp-daemon/src/relay-heartbeat-watcher.ts` lines 219-226 —
+    // so old code would promote B here, failing this test.
+    // (Also empirically re-confirmed RED: ran this file against 3a19177's production file
+    // before committing — 3 discriminators fail, incl. this one.)
+    // Distinct from test 1 (B is STALE there -> only proves slot-[2] reachability) and the
+    // equal-gap tie-break test (a tie, not a strict freshness ordering).
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n /*gap10 stale*/, '0xB': 98n /*gap2 fresh*/, '0xC': 99n /*gap1 fresh*/ },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toEqual([{ roomId: '0xroom1', oldPrimary: '0xA', newPrimary: '0xC' }]);
+  });
+
+  it('N=3: freshest wins among multiple fresh standbys; equal gaps tie-break to the earlier slot', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n, '0xB': 99n, '0xC': 99n }, // B and C tie at gap=1
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions[0]!.newPrimary).toBe('0xB'); // deterministic: earlier position
+  });
+
+  it('post-promotion duplicate vector [C,B,C]: candidates exclude the current primary and dedup ids', async () => {
+    // the on-chain shape promote_relay leaves behind (room_manager.move:886-888)
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xC', '0xB', '0xC'],
+      heartbeats: { '0xC': 90n /*current primary now stale*/, '0xB': 99n },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toEqual([{ roomId: '0xroom1', oldPrimary: '0xC', newPrimary: '0xB' }]); // NOT 0xC
+  });
+
+  it('second failover fires: dedup is per-(roomId, oldPrimary), not per-room-forever', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n, '0xB': 99n, '0xC': 98n },
+    }]});
+    const submitter = makeSubmitter();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, mockLogger(), { maxHeartbeatEpochs: 3n });
+    await watcher.scanOnce(); // promotes B (gap1 < C gap2)
+    // chain state after promotion: B replaced slot 0, B duplicated ([B,B,C]); later B dies too
+    reader.state.rooms[0]!.assignedRelays = ['0xB', '0xB', '0xC'];
+    reader.state.epoch = 110n;
+    reader.state.rooms[0]!.heartbeats = { '0xB': 100n /*gap10 stale*/, '0xC': 109n /*fresh*/ };
+    const second = await watcher.scanOnce();
+    expect(second).toEqual([{ roomId: '0xroom1', oldPrimary: '0xB', newPrimary: '0xC' }]);
+  });
+
+  it('all standbys stale -> warn + no promotion (existing behavior at N=3)', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n, '0xB': 90n, '0xC': 90n },
+    }]});
+    const submitter = makeSubmitter();
+    const logger = mockLogger();
+    const watcher = new RelayHeartbeatWatcher(reader, submitter, logger, { maxHeartbeatEpochs: 3n });
+    const promotions = await watcher.scanOnce();
+    expect(promotions).toHaveLength(0);
+    expect(submitter).not.toHaveBeenCalled();
+    // REQ-RMS-024 — the no-fresh-candidate path MUST warn (the title's promise).
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'relay-heartbeat-watcher' }),
+      expect.stringContaining('cannot promote'),
+    );
+  });
+
+  it('N=3: promote_submit log carries the ranked candidate list (freshness ranking, for the live-run assert)', async () => {
+    // REQ-RMS-024 (D2, reviewer fold) — the live-run runbook asserts "watcher log shows the
+    // freshness ranking"; scanOnce must emit the sorted candidates (freshest first) in the
+    // promote_submit log context. Fixture: B gap2, C gap1 -> ranked [C, B].
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n /*stale*/, '0xB': 98n /*gap2*/, '0xC': 99n /*gap1*/ },
+    }]});
+    const logger = mockLogger();
+    const watcher = new RelayHeartbeatWatcher(reader, makeSubmitter(), logger, { maxHeartbeatEpochs: 3n });
+    await watcher.scanOnce();
+    const submitCall = (logger.info as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[0] === 'object' && c[0] !== null &&
+        (c[0] as Record<string, unknown>)['action'] === 'promote_submit',
+    );
+    expect(submitCall).toBeDefined();
+    expect((submitCall![0] as { context: { candidates: unknown } }).context.candidates).toEqual([
+      { id: '0xC', gap: '1' },
+      { id: '0xB', gap: '2' },
+    ]);
+  });
+});
+
+// ── Tests: resolveMaxHeartbeatEpochs — Move-constant floor (REQ-RMS-024) ──────
+
+describe('resolveMaxHeartbeatEpochs (REQ-RMS-024 — Move-constant floor)', () => {
+  it('unset env -> the Move constant (3n)', () => {
+    expect(resolveMaxHeartbeatEpochs(undefined, mockLogger())).toBe(3n);
+  });
+  it('valid env >= 3 -> honored', () => {
+    expect(resolveMaxHeartbeatEpochs('5', mockLogger())).toBe(5n);
+  });
+  it('env below the Move floor -> CLAMPED to 3n + warn (promote_relay would abort E_RELAY_NOT_STALE=564)', () => {
+    const logger = mockLogger();
+    expect(resolveMaxHeartbeatEpochs('1', logger)).toBe(3n);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+  it('malformed env -> the Move constant + warn (never NaN/throw)', () => {
+    const logger = mockLogger();
+    expect(resolveMaxHeartbeatEpochs('banana', logger)).toBe(3n);
+    expect(logger.warn).toHaveBeenCalled();
   });
 });
 
