@@ -88,7 +88,9 @@ export function openInterRelayLink(opts: OpenInterRelayLinkOptions): WebSocket {
 
 /** Minimal socket the manager drives (a `ws` WebSocket satisfies this). */
 export interface StandbyLinkSocket {
-  on(event: 'close', listener: () => void): void;
+  // REQ-RMS-037 (D3) — 'open' widened in (type-surface only: the production `ws` socket
+  // already emits it); the manager listens for it to fire onOpen(url, isReopen).
+  on(event: 'close' | 'open', listener: () => void): void;
   close(): void;
   /**
    * Push a frame UP the link to the primary (REQ-RO-007 — the standby's
@@ -122,6 +124,13 @@ export interface StandbyLinkManagerOptions {
   logger?: Logger;
   /** Timer factory (default global setTimeout) — injectable for tests. */
   setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
+  /**
+   * REQ-RMS-037 (D3) — fired when a dialed socket reaches OPEN. isReopen=false on the
+   * FIRST open per target url (part-3 A2 reversePending drain already back-fills the
+   * first connect — do NOT resend there), true on every later open (the silent-drop
+   * window to recover: the wiring layer re-delivers stored reverse announces).
+   */
+  onOpen?: (url: string, isReopen: boolean) => void;
 }
 
 /**
@@ -139,6 +148,9 @@ export function createStandbyLinkManager(opts: StandbyLinkManagerOptions): Stand
   let socket: StandbyLinkSocket | null = null;
   let url: string | null = null;
   let down = false;
+  // REQ-RMS-037 (D3) — target urls that have opened at least once, so onOpen can flag a
+  // RE-open (vs the first connect, which the A2 drain already back-fills).
+  const everOpened = new Set<string>();
 
   const dial = (target: string): void => {
     if (target === url && socket !== null) return; // already linked + OPEN
@@ -146,6 +158,12 @@ export function createStandbyLinkManager(opts: StandbyLinkManagerOptions): Stand
     socket?.close();
     const s = opts.open(target);
     socket = s;
+    s.on('open', () => {
+      if (socket !== s) return; // stale socket raced a URL switch
+      const isReopen = everOpened.has(target);
+      everOpened.add(target);
+      opts.onOpen?.(target, isReopen);
+    });
     s.on('close', () => {
       if (socket === s) socket = null;
       if (down || url === null) return;
