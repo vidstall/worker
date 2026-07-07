@@ -4,5 +4,5 @@ dist/
 cursor.json
 *.tsbuildinfo
 bench-output/
-.logs/
+apps/**/.logs/
 .cursors/
