@@ -44,6 +44,7 @@ import { pathToFileURL } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
+import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { Transaction } from '@mysten/sui/transactions';
 import {
   createLogger,
@@ -291,7 +292,7 @@ async function main(): Promise<void> {
     bindHost,
     authTokenOverride: authToken,
     ...(tlsConfig
-      ? { env: { QUORUM_CLAIMS_TLS_ENABLED: '1' }, tls: tlsConfig }
+      ? { env: { ...process.env, QUORUM_CLAIMS_TLS_ENABLED: '1' }, tls: tlsConfig }
       : {}),
   });
 
@@ -353,9 +354,17 @@ async function main(): Promise<void> {
     nonce,
   };
 
+  // Normalize the env-supplied follower address to the exact SDK form (0x + 64 lowercase hex).
+  // assembleCapTokenQuorum gates the follower's att.addr (= followerKp.toSuiAddress(), already
+  // normalized) against discoveredCps[].operator via a raw Set.has — a non-normalized
+  // FOLLOWER_CP_ADDRESS would silently drop the follower's attestation and hang the leader until
+  // maxPollRounds (fail-closed, but a live-run hang). Normalizing both sides mirrors the
+  // integration test's normalizeSuiAddress usage.
+  const leaderAddr = leaderKp.toSuiAddress();
+  const followerAddr = normalizeSuiAddress(followerCpAddress);
   const discoveredCps: CpOperator[] = [
-    { minerId: leaderKp.toSuiAddress(), operator: leaderKp.toSuiAddress() },
-    { minerId: followerCpAddress, operator: followerCpAddress },
+    { minerId: leaderAddr, operator: leaderAddr },
+    { minerId: followerAddr, operator: followerAddr },
   ];
 
   // ── Collect quorum (polls board until 2-of-2) ──────────────────────────
