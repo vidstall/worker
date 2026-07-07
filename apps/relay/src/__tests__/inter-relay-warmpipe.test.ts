@@ -760,6 +760,74 @@ describe('StandbyWarmPipeCoordinator — REQ-RMS-034 REVERSE leg (onLocalClientP
   });
 });
 
+// ── E2. REQ-RMS-037 D3 (static-mesh-hardening) — reverse-announce frame-arg store + resend ──
+//
+// The standby link send is fire-and-forget: frames are silently dropped while the WS is not
+// OPEN (inter-relay-link.ts:172-183). To recover announces lost during a down window, the
+// coordinator records the ARGS of every SENT reverse announce (the PIPED consumer id +
+// remapped rtpParameters — EXACTLY what reverseConsumeAndAnnounce puts on the wire, not the
+// source producer's), keyed per (leg + origin/producer id). On link RE-open the wiring layer
+// (Task 4) calls resendReverseAnnounces(roomId): each stored frame is re-announced VERBATIM and
+// the primary's reverseMintedIds dedup (Task 1 precondition) makes the re-delivery idempotent.
+// The store NEVER re-consumes the pipe (reverseConsumedIds untouched) and is dropped with the
+// leg in clear()/clearRoom (same lifecycle as reverseConsumedIds).
+
+describe('StandbyWarmPipeCoordinator — REQ-RMS-037 D3 reverse-announce frame-arg store + resend', () => {
+  const REMAPPED_RTP = rtpParams(555111) as msTypes.RtpParameters;
+  const fakeRouter = makeMockRouter().router as unknown as msTypes.Router;
+  const PRIMARY = 'ws://primary';
+
+  /** Bind a connected leg then drive one local-client producer through
+   *  reverseConsumeAndAnnounce (the path that records the store entry). */
+  async function driveLocalClientProducer(
+    coord: StandbyWarmPipeCoordinator,
+    roomId: string,
+    producerId: string,
+    pipedId = `piped-${producerId}`,
+  ): Promise<void> {
+    coord.bindPipeTransportForTest(roomId, PRIMARY, {
+      consume: vi.fn().mockResolvedValue({ id: pipedId, kind: 'video', rtpParameters: REMAPPED_RTP }),
+    } as unknown as msTypes.PipeTransport);
+    await coord.onLocalClientProducer(roomId, fakeRouter, { id: producerId, kind: 'video' }, 'clientA', PRIMARY);
+  }
+
+  it('records announce args at announce time and resends them verbatim', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    await driveLocalClientProducer(coord, 'roomA', 'local-1');
+    expect(announced).toHaveLength(1); // the live announce
+    coord.resendReverseAnnounces('roomA');
+    expect(announced).toHaveLength(2); // re-delivered on reopen
+    expect(announced[1]).toEqual(announced[0]); // identical args -> identical frame downstream
+  });
+
+  it('resend is a no-op for a room with nothing stored', () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    coord.resendReverseAnnounces('0xno-such-room');
+    expect(announced).toHaveLength(0);
+  });
+
+  it('clearRoom drops the leg\'s stored announces so a later resend is a no-op', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    // Drive with the announcer UNSET: the live announce is a no-op but the store still records.
+    await driveLocalClientProducer(coord, 'roomA', 'local-1');
+    coord.clearRoom('roomA');
+    const announced: unknown[][] = [];
+    coord.setReverseAnnouncer((...args) => { announced.push(args); });
+    coord.resendReverseAnnounces('roomA');
+    expect(announced).toHaveLength(0);
+  });
+
+  it('roomsWithStoredAnnounces lists exactly the rooms holding entries', async () => {
+    const coord = new StandbyWarmPipeCoordinator(new InterRelayProducerRegistry(), makeMockLogger() as any, vi.fn(), true);
+    await driveLocalClientProducer(coord, 'roomA', 'local-1');
+    expect(coord.roomsWithStoredAnnounces()).toEqual(['roomA']);
+  });
+});
+
 // ── F. REQ-RMS-036: Loop/echo prevention — minted producer never re-announces UP ──
 //
 // The reverse UP-announcer (setReverseAnnouncer) fires ONLY from

@@ -885,6 +885,28 @@ export class StandbyWarmPipeCoordinator {
   private readonly reverseConsumedIds = new Map<string, Set<string>>();
 
   /**
+   * REQ-RMS-037 (D3, static-mesh-hardening) — args of every reverse announce already
+   * SENT, keyed roomId -> (peerRelayId + origin/producer id) -> args. The standby link
+   * send is fire-and-forget (silent drop while the WS is down, inter-relay-link.ts:172-183),
+   * so on link RE-open the wiring layer calls resendReverseAnnounces(roomId): the stored args
+   * are re-announced VERBATIM and the primary's reverseMintedIds dedup (mintOne) makes the
+   * re-delivery idempotent. NEVER re-consumes the pipe (reverseConsumedIds untouched). Cleared
+   * with the leg in clear() (same lifecycle as reverseConsumedIds).
+   */
+  private readonly sentReverseAnnounces = new Map<
+    string,
+    Map<string, {
+      producer: Pick<msTypes.Producer, 'id' | 'kind'>;
+      producerPeerId?: string;
+      scopedPeer?: string;
+      rtpParameters?: msTypes.RtpParameters;
+      hopTtl?: number;
+      originProducerId?: string;
+      peerRelayId: string; // un-scoped key for per-leg clear()
+    }>
+  >();
+
+  /**
    * @param registry        - the standby's announce registry.
    * @param logger          - optional structured logger.
    * @param onLocalProducer - REQ-RMS-025 — OPTIONAL callback fired AFTER the
@@ -1273,6 +1295,16 @@ export class StandbyWarmPipeCoordinator {
     // the same key re-consumes onto a fresh pipe cleanly.
     this.reverseConsumedIds.delete(key);
     this.reversePending.delete(key);
+    // REQ-RMS-037 (D3) — drop this leg's stored reverse announces (same lifecycle as
+    // reverseConsumedIds): a later room/leg reusing the key must not resend dead frames.
+    // clearRoom's roomPeerRelayIds enumerates this peer via reverseConsumedIds (co-populated
+    // in reverseConsumeAndAnnounce), so this per-leg drop is reached room-wide too — the
+    // roomId-keyed store canNOT go in roomPeerRelayIds's meshKey source list (wrong key shape).
+    const roomStore = this.sentReverseAnnounces.get(roomId);
+    if (roomStore) {
+      for (const [k, e] of roomStore) if (e.peerRelayId === peerRelayId) roomStore.delete(k);
+      if (roomStore.size === 0) this.sentReverseAnnounces.delete(roomId);
+    }
   }
 
   /**
@@ -1517,6 +1549,20 @@ export class StandbyWarmPipeCoordinator {
       // AND the announcer arity — the RED-RA-2* assertions hold). The builder omits both anyway.
       const scopedPeer = peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId;
       const piped = { id: pipedConsumer.id, kind: pipedConsumer.kind };
+      // REQ-RMS-037 (D3) — record the SENT announce args (the PIPED consumer id + its remapped
+      // rtpParameters, EXACTLY what ships below — NOT the source producer's) so a link RE-open
+      // can re-DELIVER via resendReverseAnnounces without re-consuming the pipe. Keyed per leg +
+      // origin (originProducerId ?? producer.id) so a re-drive of the same id overwrites, not grows.
+      let roomStore = this.sentReverseAnnounces.get(roomId);
+      if (!roomStore) {
+        roomStore = new Map();
+        this.sentReverseAnnounces.set(roomId, roomStore);
+      }
+      roomStore.set(`${peerRelayId}::${originProducerId ?? producer.id}`, {
+        producer: piped,
+        producerPeerId, scopedPeer, rtpParameters: pipedConsumer.rtpParameters,
+        hopTtl, originProducerId, peerRelayId,
+      });
       if (hopTtl === undefined && originProducerId === undefined) {
         this.reverseAnnouncer?.(roomId, piped, producerPeerId, scopedPeer, pipedConsumer.rtpParameters);
       } else {
@@ -1581,6 +1627,30 @@ export class StandbyWarmPipeCoordinator {
         roomId, key, peerRelayId, transport, p.producer, p.producerPeerId, p.hopTtl, p.originProducerId,
       );
     }
+  }
+
+  /** REQ-RMS-037 (D3) — rooms that currently hold stored reverse announces (for reopen resend). */
+  roomsWithStoredAnnounces(): string[] {
+    return [...this.sentReverseAnnounces.keys()];
+  }
+
+  /**
+   * REQ-RMS-037 (D3) — re-announce every stored frame for a room after a link RE-open.
+   * Pure re-SEND: no pipe re-consume, reverseConsumedIds untouched; the primary's
+   * reverseMintedIds dedup makes duplicates a no-op (Task 1 precondition proof).
+   */
+  resendReverseAnnounces(roomId: string): void {
+    const roomStore = this.sentReverseAnnounces.get(roomId);
+    if (!roomStore || this.reverseAnnouncer === null) return;
+    for (const e of roomStore.values()) {
+      // Mirror the shipped arity split (reverseConsumeAndAnnounce) so a non-tree entry stays a 5-arg call.
+      if (e.hopTtl === undefined && e.originProducerId === undefined) {
+        this.reverseAnnouncer(roomId, e.producer, e.producerPeerId, e.scopedPeer, e.rtpParameters);
+      } else {
+        this.reverseAnnouncer(roomId, e.producer, e.producerPeerId, e.scopedPeer, e.rtpParameters, e.hopTtl, e.originProducerId);
+      }
+    }
+    this.logger?.info({ roomId, count: roomStore.size }, 'REQ-RMS-037: re-delivered stored reverse announces on link reopen');
   }
 
   /**
