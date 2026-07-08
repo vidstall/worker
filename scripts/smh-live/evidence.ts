@@ -37,6 +37,16 @@ export const SMH_LIVE_CAVEATS = [
   '- Media source is a headless programmatic `mediasoup-client` peer (no browser tab). The',
   '  mesh / failover / placement behaviour under test is entirely server-side, so a headless',
   '  peer does not reduce its liveness (lane charter = 0 client edits).',
+  '- **Post-failover the mesh holds 2 DISTINCT relays, not 3.** With N=3 relays, killing the',
+  '  primary leaves 2 alive (the physical maximum). `promote_relay` (room_manager.move:888)',
+  '  overwrites ONLY the vacated slot [0] with the promoted standby, so that relay then',
+  '  occupies BOTH slot [0] and its original standby slot — `assigned_relays` keeps K_r=3',
+  '  positional SLOTS but holds 2 DISTINCT relays. This is the static-mesh graceful-degrade-',
+  '  no-migration behaviour; re-filling to 3 DISTINCT relays requires runtime relay growth',
+  '  (REQ-RMS-023), out of scope. So `spans>=K_r(3)=true` is a POSITIONAL-slot claim, NOT a',
+  '  "3 distinct relays still serving" claim. The stretch-kill\'s 2nd promotion then degrades',
+  '  to 1 distinct — it proves the promotion CHAIN survives cascading failure, not sustained',
+  '  K_r=3.',
 ].join('\n');
 
 /**

@@ -46,4 +46,18 @@ describe('SMH_LIVE_CAVEATS (RECONCILIATION v2 — D3 hermetic, live scope D1a+D1
     expect(c).toContain('D2');
     expect(c).toContain('D3');
   });
+
+  it('states post-failover the mesh holds 2 DISTINCT relays (K_r=3 positional SLOTS != distinct)', () => {
+    const c = SMH_LIVE_CAVEATS;
+    // Distinct-count honesty: 3 positional slots but only 2 distinct relays post-promotion.
+    expect(c).toMatch(/2 DISTINCT relays/);
+    expect(c).toMatch(/positional SLOTS/);
+    expect(c).toMatch(/promote_relay/);
+    expect(c).toMatch(/room_manager\.move:888/);
+    expect(c).toMatch(/REQ-RMS-023/);
+    // The stretch-kill's 2nd promotion degrades to 1 distinct — proves the promotion CHAIN,
+    // not sustained K_r=3.
+    expect(c).toMatch(/1 distinct/);
+    expect(c).toMatch(/promotion CHAIN/);
+  });
 });
