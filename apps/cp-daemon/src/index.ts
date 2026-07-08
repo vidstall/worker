@@ -43,12 +43,14 @@ import { buildHealthSignals, type CpHealthDeps } from './health-signals.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createEventHandler } from './event-handler.js';
+import { startAttestedLoadPoller, type AttestedLoadPoller } from './attested-load-poller.js';
 import { startRoleVoting } from './role-voter.js';
 import { startRevoteWatcher, makeMarkSubmitter, resolveScanIntervalEpochs } from './revote-watcher.js';
 import { SuiChainStateReader } from './sui-chain-state-reader.js';
 import {
   startRelayHeartbeatWatcher,
   makePromoteSubmitter,
+  resolveMaxHeartbeatEpochs,
 } from './relay-heartbeat-watcher.js';
 import { LiveRelayChainStateReader } from './relay-chain-state-reader.js';
 import { startTurnIssuer } from './turn-issuer.js';
@@ -1000,7 +1002,12 @@ async function main(): Promise<void> {
     relayReader,
     makePromoteSubmitter(client, signer, config, logger),
     logger,
-    { pollIntervalMs: relayHeartbeatScanMs },
+    {
+      pollIntervalMs: relayHeartbeatScanMs,
+      // REQ-RMS-024 (D2) — env-tunable threshold, clamped to the Move MAX_HEARTBEAT_EPOCHS
+      // floor: a value below it would fire promote_relay PTBs the chain aborts (E_RELAY_NOT_STALE).
+      maxHeartbeatEpochs: resolveMaxHeartbeatEpochs(process.env['RELAY_MAX_HEARTBEAT_EPOCHS'], logger),
+    },
   );
   const stopRelayHeartbeatWatcher = (): void => relayHeartbeatWatcher.stop();
   logger.info(
@@ -1147,6 +1154,20 @@ async function main(): Promise<void> {
     },
   };
 
+  // REQ-RMS-022 (static-mesh-hardening D1) -- flag-gated attested-placement feed. Default OFF =
+  // byte-stable legacy self-report placement (REQUIRED while attested rows are canary-M4b-gated:
+  // a wired-but-empty feed strictly DEFERS ALL admissions, spec §2-D1). Mirrors the RMS_TREE_ACTIVE
+  // flag pattern. The poller maintains ONE long-lived Map fed by reference into capacityCtx below.
+  // Feed URL default = the co-located validator's VALIDATOR_CANARY_COVERAGE_PORT (8102, loopback).
+  const attestedPlacementActive = process.env['RMS_ATTESTED_PLACEMENT'] === '1';
+  let attestedLoadPoller: AttestedLoadPoller | undefined;
+  if (attestedPlacementActive) {
+    const feedUrl = process.env['RMS_LOAD_FEED_URL'] ?? 'http://127.0.0.1:8102/canary/load';
+    const feedPollMs = parseInt(process.env['RMS_LOAD_FEED_POLL_MS'] ?? '5000', 10);
+    attestedLoadPoller = startAttestedLoadPoller({ feedUrl, pollMs: feedPollMs, logger });
+    logger.info({ module: 'cp-daemon', feedUrl, feedPollMs }, 'REQ-RMS-022: attested-load poller started (RMS_ATTESTED_PLACEMENT=1)');
+  }
+
   const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
     client,
     signer,
@@ -1155,7 +1176,9 @@ async function main(): Promise<void> {
     turnIssuer,
     capTokenIssuer,
     relayPromotedObserver,
-  });
+  }, attestedPlacementActive && attestedLoadPoller
+    ? { attestedLoad: attestedLoadPoller.attestedLoad } // currentEpoch/byzantineFlag stay M4b scope (both optional; spec §7 resolution)
+    : undefined);
 
   // ── F61 health signals (DOH-014) ──────────────────────────────────────────
   // rpc_error_rate: queryEvents failures / attempts, sampled at the bootstrap loop
@@ -1354,6 +1377,7 @@ async function main(): Promise<void> {
           roleVotingPoller.stop();
           registrationPoller.stop();
           turnCredentialPoller.stop();
+          attestedLoadPoller?.stop(); // REQ-RMS-022 (D1) — undefined when RMS_ATTESTED_PLACEMENT unset
         },
         stopHeartbeat, // C-B → LAST
         closeHealthz: () => healthz.close(),

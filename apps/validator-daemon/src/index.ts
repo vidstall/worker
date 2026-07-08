@@ -76,7 +76,11 @@ import {
 } from './canary/cell.js';
 import { discoverActiveValidatorMinerIds } from './canary/validator-discovery.js';
 import { buildRelayScopedValidatorPool, type ScopedRoom } from './canary/validator-pool.js';
-import { startCoverageServer, type CoverageStateProvider } from './canary/coverage-server.js';
+import {
+  startCoverageServer,
+  type CoverageStateProvider,
+  type LoadStateProvider,
+} from './canary/coverage-server.js';
 import {
   startCanaryVerifyLoop,
   type CanaryVerifyLoopHandle,
@@ -506,11 +510,22 @@ export async function startDaemon(overrides?: {
     // the Wallet-A validatorMinerId (NEVER sessionAddress). Same crash-safe try as the loop.
     const coverageProvider: CoverageStateProvider = () => state.canaryCellLoop?.latest() ?? null;
     const coveragePort = parseInt(process.env['VALIDATOR_CANARY_COVERAGE_PORT'] ?? '8102', 10);
+    // REQ-RMS-022 (static-mesh-hardening D1): attested-load feed provider over the verify-loop
+    // accumulator. The coverage server starts BEFORE the verify loop (below), so this closure
+    // reads `state.canaryVerifyLoop` lazily via `?.` — it is only INVOKED per /canary/load
+    // request, by which point the handle is set; the empty-accumulator fallback keeps it total.
+    // heartbeatFresh: the per-relay on-chain freshness source is canary-M4b scope; the empty map
+    // makes buildLoadPayload default rows to MAX_SAFE_INTEGER (conservative).
+    const loadProvider: LoadStateProvider = () => ({
+      acc: state.canaryVerifyLoop?.getAccumulator() ?? { byRelay: new Map() },
+      heartbeatFresh: new Map<string, number>(),
+    });
     state.coverageServer = startCoverageServer({
       port: coveragePort,
       provider: coverageProvider,
       reporterMinerId: validatorMinerId, // Wallet-A (mainAddress) — NOT sessionAddress
       logger: log.child({ component: 'canary-coverage' }),
+      loadProvider,
     });
   } catch (err) {
     log.error({ err }, 'canary cell loop / coverage feed failed to start (daemon continues)');

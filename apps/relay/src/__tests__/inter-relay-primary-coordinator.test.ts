@@ -355,6 +355,22 @@ describe('PrimaryPipeCoordinator — REQ-RMS-034/037 reverseMint (part-3 reverse
     expect(fakeTransport.produce).toHaveBeenCalledTimes(1);
   });
 
+  it('REQ-RMS-037 (D3 precondition): a DUPLICATE reverse announce for the same producerId mints exactly once (reverseMintedIds dedup)', async () => {
+    // D3 re-delivery precondition (static-mesh-hardening, spec §2-D3.4): StandbyWarmPipeCoordinator
+    // .resendReverseAnnounces (Task 2) RE-SENDS stored announce frames on link reopen, so the primary
+    // MUST treat a duplicate announce for the same producerId as a no-op. Mechanism = mintOne's per-leg
+    // reverseMintedIds Set (inter-relay.ts:2238-2244: `if (seen.has(announced.producerId)) return null`).
+    // Sibling of RED-RA-3b-dedup, pinned explicitly to REQ-RMS-037 and driven with an AUDIO kind to prove
+    // the dedup is kind-agnostic. GREEN today -> that pass IS the precondition proof (no receiver fix needed).
+    const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
+    const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'prod-dup-1', kind: 'audio', on: vi.fn() }) } as unknown as msTypes.PipeTransport;
+    coord.bindLegTransportForTest('roomA', 'ws://standbyA', fakeTransport);
+    const announce = { producerId: 'prod-dup-1', kind: 'audio' as const, rtpParameters: REMAPPED_RTP, producerPeerId: 'peer-A' };
+    await coord.reverseMint('roomA', fakeRouter, announce, 'ws://standbyA'); // first announce
+    await coord.reverseMint('roomA', fakeRouter, announce, 'ws://standbyA'); // EXACT duplicate -- the resend case
+    expect(fakeTransport.produce).toHaveBeenCalledTimes(1); // minted exactly once
+  });
+
   it('RED-RA-3b-clear: clear() drops reverse dedup state so a post-teardown re-announce mints again', async () => {
     const coord = new PrimaryPipeCoordinator({ announcer: vi.fn(), portAllocator: zeroAllocator, paramSender: vi.fn() });
     const fakeTransport = { produce: vi.fn().mockResolvedValue({ id: 'piped-up-1', kind: 'video', on: vi.fn() }) } as unknown as msTypes.PipeTransport;

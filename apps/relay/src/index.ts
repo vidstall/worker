@@ -564,6 +564,22 @@ if (isMainModule) {
           logger,
         }),
       reconnectMs,
+      // REQ-RMS-037 (D3, static-mesh-hardening): on link RE-open, re-deliver reverse
+      // announces that were silently dropped during the down window. First-open is
+      // back-filled by the A2 reversePending drain -- never resend there. Defensive: the
+      // manager already guards this callback against throws; we also isolate per-room so
+      // one bad room does not skip the rest.
+      onOpen: (url, isReopen) => {
+        if (!isReopen) return;
+        for (const roomId of standbyWarmPipe.roomsWithStoredAnnounces()) {
+          try {
+            standbyWarmPipe.resendReverseAnnounces(roomId);
+          } catch (err) {
+            logger.warn({ err, roomId }, 'REQ-RMS-037: resend-on-reopen failed for room (isolated)');
+          }
+        }
+        logger.info({ url }, 'REQ-RMS-037: link reopen -- stored reverse announces re-delivered');
+      },
       logger,
     });
 
@@ -818,8 +834,11 @@ if (isMainModule) {
     // is live (same box pattern as fanLocalProducer).
     signalingRef.getRoom = getRoom;
     signalingRef.registerReverseMinted = registerReverseMinted;
-    // REQ-RMS-037 (Task B4b): late-bind the standby UP re-announce so the link
-    // reopen back-fill can reach it once the server is live (same box pattern).
+    // REQ-RMS-037: late-bind the standby UP re-announce. SUPERSEDED for the link-flap /
+    // reopen case by StandbyWarmPipeCoordinator.resendReverseAnnounces (static-mesh-hardening
+    // D3, wired via the standbyLinkManager onOpen above) — a flap must RE-DELIVER stored
+    // announce frames, not re-drive this path (reverseConsumedIds would skip every already-
+    // consumed producer). Kept as an ops/manual utility; not wired to a production reopen trigger.
     signalingRef.reannounceLocalProducersUp = reannounceLocalProducersUp;
     // REQ-RMS-034: bind the reverse UP-announcer on the standby coordinator. Uses
     // the SAME UP link seam as the pipe-connect frame (standbyLinkManager.send),

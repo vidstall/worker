@@ -91,6 +91,39 @@ async function ensureNodeWebRtcGlobals(): Promise<void> {
 // ── Pure helpers ─────────────────────────────────────────────────────
 
 /**
+ * SMH-LIVE (D2 media-hardening) — bounded retry of a flaky async op.
+ *
+ * The bench cross-relay consume/produce handshake occasionally rejects with
+ * `Relay response timeout` (the piped/minted producer lags the `newProducer`
+ * push). Re-runs `op` up to `attempts` times, sleeping `delayMs` between tries,
+ * and rethrows the LAST error once attempts are exhausted. Pure (no relay / no
+ * timers beyond a plain sleep) so it is unit-testable in isolation.
+ */
+export async function retryOnTimeout<T>(
+  op: () => Promise<T>,
+  opts: { attempts: number; delayMs: number },
+): Promise<T> {
+  const attempts = Math.max(1, opts.attempts);
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await op();
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) {
+        await new Promise((r) => setTimeout(r, opts.delayMs));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/** SMH-LIVE consume-retry budget: 4 attempts over ~12 s covers the observed
+ *  cross-relay piped-producer lag without blocking the fleet warm-up window. */
+const CONSUME_RETRY_ATTEMPTS = 4;
+const CONSUME_RETRY_DELAY_MS = 3000;
+
+/**
  * Methodology §3.2 capture/encode/render constant — a fixed 50 ms placeholder
  * accounting for camera-firmware capture + codec encode + decode + paint on
  * commodity hardware. Validated by Option-A cross-check in S-baseline.
@@ -183,6 +216,22 @@ export function extractRttOnly(report: StatsReportLike): number | null {
     }
   }
   return null;
+}
+
+/**
+ * SMH-LIVE (D2 real-continuity): sum `bytesReceived` across every `inbound-rtp` entry in a
+ * stats report. On a recv transport (RTCPeerConnection-level) this is the TOTAL inbound media
+ * bytes across all of a peer's consumers; on a single Consumer it is that consumer's bytes.
+ * `> 0` proves REAL media flowed through the relay mesh (not just an RPC/on-chain claim).
+ */
+export function extractBytesReceived(report: StatsReportLike): number {
+  let total = 0;
+  for (const stat of report.values()) {
+    if (stat.type === 'inbound-rtp' && typeof stat['bytesReceived'] === 'number') {
+      total += stat['bytesReceived'] as number;
+    }
+  }
+  return total;
 }
 
 export interface ConsumerLike {
@@ -572,7 +621,7 @@ interface VirtualPeerOptions {
   iceServers?: Array<{ urls: string[]; username?: string; credential?: string }>;
 }
 
-class VirtualPeer {
+export class VirtualPeer {
   private readonly opts: VirtualPeerOptions;
   private device: Device | null = null;
   private client: RelayClient | null = null;
@@ -581,6 +630,11 @@ class VirtualPeer {
   private producer: Producer | null = null;
   private readonly consumers: Consumer[] = [];
   private readonly pollerStops: Array<() => void> = [];
+  /** SMH-LIVE (D2 media-hardening): producerIds we have already begun consuming.
+   *  Guards against a double-consume when the SAME producer is delivered twice —
+   *  the join-time `newProducer` loop AND a live push, or a retry racing the
+   *  original — which would otherwise throw `Consumer already exists` on the relay. */
+  private readonly consumedProducerIds = new Set<string>();
   private audioSource: { onData: (data: unknown) => void } | null = null;
   private audioInterval: NodeJS.Timeout | null = null;
   /** Producers we were told about before recvTransport was ready
@@ -749,14 +803,54 @@ class VirtualPeer {
     }
     const producerId = msg['producerId'] as string;
     const remotePeerId = msg['peerId'] as string;
-    this.client.send({
-      type: 'consume',
-      producerId,
-      rtpCapabilities: this.device.rtpCapabilities,
-    });
-    const consumed = await this.client.waitFor(
-      (m) => m.type === 'consumed' && m['producerId'] === producerId,
-    );
+
+    // SMH-LIVE (D2 media-hardening): idempotency — never consume the same producer
+    // twice. The join-time `newProducer` loop and the live push can deliver the same
+    // producerId, and the retry below can race the original in-flight consume; a
+    // second consume of the same producer throws `Consumer already exists` on the
+    // relay and would tear the whole handshake down. Claim the id up-front.
+    if (this.consumedProducerIds.has(producerId)) {
+      if (debug) {
+        console.log(
+          `[debug-peer ${this.opts.peerId}] onNewProducer SKIP — already consuming producerId=${producerId}`,
+        );
+      }
+      return;
+    }
+    this.consumedProducerIds.add(producerId);
+
+    // SMH-LIVE (D2 media-hardening): the cross-relay consume handshake sometimes
+    // times out ('Relay response timeout') — the piped/minted producer can lag the
+    // `newProducer` push by a few seconds. Retry the consume-request round-trip a
+    // bounded number of times so a single flaky handshake does not leave this peer
+    // with no consumer (= no forwarded bytes on that relay). Each attempt re-sends
+    // the consume request and waits for the matching `consumed` reply.
+    let consumed: RelayMessage;
+    try {
+      consumed = await retryOnTimeout(
+        async () => {
+          this.client!.send({
+            type: 'consume',
+            producerId,
+            rtpCapabilities: this.device!.rtpCapabilities,
+          });
+          return this.client!.waitFor(
+            (m) => m.type === 'consumed' && m['producerId'] === producerId,
+          );
+        },
+        { attempts: CONSUME_RETRY_ATTEMPTS, delayMs: CONSUME_RETRY_DELAY_MS },
+      );
+    } catch (err) {
+      // Exhausted retries — release the claim so a LATER push for this producer can
+      // try again, then rethrow (the caller's process-level handler swallows it).
+      this.consumedProducerIds.delete(producerId);
+      if (debug) {
+        console.log(
+          `[debug-peer ${this.opts.peerId}] onNewProducer consume FAILED after retries producerId=${producerId}: ${String(err)}`,
+        );
+      }
+      throw err;
+    }
     if (debug) {
       console.log(
         `[debug-peer ${this.opts.peerId}] consumed reply id=${String(consumed['consumerId'])} kind=${String(consumed['kind'])}`,
@@ -787,6 +881,43 @@ class VirtualPeer {
       { transport: this.recvTransport as unknown as TransportLike },
     );
     this.pollerStops.push(stop);
+  }
+
+  /**
+   * SMH-LIVE (D2): current total inbound media bytes for this peer. Prefers the recv
+   * transport's RTCPeerConnection-level stats (total across all consumers); falls back to
+   * summing per-consumer stats. Returns 0 if no stats are available yet. Additive read-only
+   * accessor — does not change the join/produce/consume lifecycle.
+   */
+  /**
+   * SMH-LIVE (D2): number of consumers this peer has established (>0 means the peer
+   * is actively receiving at least one remote track — the client-side counterpart to
+   * the relay's server-side bytesForwarded). Additive read-only accessor.
+   */
+  consumerCount(): number {
+    return this.consumers.length;
+  }
+
+  async currentBytesReceived(): Promise<number> {
+    if (this.recvTransport !== null) {
+      try {
+        const report = await (this.recvTransport as unknown as TransportLike).getStats();
+        const b = extractBytesReceived(report);
+        if (b > 0) return b;
+      } catch {
+        // fall through to per-consumer stats
+      }
+    }
+    let total = 0;
+    for (const c of this.consumers) {
+      try {
+        const report = await (c as unknown as ConsumerLike).getStats();
+        total += extractBytesReceived(report);
+      } catch {
+        // skip a consumer whose getStats is unavailable
+      }
+    }
+    return total;
   }
 
   async close(): Promise<void> {

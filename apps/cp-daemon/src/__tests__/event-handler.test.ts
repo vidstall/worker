@@ -727,6 +727,46 @@ describe('REQ-RMS-002 capacity-aware placement replaces the hardcoded top-2 slic
   });
 });
 
+describe('REQ-RMS-022 (D1) — tri-state placement-capacity basis log', () => {
+  // The basis log fires at the capacity build (event-handler.ts, right after `capacities`),
+  // BEFORE poolHealthGate — so it is emitted for all three states, incl. the defer break.
+  const basisLogsOf = (logger: ReturnType<typeof mockLogger>): unknown[] =>
+    logger.info.mock.calls
+      .filter((c: unknown[]) => (c[0] as { action?: string })?.action === 'placement_basis')
+      .map((c: unknown[]) => (c[0] as { context: { basis: unknown } }).context.basis);
+
+  const seed = () => ({
+    relayState: new Map<string, NodeCandidate>([
+      ['r1', { minerId: 'r1', rtt: 0n, load: 5n, stakeAmount: 2_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY }],
+    ]),
+    signalingState: new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]),
+    pendingRooms: new Map<string, RoomCreated>([['roomB', { room_id: 'roomB', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]),
+    escrow: makeSuiEvent('EscrowCreated', { escrow_id: 'eB', room_id: 'roomB', amount: '1' }),
+  });
+
+  it('basis=legacy-self-report when NO attestedLoad feed is wired (flag OFF path)', () => {
+    const logger = mockLogger();
+    const { relayState, signalingState, pendingRooms, escrow } = seed();
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), new Map(), undefined);
+    expect(basisLogsOf(logger)).toEqual(['legacy-self-report']);
+  });
+
+  it('basis=attested when the wired feed has a row for a candidate relay', () => {
+    const logger = mockLogger();
+    const { relayState, signalingState, pendingRooms, escrow } = seed();
+    const attested = new Map<string, AttestedLoad>([['r1', { attestedLoadPaths: 3, heartbeatFreshEpochs: 1 }]]);
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), new Map(), attested);
+    expect(basisLogsOf(logger)).toEqual(['attested']);
+  });
+
+  it('basis=defer when the wired feed is EMPTY (strict no-attestation)', () => {
+    const logger = mockLogger();
+    const { relayState, signalingState, pendingRooms, escrow } = seed();
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), new Map(), new Map());
+    expect(basisLogsOf(logger)).toEqual(['defer']);
+  });
+});
+
 describe('REQ-RMS-004 capacity-selected N-vector reaches submit_pairing_proposal unchanged', () => {
   it('REQ-RMS-004 records the capacity-selected N-vector via submit_pairing_proposal unchanged', async () => {
     const spy = vi.spyOn(roomAssignment, 'submitProposal').mockResolvedValue(undefined);
