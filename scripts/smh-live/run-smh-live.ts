@@ -394,8 +394,10 @@ async function main(): Promise<void> {
     const d1b = await runD1b(logger);
     phases.push(d1b.phase);
 
-    // Fleet + D2 (only if D1b gave us a placed room).
-    if (d1b.phase.verdict === 'PASS' && d1b.roomId && d1b.assigned && d1b.assigned.length >= 3) {
+    // Fleet + D2 (only if D1b gave us a placed room). SMH_PHASES=d1 stops after D1b.
+    if (process.env['SMH_PHASES'] === 'd1') {
+      logger.info('SMH_PHASES=d1 — skipping media fleet + D2');
+    } else if (d1b.phase.verdict === 'PASS' && d1b.roomId && d1b.assigned && d1b.assigned.length >= 3) {
       phases.push(await runD2(logger, d1b.client, d1b.config, d1b.roomId, d1b.assigned));
     } else {
       phases.push({ phase: 'D2', verdict: 'FAIL', lines: ['skipped — D1b did not place a room with >=3 relays'] });
