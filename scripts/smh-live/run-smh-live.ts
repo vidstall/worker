@@ -107,7 +107,29 @@ function newestLogLines(prefix: string): string[] {
 // ── Boot / teardown ────────────────────────────────────────────────────
 
 function bootFresh(inject: string[]): void {
-  runPs1('network');
+  // `sui start --force-regenesis` intermittently exceeds the ps1's 120s RPC-ready poll on a
+  // contended host (documented flake in localnet-fixture) -> the ps1 `network` step exits 1. Retry
+  // it (kill the half-booted sui first) rather than failing the whole run. deploy/daemons are
+  // deterministic once the chain is up.
+  const NETWORK_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      runPs1('network');
+      break;
+    } catch (err) {
+      if (attempt >= NETWORK_ATTEMPTS) throw err;
+      try {
+        chaos('kill', 9000);
+      } catch {
+        /* ignore */
+      }
+      try {
+        chaos('kill', 9123);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
   runPs1('deploy'); // REWRITES dvconf-daemons/.env — inject AFTER this
   injectEnv(inject);
   runPs1('daemons', ['-RelayCount', '3', '-ValidatorCount', '4']);
