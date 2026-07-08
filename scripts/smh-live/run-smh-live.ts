@@ -40,7 +40,7 @@ import {
   DEFAULT_PORT_CONFIG,
   DEFAULT_CANARY_COVERAGE_PORT,
 } from './ports.js';
-import { readAssignedRelays, pollRelayPromoted, resolveRelayWsPort } from './rpc-verify.js';
+import { readAssignedRelays, pollRelayPromoted, resolveRelayWsPort, readCurrentPrimary } from './rpc-verify.js';
 import { readPlacementBasis } from './log-asserts.js';
 import { assembleEvidence, SMH_LIVE_CAVEATS, type PhaseResult } from './evidence.js';
 import { launchFleet } from './media-fleet.js';
@@ -481,12 +481,18 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   const promo = await pollRelayPromoted(client, config.packageId, roomId, oldPrimary, 420_000);
   lines.push(`RPC pollRelayPromoted(old=${oldPrimary}) -> ${JSON.stringify(promo)}`);
 
-  const after = await readAssignedRelays(client, config.packageId, roomId, 30_000);
-  lines.push(`RPC readAssignedRelays after -> ${JSON.stringify(after)}`);
-  const oldOut = after !== null && !after.includes(oldPrimary);
-  const newIn = promo !== null && after !== null && after[0] === promo.newPrimary;
-  const stillKr = after !== null && after.length >= 3;
-  lines.push(`swap: old-primary OUT=${oldOut}, new-primary IN as [0]=${newIn}, active>=K_r(3)=${stillKr}`);
+  // Verify the swap via LIVE room state (get_room_assignment), NOT the RoomAssigned event:
+  // promote_relay mutates assigned_relays[0] + emits RelayPromoted but does NOT re-emit RoomAssigned,
+  // so the event-based readAssignedRelays returns the STALE original set. The original set is still
+  // read (below) for the K_r span display.
+  const currentPrimary = await readCurrentPrimary(client, config.packageId, config.roomManagerId, roomId);
+  lines.push(`RPC get_room_assignment current primary -> ${currentPrimary ?? '(none)'}`);
+  const originalSet = await readAssignedRelays(client, config.packageId, roomId, 30_000);
+  lines.push(`RPC readAssignedRelays (original RoomAssigned set, for K_r span) -> ${JSON.stringify(originalSet)}`);
+  const oldOut = currentPrimary !== null && currentPrimary !== oldPrimary;
+  const newIn = promo !== null && currentPrimary !== null && currentPrimary === promo.newPrimary;
+  const stillKr = originalSet !== null && originalSet.length >= 3;
+  lines.push(`swap: old-primary OUT of [0]=${oldOut}, new-primary IN as [0]=${newIn}, room spans>=K_r(3)=${stillKr}`);
   const replaced = oldOut && newIn && stillKr;
 
   // SERVER-SIDE continuity: the surviving relay WS ports (incl. the promoted relay, now in the

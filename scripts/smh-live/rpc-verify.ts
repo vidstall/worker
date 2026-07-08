@@ -202,3 +202,48 @@ export async function resolveRelayWsPort(
     return null;
   }
 }
+
+// ── Live room primary (post-promotion swap verification) ────────────────
+
+/**
+ * Decode a BCS `Option<ID>` (tag byte 0=None, 1=Some followed by 32 id bytes) to a normalized
+ * address, or null. `get_room_assignment` returns `(Option<ID> relay, Option<ID> signaling)`; the
+ * relay Option is the room's CURRENT primary (assigned_relays[0]).
+ */
+export function parseOptionId(bytes: number[]): string | null {
+  if (!bytes || bytes.length < 33 || bytes[0] !== 1) return null;
+  const hex = bytes
+    .slice(1, 33)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return normalizeSuiAddress('0x' + hex);
+}
+
+/**
+ * Read the room's CURRENT primary (assigned_relays[0]) from LIVE chain state via
+ * `room_manager::get_room_assignment`. Needed to verify a `promote_relay` swap: the promotion
+ * mutates `assigned_relays[0]` and emits `RelayPromoted` but does NOT re-emit `RoomAssigned`, so the
+ * event-based `readAssignedRelays` returns the STALE original assignment. Returns null on failure.
+ */
+export async function readCurrentPrimary(
+  client: SuiClient,
+  pkg: string,
+  roomManagerId: string,
+  roomId: string,
+): Promise<string | null> {
+  try {
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${pkg}::room_manager::get_room_assignment`,
+      arguments: [tx.object(roomManagerId), tx.pure.address(roomId)],
+    });
+    const res = await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    });
+    const relayBytes = res.results?.[0]?.returnValues?.[0]?.[0] as number[] | undefined;
+    return relayBytes ? parseOptionId(relayBytes) : null;
+  } catch {
+    return null;
+  }
+}
