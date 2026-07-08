@@ -43,7 +43,7 @@ import {
 import { readAssignedRelays, pollRelayPromoted, resolveRelayWsPort, readCurrentAssignedRelays } from './rpc-verify.js';
 import { readPlacementBasis } from './log-asserts.js';
 import { assembleEvidence, SMH_LIVE_CAVEATS, type PhaseResult } from './evidence.js';
-import { launchFleet } from './media-fleet.js';
+import { launchFleet, pollUntil } from './media-fleet.js';
 
 // ── Fixed paths / constants (AUDIT Step 5) ─────────────────────────────
 
@@ -444,8 +444,13 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
     return { phase: 'D2', verdict: 'FAIL', lines };
   }
 
-  const fleet = await launchFleet(RELAY_WS_URLS, roomId);
-  lines.push(`fleet: ${fleet.peers.length} peers on ${RELAY_WS_URLS.join(', ')}`);
+  // D2 media-hardening: home an EXTRA consumer peer on the PRIMARY relay so a
+  // deterministic INTRA-relay consume forwards real bytes on the primary before the kill
+  // (one-peer-per-relay only yields flaky cross-relay consumes — observed zero consumes →
+  // bytesForwarded=0). The per-relay producers still exist, so failover stays observable.
+  const primaryUrl = `ws://127.0.0.1:${primaryPort}`;
+  const fleet = await launchFleet(RELAY_WS_URLS, roomId, { extraConsumerRelayUrl: primaryUrl });
+  lines.push(`fleet: ${fleet.peers.length} peers on ${RELAY_WS_URLS.join(', ')} (+1 consumer homed to primary ${primaryUrl} for intra-relay forwarding)`);
 
   // PRE-KILL real-media proof. Client-side bytesReceived is UNAVAILABLE on @roamhq/wrtc (getStats
   // exposes only candidate-pair RTT, NOT inbound-rtp — documented harness limitation; it returns 0
@@ -453,19 +458,23 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   // bytesForwarded (>0 = real bytes forwarded through the relay). Client bytesReceived is still
   // recorded as informational. Cross-failover client RE-consume from the promoted relay is a
   // separate CLIENT concern (bench peer has no reconnect) — NOT asserted; continuity is SERVER-side.
+  //
+  // Media establishment is FLAKY across the mesh, so ADAPTIVELY POLL the relay bytesForwarded until
+  // it is >0 (bounded 90s) BEFORE proceeding to the kill — the pre-existing /metrics/:roomId
+  // endpoint is the ground truth. `pollUntil` returns the last observed value on timeout (honest).
   let clientBytes = 0;
-  let fwdBytes = 0n;
-  // Media establishment through the bench VirtualPeer + @roamhq/wrtc + the cross-relay mesh is
-  // FLAKY (observed bytesForwarded=3028 one run, 0 the next). Poll longer to reduce the flake.
-  const mediaDeadline = Date.now() + 90_000;
-  while (Date.now() < mediaDeadline) {
-    const fwd = await Promise.all(RELAY_WS_PORTS.map((wp) => fetchRelayBytesForwarded(wp + 1, roomId)));
-    fwdBytes = fwd.reduce((a, b) => (b > a ? b : a), 0n);
-    const cli = await Promise.all(fleet.peers.map((p) => p.bytesReceived().catch(() => 0)));
-    clientBytes = Math.max(0, ...cli);
-    if (fwdBytes > 0n) break;
-    await sleep(3_000);
-  }
+  const fwdBytes = await pollUntil(
+    async () => {
+      const fwd = await Promise.all(RELAY_WS_PORTS.map((wp) => fetchRelayBytesForwarded(wp + 1, roomId)));
+      const cli = await Promise.all(fleet.peers.map((p) => p.bytesReceived().catch(() => 0)));
+      clientBytes = Math.max(0, ...cli);
+      return fwd.reduce((a, b) => (b > a ? b : a), 0n);
+    },
+    (b) => b > 0n,
+    { deadlineMs: 90_000, intervalMs: 3_000 },
+  );
+  const consumerCounts = fleet.peers.map((p) => `${p.peerId}:${p.consumerCount()}`).join(' ');
+  lines.push(`pre-kill fleet consumers established: ${consumerCounts}`);
   lines.push(`pre-kill media: relay bytesForwarded (server-side) = ${fwdBytes}; client bytesReceived (@roamhq/wrtc, informational) = ${clientBytes}`);
   const mediaFlowing = fwdBytes > 0n;
 

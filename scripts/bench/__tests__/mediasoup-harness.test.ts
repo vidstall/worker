@@ -29,6 +29,7 @@ import {
   extractRelevantStats,
   extractRttOnly,
   extractBytesReceived,
+  retryOnTimeout,
   startConsumerPoller,
   parseArgs,
   peerLabel,
@@ -184,6 +185,38 @@ describe('extractBytesReceived', () => {
       values: () => [{ type: 'candidate-pair', currentRoundTripTime: 0 }][Symbol.iterator](),
     };
     expect(extractBytesReceived(report)).toBe(0);
+  });
+});
+
+// ── retryOnTimeout (SMH-LIVE D2 consume/produce hardening) ────────────
+
+describe('retryOnTimeout', () => {
+  it('returns on first success without retrying', async () => {
+    const op = vi.fn().mockResolvedValue('ok');
+    expect(await retryOnTimeout(op, { attempts: 3, delayMs: 1 })).toBe('ok');
+    expect(op).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a rejected op and returns a later success', async () => {
+    let n = 0;
+    const op = vi.fn().mockImplementation(async () => {
+      if (++n < 2) throw new Error('Relay response timeout');
+      return 'ok';
+    });
+    expect(await retryOnTimeout(op, { attempts: 3, delayMs: 1 })).toBe('ok');
+    expect(op).toHaveBeenCalledTimes(2);
+  });
+
+  it('rethrows the last error after exhausting attempts', async () => {
+    const op = vi.fn().mockRejectedValue(new Error('Relay response timeout'));
+    await expect(retryOnTimeout(op, { attempts: 2, delayMs: 1 })).rejects.toThrow('Relay response timeout');
+    expect(op).toHaveBeenCalledTimes(2);
+  });
+
+  it('clamps attempts<1 to a single try', async () => {
+    const op = vi.fn().mockResolvedValue('ok');
+    expect(await retryOnTimeout(op, { attempts: 0, delayMs: 1 })).toBe('ok');
+    expect(op).toHaveBeenCalledTimes(1);
   });
 });
 
