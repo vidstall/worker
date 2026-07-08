@@ -206,31 +206,44 @@ export async function resolveRelayWsPort(
 // ── Live room primary (post-promotion swap verification) ────────────────
 
 /**
- * Decode a BCS `Option<ID>` (tag byte 0=None, 1=Some followed by 32 id bytes) to a normalized
- * address, or null. `get_room_assignment` returns `(Option<ID> relay, Option<ID> signaling)`; the
- * relay Option is the room's CURRENT primary (assigned_relays[0]).
+ * Decode a BCS `vector<ID>` (ULEB128 length prefix, then length * 32 id bytes) to normalized
+ * addresses. `room_manager::get_room_assignment` returns `(vector<ID> assigned_relays, Option<ID>
+ * signaling)` — the FIRST value is the full assigned-relay vector (NOT an Option — the stale
+ * load-test pattern read it wrong), whose [0] is the room's CURRENT primary. Stops early on a
+ * truncated trailing id.
  */
-export function parseOptionId(bytes: number[]): string | null {
-  if (!bytes || bytes.length < 33 || bytes[0] !== 1) return null;
-  const hex = bytes
-    .slice(1, 33)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-  return normalizeSuiAddress('0x' + hex);
+export function parseVecId(bytes: number[]): string[] {
+  let i = 0;
+  let len = 0;
+  let shift = 0;
+  while (i < bytes.length) {
+    const b = bytes[i]!;
+    i++;
+    len |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) break;
+    shift += 7;
+  }
+  const ids: string[] = [];
+  for (let k = 0; k < len; k++) {
+    const idBytes = bytes.slice(i + k * 32, i + k * 32 + 32);
+    if (idBytes.length < 32) break;
+    ids.push(normalizeSuiAddress('0x' + idBytes.map((x) => x.toString(16).padStart(2, '0')).join('')));
+  }
+  return ids;
 }
 
 /**
- * Read the room's CURRENT primary (assigned_relays[0]) from LIVE chain state via
- * `room_manager::get_room_assignment`. Needed to verify a `promote_relay` swap: the promotion
- * mutates `assigned_relays[0]` and emits `RelayPromoted` but does NOT re-emit `RoomAssigned`, so the
- * event-based `readAssignedRelays` returns the STALE original assignment. Returns null on failure.
+ * Read the room's LIVE `assigned_relays` (from chain state, NOT the RoomAssigned event) via
+ * `room_manager::get_room_assignment`. Needed to verify a `promote_relay` swap: the promotion mutates
+ * `assigned_relays[0]` + emits `RelayPromoted` but does NOT re-emit `RoomAssigned`, so the event-based
+ * `readAssignedRelays` returns the STALE original set. Returns null on failure.
  */
-export async function readCurrentPrimary(
+export async function readCurrentAssignedRelays(
   client: SuiClient,
   pkg: string,
   roomManagerId: string,
   roomId: string,
-): Promise<string | null> {
+): Promise<string[] | null> {
   try {
     const tx = new Transaction();
     tx.moveCall({
@@ -241,8 +254,8 @@ export async function readCurrentPrimary(
       transactionBlock: tx,
       sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
     });
-    const relayBytes = res.results?.[0]?.returnValues?.[0]?.[0] as number[] | undefined;
-    return relayBytes ? parseOptionId(relayBytes) : null;
+    const vecBytes = res.results?.[0]?.returnValues?.[0]?.[0] as number[] | undefined;
+    return vecBytes ? parseVecId(vecBytes) : null;
   } catch {
     return null;
   }

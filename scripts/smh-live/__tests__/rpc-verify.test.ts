@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
-import { parseAssignedRelays, parseRelayPromoted, decodeMoveString, parseWsPort, parseOptionId } from '../rpc-verify.js';
+import { parseAssignedRelays, parseRelayPromoted, decodeMoveString, parseWsPort, parseVecId } from '../rpc-verify.js';
 
 const pkg = '0xpkg';
 
@@ -93,16 +93,21 @@ describe('parseWsPort (relay endpoint URL -> TCP port)', () => {
   });
 });
 
-describe('parseOptionId (BCS Option<ID> from get_room_assignment — live current primary)', () => {
-  it('decodes Some(id) (tag byte 1 + 32 id bytes) to a normalized address', () => {
-    const id = Array.from({ length: 32 }, (_, i) => i + 1);
-    const hex = '0x' + id.map((b) => b.toString(16).padStart(2, '0')).join('');
-    expect(parseOptionId([1, ...id])).toBe(normalizeSuiAddress(hex));
+describe('parseVecId (BCS vector<ID> from get_room_assignment.assigned_relays — LIVE swap check)', () => {
+  const hex = (a: number[]) => normalizeSuiAddress('0x' + a.map((b) => b.toString(16).padStart(2, '0')).join(''));
+
+  it('decodes a ULEB-length-prefixed vector of 32-byte ids to normalized addresses', () => {
+    const id1 = Array.from({ length: 32 }, (_, i) => i + 1);
+    const id2 = Array.from({ length: 32 }, (_, i) => 100 + i);
+    expect(parseVecId([2, ...id1, ...id2])).toEqual([hex(id1), hex(id2)]);
   });
 
-  it('returns null for None (tag byte 0) and for malformed/short input', () => {
-    expect(parseOptionId([0])).toBeNull();
-    expect(parseOptionId([])).toBeNull();
-    expect(parseOptionId([1, 2, 3])).toBeNull(); // Some but < 32 id bytes
+  it('returns [] for an empty vector', () => {
+    expect(parseVecId([0])).toEqual([]);
+  });
+
+  it('stops at a truncated trailing id rather than emitting a short address', () => {
+    const id1 = Array.from({ length: 32 }, (_, i) => i + 1);
+    expect(parseVecId([2, ...id1, 9, 9, 9])).toEqual([hex(id1)]);
   });
 });
