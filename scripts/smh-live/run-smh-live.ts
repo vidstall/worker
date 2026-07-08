@@ -40,7 +40,7 @@ import {
   DEFAULT_PORT_CONFIG,
   DEFAULT_CANARY_COVERAGE_PORT,
 } from './ports.js';
-import { readAssignedRelays, pollRelayPromoted } from './rpc-verify.js';
+import { readAssignedRelays, pollRelayPromoted, resolveRelayWsPort } from './rpc-verify.js';
 import { readPlacementBasis } from './log-asserts.js';
 import { assembleEvidence, SMH_LIVE_CAVEATS, type PhaseResult } from './evidence.js';
 import { launchFleet } from './media-fleet.js';
@@ -58,8 +58,7 @@ const EVIDENCE_PATH = path.resolve(HERE, '..', '..', '.evidence', 'verification'
 const CANARY_PORT = DEFAULT_CANARY_COVERAGE_PORT; // 8105 — outside the 8101-8104 healthz band
 const FEED_URL = `http://127.0.0.1:${CANARY_PORT}/canary/load`;
 const RELAY_WS_URLS = ['ws://127.0.0.1:4000', 'ws://127.0.0.1:4002', 'ws://127.0.0.1:4004'];
-const PRIMARY_WS_PORT = 4000; // relay-1 = registration-first = assigned_relays[0] (ps1 comment)
-const STANDBY_WS_PORT = 4002; // heuristic stretch target (see D2)
+const RELAY_WS_PORTS = [4000, 4002, 4004]; // the native rig's relay WS ports (fleet homes one peer per port)
 
 const BOOT_TIMEOUT_MS = 6 * 60 * 1000;
 
@@ -397,15 +396,24 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   const lines: string[] = [];
   const oldPrimary = assigned[0]!;
 
+  // Resolve the primary WS port FROM CHAIN (relay ids are fresh per regenesis — NEVER hardcode
+  // assigned[0]==4000). borrow_info -> info_endpoint_url -> decode -> port.
+  const primaryPort = await resolveRelayWsPort(client, config.packageId, config.relayRegistryId, oldPrimary);
+  lines.push(`resolved primary ${oldPrimary} -> WS port ${primaryPort ?? '(UNRESOLVED)'}`);
+  if (primaryPort === null) {
+    lines.push('D2 FAIL: could not resolve the primary WS port from chain (info_endpoint_url)');
+    return { phase: 'D2', verdict: 'FAIL', lines };
+  }
+
   const fleet = await launchFleet(RELAY_WS_URLS, roomId);
   lines.push(`fleet: ${fleet.peers.length} peers on ${RELAY_WS_URLS.join(', ')}`);
   await sleep(8_000); // let cross-relay consume establish through the active-forward mesh
 
-  const killOut = chaos('kill', PRIMARY_WS_PORT);
-  lines.push(`chaos kill ${PRIMARY_WS_PORT} (assigned_relays[0]=${oldPrimary}) -> ${killOut}`);
+  const killOut = chaos('kill', primaryPort);
+  lines.push(`chaos kill ${primaryPort} (RESOLVED primary, assigned_relays[0]=${oldPrimary}) -> ${killOut}`);
   await sleep(2_000);
-  const primaryState = chaos('isopen', PRIMARY_WS_PORT);
-  lines.push(`relay0 WS ${PRIMARY_WS_PORT} isopen=${primaryState}`);
+  const primaryState = chaos('isopen', primaryPort);
+  lines.push(`primary WS ${primaryPort} isopen=${primaryState}`);
   const primaryDown = primaryState === 'NOT-OPEN';
 
   const promo = await pollRelayPromoted(client, config.packageId, roomId, oldPrimary, 120_000);
@@ -413,30 +421,37 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
 
   const after = await readAssignedRelays(client, config.packageId, roomId, 30_000);
   lines.push(`RPC readAssignedRelays after -> ${JSON.stringify(after)}`);
-  const replaced = promo !== null && after !== null && after[0] !== oldPrimary && after[0] === promo.newPrimary;
+  const oldOut = after !== null && !after.includes(oldPrimary);
+  const newIn = promo !== null && after !== null && after[0] === promo.newPrimary;
+  const stillKr = after !== null && after.length >= 3;
+  lines.push(`swap: old-primary OUT=${oldOut}, new-primary IN as [0]=${newIn}, active>=K_r(3)=${stillKr}`);
+  const replaced = oldOut && newIn && stillKr;
 
-  // Continuity PROXY (VirtualPeer.consumers is private; no deeper media introspection without a
-  // further harness edit, which is out of scope): the surviving relay WS ports stay OPEN + the
-  // fleet peers homed to them were not torn down.
-  const s2 = chaos('isopen', 4002);
-  const s3 = chaos('isopen', 4004);
-  lines.push(`surviving relays: 4002=${s2} 4004=${s3} (continuity proxy)`);
-  const continuity = s2 === 'OPEN' && s3 === 'OPEN';
+  // Continuity PROXY (surviving relay WS ports stay OPEN). STEP 2 upgrades this to a bytesReceived
+  // media assert. Surviving ports = the fleet's relay ports minus the killed primary.
+  const survivingPorts = RELAY_WS_PORTS.filter((p) => p !== primaryPort);
+  const surviving = survivingPorts.map((p) => ({ port: p, state: chaos('isopen', p) }));
+  lines.push(`surviving relays: ${surviving.map((x) => `${x.port}=${x.state}`).join(' ')} (continuity proxy)`);
+  const continuity = surviving.every((x) => x.state === 'OPEN');
 
-  // Stretch (best-effort, NON-FATAL): the promotion-dedup is per (room, oldPrimary), so killing the
-  // NEW primary should fire a SECOND RelayPromoted. Port selection is heuristic (STANDBY_WS_PORT) —
-  // exact minerId->port mapping via info_endpoint_url is a live-exec refinement.
+  // Stretch (NON-FATAL): promotion-dedup is per (room, oldPrimary), so killing the NEW primary fires
+  // a SECOND RelayPromoted. Resolve the NEW primary's port FROM CHAIN (exact — not a heuristic).
   let stretch = 'not attempted';
   if (promo !== null) {
-    try {
-      const k2 = chaos('kill', STANDBY_WS_PORT);
-      lines.push(`chaos kill ${STANDBY_WS_PORT} (stretch) -> ${k2}`);
-      const promo2 = await pollRelayPromoted(client, config.packageId, roomId, promo.newPrimary, 60_000);
-      stretch = promo2
-        ? `2nd RelayPromoted new_primary=${promo2.newPrimary} epoch=${promo2.epoch}`
-        : 'no 2nd promotion (new primary likely not at the probed port — heuristic; non-fatal)';
-    } catch (err) {
-      stretch = `stretch error (non-fatal): ${String(err)}`;
+    const newPrimaryPort = await resolveRelayWsPort(client, config.packageId, config.relayRegistryId, promo.newPrimary);
+    if (newPrimaryPort !== null) {
+      try {
+        const k2 = chaos('kill', newPrimaryPort);
+        lines.push(`chaos kill ${newPrimaryPort} (stretch, RESOLVED new primary ${promo.newPrimary}) -> ${k2}`);
+        const promo2 = await pollRelayPromoted(client, config.packageId, roomId, promo.newPrimary, 60_000);
+        stretch = promo2
+          ? `2nd RelayPromoted new_primary=${promo2.newPrimary} epoch=${promo2.epoch}`
+          : 'no 2nd promotion observed within 60s (non-fatal — may need a 3rd registered relay to promote into)';
+      } catch (err) {
+        stretch = `stretch error (non-fatal): ${String(err)}`;
+      }
+    } else {
+      stretch = 'skipped — new-primary port unresolved';
     }
   }
   lines.push(`stretch: ${stretch}`);

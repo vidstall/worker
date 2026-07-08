@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
-import { parseAssignedRelays, parseRelayPromoted } from '../rpc-verify.js';
+import { parseAssignedRelays, parseRelayPromoted, decodeMoveString, parseWsPort } from '../rpc-verify.js';
 
 const pkg = '0xpkg';
 
@@ -59,5 +59,36 @@ describe('parseRelayPromoted (Move fields room_id/old_primary/new_primary/epoch 
       { type: `${pkg}::room_manager::RelayPromoted`, parsedJson: { room_id: '0xother', old_primary: '0xdead', new_primary: '0xnew', epoch: '7' } },
     ];
     expect(parseRelayPromoted(events, pkg, '0xroom', '0xdead')).toBeNull();
+  });
+});
+
+describe('decodeMoveString (BCS vector<u8> -> utf8, ULEB128 length prefix — relay endpoint bytes)', () => {
+  it('decodes a short move string (single-byte ULEB length, as devInspect returns info_endpoint_url)', () => {
+    const s = 'ws://127.0.0.1:4000';
+    const bytes = [s.length, ...Array.from(new TextEncoder().encode(s))];
+    expect(decodeMoveString(bytes)).toBe(s);
+  });
+
+  it('decodes the empty vector', () => {
+    expect(decodeMoveString([0])).toBe('');
+  });
+
+  it('honors the ULEB length (ignores trailing bytes beyond the declared length)', () => {
+    const s = 'ws://127.0.0.1:4002';
+    const bytes = [s.length, ...Array.from(new TextEncoder().encode(s)), 0xff, 0xff];
+    expect(decodeMoveString(bytes)).toBe(s);
+  });
+});
+
+describe('parseWsPort (relay endpoint URL -> TCP port)', () => {
+  it('parses the port from the native relay endpoints', () => {
+    expect(parseWsPort('ws://127.0.0.1:4000')).toBe(4000);
+    expect(parseWsPort('ws://127.0.0.1:4002')).toBe(4002);
+    expect(parseWsPort('ws://127.0.0.1:4004/path')).toBe(4004);
+  });
+
+  it('returns null when there is no explicit port or the string is not a URL', () => {
+    expect(parseWsPort('ws://127.0.0.1')).toBeNull();
+    expect(parseWsPort('garbage')).toBeNull();
   });
 });

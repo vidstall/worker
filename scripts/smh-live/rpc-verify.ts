@@ -15,6 +15,7 @@
  */
 
 import { normalizeSuiAddress } from '@mysten/sui/utils';
+import { Transaction } from '@mysten/sui/transactions';
 import type { SuiClient } from '@mysten/sui/client';
 
 type Ev = { type?: string; parsedJson?: unknown };
@@ -128,4 +129,76 @@ export async function pollRelayPromoted(
     await new Promise((r) => setTimeout(r, 2000));
   }
   return null;
+}
+
+// ── Relay endpoint -> WS port resolver (D2 exact primary/standby, per-regenesis) ──
+
+/**
+ * Decode a BCS `vector<u8>` (ULEB128 length prefix + content bytes) to a UTF-8 string.
+ * This is how `devInspect` returns `relay_registry::info_endpoint_url` — the on-chain
+ * relay endpoint (e.g. `ws://127.0.0.1:4000`, registered by the native relay daemon from
+ * RELAY_ENDPOINT_URL). Trailing bytes beyond the declared length are ignored.
+ */
+export function decodeMoveString(bytes: number[]): string {
+  let i = 0;
+  let len = 0;
+  let shift = 0;
+  while (i < bytes.length) {
+    const b = bytes[i]!;
+    i++;
+    len |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) break;
+    shift += 7;
+  }
+  const content = bytes.slice(i, i + len);
+  return new TextDecoder().decode(new Uint8Array(content));
+}
+
+/** Parse the TCP port from a `ws(s)://host:port` endpoint (or host:port). Null if absent/invalid. */
+export function parseWsPort(endpoint: string): number | null {
+  const validate = (raw: string): number | null => {
+    const p = Number(raw);
+    return Number.isInteger(p) && p > 0 && p <= 65535 ? p : null;
+  };
+  try {
+    const u = new URL(endpoint);
+    if (u.port === '') return null;
+    return validate(u.port);
+  } catch {
+    const m = /:(\d{1,5})(?:\/|$)/.exec(endpoint);
+    return m ? validate(m[1]!) : null;
+  }
+}
+
+/**
+ * Live resolver: given a relay `minerId`, devInspect `relay_registry::borrow_info(registry, id)`
+ * → `&RelayNodeInfo`, chain `info_endpoint_url(&RelayNodeInfo)` → `vector<u8>`, decode it and parse
+ * the WS port. Returns null on any failure (unresolvable id, unparseable endpoint, RPC error).
+ * This replaces the WRONG `assigned[0] == 4000` heuristic — relay ids are fresh per regenesis, so
+ * the primary/standby port MUST come from chain.
+ */
+export async function resolveRelayWsPort(
+  client: SuiClient,
+  pkg: string,
+  relayRegistryId: string,
+  minerId: string,
+): Promise<number | null> {
+  try {
+    const tx = new Transaction();
+    const info = tx.moveCall({
+      target: `${pkg}::relay_registry::borrow_info`,
+      arguments: [tx.object(relayRegistryId), tx.pure.id(minerId)],
+    });
+    tx.moveCall({ target: `${pkg}::relay_registry::info_endpoint_url`, arguments: [info] });
+    const res = await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    });
+    // The endpoint vector<u8> is the return value of the SECOND moveCall (info_endpoint_url).
+    const bytes = res.results?.[1]?.returnValues?.[0]?.[0] as number[] | undefined;
+    if (!bytes) return null;
+    return parseWsPort(decodeMoveString(bytes));
+  } catch {
+    return null;
+  }
 }
