@@ -323,6 +323,23 @@ async function pollForPlacementBasis(deadlineMs: number): Promise<string | null>
   return readPlacementBasis(newestLogLines('cp-1-'));
 }
 
+/**
+ * SERVER-SIDE real-media proof: the relay's `GET /metrics/:roomId` returns `bytesForwarded`
+ * (bigint string; open when no metrics token — the validator scrapes this same endpoint). >0 proves
+ * REAL media forwarded THROUGH the relay — independent of @roamhq/wrtc client stats (which only
+ * expose candidate-pair RTT, not inbound-rtp bytesReceived). `metricsPort` = relay WS port + 1.
+ */
+async function fetchRelayBytesForwarded(metricsPort: number, roomId: string): Promise<bigint> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${metricsPort}/metrics/${roomId}`);
+    if (res.status !== 200) return 0n;
+    const j = (await res.json()) as { bytesForwarded?: string; totalBytesForwarded?: string };
+    return BigInt(j.bytesForwarded ?? j.totalBytesForwarded ?? '0');
+  } catch {
+    return 0n;
+  }
+}
+
 // ── Feed probe ─────────────────────────────────────────────────────────
 
 async function pollFeed(deadlineMs: number): Promise<{ status: number; relaysEmpty: boolean; raw: string }> {
@@ -430,20 +447,25 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   const fleet = await launchFleet(RELAY_WS_URLS, roomId);
   lines.push(`fleet: ${fleet.peers.length} peers on ${RELAY_WS_URLS.join(', ')}`);
 
-  // PRE-KILL real-media assert (STEP 2): poll until some peer has bytesReceived > 0 — REAL audio
-  // flowing through the relay mesh (not just an on-chain claim), or a deadline. Cross-failover
-  // client RE-consume from the promoted relay is a separate CLIENT concern (the bench VirtualPeer
-  // has no reconnect) and is NOT asserted here (out of charter); continuity is proven SERVER-side.
-  let preKillBytes = 0;
-  const bytesDeadline = Date.now() + 30_000;
-  while (Date.now() < bytesDeadline) {
-    const vals = await Promise.all(fleet.peers.map((p) => p.bytesReceived().catch(() => 0)));
-    preKillBytes = Math.max(0, ...vals);
-    if (preKillBytes > 0) break;
-    await sleep(2_000);
+  // PRE-KILL real-media proof. Client-side bytesReceived is UNAVAILABLE on @roamhq/wrtc (getStats
+  // exposes only candidate-pair RTT, NOT inbound-rtp — documented harness limitation; it returns 0
+  // even while media flows), so we prove REAL media SERVER-side via the relay's /metrics/:roomId
+  // bytesForwarded (>0 = real bytes forwarded through the relay). Client bytesReceived is still
+  // recorded as informational. Cross-failover client RE-consume from the promoted relay is a
+  // separate CLIENT concern (bench peer has no reconnect) — NOT asserted; continuity is SERVER-side.
+  let clientBytes = 0;
+  let fwdBytes = 0n;
+  const mediaDeadline = Date.now() + 45_000;
+  while (Date.now() < mediaDeadline) {
+    const fwd = await Promise.all(RELAY_WS_PORTS.map((wp) => fetchRelayBytesForwarded(wp + 1, roomId)));
+    fwdBytes = fwd.reduce((a, b) => (b > a ? b : a), 0n);
+    const cli = await Promise.all(fleet.peers.map((p) => p.bytesReceived().catch(() => 0)));
+    clientBytes = Math.max(0, ...cli);
+    if (fwdBytes > 0n) break;
+    await sleep(3_000);
   }
-  lines.push(`pre-kill media: max bytesReceived across fleet = ${preKillBytes} (>0 proves REAL media flowed)`);
-  const mediaFlowing = preKillBytes > 0;
+  lines.push(`pre-kill media: relay bytesForwarded (server-side) = ${fwdBytes}; client bytesReceived (@roamhq/wrtc, informational) = ${clientBytes}`);
+  const mediaFlowing = fwdBytes > 0n;
 
   const killOut = chaos('kill', primaryPort);
   lines.push(`chaos kill ${primaryPort} (RESOLVED primary, assigned_relays[0]=${oldPrimary}) -> ${killOut}`);
@@ -452,7 +474,11 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   lines.push(`primary WS ${primaryPort} isopen=${primaryState}`);
   const primaryDown = primaryState === 'NOT-OPEN';
 
-  const promo = await pollRelayPromoted(client, config.packageId, roomId, oldPrimary, 120_000);
+  // promote_relay requires current_epoch - last_hb > MAX_HEARTBEAT_EPOCHS(3) (room_manager.move:884),
+  // i.e. ~4 epochs of staleness. The native rig's epoch duration is 60s (unset --epoch-duration-ms)
+  // and the cp relay-heartbeat-watcher scans once per epoch, so the promotion lands ~4-5 min after
+  // the kill. Poll up to 7 min. (A short-epoch rig would fire in seconds — see the hermetic test.)
+  const promo = await pollRelayPromoted(client, config.packageId, roomId, oldPrimary, 420_000);
   lines.push(`RPC pollRelayPromoted(old=${oldPrimary}) -> ${JSON.stringify(promo)}`);
 
   const after = await readAssignedRelays(client, config.packageId, roomId, 30_000);
@@ -483,10 +509,11 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
       try {
         const k2 = chaos('kill', newPrimaryPort);
         lines.push(`chaos kill ${newPrimaryPort} (stretch, RESOLVED new primary ${promo.newPrimary}) -> ${k2}`);
-        const promo2 = await pollRelayPromoted(client, config.packageId, roomId, promo.newPrimary, 60_000);
+        // Same ~4-epoch staleness gate as the first promotion (60s epochs) — poll up to 6 min.
+        const promo2 = await pollRelayPromoted(client, config.packageId, roomId, promo.newPrimary, 360_000);
         stretch = promo2
           ? `2nd RelayPromoted new_primary=${promo2.newPrimary} epoch=${promo2.epoch}`
-          : 'no 2nd promotion observed within 60s (non-fatal — may need a 3rd registered relay to promote into)';
+          : 'no 2nd promotion observed within 6min (non-fatal — dedup is per (room,oldPrimary), so this is a genuine 2nd swap when it fires)';
       } catch (err) {
         stretch = `stretch error (non-fatal): ${String(err)}`;
       }
