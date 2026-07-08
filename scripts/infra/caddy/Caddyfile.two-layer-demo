@@ -1,0 +1,102 @@
+# =============================================================================
+# Caddyfile — Two-Layer (user -> R1 -> R2 -> user) LIVE PUBLIC DEMO
+# =============================================================================
+#
+# Purpose: defeat the browser MIXED-CONTENT block. The prod client is served
+# over HTTPS (https://app.<KR-DNS>), and an HTTPS page makes the browser BLOCK
+# any ws:// or http:// sub-resource. So EVERY browser-facing endpoint the client
+# touches must be TLS. Caddy v2 auto-provisions Let's Encrypt certs for each
+# *.cloudapp.azure.com sub-name (each VM gets one free Azure DNS name) and
+# reverse-proxies each control/signaling/RPC endpoint to its plain-loopback
+# daemon on that VM.
+#
+#   Browser touches           ->  TLS front (Caddy)          ->  daemon (loopback)
+#   ----------------------------------------------------------------------------
+#   client static app             https://app.<KR-DNS>           file_server dist/
+#   Sui RPC                        https://rpc.<KR-DNS>           localhost:9000
+#   signaling WS (cap-token)       wss://sig.<KR-DNS>             localhost:8080
+#   relay-KR control WS            wss://relay-kr.<KR-DNS>        localhost:4000
+#   relay-JP control WS            wss://relay-jp.<JP-DNS>        localhost:4000  (JP VM)
+#
+# NOT PROXIED — media (RTP/RTCP) stays DIRECT UDP to each relay's ANNOUNCED_IP
+# (udp 40000-49999). DTLS/SRTP already encrypts the media, so it needs no TLS
+# front and MUST NOT go through Caddy (Caddy is HTTP/WS only). The browser
+# reaches media by the ICE candidates the relay advertises (ANNOUNCED_IP =
+# each VM's public IP), never through app.<KR-DNS>.
+#
+# TEMPLATING: replace <KR-DNS> and <JP-DNS> with the real Azure DNS names, known
+# only at provision time, e.g.
+#     <KR-DNS> = dvconf-kr.koreacentral.cloudapp.azure.com
+#     <JP-DNS> = dvconf-jp.japaneast.cloudapp.azure.com
+# On each VM, keep ONLY that VM's section (delete the other) or use a per-VM copy.
+# Caddy needs inbound TCP 80 (ACME HTTP challenge) + 443 open in the NSG/UFW.
+#
+# NOTE: syntax is Caddy v2, hand-written; NOT validated with `caddy validate`
+# here (no live env). Run `caddy validate --config Caddyfile` on the VM first.
+# =============================================================================
+
+
+# =====================================================================
+# ===================== KR VM (koreacentral) ==========================
+#   R1 (primary relay, ALIVE) + committee (cp / signaling / validators)
+#   + Sui localnet + the built client static app.
+#   Keep this block on the KR VM; delete the JP block below.
+# =====================================================================
+
+# --- client static app: file_server on the built Vite dist/ ---
+# Replace the root path with wherever you scp'd the built dist/ (placeholder).
+app.<KR-DNS> {
+	root * /var/www/dvconf-dist      # <-- PLACEHOLDER: the scp'd client `dist/`
+	encode zstd gzip
+	file_server
+	# SPA fallback: unknown paths serve index.html (client-side routing).
+	try_files {path} /index.html
+}
+
+# --- Sui RPC: https://rpc.<KR-DNS> -> local full-node JSON-RPC on :9000 ---
+# The client reads VITE_SUI_RPC_URL=https://rpc.<KR-DNS>; room list loads from here.
+rpc.<KR-DNS> {
+	reverse_proxy localhost:9000
+}
+
+# --- signaling WS (cap-token join): wss://sig.<KR-DNS> -> :8080 ---
+# Caddy reverse_proxy upgrades WebSocket transparently (no special directive needed in v2).
+sig.<KR-DNS> {
+	reverse_proxy localhost:8080
+}
+
+# --- relay-KR control WS (R1 primary): wss://relay-kr.<KR-DNS> -> :4000 ---
+# This is the relay's WS_PORT (control/signaling only). Media is NOT here — it is
+# direct UDP to ANNOUNCED_IP:40000-49999.
+relay-kr.<KR-DNS> {
+	reverse_proxy localhost:4000
+}
+
+# --- OPTIONAL: 5 daemon /healthz + canary routes (dashboard liveness widgets) ---
+# These power the client's DaemonHealthPanel / canary-coverage widgets. They are
+# OPTIONAL: if omitted, those widgets render DEGRADED (unknown/down) but the demo
+# (create room / join / media) is UNAFFECTED. Uncomment + build the client with the
+# matching VITE_*_HEALTHZ_URL to light them up over TLS; otherwise leave them out and
+# accept degraded widgets. Ports: cp 8091 / sig 8082 / val 8101 / relay 4001 / canary 8102.
+#
+# cp-hz.<KR-DNS>     { reverse_proxy localhost:8091 }   # VITE_CP_HEALTHZ_URL
+# sig-hz.<KR-DNS>    { reverse_proxy localhost:8082 }   # VITE_SIGNALING_HEALTHZ_URL
+# val-hz.<KR-DNS>    { reverse_proxy localhost:8101 }   # VITE_VALIDATOR_HEALTHZ_URL
+# relay-hz.<KR-DNS>  { reverse_proxy localhost:4001 }   # VITE_RELAY_HEALTHZ_URL (relay METRICS_PORT)
+# canary.<KR-DNS>    { reverse_proxy localhost:8102 }   # VITE_VALIDATOR_CANARY_COVERAGE_URL
+
+
+# =====================================================================
+# ======================= JP VM (japaneast) ===========================
+#   R2 (standby relay, active-forwards R1's media over the WAN pipe).
+#   Keep ONLY this block on the JP VM; delete the KR block above.
+#   The JP VM fronts just the relay control WS — no app / rpc / signaling
+#   (those all live on KR).
+# =====================================================================
+
+# --- relay-JP control WS (R2 standby): wss://relay-jp.<JP-DNS> -> :4000 ---
+# user_B pins to R2 via ?relayPin=standby; the client opens this wss for control.
+# Media for user_B is direct UDP to the JP VM's ANNOUNCED_IP:40000-49999.
+relay-jp.<JP-DNS> {
+	reverse_proxy localhost:4000
+}

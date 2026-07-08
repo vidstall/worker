@@ -594,6 +594,93 @@ grep -o '"metric":"t_hop_network"[^}]*"value_ms":[0-9.]*' bench-output/"$RUN_ID"
 
 ---
 
+## Section 6B-D — Two-layer demo deviations (2026-07-08)
+
+> **Scope:** these are the live-discovered fixes for the **two-layer LIVE PUBLIC
+> demo** (`docs/superpowers/plans/2026-07-08-two-layer-live-public-demo.md` — a
+> real human on a phone over the real internet, behind TLS). That demo reuses the
+> §6B primary/standby topology but on TWO permanent VMs (relay-KR primary in
+> koreacentral + relay-JP standby in japaneast, plus the full committee — cp /
+> signaling / validators — on the KR VM). Apply these ON TOP OF §1–§6B; the TLS +
+> client-host layer (Caddy) is `scripts/infra/deploy-two-layer-demo.md`.
+>
+> **Standby has NO local chain.** Unlike the Lane-B measurement (which stood up a
+> localnet on the *primary* only and pointed the standby at it), here the JP standby
+> VM runs a relay ONLY — the Sui localnet + all committee daemons live on the KR VM.
+> That single fact drives deviations (a) and (b).
+
+- **(a) relay-JP `SUI_NETWORK` = the KR RPC URL.** The standby VM has no local
+  `sui start`, so it cannot use `SUI_NETWORK=localnet` (that resolves to
+  `http://127.0.0.1:9000`, which is dead on the JP VM). Point it at the KR VM's
+  RPC: `SUI_NETWORK=http://<KR-pub-ip>:9000`. Rationale: `createSuiClient` treats a
+  keyword (`localnet`/`testnet`/`mainnet`) specially but passes any OTHER string
+  through as a **custom RPC URL** — so a bare `http://...:9000` is honored verbatim.
+  (During the demo Sui RPC 9000 must be reachable JP→KR — open it in the KR NSG for
+  the JP source, or accept it is open per §2.)
+
+  ```bash
+  # relay-JP (standby) start — SUI_NETWORK is the KR VM's RPC, NOT the `localnet` keyword:
+  ssh azureuser@"$JP_IP" "cd ~/dvconf-daemons && \
+    SUI_NETWORK=http://${KR_IP}:9000 \
+    RMS_ACTIVE_FORWARD=1 RMS_TREE_ACTIVE=0 INTER_RELAY_TOKEN=<shared> \
+    RELAY_ENDPOINT_URL=ws://${JP_IP}:4000 ANNOUNCED_IP=${JP_IP} WS_PORT=4000 \
+    RTC_MIN_PORT=40000 RTC_MAX_PORT=49999 \
+      nohup pnpm --filter relay start > /tmp/relay-jp.log 2>&1 & \
+    sleep 6 && (pgrep -af 'tsx|src/index.ts' || true)"
+  ```
+
+- **(b) cp-daemon `CAP_TOKEN_QUORUM_THRESHOLD=1` (single-CP path).** Start the
+  cp-daemon on the KR VM with `CAP_TOKEN_QUORUM_THRESHOLD=1`. Rationale: the demo's
+  publish helper (`lane-b-publish`) SKIPS creating `QUORUM_STATE_OBJECT_ID` (it is a
+  step-7+ artifact, and the password-join demo never uses cap-token co-sign). With
+  the default quorum threshold (>1) the cp-daemon tries to load that missing object
+  and throws `QuorumStateIdUnsetError`. Setting the threshold to 1 selects the
+  single-CP path that does not touch `QUORUM_STATE_OBJECT_ID`.
+
+  ```bash
+  # cp-daemon on the KR VM (single-CP; no QUORUM_STATE_OBJECT_ID needed):
+  ssh azureuser@"$KR_IP" "cd ~/dvconf-daemons && set -a && . ./.env && set +a && \
+    CAP_TOKEN_QUORUM_THRESHOLD=1 nohup pnpm --filter @dvconf/cp start > /tmp/cp.log 2>&1 &"
+  ```
+
+- **(c) `lane-b-publish.sh` step-7 `ENV_OUT` bug — write the `.env` manually.** The
+  publish script's step 7 reads `process.env.ENV_OUT` to know where to write the
+  `.env`, but `ENV_OUT` is passed as an **argv** (positional arg), NOT exported to
+  the environment — so `process.env.ENV_OUT` is `undefined` and the `.env` write
+  throws. **The publish itself SUCCEEDS**: the 10 fresh on-chain object IDs land in
+  `~/publish-output.json`. So ignore the step-7 throw and write the `.env` by hand
+  from that file:
+
+  ```bash
+  # The publish threw at step 7, but publish-output.json has the 10 IDs. Map them
+  # to .env names (same 10 as §6.1a step 4) and write the .env manually:
+  ssh azureuser@"$KR_IP" "cd ~/dvconf-daemons && \
+    bash scripts/read-publish-output.sh ~/publish-output.json"   # prints the ID=value lines
+  # -> paste those into ~/dvconf-daemons/.env, add SUI_NETWORK=localnet + the throwaway
+  #    keypairs (PRIVATE_KEY / SIGNALING_KEYPAIR / CP_KEYPAIR / SUI_PRIVATE_KEY), same as §6.1a.
+  ```
+
+- **(d) Standing landmine — restart any relay ⇒ clear its cursors first.** On ANY
+  relay restart (KR or JP), delete the relay's assignment cursors BEFORE restarting,
+  so the on-chain `RoomAssigned` event re-emits and the relay re-resolves its role
+  (primary vs standby) from scratch. Without this the restarted relay silently keeps
+  a stale/empty role and never re-attaches the pipe:
+
+  ```bash
+  ssh azureuser@"$RELAY_IP" "cd ~/dvconf-daemons && rm -rf apps/relay/.cursors"
+  # THEN restart the relay (a/b start commands above). Consumer-first join is cleanest.
+  ```
+
+> **Order for a clean two-layer bring-up:** (1) KR localnet publish → deviation (c)
+> write `.env` manually; (2) `wan-bootstrap.ts` to register cp + signaling + relay-KR
+> + relay-JP + validators (§6.1a step 5, with the CORRECT public endpoint URLs);
+> (3) start cp with deviation (b), start signaling, start relay-KR (primary); (4)
+> start relay-JP with deviation (a); (5) drive assignment (`lane-b-assign.ts`,
+> `RMS_KR_MIN=2`) → `RoomAssigned=[KR,JP]`; (6) on ANY restart, deviation (d) first.
+> Then layer Caddy TLS + host the client per `scripts/infra/deploy-two-layer-demo.md`.
+
+---
+
 ## Section 7 — Collect and Teardown
 
 ### 7.1 — Pull bench output and assemble
