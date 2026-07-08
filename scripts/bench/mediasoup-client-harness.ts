@@ -572,7 +572,7 @@ interface VirtualPeerOptions {
   iceServers?: Array<{ urls: string[]; username?: string; credential?: string }>;
 }
 
-class VirtualPeer {
+export class VirtualPeer {
   private readonly opts: VirtualPeerOptions;
   private device: Device | null = null;
   private client: RelayClient | null = null;
