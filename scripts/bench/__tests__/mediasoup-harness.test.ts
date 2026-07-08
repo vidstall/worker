@@ -28,6 +28,7 @@ import {
   computeG2GoptB,
   extractRelevantStats,
   extractRttOnly,
+  extractBytesReceived,
   startConsumerPoller,
   parseArgs,
   peerLabel,
@@ -159,6 +160,30 @@ describe('extractRttOnly', () => {
         [{ type: 'inbound-rtp', bytesReceived: 1234 }][Symbol.iterator](),
     };
     expect(extractRttOnly(report)).toBeNull();
+  });
+});
+
+// ── extractBytesReceived (SMH-LIVE D2 real-continuity) ────────────────
+
+describe('extractBytesReceived', () => {
+  it('sums bytesReceived across all inbound-rtp entries (ignores other stat types)', () => {
+    const report = {
+      values: () =>
+        [
+          { type: 'candidate-pair', currentRoundTripTime: 0.05 },
+          { type: 'inbound-rtp', bytesReceived: 1200 },
+          { type: 'inbound-rtp', bytesReceived: 800 },
+          { type: 'outbound-rtp', bytesSent: 5000 },
+        ][Symbol.iterator](),
+    };
+    expect(extractBytesReceived(report)).toBe(2000);
+  });
+
+  it('returns 0 when there is no inbound-rtp (no media received yet)', () => {
+    const report = {
+      values: () => [{ type: 'candidate-pair', currentRoundTripTime: 0 }][Symbol.iterator](),
+    };
+    expect(extractBytesReceived(report)).toBe(0);
   });
 });
 

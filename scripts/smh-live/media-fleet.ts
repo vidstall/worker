@@ -23,6 +23,8 @@ export interface FleetPeer {
   relayUrl: string;
   /** The distinct peer id used on the join. */
   peerId: string;
+  /** Current total inbound media bytes for this peer (>0 proves REAL media flowed, D2 continuity). */
+  bytesReceived: () => Promise<number>;
   /** Close this one peer (idempotent-safe; best-effort). */
   stop: () => Promise<void>;
 }
@@ -53,7 +55,7 @@ export async function launchFleet(relayUrls: string[], roomId: string): Promise<
       const peer = new VirtualPeer({ relayUrl, roomId, peerId, writer: NOOP_WRITER });
       await peer.run(); // join + produce ONE audio track (default run(), no produceNew)
       running.push(peer);
-      peers.push({ relayUrl, peerId, stop: () => peer.close() });
+      peers.push({ relayUrl, peerId, bytesReceived: () => peer.currentBytesReceived(), stop: () => peer.close() });
     }
   } catch (err) {
     await Promise.allSettled(running.map((p) => p.close()));

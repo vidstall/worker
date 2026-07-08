@@ -185,6 +185,22 @@ export function extractRttOnly(report: StatsReportLike): number | null {
   return null;
 }
 
+/**
+ * SMH-LIVE (D2 real-continuity): sum `bytesReceived` across every `inbound-rtp` entry in a
+ * stats report. On a recv transport (RTCPeerConnection-level) this is the TOTAL inbound media
+ * bytes across all of a peer's consumers; on a single Consumer it is that consumer's bytes.
+ * `> 0` proves REAL media flowed through the relay mesh (not just an RPC/on-chain claim).
+ */
+export function extractBytesReceived(report: StatsReportLike): number {
+  let total = 0;
+  for (const stat of report.values()) {
+    if (stat.type === 'inbound-rtp' && typeof stat['bytesReceived'] === 'number') {
+      total += stat['bytesReceived'] as number;
+    }
+  }
+  return total;
+}
+
 export interface ConsumerLike {
   getStats: () => Promise<StatsReportLike>;
 }
@@ -787,6 +803,34 @@ export class VirtualPeer {
       { transport: this.recvTransport as unknown as TransportLike },
     );
     this.pollerStops.push(stop);
+  }
+
+  /**
+   * SMH-LIVE (D2): current total inbound media bytes for this peer. Prefers the recv
+   * transport's RTCPeerConnection-level stats (total across all consumers); falls back to
+   * summing per-consumer stats. Returns 0 if no stats are available yet. Additive read-only
+   * accessor — does not change the join/produce/consume lifecycle.
+   */
+  async currentBytesReceived(): Promise<number> {
+    if (this.recvTransport !== null) {
+      try {
+        const report = await (this.recvTransport as unknown as TransportLike).getStats();
+        const b = extractBytesReceived(report);
+        if (b > 0) return b;
+      } catch {
+        // fall through to per-consumer stats
+      }
+    }
+    let total = 0;
+    for (const c of this.consumers) {
+      try {
+        const report = await (c as unknown as ConsumerLike).getStats();
+        total += extractBytesReceived(report);
+      } catch {
+        // skip a consumer whose getStats is unavailable
+      }
+    }
+    return total;
   }
 
   async close(): Promise<void> {
