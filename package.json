@@ -32,6 +32,7 @@
     "forensic:collect": "tsx apps/forensic-cli/src/index.ts collect",
     "forensic:report": "tsx apps/forensic-cli/src/index.ts report",
     "failover:smoke": "tsx scripts/failover/failover-smoke.ts",
+    "smh:live": "tsx scripts/smh-live/run-smh-live.ts",
     "smh:live:test": "vitest run scripts/smh-live/__tests__"
   },
   "devDependencies": {
