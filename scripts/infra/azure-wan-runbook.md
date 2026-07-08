@@ -193,6 +193,32 @@ az network nsg rule create \
   --access Allow
 ```
 
+> **TWO-LAYER DEMO — extra TLS ports (Caddy single-hostname port scheme).** The
+> two-layer LIVE PUBLIC demo (`deploy-two-layer-demo.md` §6B-D below) fronts ONE
+> Azure hostname per VM and separates the backends by distinct TLS PORTS (Azure free
+> `*.cloudapp.azure.com` has no wildcard for subdomains). So on the **KR VM** open,
+> IN ADDITION to the ports above, TCP **8443** (relay-KR WS), **9443** (signaling WS),
+> and **7443** (Sui RPC) — plus TCP 80 + 443 (already `allow-http`/`allow-https`
+> above; KEEP BOTH for the ACME HTTP-01 challenge + cert renewal + the app on :443).
+> The **JP VM** needs only 80 + 443 (relay-JP fronts on the default :443). Media stays
+> UDP 40000-49999 direct (`allow-mediasoup-rtp-udp`) — never TLS/Caddy.
+>
+> ```bash
+> # KR VM only — the 3 extra single-hostname TLS ports for the two-layer demo:
+> az network nsg rule create --resource-group dvconf-bench --nsg-name "$NSG_NAME" \
+>   --name allow-tls-relay-kr --priority 250 --direction Inbound --protocol Tcp \
+>   --destination-port-ranges 8443 --access Allow
+> az network nsg rule create --resource-group dvconf-bench --nsg-name "$NSG_NAME" \
+>   --name allow-tls-signaling --priority 251 --direction Inbound --protocol Tcp \
+>   --destination-port-ranges 9443 --access Allow
+> az network nsg rule create --resource-group dvconf-bench --nsg-name "$NSG_NAME" \
+>   --name allow-tls-sui-rpc --priority 252 --direction Inbound --protocol Tcp \
+>   --destination-port-ranges 7443 --access Allow
+> # (If you uncomment the 5 healthz TLS-port blocks in the Caddyfile, open those
+> #  ports too, e.g. 6443-6447.) UFW mirror on the KR VM:
+> #   sudo ufw allow 80,443,8443,9443,7443/tcp && sudo ufw reload
+> ```
+
 > The bench PAGE is served on each client machine's **localhost** (see Section 6),
 > so port 5173 is NOT exposed on the VM and needs no NSG rule. Only the relay WS
 > (4000), the bench sink (8081), and the media range (40000–49999/udp) cross the WAN.
@@ -619,11 +645,15 @@ grep -o '"metric":"t_hop_network"[^}]*"value_ms":[0-9.]*' bench-output/"$RUN_ID"
   the JP source, or accept it is open per §2.)
 
   ```bash
-  # relay-JP (standby) start — SUI_NETWORK is the KR VM's RPC, NOT the `localnet` keyword:
+  # relay-JP (standby) start — SUI_NETWORK is the KR VM's RPC, NOT the `localnet` keyword.
+  # RELAY_ENDPOINT_URL is the TLS wss URL (deviation (e)) — it is published on-chain and
+  # the HTTPS browser dials it, so it MUST be wss (mixed-content). ANNOUNCED_IP stays the
+  # raw IP (media/pipe UDP is direct, never TLS).
   ssh azureuser@"$JP_IP" "cd ~/dvconf-daemons && \
     SUI_NETWORK=http://${KR_IP}:9000 \
     RMS_ACTIVE_FORWARD=1 RMS_TREE_ACTIVE=0 INTER_RELAY_TOKEN=<shared> \
-    RELAY_ENDPOINT_URL=ws://${JP_IP}:4000 ANNOUNCED_IP=${JP_IP} WS_PORT=4000 \
+    RELAY_ENDPOINT_URL=wss://dvconf-jp.japaneast.cloudapp.azure.com \
+    ANNOUNCED_IP=${JP_IP} WS_PORT=4000 \
     RTC_MIN_PORT=40000 RTC_MAX_PORT=49999 \
       nohup pnpm --filter relay start > /tmp/relay-jp.log 2>&1 & \
     sleep 6 && (pgrep -af 'tsx|src/index.ts' || true)"
@@ -671,13 +701,48 @@ grep -o '"metric":"t_hop_network"[^}]*"value_ms":[0-9.]*' bench-output/"$RUN_ID"
   # THEN restart the relay (a/b start commands above). Consumer-first join is cleanest.
   ```
 
+- **(e) `RELAY_ENDPOINT_URL` = the TLS wss URL (the relay-leg mixed-content fix).**
+  This is the deviation that makes the TLS demo actually connect. The relay publishes
+  its `RELAY_ENDPOINT_URL` on-chain as its `endpoint_url`, and the HTTPS client reads
+  that VERBATIM from `relay_registry` and dials it with `new WebSocket(url)`
+  (`useRoomAssignment.ts` → `resolvePinnedRelayUrls`, no port assumption / no path
+  append — verified in `dvconf-client/src`). If it is `ws://<pub-ip>:4000` the browser
+  MIXED-CONTENT-BLOCKS it and no media flows. So for BOTH relays set the wss URL that
+  the Caddy port scheme fronts (`deploy-two-layer-demo.md`):
+
+  - relay-KR: `RELAY_ENDPOINT_URL=wss://dvconf-kr.koreacentral.cloudapp.azure.com:8443`
+    (Caddy :8443 → `localhost:4000`)
+  - relay-JP: `RELAY_ENDPOINT_URL=wss://dvconf-jp.japaneast.cloudapp.azure.com` (:443)
+    (Caddy default :443 → `localhost:4000`)
+
+  `ANNOUNCED_IP` stays each VM's RAW public IP (media RTP/RTCP + the inter-relay pipe
+  are direct UDP, NEVER through Caddy) — ONLY the control endpoint URL becomes wss.
+  Set `RELAY_ENDPOINT_URL` on BOTH the relay start commands AND (if it registers there)
+  in `wan-bootstrap.ts`'s env, so the on-chain registration carries the wss value.
+
+  ```bash
+  # relay-KR (primary) start — wss control URL, raw IP for media:
+  ssh azureuser@"$KR_IP" "cd ~/dvconf-daemons && set -a && . ./.env && set +a && \
+    RMS_ACTIVE_FORWARD=1 RMS_TREE_ACTIVE=0 INTER_RELAY_TOKEN=<shared> \
+    RELAY_ENDPOINT_URL=wss://dvconf-kr.koreacentral.cloudapp.azure.com:8443 \
+    ANNOUNCED_IP=${KR_IP} WS_PORT=4000 RTC_MIN_PORT=40000 RTC_MAX_PORT=49999 \
+      nohup pnpm --filter relay start > /tmp/relay-kr.log 2>&1 &"
+  ```
+
+  > NOTE: the relay LISTENS on plain `WS_PORT=4000` on loopback; Caddy terminates TLS
+  > on :8443 (KR) / :443 (JP) and reverse-proxies to `localhost:4000`. The relay does
+  > NOT need TLS itself — `RELAY_ENDPOINT_URL` is only the PUBLIC (browser-facing) URL
+  > it advertises, which is the Caddy-fronted wss one.
+
 > **Order for a clean two-layer bring-up:** (1) KR localnet publish → deviation (c)
 > write `.env` manually; (2) `wan-bootstrap.ts` to register cp + signaling + relay-KR
-> + relay-JP + validators (§6.1a step 5, with the CORRECT public endpoint URLs);
-> (3) start cp with deviation (b), start signaling, start relay-KR (primary); (4)
-> start relay-JP with deviation (a); (5) drive assignment (`lane-b-assign.ts`,
-> `RMS_KR_MIN=2`) → `RoomAssigned=[KR,JP]`; (6) on ANY restart, deviation (d) first.
-> Then layer Caddy TLS + host the client per `scripts/infra/deploy-two-layer-demo.md`.
+> + relay-JP + validators (§6.1a step 5, with the wss public endpoint URLs — deviation
+> (e)); (3) start cp with deviation (b), start signaling, start relay-KR (primary,
+> deviation (e) wss URL); (4) start relay-JP with deviation (a)+(e); (5) drive
+> assignment (`lane-b-assign.ts`, `RMS_KR_MIN=2`) → `RoomAssigned=[KR,JP]` (verify the
+> resolved `endpoint_url`s ARE the wss URLs); (6) on ANY restart, deviation (d) first.
+> Then layer Caddy TLS (open the 8443/9443/7443 NSG ports — §2 two-layer note) + host
+> the client per `scripts/infra/deploy-two-layer-demo.md`.
 
 ---
 
