@@ -605,6 +605,19 @@ async function main(): Promise<void> {
   process.exit(overall ? 0 : 1);
 }
 
+// Fleet peers (mediasoup-client VirtualPeers) consume via a fire-and-forget (void-ed) onNewProducer;
+// a cross-relay consume that times out ('Relay response timeout') surfaces as an UNHANDLED rejection
+// that would crash the whole orchestrator before the evidence write. Those — and the documented
+// @roamhq/wrtc native-teardown crash on Windows — are NON-FATAL to D2's SERVER-side asserts (the
+// producer is still created + piped -> bytesForwarded; promotion is RPC-verified). Log + swallow so
+// one flaky peer never kills the run; main()'s own critical path stays explicitly try/catch'd/awaited.
+process.on('unhandledRejection', (reason) => {
+  console.error('[smh-live] non-fatal unhandledRejection (fleet peer async, e.g. consume timeout):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[smh-live] non-fatal uncaughtException (fleet peer / wrtc async):', err);
+});
+
 const isMain =
   process.argv[1]?.endsWith('run-smh-live.ts') === true || process.argv[1]?.endsWith('run-smh-live.js') === true;
 
