@@ -473,27 +473,40 @@ async function main(): Promise<void> {
     'LOG_PRETTY=false',
   ];
 
+  const mode = process.env['SMH_PHASES'];
   try {
-    // D1a — flag ON (strict no-attestation defer).
-    bootFresh([...commonInject, 'RMS_ATTESTED_PLACEMENT=1']);
-    phases.push(await runD1a(logger));
-
-    // Teardown between sub-runs (kill sui too — ps1 stop won't).
-    teardown();
-    await sleep(3_000);
-
-    // D1b — flag OFF (byte-stable K_r>=3 placement).
-    bootFresh(commonInject);
-    const d1b = await runD1b(logger);
-    phases.push(d1b.phase);
-
-    // Fleet + D2 (only if D1b gave us a placed room). SMH_PHASES=d1 stops after D1b.
-    if (process.env['SMH_PHASES'] === 'd1') {
-      logger.info('SMH_PHASES=d1 — skipping media fleet + D2');
-    } else if (d1b.phase.verdict === 'PASS' && d1b.roomId && d1b.assigned && d1b.assigned.length >= 3) {
-      phases.push(await runD2(logger, d1b.client, d1b.config, d1b.roomId, d1b.assigned));
+    if (mode === 'd2') {
+      // D2-only: boot flag-OFF once, place a room (the D1b setup: seed + readAssignedRelays), run D2.
+      // D1a/D1b phases are NOT recorded — only D2 (a failed placement surfaces as a D2 FAIL).
+      bootFresh(commonInject);
+      const setup = await runD1b(logger);
+      if (setup.phase.verdict === 'PASS' && setup.roomId && setup.assigned && setup.assigned.length >= 3) {
+        phases.push(await runD2(logger, setup.client, setup.config, setup.roomId, setup.assigned));
+      } else {
+        phases.push({ phase: 'D2', verdict: 'FAIL', lines: ['D2 setup failed — placement did not yield >=3 relays:', ...setup.phase.lines] });
+      }
     } else {
-      phases.push({ phase: 'D2', verdict: 'FAIL', lines: ['skipped — D1b did not place a room with >=3 relays'] });
+      // D1a — flag ON (strict no-attestation defer).
+      bootFresh([...commonInject, 'RMS_ATTESTED_PLACEMENT=1']);
+      phases.push(await runD1a(logger));
+
+      // Teardown between sub-runs (kill sui too — ps1 stop won't).
+      teardown();
+      await sleep(3_000);
+
+      // D1b — flag OFF (byte-stable K_r>=3 placement).
+      bootFresh(commonInject);
+      const d1b = await runD1b(logger);
+      phases.push(d1b.phase);
+
+      // Fleet + D2 (only if D1b gave us a placed room). SMH_PHASES=d1 stops after D1b.
+      if (mode === 'd1') {
+        logger.info('SMH_PHASES=d1 — skipping media fleet + D2');
+      } else if (d1b.phase.verdict === 'PASS' && d1b.roomId && d1b.assigned && d1b.assigned.length >= 3) {
+        phases.push(await runD2(logger, d1b.client, d1b.config, d1b.roomId, d1b.assigned));
+      } else {
+        phases.push({ phase: 'D2', verdict: 'FAIL', lines: ['skipped — D1b did not place a room with >=3 relays'] });
+      }
     }
   } catch (err) {
     logger.error({ err }, 'orchestrator error');
