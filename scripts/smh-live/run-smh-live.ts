@@ -142,11 +142,22 @@ function teardown(): void {
  */
 function loadFreshConfig(): NetworkConfig {
   const raw = fs.readFileSync(DAEMONS_ENV, 'utf8');
+  const setKeys: string[] = [];
   for (const line of raw.split(/\r?\n/)) {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
-    if (m) process.env[m[1]!] = m[2]!;
+    if (m) {
+      process.env[m[1]!] = m[2]!;
+      setKeys.push(m[1]!);
+    }
   }
-  return loadNetworkConfig();
+  const config = loadNetworkConfig();
+  // CRITICAL (D1b fix): delete the keys we just set so they DON'T leak into the NEXT boot's ps1
+  // daemon children. execFileSync inherits THIS process.env, and the daemons' dotenv is
+  // override:false — an inherited stale PACKAGE_ID from the prior phase's (torn-down, regenesis'd)
+  // chain would win over the fresh .env, making every daemon fail "Package object does not exist"
+  // (registration stuck at 0/0/0). The returned `config` is a plain object, so cleanup is safe.
+  for (const k of setKeys) delete process.env[k];
+  return config;
 }
 
 async function createFundedUser(logger: Logger): Promise<Ed25519Keypair> {
