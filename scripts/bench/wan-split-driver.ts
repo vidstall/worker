@@ -54,6 +54,11 @@ interface DriverOpts {
   bench: string;
   realCamera: boolean;
   peerPrefix: string;
+  // E2EE toggle passed straight through to the bench page (?e2ee=<on|off>).
+  // wan-measure.ts reads `q.get('e2ee') === 'on'` and, when on, attaches the
+  // real SFrame transform to BOTH legs — mirrors wan-playwright-driver.ts.
+  // Default 'off' preserves plaintext behavior for callers that don't pass it.
+  e2ee: string;
   // Fixed relay room to join for EVERY session, overriding the default `wan-<i>`.
   // WHY: the relay's standby cross-forward (RMS_ACTIVE_FORWARD) is keyed to the
   // ON-CHAIN assigned room id (RoomAssigned.room_id, a 0x… object id), NOT an
@@ -63,7 +68,7 @@ interface DriverOpts {
   roomOverride: string | null;
 }
 
-function parse(argv: string[]): DriverOpts {
+export function parseArgs(argv: string[]): DriverOpts {
   // A missing value OR a neighbouring `--flag` (operator forgot the value) →
   // fall back to the default rather than silently swallowing the next flag.
   const g = (k: string, d: string): string => {
@@ -111,6 +116,7 @@ function parse(argv: string[]): DriverOpts {
     bench: g('bench', 'http://localhost:8081'),
     realCamera: argv.includes('--real-camera'),
     peerPrefix: g('peer-prefix', role),
+    e2ee: g('e2ee', 'off'), // passthrough to both legs (ON-vs-OFF glass-to-glass); default off = plaintext
     roomOverride: (() => {
       const r = g('room', '');
       return r ? r : null;
@@ -121,22 +127,15 @@ function parse(argv: string[]): DriverOpts {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
 /**
- * Open the bench page for one session's role+room in the GIVEN context and pipe
- * its console to stdout. The caller owns `ctx` (created before this call) so a
- * throw from newPage/goto still leaves the context tracked + closeable in the
- * caller's finally — no leaked context on the failure path.
+ * Build the bench-page URL for session `i`'s role+room. Pure (no browser) so the
+ * flag→query wiring is unit-testable. `trace` separates JSONL rows by `wan-<i>`
+ * even when `roomOverride` pins the actual relay room to the on-chain assigned id.
  */
-async function openSession(ctx: BrowserContext, o: DriverOpts, i: number): Promise<void> {
+export function buildSessionUrl(o: DriverOpts, i: number): string {
   const traceRoom = `wan-${i}`;
   // The relay room actually JOINED: the on-chain assigned room when overridden,
   // else the per-session `wan-<i>`. Cross-relay forwarding needs the assigned id.
   const room = o.roomOverride ?? traceRoom;
-  const page = await ctx.newPage();
-
-  // Surface the page's own logs — including consumeRemote's rendezvous-timeout
-  // fatal — so the operator sees per-session success/failure live.
-  page.on('console', (msg) => console.log(`[${o.role} ${traceRoom}] ${msg.text()}`));
-  page.on('pageerror', (err) => console.log(`[${o.role} ${traceRoom}] PAGEERROR ${err.message}`));
 
   const u = new URL(o.pageBase);
   u.searchParams.set('role', o.role);
@@ -145,18 +144,36 @@ async function openSession(ctx: BrowserContext, o: DriverOpts, i: number): Promi
   u.searchParams.set('relay', o.relay);
   u.searchParams.set('bench', o.bench);
   u.searchParams.set('peer', `${o.peerPrefix}-${i}`);
+  u.searchParams.set('e2ee', o.e2ee); // both legs get the same flag (ON-vs-OFF glass-to-glass); mirrors wan-playwright-driver.ts
   if (o.realCamera) u.searchParams.set('camera', 'real');
   if (o.relayPin === 'standby') u.searchParams.set('relayPin', 'standby');
   if (o.distinguishable) u.searchParams.set('distinguishable', '1');
   if (o.distinguishable) u.searchParams.set('streamId', String(i));
+  return u.toString();
+}
+
+/**
+ * Open the bench page for one session's role+room in the GIVEN context and pipe
+ * its console to stdout. The caller owns `ctx` (created before this call) so a
+ * throw from newPage/goto still leaves the context tracked + closeable in the
+ * caller's finally — no leaked context on the failure path.
+ */
+async function openSession(ctx: BrowserContext, o: DriverOpts, i: number): Promise<void> {
+  const traceRoom = `wan-${i}`;
+  const page = await ctx.newPage();
+
+  // Surface the page's own logs — including consumeRemote's rendezvous-timeout
+  // fatal — so the operator sees per-session success/failure live.
+  page.on('console', (msg) => console.log(`[${o.role} ${traceRoom}] ${msg.text()}`));
+  page.on('pageerror', (err) => console.log(`[${o.role} ${traceRoom}] PAGEERROR ${err.message}`));
 
   // Clamp a navigation hang to within this session's window (default goto
   // timeout is 30s, which can exceed windowMs) so the wall-clock bound is real.
-  await page.goto(u.toString(), { timeout: Math.max(1000, o.windowMs - o.teardownMs) });
+  await page.goto(buildSessionUrl(o, i), { timeout: Math.max(1000, o.windowMs - o.teardownMs) });
 }
 
 async function main(): Promise<void> {
-  const o = parse(process.argv.slice(2));
+  const o = parseArgs(process.argv.slice(2));
 
   // Print the schedule up front so both operators can eyeball alignment.
   const lastEnd = o.startEpochMs + o.sessions * o.windowMs;
