@@ -54,6 +54,49 @@ interface HttpResult {
   body: string;
 }
 
+interface HttpResultH {
+  status: number;
+  body: string;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+function postRawWithHeaders(
+  port: number,
+  path: string,
+  body: string,
+  method = 'POST',
+): Promise<HttpResultH> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method,
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString('utf8'),
+            headers: res.headers as Record<string, string | string[] | undefined>,
+          });
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    if (body.length > 0) req.write(body);
+    req.end();
+  });
+}
+
 function postRaw(
   port: number,
   path: string,
@@ -197,6 +240,32 @@ describe('createBenchHttpServer', () => {
     const res = await postRaw(port, '/bench/event', huge);
     expect(res.status).toBe(413);
     expect(writer.write).not.toHaveBeenCalled();
+  });
+
+  // Cross-origin bench page (vite :5173) posts to this sink (:8081); the browser
+  // blocks the POST unless the sink echoes CORS. These two guard the WAN split-driver path.
+  it('answers CORS preflight OPTIONS with 204 + allow-origin', async () => {
+    const res = await postRawWithHeaders(port, '/bench/event', '', 'OPTIONS');
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe('*');
+    expect((res.headers['access-control-allow-methods'] ?? '')).toContain('POST');
+    expect(writer.write).not.toHaveBeenCalled();
+  });
+
+  it('includes access-control-allow-origin on the 202 POST response', async () => {
+    const body = JSON.stringify({
+      schema_version: '1.0',
+      ts: 1,
+      trace_id: 't',
+      scenario: 'adhoc',
+      source: 'client',
+      instance: 'i',
+      metric: 'identity_ok',
+      value_ms: 1,
+    });
+    const res = await postRawWithHeaders(port, '/bench/event', body);
+    expect(res.status).toBe(202);
+    expect(res.headers['access-control-allow-origin']).toBe('*');
   });
 });
 

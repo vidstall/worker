@@ -58,12 +58,28 @@ function handleRequest(
   const send = (status: number, body = ''): void => {
     if (sent) return;
     sent = true;
-    res.writeHead(status, { 'content-length': Buffer.byteLength(body) });
+    // CORS: the browser bench page (wan-measure) is served from a DIFFERENT
+    // origin (vite http://<host>:5173) than this sink (http://<host>:8081), so a
+    // cross-origin POST is blocked unless we echo permissive CORS headers. This
+    // is a bench-only telemetry sink (BENCH_LATENCY-gated, never a product path),
+    // so `*` is safe and keeps the split WAN driver's browser posts flowing.
+    res.writeHead(status, {
+      'content-length': Buffer.byteLength(body),
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'POST, OPTIONS',
+      'access-control-allow-headers': 'content-type',
+    });
     res.end(body);
   };
 
   if (req.url !== BENCH_PATH) {
     send(404);
+    return;
+  }
+  // CORS preflight: browsers send OPTIONS before a cross-origin JSON POST. Answer
+  // 204 with the allow headers so the real POST is permitted.
+  if (req.method === 'OPTIONS') {
+    send(204);
     return;
   }
   if (req.method !== 'POST') {

@@ -54,6 +54,13 @@ interface DriverOpts {
   bench: string;
   realCamera: boolean;
   peerPrefix: string;
+  // Fixed relay room to join for EVERY session, overriding the default `wan-<i>`.
+  // WHY: the relay's standby cross-forward (RMS_ACTIVE_FORWARD) is keyed to the
+  // ON-CHAIN assigned room id (RoomAssigned.room_id, a 0x… object id), NOT an
+  // arbitrary string. To make media cross the R1→R2 warm pipe the produce+consume
+  // legs must join THAT assigned room. `trace`/JSONL row separation still uses
+  // `wan-<i>` so per-session assembly is unchanged. Null → legacy `wan-<i>` room.
+  roomOverride: string | null;
 }
 
 function parse(argv: string[]): DriverOpts {
@@ -104,6 +111,10 @@ function parse(argv: string[]): DriverOpts {
     bench: g('bench', 'http://localhost:8081'),
     realCamera: argv.includes('--real-camera'),
     peerPrefix: g('peer-prefix', role),
+    roomOverride: (() => {
+      const r = g('room', '');
+      return r ? r : null;
+    })(),
   };
 }
 
@@ -116,17 +127,20 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Ma
  * caller's finally — no leaked context on the failure path.
  */
 async function openSession(ctx: BrowserContext, o: DriverOpts, i: number): Promise<void> {
-  const room = `wan-${i}`;
+  const traceRoom = `wan-${i}`;
+  // The relay room actually JOINED: the on-chain assigned room when overridden,
+  // else the per-session `wan-<i>`. Cross-relay forwarding needs the assigned id.
+  const room = o.roomOverride ?? traceRoom;
   const page = await ctx.newPage();
 
   // Surface the page's own logs — including consumeRemote's rendezvous-timeout
   // fatal — so the operator sees per-session success/failure live.
-  page.on('console', (msg) => console.log(`[${o.role} ${room}] ${msg.text()}`));
-  page.on('pageerror', (err) => console.log(`[${o.role} ${room}] PAGEERROR ${err.message}`));
+  page.on('console', (msg) => console.log(`[${o.role} ${traceRoom}] ${msg.text()}`));
+  page.on('pageerror', (err) => console.log(`[${o.role} ${traceRoom}] PAGEERROR ${err.message}`));
 
   const u = new URL(o.pageBase);
   u.searchParams.set('role', o.role);
-  u.searchParams.set('trace', room); // consumed by getTraceId() in rtcstats-collector.ts → JSONL trace_id
+  u.searchParams.set('trace', traceRoom); // consumed by getTraceId() in rtcstats-collector.ts → JSONL trace_id
   u.searchParams.set('room', room);
   u.searchParams.set('relay', o.relay);
   u.searchParams.set('bench', o.bench);
