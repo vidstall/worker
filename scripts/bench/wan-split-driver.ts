@@ -35,7 +35,9 @@ export function parseRole(raw: string): { role: Role; relayPin: 'standby' | null
     case 'produce-id':      return { role: 'produce', relayPin: null,       distinguishable: true  };
     case 'consume':         return { role: 'consume', relayPin: null,       distinguishable: false };
     case 'consume-standby': return { role: 'consume', relayPin: 'standby',  distinguishable: false };
-    default: throw new Error(`--role must be one of produce|produce-id|consume|consume-standby, got "${raw}"`);
+    case 'consume-id':         return { role: 'consume', relayPin: null,      distinguishable: true  };
+    case 'consume-standby-id': return { role: 'consume', relayPin: 'standby', distinguishable: true  };
+    default: throw new Error(`--role must be one of produce|produce-id|consume|consume-standby|consume-id|consume-standby-id, got "${raw}"`);
   }
 }
 
@@ -132,6 +134,7 @@ async function openSession(ctx: BrowserContext, o: DriverOpts, i: number): Promi
   if (o.realCamera) u.searchParams.set('camera', 'real');
   if (o.relayPin === 'standby') u.searchParams.set('relayPin', 'standby');
   if (o.distinguishable) u.searchParams.set('distinguishable', '1');
+  if (o.distinguishable) u.searchParams.set('streamId', String(i));
 
   // Clamp a navigation hang to within this session's window (default goto
   // timeout is 30s, which can exceed windowMs) so the wall-clock bound is real.
