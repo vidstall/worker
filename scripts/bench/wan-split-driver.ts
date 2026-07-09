@@ -29,8 +29,20 @@ import { chromium, type BrowserContext } from 'playwright';
 
 type Role = 'produce' | 'consume';
 
+export function parseRole(raw: string): { role: Role; relayPin: 'standby' | null; distinguishable: boolean } {
+  switch (raw) {
+    case 'produce':         return { role: 'produce', relayPin: null,       distinguishable: false };
+    case 'produce-id':      return { role: 'produce', relayPin: null,       distinguishable: true  };
+    case 'consume':         return { role: 'consume', relayPin: null,       distinguishable: false };
+    case 'consume-standby': return { role: 'consume', relayPin: 'standby',  distinguishable: false };
+    default: throw new Error(`--role must be one of produce|produce-id|consume|consume-standby, got "${raw}"`);
+  }
+}
+
 interface DriverOpts {
   role: Role;
+  relayPin: 'standby' | null;
+  distinguishable: boolean;
   startEpochMs: number;
   windowMs: number;
   teardownMs: number;
@@ -59,10 +71,8 @@ function parse(argv: string[]): DriverOpts {
     return n;
   };
 
-  const role = g('role', '');
-  if (role !== 'produce' && role !== 'consume') {
-    throw new Error(`--role must be "produce" or "consume" (got "${role}"). This driver runs ONE role per machine.`);
-  }
+  const rawRole = g('role', '');
+  const { role, relayPin, distinguishable } = parseRole(rawRole);
 
   const startRaw = g('start-epoch', '');
   const startEpochMs = parseInt(startRaw, 10);
@@ -81,6 +91,8 @@ function parse(argv: string[]): DriverOpts {
 
   return {
     role,
+    relayPin,
+    distinguishable,
     startEpochMs,
     windowMs,
     teardownMs,
@@ -118,6 +130,8 @@ async function openSession(ctx: BrowserContext, o: DriverOpts, i: number): Promi
   u.searchParams.set('bench', o.bench);
   u.searchParams.set('peer', `${o.peerPrefix}-${i}`);
   if (o.realCamera) u.searchParams.set('camera', 'real');
+  if (o.relayPin === 'standby') u.searchParams.set('relayPin', 'standby');
+  if (o.distinguishable) u.searchParams.set('distinguishable', '1');
 
   // Clamp a navigation hang to within this session's window (default goto
   // timeout is 30s, which can exceed windowMs) so the wall-clock bound is real.
@@ -196,7 +210,10 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((err) => {
-  console.error('wan-split-driver fatal:', err);
-  process.exitCode = 1;
-});
+// Guard: only run as entrypoint, not when imported by tests.
+if (process.argv[1] && (process.argv[1].endsWith('wan-split-driver.ts') || process.argv[1].endsWith('wan-split-driver.js'))) {
+  main().catch((err) => {
+    console.error('wan-split-driver fatal:', err);
+    process.exitCode = 1;
+  });
+}
