@@ -5,4 +5,5 @@ cursor.json
 *.tsbuildinfo
 bench-output/
 apps/**/.logs/
+.logs/bench/rms-internet/
 .cursors/
