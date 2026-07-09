@@ -592,3 +592,84 @@ describe('PrimaryPipeCoordinator — RC-A forward drain on reverse-leg bring-up 
     expect(announcer.mock.calls[0]![1].id).not.toBe('fwd-1'); // …NOT the source id
   });
 });
+
+// ── H. PRODUCER-FIRST WAN ordering (the LIVE deadlock) — on a real WAN the
+//    PRODUCER is all-local on the primary so it arrives FIRST, and the standby's
+//    cross-WAN pipe-connect params land a few ms LATER. onProducer(standbyParams
+//    ===null) QUEUES the producer and returns early (the mint block lives only in
+//    the params-present branch), and onStandbyConnectParams historically had NO
+//    router so it could not mint — it only drained if ALREADY connected. So neither
+//    handler ever minted the pipe: the producer stayed queued forever, pipe_bytes
+//    stayed 0, and the consumer got "no producer appeared within 30000ms". This is
+//    DETERMINISTIC on WAN (which is why the localhost/same-relay params-first tests
+//    above never caught it). The fix threads the room router into
+//    onStandbyConnectParams so it can mint+connect+reply-DOWN+drain the queued
+//    producer (the symmetric dual of ensureReverseLeg's forward drain). ──────────
+describe('PrimaryPipeCoordinator — PRODUCER-FIRST WAN ordering mints on standby params (LIVE deadlock)', () => {
+  let announcer: ReturnType<typeof vi.fn>;
+  let paramSender: ReturnType<typeof vi.fn>;
+  let allocator: ReturnType<typeof makeStubAllocator>;
+
+  beforeEach(() => {
+    announcer = vi.fn();
+    paramSender = vi.fn();
+    allocator = makeStubAllocator(41000);
+  });
+
+  it('RED-PPC-WAN-PRODUCER-FIRST: producer arrives first (queued, standbyParams null); when the standby params arrive WITH the room router, the pipe is minted+connected, replies DOWN, and the queued producer is drained+announced', async () => {
+    const { router, transports, piped } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    // 1. WAN order: the ALL-LOCAL producer lands FIRST, before the cross-WAN params.
+    //    standbyParams is null → the producer is QUEUED, nothing minted/piped yet.
+    await coord.onProducer('room-WAN', router as any, makeProducer('producer-WAN'));
+    expect(router.createPipeTransport).not.toHaveBeenCalled();
+    expect(transports).toHaveLength(0);
+    expect(announcer).not.toHaveBeenCalled();
+
+    // 2. A few ms later the standby's cross-WAN pipe-connect params arrive — carrying
+    //    the room ROUTER (the production wiring reads it via signalingRef.getRoom(roomId)
+    //    .router). With a producer already queued and the pipe not built, this MUST now
+    //    mint+connect the primary pipe and drain the queued producer.
+    await coord.onStandbyConnectParams('room-WAN', STANDBY_PARAMS, undefined, router as any);
+
+    // The pipe was minted ONCE, connected to the standby's params.
+    expect(router.createPipeTransport).toHaveBeenCalledOnce();
+    expect(transports).toHaveLength(1);
+    expect(transports[0]!.connect).toHaveBeenCalledOnce();
+    const connectArg = transports[0]!.connect.mock.calls[0]![0] as PipeConnectParams;
+    expect(connectArg.ip).toBe('127.0.0.1');
+    expect(connectArg.port).toBe(40000); // the standby's port
+
+    // The queued SOURCE producer was piped onto the pipe.
+    expect(transports[0]!.consume).toHaveBeenCalledWith({ producerId: 'producer-WAN' });
+
+    // Replied DOWN with the primary's OWN bound port (the §2 handshake reply).
+    expect(paramSender).toHaveBeenCalledOnce();
+    const [downRoom, downParams] = paramSender.mock.calls[0]!;
+    expect(downRoom).toBe('room-WAN');
+    expect((downParams as PipeConnectParams).port).toBe(transports[0]!.tuple.localPort);
+
+    // The queued producer was served: the PIPED consumer id is announced (NOT source id).
+    expect(announcer).toHaveBeenCalledOnce();
+    expect(announcer.mock.calls[0]![1].id).toBe(piped[0]!.id);
+    expect(announcer.mock.calls[0]![1].id).not.toBe('producer-WAN');
+  });
+
+  it('RED-PPC-WAN-mint-once: after the WAN mint, a LATER forward onProducer reuses the SAME transport (createPipeTransport still called once) and announces its PIPED id', async () => {
+    const { router, transports } = makeMockRouter();
+    const coord = new PrimaryPipeCoordinator({ announcer, portAllocator: allocator, paramSender });
+
+    await coord.onProducer('room-WAN', router as any, makeProducer('producer-WAN-1'));
+    await coord.onStandbyConnectParams('room-WAN', STANDBY_PARAMS, undefined, router as any);
+    expect(router.createPipeTransport).toHaveBeenCalledOnce();
+    expect(announcer).toHaveBeenCalledOnce();
+
+    // A second producer after the WAN pipe is up drains onto the SAME transport.
+    await coord.onProducer('room-WAN', router as any, makeProducer('producer-WAN-2'));
+    expect(router.createPipeTransport).toHaveBeenCalledOnce(); // still mint-once
+    expect(transports).toHaveLength(1);
+    expect(transports[0]!.consume).toHaveBeenCalledTimes(2);
+    expect(announcer).toHaveBeenCalledTimes(2);
+  });
+});

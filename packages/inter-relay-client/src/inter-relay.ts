@@ -2067,15 +2067,28 @@ export class PrimaryPipeCoordinator {
 
   /**
    * The standby's pipe-connect params arrived (the UP leg of the handshake).
-   * Stashes them; does NOT mint the transport yet (minting needs the router,
-   * which only onProducer carries). If a producer was already queued AND we have
-   * a router stashed via a prior onProducer, the drain runs there — here we only
-   * record + (cheaply) reserve the per-room port so a later onProducer binds it.
+   * Stashes them + reserves the per-room port. `router` is OPTIONAL and additive:
+   * the production wiring threads the room router (via signalingRef.getRoom(roomId)
+   * .router) so the WAN PRODUCER-FIRST order can mint the pipe HERE; callers that
+   * omit it (the legacy single-host tests + pre-mesh call sites) keep the original
+   * record-only behavior byte-for-byte.
+   *
+   * WAN PRODUCER-FIRST (the live deadlock): when the ALL-LOCAL producer arrives
+   * FIRST it is queued with standbyParams===null, so onProducer's mint block is
+   * skipped. Historically onStandbyConnectParams had NO router and only drained if
+   * ALREADY connected → neither handler ever minted → the producer stayed queued
+   * forever (pipe_bytes 0, "no producer within 30000ms"). Now, when the params
+   * arrive WITH a router AND a producer is already queued AND the pipe isn't built
+   * yet, we mint+connect+reply-DOWN via ensurePrimaryPipe and drain the queue — the
+   * symmetric dual of ensureReverseLeg's forward drain.
    */
   async onStandbyConnectParams(
     roomId: string,
     params: PipeConnectParams,
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
+    // Additive trailing router — the room's mediasoup router, threaded by the
+    // production wiring. Undefined → the pre-mesh record-only path (byte-stable).
+    router?: msTypes.Router,
   ): Promise<void> {
     const s = this.getState(roomId, peerRelayId);
     s.standbyParams = params;
@@ -2086,8 +2099,16 @@ export class PrimaryPipeCoordinator {
       { roomId, standbyPort: params.port, primaryPort: s.pipePort },
       'F1: primary coordinator received standby pipe-connect params',
     );
-    // If a producer is queued AND we have already minted+connected (params is a
-    // re-send), drain now. The common params-first order mints on onProducer.
+    // WAN PRODUCER-FIRST: params arrived after a queued producer and the pipe is
+    // not built yet. With a router in hand, mint+connect+reply-DOWN here so the
+    // queued producer finally drains (the mint block used to live only in
+    // onProducer's params-present branch, which the producer-first order skipped).
+    if (router !== undefined && s.pipeTransport === null && s.pendingProducers.length > 0) {
+      await this.ensurePrimaryPipe(roomId, router, s, peerRelayId);
+    }
+    // If a producer is queued AND we are now (or already were) minted+connected —
+    // params re-send OR the WAN mint just above — drain now. The common params-
+    // first order mints+drains on onProducer.
     if (s.connected && s.pipeTransport !== null && s.pendingProducers.length > 0) {
       await this.drain(roomId, s, peerRelayId);
     }
@@ -2129,46 +2150,71 @@ export class PrimaryPipeCoordinator {
       return;
     }
 
-    // Mint + connect ONCE (REQ-RO-009 idempotent binding).
-    if (s.pipeTransport === null) {
-      if (s.pipePort === null) {
-        s.pipePort = this.deps.portAllocator.allocate(primaryPortKey(roomId, peerRelayId));
-      }
-      const transport = await createPrimaryPipeTransport(router, s.pipePort);
-      s.pipeTransport = transport;
-      await transport.connect({
-        ip: s.standbyParams.ip,
-        port: s.standbyParams.port,
-        srtpParameters: s.standbyParams.srtpParameters,
-      } as Parameters<msTypes.PipeTransport['connect']>[0]);
-      s.connected = true;
-
-      // Reply DOWN with the primary's OWN bound port (the §2 handshake reply).
-      // B1-SRTP: when PIPE_SRTP=1 the primary's PipeTransport carries SRTP params
-      // (the TOP-LEVEL `transport.srtpParameters` getter — NOT `transport.tuple.
-      // srtpParameters`, which is undefined). Guarded `!== undefined` spread so a
-      // flag-OFF reply omits the field and stays byte-identical to today.
-      const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
-      // REQ-RMS-028 (L1.3-b): thread `peerRelayId` so the DOWN reply routes to the
-      // RIGHT cascade leg's socket (DEFAULT peer → undefined → legacy single link).
-      this.deps.paramSender(
-        roomId,
-        {
-          ip: announcedIp,
-          port: transport.tuple.localPort,
-          ...(transport.srtpParameters !== undefined
-            ? { srtpParameters: transport.srtpParameters }
-            : {}),
-        },
-        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
-      );
-      this.deps.logger?.info(
-        { roomId, primaryPort: transport.tuple.localPort, standbyPort: s.standbyParams.port },
-        'F1: primary pipe transport minted + connected to standby',
-      );
-    }
+    // Mint + connect ONCE (REQ-RO-009 idempotent binding). Extracted into
+    // ensurePrimaryPipe so onStandbyConnectParams can mint it too on the WAN
+    // PRODUCER-FIRST order (see that method).
+    await this.ensurePrimaryPipe(roomId, router, s, peerRelayId);
 
     await this.drain(roomId, s, peerRelayId);
+  }
+
+  /**
+   * Mint + connect the primary's FORWARD pipe transport ONCE and reply DOWN with
+   * the primary's own bound port (the §2 handshake reply) — the shared body both
+   * onProducer AND onStandbyConnectParams use. A no-op when the transport is
+   * already bound (REQ-RO-009 idempotent binding: createPipeTransport is called at
+   * most once per leg). Requires the caller to have already stashed s.standbyParams
+   * (both call sites guard that) — it is the standby's connect target.
+   *
+   * WAN PRODUCER-FIRST (the live deadlock): on a real WAN the producer is all-local
+   * on the primary so onProducer fires FIRST with standbyParams===null → the block
+   * below is skipped and the producer is queued. The standby's cross-WAN params
+   * arrive a few ms later; onStandbyConnectParams — now threaded the room router —
+   * calls THIS to mint the pipe so the queued producer finally drains. The mirror
+   * of ensureReverseLeg's forward drain, but for the FORWARD mint path.
+   */
+  private async ensurePrimaryPipe(
+    roomId: string,
+    router: msTypes.Router,
+    s: PrimaryPipeState,
+    peerRelayId: string,
+  ): Promise<void> {
+    if (s.pipeTransport !== null || s.standbyParams === null) return;
+    if (s.pipePort === null) {
+      s.pipePort = this.deps.portAllocator.allocate(primaryPortKey(roomId, peerRelayId));
+    }
+    const transport = await createPrimaryPipeTransport(router, s.pipePort);
+    s.pipeTransport = transport;
+    await transport.connect({
+      ip: s.standbyParams.ip,
+      port: s.standbyParams.port,
+      srtpParameters: s.standbyParams.srtpParameters,
+    } as Parameters<msTypes.PipeTransport['connect']>[0]);
+    s.connected = true;
+
+    // Reply DOWN with the primary's OWN bound port (the §2 handshake reply).
+    // B1-SRTP: when PIPE_SRTP=1 the primary's PipeTransport carries SRTP params
+    // (the TOP-LEVEL `transport.srtpParameters` getter — NOT `transport.tuple.
+    // srtpParameters`, which is undefined). Guarded `!== undefined` spread so a
+    // flag-OFF reply omits the field and stays byte-identical to today.
+    const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
+    // REQ-RMS-028 (L1.3-b): thread `peerRelayId` so the DOWN reply routes to the
+    // RIGHT cascade leg's socket (DEFAULT peer → undefined → legacy single link).
+    this.deps.paramSender(
+      roomId,
+      {
+        ip: announcedIp,
+        port: transport.tuple.localPort,
+        ...(transport.srtpParameters !== undefined
+          ? { srtpParameters: transport.srtpParameters }
+          : {}),
+      },
+      peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
+    );
+    this.deps.logger?.info(
+      { roomId, primaryPort: transport.tuple.localPort, standbyPort: s.standbyParams.port },
+      'F1: primary pipe transport minted + connected to standby',
+    );
   }
 
   /**

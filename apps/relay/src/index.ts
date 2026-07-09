@@ -742,8 +742,14 @@ if (isMainModule) {
       // any pending producers.
       // C6 part-2: thread the standby's peerRelayId → connect the SAME per-(room,peer)
       // producer pipe leg the cascade onPrimaryProducer minted (undefined → DEFAULT).
+      // WAN PRODUCER-FIRST fix: also thread the room ROUTER (via signalingRef.getRoom
+      // — same accessor onReverseAnnounce/onLocalProducer use) so the coordinator can
+      // mint the forward pipe HERE when the all-local producer arrived first and is
+      // queued. getRoom is late-bound (undefined pre-server-live) → the coordinator
+      // falls back to the record-only path, byte-stable.
       onConnectParams: (roomId, params, peerRelayId) => {
-        void primaryPipe.onStandbyConnectParams(roomId, params, peerRelayId);
+        const router = signalingRef.getRoom?.(roomId)?.router;
+        void primaryPipe.onStandbyConnectParams(roomId, params, peerRelayId, router);
       },
       // G3.2b STANDBY: on the first peer join for a standby room, build the room's
       // topology + open the paused warm pipe in the LIVE signaling path. F1: the
