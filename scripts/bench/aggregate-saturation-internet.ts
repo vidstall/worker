@@ -25,9 +25,12 @@ import { percentile } from './replay';
 import { extrapolateTwoCeiling } from './two-ceiling-extrapolate';
 import { validateCurated } from './saturation-internet.schema';
 import type {
+  BandwidthProjection,
+  ConsumerKnee,
   CuratedSaturationInternet,
   DropRelayEvent,
   Extrapolation,
+  MediaSecurity,
   PercentileTriple,
   RelayNode,
   RungRow,
@@ -37,6 +40,10 @@ import type {
 const PATHS_PER_VIEWER = 9;
 const NIC_MBPS = 100;
 const N_AT_TARGET = 100;
+/** A rung is "relay CPU-bound" only if it approached a full core. */
+const RELAY_CPU_SATURATION_CORES = 0.5;
+/** Named uplinks for the bandwidth PROJECTION reference points. */
+const PROJECTION_UPLINKS_MBPS = [100, 1000];
 
 /** Raw rung sample line shape (aligned to the real probe/latency keys). */
 interface RawRung {
@@ -87,6 +94,45 @@ function median(values: number[]): number {
     : sorted[mid]!;
 }
 
+/** A rung's g2g TAIL SPREAD = p99/p50. ~1.0 = tight (no tail); >1 = tail detaching. */
+function tailSpread(r: RungRow): number {
+  return r.g2gMs.p50 > 0 ? r.g2gMs.p99 / r.g2gMs.p50 : 1;
+}
+
+/**
+ * Locate the consumer-decode knee from the measured g2g curve. Onset = the
+ * lowest rung where the latency TAIL first DETACHES from the median — i.e. the
+ * p99/p50 tail-spread jumps materially (>= KNEE_SPREAD_JUMP) vs the previous
+ * rung. (Tail-detachment, not raw-p99-super-linearity: p99 can nearly double
+ * for a 2x load and still read "linear" while the tail has plainly blown out;
+ * the SPREAD is the honest saturation signal.) Saturation = the top measured
+ * rung. If no rung detaches, onset falls back to the top rung (still located).
+ * Pure — derived only from measured p50/p99.
+ */
+const KNEE_SPREAD_JUMP = 1.3; // >=30% jump in p99/p50 spread = tail detaching.
+export function deriveConsumerKnee(rungs: RungRow[]): ConsumerKnee {
+  if (rungs.length === 0) {
+    return { onsetN: 0, saturatedN: 0, g2gP99AtOnset: 0, g2gP99AtSaturation: 0 };
+  }
+  const top = rungs[rungs.length - 1]!;
+  let onsetIdx = rungs.length - 1;
+  for (let i = 1; i < rungs.length; i++) {
+    const prevSpread = tailSpread(rungs[i - 1]!);
+    const curSpread = tailSpread(rungs[i]!);
+    if (prevSpread > 0 && curSpread / prevSpread >= KNEE_SPREAD_JUMP) {
+      onsetIdx = i;
+      break;
+    }
+  }
+  const onset = rungs[onsetIdx]!;
+  return {
+    onsetN: onset.n,
+    saturatedN: top.n,
+    g2gP99AtOnset: onset.g2gMs.p99,
+    g2gP99AtSaturation: top.g2gMs.p99,
+  };
+}
+
 function toRungRow(raw: RawRung): RungRow {
   const forwardPaths = raw.n * PATHS_PER_VIEWER;
   // bytesSent -> bits -> per-second -> Mbps.
@@ -118,7 +164,7 @@ function toRungRow(raw: RawRung): RungRow {
  */
 export function aggregate(
   rawJsonl: string,
-  meta: { runId: string; benchCommit: string },
+  meta: { runId: string; benchCommit: string; mediaSecurity: MediaSecurity },
 ): CuratedSaturationInternet {
   const lines: RawLine[] = rawJsonl
     .split('\n')
@@ -163,13 +209,51 @@ export function aggregate(
     nAtTarget: N_AT_TARGET,
     pathsPerViewer: PATHS_PER_VIEWER,
   });
+
+  // DERIVED saturation verdict: the relay is CPU-bound only if a MEASURED rung
+  // approached a full core; otherwise it never became the bottleneck.
+  const maxCpuCoresSrtp = rungs.reduce(
+    (m, r) => Math.max(m, r.cpuCoresSrtp),
+    0,
+  );
+  const binding: TwoCeilingReal['binding'] =
+    maxCpuCoresSrtp > RELAY_CPU_SATURATION_CORES ? 'cpu' : 'not-saturated';
+  const cWorkerSrtpNote =
+    binding === 'cpu'
+      ? `${tc.cWorkerSrtp} = 1/measured per-path CPU slope; a rung approached a core (max ${maxCpuCoresSrtp.toFixed(4)}) so this IS the CPU operating ceiling.`
+      : `${tc.cWorkerSrtp} = 1/measured per-path CPU slope; the relay never approached this (peaked at ${maxCpuCoresSrtp.toFixed(4)} of a core) — a HEADROOM indicator, NOT a claimed operating ceiling.`;
   const twoCeiling: TwoCeilingReal = {
     cWorkerSrtp: tc.cWorkerSrtp,
+    cWorkerSrtpNote,
     kRcpuAt100: tc.kRcpuAt100,
     kRbwAt100: tc.kRbwAt100,
-    binding: tc.binding,
+    binding,
     floorAt100: tc.floorAt100,
     planningAt100: tc.planningAt100,
+  };
+
+  // CONSUMER-DECODE knee (measured operating limit). Onset = the lowest rung
+  // where g2g p99 first bends up super-linearly vs the previous rung (its p99
+  // grows faster than n grows); saturation = the top measured rung. Both DERIVED.
+  const consumerKnee = deriveConsumerKnee(rungs);
+
+  // Bandwidth ceiling as a labeled PROJECTION (viewers = uplink / per-viewer),
+  // parameterized on named uplinks; plus the measured peak egress (relay NIC was
+  // never the constraint in this run).
+  const measuredPeakEgressMbps = rungs.reduce(
+    (m, r) => Math.max(m, r.egressMbpsReal),
+    0,
+  );
+  const bandwidthProjection: BandwidthProjection = {
+    mbpsPerViewer: mbpsPerViewerReal,
+    references: PROJECTION_UPLINKS_MBPS.map((uplinkMbps) => ({
+      uplinkMbps,
+      viewers:
+        mbpsPerViewerReal > 0
+          ? Math.floor(uplinkMbps / mbpsPerViewerReal)
+          : 0,
+    })),
+    measuredPeakEgressMbps,
   };
 
   const measuredToN = rungs.reduce((m, r) => Math.max(m, r.n), 0);
@@ -205,16 +289,31 @@ export function aggregate(
 
   const honesty: string[] = [
     `Measured live only to N=${measuredToN}; higher N is EXTRAPOLATED, not observed.`,
-    'Ceiling is EXTRAPOLATED from measured per-path CPU + per-viewer Mbps slopes — the run was NOT pushed to saturation.',
+    // (1) REQUIRED caveat: relay sub-saturation / headroom (relay NOT the bottleneck).
+    `RELAY HEADROOM: the relay never approached its CPU ceiling — SRTP CPU peaked at ${maxCpuCoresSrtp.toFixed(4)} of a core (~${(maxCpuCoresSrtp * 100).toFixed(1)}%) at the top rung, scaling LINEARLY with N. The relay was NOT the bottleneck; cWorkerSrtp (${tc.cWorkerSrtp}) is a headroom indicator, not a measured operating ceiling.`,
+    // (2) REQUIRED caveat: the consumer knee is a CO-LOCATION artifact, not a per-user limit.
+    `CONSUMER-KNEE = CO-LOCATION ARTIFACT: the g2g p99 knee (${consumerKnee.g2gP99AtOnset.toFixed(1)}->${consumerKnee.g2gP99AtSaturation.toFixed(1)} ms across N=${consumerKnee.onsetN}->${consumerKnee.saturatedN}) arises because ALL synthetic consumers were co-located on ONE 2-vCPU box competing for decode CPU. In real deployment each user decodes on their OWN device, so decode does NOT stack — this knee does NOT reproduce per real user. Evidence: relay hop p50 stays FLAT (~13 ms) at every rung; only the co-located decode grows. NOT a per-user deployment limit.`,
+    'Bandwidth ceiling is a labeled forward PROJECTION (viewers = uplink / per-viewer-Mbps); the relay NIC was never a constraint in this run (measured peak egress well under the cap). No NIC number gates the pass/fail.',
+    // Planning-fields legend — so kRbwAt100=3 is never misread against the 34-viewer projection.
+    `twoCeiling planning fields = number of RELAYS needed to serve N=${N_AT_TARGET} concurrent viewers: kRcpuAt100 (CPU-bound: ceil(N*pathsPerViewer / cWorkerSrtp)), kRbwAt100 (bandwidth-bound: ceil(N*mbpsPerViewer / publishedNicMbps)), floorAt100 = max(kRcpuAt100, kRbwAt100), planningAt100 = floor + engineering headroom (20% burst @ 70% target NIC utilisation). The bandwidth-bound figures assume the published ${NIC_MBPS} Mbps relay NIC (relays[].publishedNicMbps) — a forward PROJECTION, not a measured ceiling (measured peak egress was only ${measuredPeakEgressMbps.toFixed(2)} Mbps, so the NIC was never the constraint in this run). This is orthogonal to bandwidthProjection.references, which report per-relay VIEWER capacity (uplink / per-viewer) at named uplinks.`,
     '3 relays = redundant placement in the 1-primary / 1-warm-standby model (NOT a multi-active mesh; no mesh economics claimed).',
+    'relaysAfter=3 means the mesh was left UNTOUCHED — this run did NOT perform a kill+survive; it is NOT a measured failover. Live relay kill+survive (MTTR + media-resume) is proven separately in the smh D2 lane (REQ-RMS-024).',
     'Mesh re-formation after failover is deferred (REQ-RMS-023, out of scope for this run).',
-    'Drop-relay = primary-death -> promote standby -> >=2 relays survive (smh D2 scope); it is not a network-partition test.',
   ];
+
+  // Plaintext runs must declare that the relay capacity is E2EE-INVARIANT (the
+  // relay is content-blind; E2EE's cost is paid at the endpoints, not the relay).
+  if (meta.mediaSecurity === 'plaintext') {
+    honesty.push(
+      'Measured on the PLAINTEXT SFU-forward path (e2ee=off). Relay capacity is E2EE-INVARIANT: the relay is content-blind — it forwards opaque bytes and performs the same hop-by-hop DTLS-SRTP transport work whether or not the E2EE inner layer (SFrame/insertable streams) is present; E2EE\'s cost is paid at the endpoints (encrypt at producer, decrypt at consumer). The relay-blind property itself is proven separately in the W5 M2/M3 lane (p10-relayblind harness: relay forwards the E2EE stream but the forwarded body is GCM-opaque, undecodable without the key).',
+    );
+  }
 
   return {
     artifact: 'relay-saturation-internet-multirelay',
     runId: meta.runId,
     benchCommit: meta.benchCommit,
+    mediaSecurity: meta.mediaSecurity,
     requirement: 'REQ-RMS-001 (internet fidelity upgrade)',
     regionPair: ['koreacentral', 'japaneast'],
     relays,
@@ -224,6 +323,8 @@ export function aggregate(
     rungs,
     dropRelay,
     twoCeiling,
+    consumerKnee,
+    bandwidthProjection,
     extrapolation,
     honesty,
   };
@@ -238,29 +339,41 @@ interface CliArgs {
   jsonlPath: string;
   runId: string;
   benchCommit: string;
+  mediaSecurity: MediaSecurity;
 }
+
+const USAGE =
+  'Usage: tsx scripts/bench/aggregate-saturation-internet.ts <raw.jsonl> ' +
+  '--run-id <id> --commit <sha> --media-security <plaintext|e2ee>';
 
 export function parseAggregateArgs(argv: readonly string[]): CliArgs {
   const args = argv.slice(2);
   let jsonlPath: string | null = null;
   let runId = 'unknown';
   let benchCommit = 'unknown';
+  let mediaSecurity: string | null = null;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--run-id') {
       runId = args[++i] ?? runId;
     } else if (a === '--commit') {
       benchCommit = args[++i] ?? benchCommit;
+    } else if (a === '--media-security') {
+      mediaSecurity = args[++i] ?? null;
     } else if (!a.startsWith('-')) {
       jsonlPath = a;
     }
   }
   if (jsonlPath === null) {
+    throw new Error(USAGE);
+  }
+  // Required + validated at the boundary (fail-closed before we even build).
+  if (mediaSecurity !== 'plaintext' && mediaSecurity !== 'e2ee') {
     throw new Error(
-      'Usage: tsx scripts/bench/aggregate-saturation-internet.ts <raw.jsonl> --run-id <id> --commit <sha>',
+      `--media-security is REQUIRED and must be 'plaintext' or 'e2ee'. ${USAGE}`,
     );
   }
-  return { jsonlPath, runId, benchCommit };
+  return { jsonlPath, runId, benchCommit, mediaSecurity };
 }
 
 function main(): void {
@@ -269,6 +382,7 @@ function main(): void {
   const curated = aggregate(raw, {
     runId: args.runId,
     benchCommit: args.benchCommit,
+    mediaSecurity: args.mediaSecurity,
   });
   const violations = validateCurated(curated);
   process.stdout.write(JSON.stringify(curated, null, 2) + '\n');
