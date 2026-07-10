@@ -307,6 +307,10 @@ export function aggregate(
     honesty.push(
       'Measured on the PLAINTEXT SFU-forward path (e2ee=off). Relay capacity is E2EE-INVARIANT: the relay is content-blind — it forwards opaque bytes and performs the same hop-by-hop DTLS-SRTP transport work whether or not the E2EE inner layer (SFrame/insertable streams) is present; E2EE\'s cost is paid at the endpoints (encrypt at producer, decrypt at consumer). The relay-blind property itself is proven separately in the W5 M2/M3 lane (p10-relayblind harness: relay forwards the E2EE stream but the forwarded body is GCM-opaque, undecodable without the key).',
     );
+  } else if (meta.mediaSecurity === 'e2ee') {
+    honesty.push(
+      'Measured on the E2EE path (e2ee=on): the real SFrame / insertable-streams transform ran on BOTH legs (SFrame encrypt at the producer, decrypt at each consumer; verified per rung: RTCRtpScriptTransform attached, notEncrypted=0). Relay capacity is E2EE-INVARIANT: the relay is content-blind. It forwards the opaque SFrame-wrapped SRTP and performs the same hop-by-hop DTLS-SRTP transport work as plaintext, so cpuCoresSrtp is unchanged by E2EE (compare to the matched-N plaintext baseline). E2EE\'s cost is paid at the ENDPOINTS (encrypt at producer, decrypt at consumer); any consumer-side g2g increase versus the plaintext baseline is per-frame SFrame DECRYPT stacked on the co-located decode, NOT a relay or per-user-deployment limit. The relay-blind property is proven separately in the W5 M2/M3 lane (p10-relayblind: the forwarded body is GCM-opaque, undecodable without the key).',
+    );
   }
 
   return {

@@ -297,6 +297,17 @@ describe('reframe: mediaSecurity must be self-declared (fail-closed)', () => {
       c.honesty.some((h) => /Measured on the PLAINTEXT SFU-forward path/i.test(h)),
     ).toBe(false);
   });
+
+  it('an e2ee run emits the E2EE-path / endpoints-pay caveat', () => {
+    const c = aggregate(raw, {
+      runId: 'demo',
+      benchCommit: 'abc123',
+      mediaSecurity: 'e2ee',
+    });
+    expect(
+      c.honesty.some((h) => /Measured on the E2EE path/i.test(h)),
+    ).toBe(true);
+  });
 });
 
 describe('reframe: planning-fields legend + CLI media-security requirement', () => {
