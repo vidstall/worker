@@ -19,6 +19,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_RUN_START = 1783232707672;
 const DEFAULT_ROOM_PREFIX = 'wan-';
@@ -43,13 +44,17 @@ function parseArgs(argv: string[]): {
 }
 
 export function filterAnalysisSet(raw: string, runStart: number, roomPrefix: string): {
-  lines: string[]; kept: number; excluded: number;
+  lines: string[]; kept: number; excluded: number; malformed: number;
 } {
   const rows = raw.split('\n').filter((l) => l.length > 0);
   const lines: string[] = [];
+  let malformed = 0;
   for (const line of rows) {
     let o: unknown;
-    try { o = JSON.parse(line); } catch { continue; } // malformed -> excluded
+    // A line that fails JSON.parse is NOT an ordinary predicate exclusion — it is a
+    // corrupt input row. Count it separately so a malformed line can never hide in
+    // the predicate-exclusion tally (see docs/80-research/evaluation/raw/README.md).
+    try { o = JSON.parse(line); } catch { malformed++; continue; }
     const rec = o as { ts?: unknown; context?: { room_id?: unknown } };
     const ts = rec.ts;
     const roomId = rec.context?.room_id;
@@ -58,22 +63,31 @@ export function filterAnalysisSet(raw: string, runStart: number, roomPrefix: str
       typeof roomId === 'string' && roomId.startsWith(roomPrefix);
     if (keep) lines.push(line); // keep the ORIGINAL bytes, order-preserving
   }
-  return { lines, kept: lines.length, excluded: rows.length - lines.length };
+  // `excluded` is now predicate-only exclusions; malformed rows are reported apart.
+  return { lines, kept: lines.length, excluded: rows.length - lines.length - malformed, malformed };
 }
 
 function main(): void {
   const { input, output, runStart, roomPrefix } = parseArgs(process.argv.slice(2));
   const raw = readFileSync(input, 'utf8');
-  const { lines, kept, excluded } = filterAnalysisSet(raw, runStart, roomPrefix);
+  const { lines, kept, excluded, malformed } = filterAnalysisSet(raw, runStart, roomPrefix);
   const body = lines.join('\n') + '\n'; // trailing newline, matching the captured file
   const sha = createHash('sha256').update(Buffer.from(body, 'utf8')).digest('hex').toUpperCase();
   if (output !== undefined) writeFileSync(output, body);
   process.stderr.write(
-    `filter-star-analysis-set: kept=${kept} excluded=${excluded} ` +
+    `filter-star-analysis-set: kept=${kept} excluded=${excluded} malformed=${malformed} ` +
     `(predicate: ts>=${runStart} AND room_id^${roomPrefix}) output-sha256=${sha}\n`,
   );
+  if (malformed > 0) {
+    process.stderr.write(
+      `filter-star-analysis-set: WARNING ${malformed} malformed (non-JSON) line(s) were ` +
+      `skipped and are NOT counted as predicate exclusions\n`,
+    );
+  }
   if (output === undefined) process.stdout.write(body);
 }
 
-// Run only when invoked directly (not when imported for tests).
-main();
+// Run only when invoked directly (not when imported for tests). This file is ESM
+// (`"type": "module"`), so compare argv[1] to the resolved module path.
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+if (isMain) { main(); }
