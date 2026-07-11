@@ -25,7 +25,8 @@ import type { LatencyEvent } from '@dvconf/shared';
  *
  * Camera-sensor+USB capture is deliberately NOT in this constant: RTCStats timing starts
  * at the encoder, so the whole capture path is upstream of every measured term. Fake-device
- * sessions have ~0 capture (residual = display only → this constant is exact); the
+ * sessions have ~0 capture (residual = display only), but 12.5 ms remains a fixed modelling
+ * constant (band midpoint), not a measured value; the
  * REQ-WLM-01a real-camera subset must report capture as a measured/bounded term (~tens of ms,
  * up to ~100 ms dominant for USB webcams), never folded into RESIDUAL_MS.
  * Ref: Transitive Robotics, "WebRTC Latency: A Breakdown" (infinite-mirror measurement).
@@ -75,10 +76,12 @@ export function assembleOneWay(events: LatencyEvent[]): OneWayRow[] {
     // L_present (requestVideoFrameCallback) absent -> treated as 0, making oneWayMs a conservative
     // LOWER BOUND for that session. Coverage (RESOLVED 2026-07-05): rVFC is Baseline "widely available"
     // since Oct 2024 — Chrome/Edge 83+ (2020-05), Safari 15.4+ (2022-03), Firefox 132+ (2024-10) [MDN/
-    // caniuse]. The Playwright driver runs Chromium, so present_recv is ALWAYS captured for the >=30
-    // automatable sessions and this lower-bound branch does NOT trigger there; it only bites hypothetical
-    // pre-132 Firefox clients. So the manuscript row is exact for the automated harness (same labeled
-    // standard as RESIDUAL_MS / ND-3).
+    // caniuse]. The Playwright driver runs Chromium and rVFC is Baseline-available, so a harness that
+    // surfaces present_recv COULD capture it; empirically, however, the STAR run wan-20260705T060736
+    // emitted ZERO L_present samples (see docs/80-research/evaluation/raw/README.md), so this `?? 0`
+    // fallback DID fire for every session and the reported figure is a LOWER BOUND, not exact. The
+    // fallback is safe -- folding 0 for a non-negative term cannot inflate the total -- by design;
+    // the absence itself is a property of this run, not a guarantee.
     if (
       encodeSend === undefined || rttSend === undefined || rttRecv === undefined ||
       jitterBufferRecv === undefined || decodeRecv === undefined
