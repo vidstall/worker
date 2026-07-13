@@ -1,5 +1,5 @@
 /**
- * Offline failover-detector smoke — feeds 5 synthetic scenarios into the
+ * Offline failover-detector smoke — feeds 6 synthetic scenarios into the
  * detector state machine and emits a JSON summary on stdout. No chain, no
  * mediasoup, no devnet dependency — purely validates the analyzer half of
  * the failover surface added by Task #30 (scope-B).
