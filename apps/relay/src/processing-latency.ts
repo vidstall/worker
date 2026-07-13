@@ -15,11 +15,14 @@
  * do the correlation + percentile summary so that logic is unit-tested (`pnpm
  * test`) independently of the real-worker bench.
  *
- * IMPORTANT — the measured number is an UPPER BOUND on a production relay's
- * per-hop processing latency: the DirectTransport in/out path crosses the
- * JS↔C++ worker channel twice (marshalling that a real UDP WebRtc/Pipe forward,
- * which stays entirely in C++, does NOT incur). Reported as a separately-bounded
- * term, never folded into `t_hop_network`.
+ * IMPORTANT — the measured number is a CONSERVATIVE PROXY for the tested
+ * DirectTransport path, NOT a bound on production forwarding or its scheduling
+ * tails: the DirectTransport in/out path crosses the JS↔C++ worker channel twice
+ * (marshalling that a real UDP WebRtc/Pipe forward, which stays entirely in C++,
+ * does NOT incur), so it overstates the tested path's marshalling — but production
+ * adds SRTP, the real UDP stack, and load-dependent scheduling tails this
+ * single-box bench cannot bound. Reported as a separately-measured term, never
+ * folded into `t_hop_network`.
  *
  * Methodology + result: `docs/80-research/evaluation/star-wan-results.md`
  * (Lane-B processing term) and `docs/80-research/evaluation/evaluation-roadmap.md`

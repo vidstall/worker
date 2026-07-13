@@ -15,13 +15,15 @@
  * number (empirically verified: rxSeq != txSeq), but the media payload is
  * forwarded byte-identical, so an embedded counter is the reliable key.
  *
- * UPPER BOUND, stated honestly: the DirectTransport in/out path crosses the
- * JS↔C++ worker channel twice (marshalling a real UDP WebRtc/Pipe forward, which
- * stays entirely in C++, does not incur). So the measured number OVERSTATES a
- * production relay's pure forward latency. That is the correct direction for a
- * bound: if this upper bound is already ≪ `t_hop_network` (34.5 ms), the per-hop
- * total is network-dominated regardless. Carried as a separately-bounded term,
- * never folded into `t_hop_network`.
+ * CONSERVATIVE PROXY, stated honestly: the DirectTransport in/out path crosses
+ * the JS↔C++ worker channel twice (marshalling a real UDP WebRtc/Pipe forward,
+ * which stays entirely in C++, does not incur). So the measured number OVERSTATES
+ * the marshalling of the TESTED DirectTransport path — it is NOT a bound on
+ * production forwarding or its scheduling tails (production adds SRTP, the real
+ * UDP stack, and load-dependent scheduling tails this single-box bench cannot
+ * bound). On the tested path the proxy sits ≪ `t_hop_network` (34.5 ms), so the
+ * per-hop total is network-dominated for these tested inputs. Carried as a
+ * separately-measured term, never folded into `t_hop_network`.
  *
  * Fan-out sweep (1 vs ~60): answers the methodology's open "does processing
  * latency rise under load?" — 60 ≈ the Lane-C gallery-viewers/core saturation
@@ -131,7 +133,7 @@ async function runFanOut(fanOut: number, n: number, warmup: number): Promise<num
 }
 
 describe('REQ-WLM-08 relay-processing latency — DirectTransport echo, fan-out sweep', () => {
-  it('measures in-process forward latency (UPPER BOUND) at fan-out 1 and ~60', async () => {
+  it('measures in-process forward latency (hermetic DirectTransport proxy) at fan-out 1 and ~60', async () => {
     const N = 400;
     const WARMUP = 20;
     const MEASURED = N - WARMUP;
@@ -149,7 +151,7 @@ describe('REQ-WLM-08 relay-processing latency — DirectTransport echo, fan-out 
     console.log(`[REQ-WLM-08] fanout=60 ${JSON.stringify(s60)}`);
     // eslint-disable-next-line no-console
     console.log(
-      `[REQ-WLM-08] SUMMARY (ms, UPPER BOUND incl. DirectTransport marshalling): ` +
+      `[REQ-WLM-08] SUMMARY (ms, hermetic DirectTransport proxy incl. double JS<->C++ marshalling — not a production bound): ` +
         `fanout1 p50=${s1.p50.toFixed(3)} p95=${s1.p95.toFixed(3)} p99=${s1.p99.toFixed(3)} | ` +
         `fanout60 p50=${s60.p50.toFixed(3)} p95=${s60.p95.toFixed(3)} p99=${s60.p99.toFixed(3)} | ` +
         `t_hop_network=34.5 ms (Lane-B) — processing term is a fraction of the network hop`,

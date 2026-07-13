@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   // primary BEFORE any produce. The primary announces PIPED ids AT PRODUCE TIME
   // (cascadePeers snapshot) and does NOT re-announce an already-created producer
   // to a standby that connects later — so producer-first yields cascadePeers:0
-  // and the standby never mints (empirically confirmed). Consumer-first → the
+  // and the standby never mints (observed in this harness's live runs). Consumer-first → the
   // produce sees cascadePeers:1 → standby mints → RTP crosses the pipe → T7.
   const consumer = await mk('consume', o.relayB, 'hop-consumer');
   await new Promise((r) => setTimeout(r, 5000)); // let the warm-pipe handshake settle
