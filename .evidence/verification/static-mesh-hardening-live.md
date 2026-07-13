@@ -33,13 +33,16 @@ OVERALL: PASS
     chaos kill 4000 (stretch, RESOLVED new primary 0x6d68d53333126631588037f99e06555059bbd18e36fc422ec0398f355e556da7) -> killed:4000:pids=138072
     stretch: 2nd RelayPromoted new_primary=0x768bd7e2efc5ce5cb6d2b0532d40d2f0e9ed07cd5618b547325e7f8a3b3164ca epoch=10
 
+> **Label correction (CH5-R4-005, 2026-07-13):** the raw stdout line `continuity = real-media-flowed(true) AND surviving-relays-serving(true)` above was an over-claim. `real-media-flowed` is a PRE-kill `bytesForwarded=4732` observation; `surviving-relays-serving` is POST-kill WS-port liveness. No post-kill media re-read or re-consume was performed, so D2 proves **pre-kill-media-established + post-kill-survivor-liveness**, NOT post-promotion media continuity. The generator (`run-smh-live.ts` / `evidence.ts`) now emits the corrected label; this frozen 2026-07-08 transcript keeps the original stdout with this note.
+
 ## Honest scope / caveats
 
 - **Live scope = D1a + D1b + D2 ONLY.** This hands-off run proves, on the native N=3
   localnet: D1a (flag-ON strict no-attestation `defer`), D1b (flag-OFF byte-stable
   K_r>=3 placement), and D2 (kill-relay failover with an RPC-verified `RelayPromoted`
-  and same-relay consume continuity). Every on-chain claim is re-read by an independent
-  Sui RPC query, never by a daemon log alone.
+  after verified pre-kill media, with the surviving relay processes/ports staying open ---
+  post-promotion media continuity is NOT asserted; no post-kill media re-read/re-consume is done).
+  Every on-chain claim is re-read by an independent Sui RPC query, never by a daemon log alone.
 - **D3 (reopen re-delivery, REQ-RMS-037) is proven HERMETICALLY, not in this live run.**
   On single-host loopback the standby dials the PRIMARY's SHARED client-WS port (there is
   NO dedicated inter-relay port), and Windows Firewall does not filter loopback traffic —

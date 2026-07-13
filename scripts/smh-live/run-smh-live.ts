@@ -457,7 +457,9 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   // even while media flows), so we prove REAL media SERVER-side via the relay's /metrics/:roomId
   // bytesForwarded (>0 = real bytes forwarded through the relay). Client bytesReceived is still
   // recorded as informational. Cross-failover client RE-consume from the promoted relay is a
-  // separate CLIENT concern (bench peer has no reconnect) — NOT asserted; continuity is SERVER-side.
+  // separate CLIENT concern (bench peer has no reconnect) — NOT asserted. Server-side we prove
+  // pre-kill media established + post-kill survivor process/port liveness, NOT post-promotion media
+  // continuity (no post-kill media re-read / re-consume is performed).
   //
   // Media establishment is FLAKY across the mesh, so ADAPTIVELY POLL the relay bytesForwarded until
   // it is >0 (bounded 90s) BEFORE proceeding to the kill — the pre-existing /metrics/:roomId
@@ -503,16 +505,18 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   lines.push(`swap: old-primary OUT of [0]=${oldOut}, new-primary IN as [0]=${newIn}, room spans>=K_r(3)=${stillKr}`);
   const replaced = oldOut && newIn && stillKr;
 
-  // SERVER-SIDE continuity: the surviving relay WS ports (incl. the promoted relay, now in the
-  // active set per the swap check) stay OPEN + serving. Combined with the PRE-KILL bytesReceived>0
-  // (real media was flowing), this is the honest continuity proof; client re-consume post-failover
-  // is out of charter (documented above).
+  // SERVER-SIDE survivor liveness: the surviving relay WS ports (incl. the promoted relay, now in
+  // the active set per the swap check) stay OPEN + serving. Combined with the PRE-KILL
+  // bytesForwarded>0 (real media flowed BEFORE the kill), this proves pre-kill-media-established +
+  // post-kill-survivor-liveness — it is NOT a post-promotion media-continuity proof: no second media
+  // read / re-consume is performed after the promotion (client re-consume post-failover is out of
+  // charter, documented above). Reserve "continuity" for a real post-promotion media observation.
   const survivingPorts = RELAY_WS_PORTS.filter((p) => p !== primaryPort);
   const surviving = survivingPorts.map((p) => ({ port: p, state: chaos('isopen', p) }));
   lines.push(`surviving relays (incl. promoted): ${surviving.map((x) => `${x.port}=${x.state}`).join(' ')}`);
   const survivingOpen = surviving.every((x) => x.state === 'OPEN');
-  const continuity = mediaFlowing && survivingOpen;
-  lines.push(`continuity = real-media-flowed(${mediaFlowing}) AND surviving-relays-serving(${survivingOpen})`);
+  const preKillMediaAndSurvivorsServing = mediaFlowing && survivingOpen;
+  lines.push(`pre-kill-media-established(${mediaFlowing}) AND post-kill-survivors-serving(${survivingOpen}) [NOT a post-promotion media-continuity proof — no post-kill media re-read]`);
 
   // Stretch (NON-FATAL): promotion-dedup is per (room, oldPrimary), so killing the NEW primary fires
   // a SECOND RelayPromoted. Resolve the NEW primary's port FROM CHAIN (exact — not a heuristic).
@@ -539,7 +543,7 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
 
   await fleet.stopAll();
 
-  const verdict: PhaseResult['verdict'] = promo !== null && primaryDown && replaced && continuity ? 'PASS' : 'FAIL';
+  const verdict: PhaseResult['verdict'] = promo !== null && primaryDown && replaced && preKillMediaAndSurvivorsServing ? 'PASS' : 'FAIL';
   return { phase: 'D2', verdict, lines };
 }
 

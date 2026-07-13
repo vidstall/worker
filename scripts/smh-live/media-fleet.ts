@@ -9,7 +9,8 @@
  * so a kill-relay failover is observable end-to-end).
  *
  * A no-op `WriterLike` is passed because the fleet does not sample latency (D2/D3 assert
- * on-chain promotion + consume continuity, not `L_g2g`).
+ * on-chain promotion + pre-kill media establishment + post-kill survivor liveness, not
+ * post-promotion media continuity and not `L_g2g`).
  *
  * ── D2 media-hardening (this file) ──
  * The D2 hard gate requires SERVER-side `bytesForwarded>0` on the primary relay BEFORE
@@ -78,7 +79,7 @@ export interface FleetPeer {
   relayUrl: string;
   /** The distinct peer id used on the join. */
   peerId: string;
-  /** Current total inbound media bytes for this peer (>0 proves REAL media flowed, D2 continuity). */
+  /** Current total inbound media bytes for this peer (>0 proves REAL media flowed pre-kill; D2 media-establishment gate, NOT a post-promotion continuity proof). */
   bytesReceived: () => Promise<number>;
   /** Number of consumers this peer has established (>0 = actively receiving a remote track). */
   consumerCount: () => number;

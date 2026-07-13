@@ -164,7 +164,7 @@ describe('extractRttOnly', () => {
   });
 });
 
-// ── extractBytesReceived (SMH-LIVE D2 real-continuity) ────────────────
+// ── extractBytesReceived (SMH-LIVE D2 pre-kill media establishment) ────────────────
 
 describe('extractBytesReceived', () => {
   it('sums bytesReceived across all inbound-rtp entries (ignores other stat types)', () => {
