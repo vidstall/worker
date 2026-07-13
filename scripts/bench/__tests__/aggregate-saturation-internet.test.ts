@@ -14,8 +14,9 @@ describe('aggregate-saturation-internet', () => {
     expect(curated.dropRelay.relaysAfter).toBeGreaterThanOrEqual(2);
     // Reframe: binding is a DERIVED saturation verdict; the fixture relay never
     // approached a core (max cpuCoresSrtp ~0.28), so it is 'not-saturated' and
-    // the <=540 SRTP-ceiling guard does NOT apply (cWorkerSrtp is a headroom
-    // indicator here, not a claimed operating ceiling).
+    // the DirectTransport-boundary caveat requirement does NOT apply
+    // (cWorkerSrtp is a headroom indicator here, not a claimed operating
+    // ceiling). There is NO numeric cap on cWorkerSrtp (CH5-R6-001).
     expect(curated.twoCeiling.binding).toBe('not-saturated');
     expect(curated.honesty.length).toBeGreaterThan(0);
   });

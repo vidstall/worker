@@ -5,10 +5,14 @@
  * at the target concurrency:
  *
  *   1. CPU ceiling — a mediasoup Worker forwards at most `C_worker` SRTP paths
- *      before its core saturates. The DirectTransport micro-bench put this at an
- *      optimistic ~540; real SRTP encryption on the wire can only *lower* it (we
- *      recompute `cWorkerSrtp` from the MEASURED per-path CPU slope). Relays
- *      needed on CPU grounds: ceil(N * pathsPerViewer / C_worker_srtp).
+ *      before its core saturates. The DirectTransport micro-bench's last
+ *      delivery-healthy sample was 540 paths on one laptop (the DirectTransport
+ *      boundary itself is UNKNOWN — >540; the harness broke at 720). The
+ *      real-SRTP ceiling is LOWER than that UNKNOWN boundary, but its relation
+ *      to 540 (or any measured point) is UNMEASURED — which is why we recompute
+ *      `cWorkerSrtp` from the MEASURED per-path CPU slope instead of assuming
+ *      any relation. Relays needed on CPU grounds:
+ *      ceil(N * pathsPerViewer / C_worker_srtp).
  *
  *   2. Bandwidth ceiling — each relay NIC is capped at `nicMbps`; the MEASURED
  *      real per-viewer egress (`mbpsPerViewerReal`, from the standby capped-NIC

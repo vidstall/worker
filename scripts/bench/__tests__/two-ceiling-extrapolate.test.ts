@@ -4,7 +4,7 @@ import { extrapolateTwoCeiling } from '../two-ceiling-extrapolate';
 describe('extrapolateTwoCeiling', () => {
   it('recomputes the two ceilings on measured slopes and binds on the tighter', () => {
     const r = extrapolateTwoCeiling({
-      cpuCoresPerPathSrtp: 1 / 480,   // -> C_worker_srtp = 480 (<=540, SRTP lowered it)
+      cpuCoresPerPathSrtp: 1 / 480,   // -> C_worker_srtp = 480 (recomputed from the measured SRTP slope; no relation to the 540 DirectTransport floor is assumed)
       mbpsPerViewerReal: 3.0,         // real capped-NIC per-viewer
       nicMbps: 100, nAtTarget: 100, pathsPerViewer: 9,
     });

@@ -41,7 +41,11 @@
  *
  * ── Honesty bounds (mechanism-floor discipline, mirrors P9 + relay-overlap) ───
  *  - DirectTransport SKIPS SRTP encrypt/decrypt — real WebRTC pays that per
- *    packet, so the measured CPU is OPTIMISTIC (real ceiling is LOWER).
+ *    packet, so the measured CPU is OPTIMISTIC. The real-SRTP ceiling is LOWER
+ *    than the UNKNOWN DirectTransport boundary (this harness's boundary was
+ *    never located — it broke before reaching it); the real-SRTP ceiling's
+ *    relation to any measured point (e.g. the 540-path delivery-healthy
+ *    sample) is UNMEASURED.
  *  - Single box, synthetic RTP source, no WAN, no jitter/congestion control.
  *  - One Worker == one core. Multi-worker / multi-node cascade (which spreads a
  *    big room across cores/hosts) is NOT built (DA-5) — extrapolating past one
@@ -580,7 +584,7 @@ describe('W5 M1 — single-worker forwarding-ceiling bench (REAL mediasoup, advi
         cRelayPaths,
         audioBakedIn,
         honest_note:
-          'ONE mediasoup Worker (==one core) forwarding ceiling. DirectTransport SKIPS SRTP -> measured CPU is OPTIMISTIC, real WebRTC ceiling is LOWER. Single box, synthetic RTP, no WAN/jitter. Multi-worker/multi-node cascade (DA-5) NOT built; extrapolating past one worker is a documented assumption, not a measurement. Exploratory curve, not a pass/fail gate.',
+          'ONE mediasoup Worker (==one core) forwarding ceiling. DirectTransport SKIPS SRTP -> measured CPU is OPTIMISTIC; the real-SRTP ceiling is LOWER than the UNKNOWN DirectTransport boundary, and its relation to any measured point (e.g. the 540-path delivery-healthy sample) is UNMEASURED. Single box, synthetic RTP, no WAN/jitter. Multi-worker/multi-node cascade (DA-5) NOT built; extrapolating past one worker is a documented assumption, not a measurement. Exploratory curve, not a pass/fail gate.',
         audio_note:
           'audio-only fan-out is O(N^2); C_relay = cores*C_worker is an EXTRAPOLATION not a measurement; SRTP skipped -> CPU optimistic, +-2-3x variance. Synthetic Opus carries the ssrc-audio-level RTP header extension (mediasoup level meter does not decode payload); no server-side audio last-N (REQ-RMS-012 deferred), so audio paths are counted CONSERVATIVELY.',
       };

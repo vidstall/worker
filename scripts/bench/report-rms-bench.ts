@@ -57,7 +57,7 @@ L.push('- Reproduce: `pnpm bench:rms`.');
 L.push('');
 L.push('## Honesty / bounds (mechanism-floor)');
 L.push('');
-L.push('- **DirectTransport SKIPS SRTP** -> measured CPU is OPTIMISTIC; the real WebRTC ceiling is LOWER (+-2-3x variance, not reproducible).');
+L.push('- **DirectTransport SKIPS SRTP** -> measured CPU is OPTIMISTIC; the real-SRTP ceiling is LOWER than the UNKNOWN DirectTransport boundary, and its relation to any measured point is UNMEASURED (+-2-3x variance, not reproducible).');
 L.push('- **C_relay is extrapolated**, not measured: a single Worker was benched; cross-worker spread is NOT built in M1.');
 L.push('- **Audio fan-out is ~O(N^2)** with no server-side last-N (REQ-RMS-012 deferred); audio paths counted CONSERVATIVELY.');
 L.push('- Single box, synthetic RTP, no WAN/jitter. This proves the MECHANISM-FLOOR, not a production capacity number.');

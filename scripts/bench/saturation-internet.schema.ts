@@ -78,12 +78,28 @@ export interface DropRelayEvent {
  *                        run: relay peaked at ~5% of a core; it was never the
  *                        bottleneck). When 'not-saturated', `cWorkerSrtp` is a
  *                        HEADROOM indicator (= 1/measured-slope), NOT a claimed
- *                        operating ceiling — so the `<=540` DirectTransport guard
- *                        does NOT apply. The guard fires ONLY when 'cpu' (or when
- *                        `binding` is absent, for legacy artifacts).
+ *                        operating ceiling — so the DirectTransport-boundary
+ *                        caveat requirement does NOT apply. The requirement fires
+ *                        ONLY when 'cpu' (or when `binding` is absent, for legacy
+ *                        artifacts).
+ *
+ * There is deliberately NO numeric cap on `cWorkerSrtp` (CH5-R6-001): 540
+ * forward-paths is the last delivery-healthy sample of the DirectTransport
+ * harness on ONE laptop (i9-12900HK) — a harness-domain FLOOR, not a ceiling.
+ * The DirectTransport boundary itself is UNKNOWN (>540; the harness broke at
+ * 720). The real-SRTP ceiling is lower than that UNKNOWN boundary, but its
+ * relation to 540 (or any measured point) is UNMEASURED — and `cWorkerSrtp`
+ * comes from different hardware (Azure VMs), so a numeric `<=540` cap would
+ * reject legitimate measurements the evidence does not rule out. Instead a
+ * CPU-bound artifact must CARRY the DirectTransport-boundary honesty caveat
+ * (fail-closed on the caveat's PRESENCE, not on a number).
  */
 export interface TwoCeilingReal {
-  /** = round(1/measured per-path CPU slope). Guarded (<=540) ONLY when binding==='cpu'. */
+  /**
+   * = round(1/measured per-path CPU slope). When binding==='cpu' (or absent),
+   * the artifact must carry the DirectTransport-boundary honesty caveat — no
+   * numeric cap (see interface doc: 540 is a one-laptop harness floor).
+   */
   cWorkerSrtp: number;
   /** Explicit label for cWorkerSrtp (headroom-vs-ceiling), so it is never misread. */
   cWorkerSrtpNote: string;
@@ -280,18 +296,34 @@ export function validateCurated(o: CuratedSaturationInternet): string[] {
     }
   }
 
-  // Two-ceiling: the <=540 SRTP guard applies ONLY when the relay was CPU-bound.
-  // When binding is absent (legacy artifacts) we DEFAULT to applying the guard,
-  // so a legacy CPU-bound overclaim can never slip through fail-open.
+  // Two-ceiling: the DirectTransport-boundary CAVEAT requirement applies ONLY
+  // when the relay was CPU-bound. When binding is absent (legacy artifacts) we
+  // DEFAULT to applying the requirement, so a legacy CPU-bound overclaim can
+  // never slip through fail-open.
+  //
+  // WHY a caveat-presence check and NOT a numeric `<=540` cap (CH5-R6-001):
+  // 540 forward-paths is a delivery-healthy DirectTransport-harness FLOOR on
+  // one laptop (i9-12900HK), not a ceiling — the DirectTransport boundary is
+  // UNKNOWN (>540; the harness broke at 720), the real-SRTP ceiling's relation
+  // to 540 is UNMEASURED, and cWorkerSrtp is measured on different hardware
+  // (Azure VMs). A numeric cap would reject legitimate measurements in
+  // (540, DT-boundary] that the evidence does not rule out. Fail-closed is
+  // preserved by requiring the artifact to NAME the boundary relation in
+  // honesty[] whenever it claims a CPU-bound cWorkerSrtp.
+  const honesty = Array.isArray(o.honesty) ? o.honesty : [];
   const binding = o.twoCeiling?.binding;
   const guardApplies = binding === 'cpu' || binding === undefined;
+  const hasDtBoundaryCaveat = honesty.some(
+    (h) => /DirectTransport/i.test(h) && /boundary|unmeasured|unknown/i.test(h),
+  );
   if (
     guardApplies &&
     isFiniteNumber(o.twoCeiling?.cWorkerSrtp) &&
-    o.twoCeiling.cWorkerSrtp > 540
+    !hasDtBoundaryCaveat
   ) {
     violations.push(
-      'cWorkerSrtp > 540 (SRTP cannot exceed DirectTransport ceiling when CPU-bound)',
+      'cpu-bound artifact missing the DirectTransport-boundary caveat ' +
+        '(real-SRTP ceiling vs the UNKNOWN DirectTransport boundary is unmeasured)',
     );
   }
 
@@ -323,7 +355,6 @@ export function validateCurated(o: CuratedSaturationInternet): string[] {
   // honesty[] must DOCUMENT both load-bearing caveats:
   //   (1) the relay was sub-saturated / has headroom (relay NOT the bottleneck);
   //   (2) the consumer knee is a CO-LOCATION artifact (not a per-user limit).
-  const honesty = Array.isArray(o.honesty) ? o.honesty : [];
   const hasHeadroomCaveat = honesty.some((h) =>
     /headroom|sub-saturat|not saturat|never approached|not the bottleneck/i.test(h),
   );

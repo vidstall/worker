@@ -3,14 +3,17 @@
  *
  * Reads the committed raw localnet gas capture and emits the §5.3 cost tables:
  *   - per-function gas (computation / storage / rebate / nonRefundable / net) in MIST
- *   - cost-class bundles (one-time deploy, per-user, per-node enrol, per-SESSION)
+ *   - cost-class bundles (one-time deploy, per-user, node-enrolment coverage bundle (synthetic), per-SESSION)
  *   - per-session under three honest measures:
  *       (A) computation-only        — never rebated (protocol-deterministic)
  *       (B) computation + nonRefundable storage fee — MINIMUM irreversible cost
  *       (C) net (= comp + storage - rebate) — includes refundable storage deposits
  *   - SUI (= MIST / 1e9) + USD at a PARAMETERIZED SUI price (default = manuscript
  *     design-assumption $1.50, clearly labelled), + the break-even SUI price at
- *     which a session fits the $0.01/room design target.
+ *     which a session fits the $0.01/room design target. Session costs are a
+ *     single-relay (K=1), first-proof-linearized LOWER-BOUND projection, so the
+ *     break-even prices derived from them are OPTIMISTIC UPPER BOUNDS on the
+ *     shipped-K=2 allowable SUI price (break-even price = target / cost).
  *
  * Gas provenance (from the raw meta line): protocolVersion 113, referenceGasPrice
  * 1000, framework rev 8fc60f1, CLI 1.66.2, localnet. computationCost is already in
@@ -85,7 +88,9 @@ p('');
 // ---- cost classes ----
 const ONE_TIME_DEPLOY = ['publish'];
 const PER_USER = ['register_user'];
-const PER_NODE_ENROL = ['register', 'cast_role_vote', 'apply_voted_role', 'register_relay', 'register_validator', 'self_assign_session_wallet'];
+// Synthetic coverage bundle spanning BOTH enrolment paths; production role selection is one XOR
+// branch (relay | signaling | validator, role-voter.ts), so no single node pays all six.
+const ENROL_COVERAGE_BUNDLE = ['register', 'cast_role_vote', 'apply_voted_role', 'register_relay', 'register_validator', 'self_assign_session_wallet'];
 // per-SESSION core (per §5.3.1: room creation, pairing assignment, N session proofs, distribution)
 const SESSION_FIXED = ['create_room', 'create_escrow', 'submit_pairing_proposal', 'close_room', 'distribute_rewards'];
 const SESSION_PER_VALIDATOR = ['submit_session_proof'];
@@ -103,12 +108,13 @@ p(`| class | txs | computation | comp+nonRefundable | net | USD compNonR/net |`)
 p(`|---|---|--:|--:|--:|--:|`);
 classLine('one-time DEPLOY (publish)', ONE_TIME_DEPLOY);
 classLine('per-USER register (one-time)', PER_USER);
-classLine('per-NODE enrol (one-time/node)', PER_NODE_ENROL);
+classLine('node-enrolment coverage bundle (synthetic; not a realizable per-node cost — role selection is relay XOR validator)', ENROL_COVERAGE_BUNDLE);
 p('');
 
 // ---- per-session under three measures x N validators ----
 p(`## Per-SESSION cost x config (N validators) x SUI price — the sensitivity envelope`);
 p(`core = ${SESSION_FIXED.join(' + ')} + N x submit_session_proof. N is the dominant CONFIG lever (DEFAULT_MIN_VALIDATORS_PER_ROOM; BFT-safe min = 3 per QUORUM_THRESHOLD).`);
+p(`K note: the cost columns below are a single-relay (K=1), first-proof-linearized LOWER-BOUND projection; the break-even columns are correspondingly OPTIMISTIC UPPER BOUNDS on the shipped-K=2 allowable SUI price (break-even price = target ÷ cost, so a lower-bound cost yields an upper-bound price). The shipped path submits one proof per validator per assigned relay (default K=2, DEFAULT_MIN_RELAYS_PER_ROOM), so the total proof count grows with K×N and the exact shipped-K=2 break-even and full-session delta remain unmeasured; the harness logs one submit_session_proof and this aggregator linearizes it ×N with no K/per-relay factor.`);
 p(`| N | (B) irreversible MIST | (B) SUI | (B) USD@$${SUI_USD.toFixed(2)} | (C) net USD@$${SUI_USD.toFixed(2)} | break-even SUI for $0.01 (B) | (C) | note |`);
 p(`|--:|--:|--:|--:|--:|--:|--:|---|`);
 for (const N of [2, 3, 4, 5]) {
@@ -132,6 +138,7 @@ p(`- irreversible (comp+nonRefundable) = ${B4} MIST = ${mistToSui(B4).toFixed(6)
 p(`- net (incl. refundable storage deposits) = ${C4} MIST = ${mistToSui(C4).toFixed(6)} SUI = $${usd(C4).toFixed(5)} @ $${SUI_USD.toFixed(2)}/SUI`);
 p(`- fits $0.01 target @ $${SUI_USD.toFixed(2)}/SUI:  irreversible=${usd(B4) <= TARGET_USD ? 'YES' : 'NO'}  net=${usd(C4) <= TARGET_USD ? 'YES' : 'NO'}`);
 p(`- BREAK-EVEN SUI price for $0.01/room:  irreversible <= $${breakevenB.toFixed(4)}/SUI ; net <= $${breakevenC.toFixed(4)}/SUI`);
+p(`- K/bound direction: the cost figures above are a single-relay (K=1), first-proof-linearized LOWER-BOUND projection; the break-even prices are correspondingly OPTIMISTIC UPPER BOUNDS on the shipped-K=2 allowable SUI price (break-even price = target ÷ cost). The shipped path submits one proof per validator per assigned relay (default K=2), so the exact shipped-K=2 break-even and full-session delta remain unmeasured.`);
 p('');
 
 const canonical = out.join('\n');

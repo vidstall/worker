@@ -1,16 +1,22 @@
 /**
  * Reframe invariants — relay-saturation INTERNET curated schema (real-bitrate run).
  *
- * The `<=540` DirectTransport worker-ceiling guard was CATEGORY-WRONG for the
- * internet real-bitrate scenario: the relay never approached its CPU ceiling
- * (max cpuCoresSrtp ~5% of a core), so `cWorkerSrtp = round(1/measured-slope)`
- * comes out huge (~2250) — a HEADROOM indicator, not a claimed operating
- * ceiling. These tests pin the reframed, still-fail-closed contract:
+ * The old `<=540` DirectTransport worker-ceiling guard was CATEGORY-WRONG twice
+ * over: (1) for the internet real-bitrate scenario the relay never approached
+ * its CPU ceiling (max cpuCoresSrtp ~5% of a core), so `cWorkerSrtp =
+ * round(1/measured-slope)` comes out huge (~2250) — a HEADROOM indicator, not a
+ * claimed operating ceiling; and (2) 540 is a delivery-healthy
+ * DirectTransport-harness FLOOR on one laptop (i9-12900HK), NOT a ceiling — the
+ * DirectTransport boundary is UNKNOWN (>540; harness broke at 720), the
+ * real-SRTP ceiling's relation to 540 is UNMEASURED, and cWorkerSrtp comes from
+ * Azure VMs (CH5-R6-001). These tests pin the reframed, still-fail-closed
+ * contract:
  *
  *   - binding is DERIVED from measured relay-CPU headroom: 'cpu' iff a rung
- *     approached a core (> 0.5), else 'not-saturated'. The `<=540` guard fires
- *     ONLY when binding==='cpu' (and for legacy artifacts where binding is
- *     absent — those default to the cpu guard).
+ *     approached a core (> 0.5), else 'not-saturated'. When binding==='cpu'
+ *     (and for legacy artifacts where binding is absent — those default to the
+ *     requirement) the artifact must CARRY the DirectTransport-boundary honesty
+ *     caveat; there is NO numeric cap on cWorkerSrtp.
  *   - MEASURED fail-closed gates: egress linearity, delivery==1 all rungs,
  *     identity 0-mismatch all rungs (incl. clean:false rungs), relaysAfter>=2.
  *   - the CONSUMER-DECODE knee is present + located (derived from g2g p99).
@@ -81,8 +87,19 @@ describe('reframe: binding is a DERIVED saturation verdict', () => {
   });
 });
 
-describe('reframe: the 540 guard is binding-conditional (fail-closed preserved)', () => {
-  it("does NOT trip 540 when binding is 'not-saturated', even with a huge cWorkerSrtp", () => {
+/** The violation emitted when a CPU-bound artifact lacks the DT-boundary caveat. */
+const DT_CAVEAT_VIOLATION =
+  'cpu-bound artifact missing the DirectTransport-boundary caveat ' +
+  '(real-SRTP ceiling vs the UNKNOWN DirectTransport boundary is unmeasured)';
+
+/** An honesty entry that satisfies the DirectTransport-boundary requirement. */
+const DT_CAVEAT =
+  'Real-SRTP ceiling is LOWER than the UNKNOWN DirectTransport boundary ' +
+  '(>540 forward-paths; the harness broke at 720); its relation to 540 or any ' +
+  'measured point is UNMEASURED.';
+
+describe('reframe: the DirectTransport-boundary caveat requirement is binding-conditional (fail-closed preserved)', () => {
+  it("does NOT require the caveat when binding is 'not-saturated', even with a huge cWorkerSrtp", () => {
     const c = validCurated();
     const huge = {
       ...c,
@@ -95,18 +112,16 @@ describe('reframe: the 540 guard is binding-conditional (fail-closed preserved)'
     expect(validateCurated(huge)).toEqual([]);
   });
 
-  it("STILL trips 540 when binding==='cpu' and cWorkerSrtp>540 (overclaim guard)", () => {
+  it("trips when binding==='cpu' and the DirectTransport-boundary caveat is MISSING", () => {
     const c = validCurated();
-    const overclaim = {
+    const uncaveated = {
       ...c,
       twoCeiling: { ...c.twoCeiling, binding: 'cpu' as const, cWorkerSrtp: 2250 },
     };
-    expect(validateCurated(overclaim)).toContain(
-      'cWorkerSrtp > 540 (SRTP cannot exceed DirectTransport ceiling when CPU-bound)',
-    );
+    expect(validateCurated(uncaveated)).toContain(DT_CAVEAT_VIOLATION);
   });
 
-  it('defaults to applying the 540 guard when binding is absent (legacy artifact)', () => {
+  it('defaults to requiring the caveat when binding is absent (legacy artifact, fail-closed)', () => {
     const c = validCurated();
     const legacy = {
       ...c,
@@ -114,21 +129,33 @@ describe('reframe: the 540 guard is binding-conditional (fail-closed preserved)'
     } as CuratedSaturationInternet;
     // Strip the binding field to simulate a legacy artifact.
     delete (legacy.twoCeiling as { binding?: unknown }).binding;
-    expect(validateCurated(legacy)).toContain(
-      'cWorkerSrtp > 540 (SRTP cannot exceed DirectTransport ceiling when CPU-bound)',
-    );
+    expect(validateCurated(legacy)).toContain(DT_CAVEAT_VIOLATION);
   });
 
-  it('legacy cWorkerSrtp=540 (not >540) still passes the guard', () => {
+  it('accepts a CPU-bound cWorkerSrtp in (540, 750] when the caveat IS present (no numeric cap)', () => {
+    // The point of CH5-R6-001: 540 is a one-laptop DirectTransport-harness
+    // FLOOR, not a ceiling — a properly-caveated 720 must NOT be rejected.
+    const c = validCurated();
+    const caveated = {
+      ...c,
+      twoCeiling: { ...c.twoCeiling, binding: 'cpu' as const, cWorkerSrtp: 720 },
+      honesty: [...c.honesty, DT_CAVEAT],
+    };
+    expect(validateCurated(caveated)).toEqual([]);
+  });
+
+  it('accepts a legacy (binding-absent) artifact at ANY cWorkerSrtp once the caveat is present', () => {
     const c = validCurated();
     const legacy = {
       ...c,
       twoCeiling: { ...c.twoCeiling, cWorkerSrtp: 540 },
+      honesty: [...c.honesty, DT_CAVEAT],
     } as CuratedSaturationInternet;
     delete (legacy.twoCeiling as { binding?: unknown }).binding;
-    // No cWorkerSrtp violation (540 is not > 540).
     expect(
-      validateCurated(legacy).filter((v) => v.includes('cWorkerSrtp')),
+      validateCurated(legacy).filter(
+        (v) => v.includes('cWorkerSrtp') || v.includes('DirectTransport'),
+      ),
     ).toEqual([]);
   });
 });
