@@ -301,8 +301,9 @@ export function aggregate(
     'Mesh re-formation after failover is deferred (REQ-RMS-023, out of scope for this run).',
   ];
 
-  // Plaintext runs must declare that the relay capacity is E2EE-INVARIANT (the
-  // relay is content-blind; E2EE's cost is paid at the endpoints, not the relay).
+  // Plaintext runs must declare that no material relay-capacity difference was
+  // resolved between the plaintext and E2EE arms (the relay is content-blind — it
+  // forwards opaque bytes; any endpoint cost is paid at encrypt/decrypt, not the relay).
   if (meta.mediaSecurity === 'plaintext') {
     honesty.push(
       'Measured on the PLAINTEXT SFU-forward path (e2ee=off). No material relay-capacity difference was resolved between the plaintext and E2EE arms through N=15 (comparable-load cross-runs, not matched arms): the relay is content-blind — it forwards opaque bytes and performs the same class of hop-by-hop DTLS-SRTP transport work whether or not the E2EE inner layer (SFrame/insertable streams) is present, so no E2EE-specific relay cost was resolved (any endpoint cost is paid at encrypt/decrypt). The relay-blind property itself is proven separately in the W5 M2/M3 lane (p10-relayblind harness: relay forwards the E2EE stream but the forwarded body is GCM-opaque, undecodable without the key).',
