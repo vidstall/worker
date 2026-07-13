@@ -506,7 +506,7 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   const replaced = oldOut && newIn && stillKr;
 
   // SERVER-SIDE survivor liveness: the surviving relay WS ports (incl. the promoted relay, now in
-  // the active set per the swap check) stay OPEN + serving. Combined with the PRE-KILL
+  // the active set per the swap check) stay OPEN (TCP LISTEN socket only). Combined with the PRE-KILL
   // bytesForwarded>0 (real media flowed BEFORE the kill), this proves pre-kill-media-established +
   // post-kill-survivor-liveness — it is NOT a post-promotion media-continuity proof: no second media
   // read / re-consume is performed after the promotion (client re-consume post-failover is out of
@@ -515,8 +515,8 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   const surviving = survivingPorts.map((p) => ({ port: p, state: chaos('isopen', p) }));
   lines.push(`surviving relays (incl. promoted): ${surviving.map((x) => `${x.port}=${x.state}`).join(' ')}`);
   const survivingOpen = surviving.every((x) => x.state === 'OPEN');
-  const preKillMediaAndSurvivorsServing = mediaFlowing && survivingOpen;
-  lines.push(`pre-kill-media-established(${mediaFlowing}) AND post-kill-survivors-serving(${survivingOpen}) [NOT a post-promotion media-continuity proof — no post-kill media re-read]`);
+  const preKillMediaAndSurvivorPortsOpen = mediaFlowing && survivingOpen;
+  lines.push(`pre-kill-media-established(${mediaFlowing}) AND post-kill-survivor-ports-open(${survivingOpen}) [TCP LISTEN only, NOT a post-promotion media-continuity proof — no post-kill media re-read]`);
 
   // Stretch (NON-FATAL): promotion-dedup is per (room, oldPrimary), so killing the NEW primary fires
   // a SECOND RelayPromoted. Resolve the NEW primary's port FROM CHAIN (exact — not a heuristic).
@@ -543,7 +543,7 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
 
   await fleet.stopAll();
 
-  const verdict: PhaseResult['verdict'] = promo !== null && primaryDown && replaced && preKillMediaAndSurvivorsServing ? 'PASS' : 'FAIL';
+  const verdict: PhaseResult['verdict'] = promo !== null && primaryDown && replaced && preKillMediaAndSurvivorPortsOpen ? 'PASS' : 'FAIL';
   return { phase: 'D2', verdict, lines };
 }
 
