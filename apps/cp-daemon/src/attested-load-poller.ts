@@ -25,10 +25,12 @@ export function startAttestedLoadPoller(args: {
   const attestedLoad = new Map<string, AttestedLoad>();
   // Re-entrancy note (REQ-RMS-022 D1, reviewer carry-forward): setInterval does NOT await refresh,
   // so a fetch that outlives pollMs could interleave with the next tick and apply an OUT-OF-ORDER
-  // snapshot (whichever clear()+refill finishes last wins). Harmless in practice — a loopback GET
-  // is sub-ms vs the ~5s cadence, and the feed is bounded by AbortSignal.timeout (fetchAttestedLoad).
-  // RECORDED not fixed; a future fix = an in-flight guard dropping overlapping ticks (verify-loop's
-  // `inFlight` pattern).
+  // snapshot (whichever clear()+refill finishes last wins). Unlikely under the 5s default cadence —
+  // a loopback GET is sub-ms and capped by AbortSignal.timeout(3s) (fetchAttestedLoad) — but NOT an
+  // invariant: RMS_LOAD_FEED_POLL_MS is parsed unvalidated (index.ts), so a sub-3s (or NaN) value
+  // re-opens the overlap window, and a stale snapshot feeds placement directly (event-handler
+  // capacity rows). RECORDED not fixed; a future fix = an in-flight guard dropping overlapping
+  // ticks (verify-loop's `inFlight` pattern).
   const refresh = async (): Promise<void> => {
     const next = await fetcher(args.feedUrl, args.logger);
     attestedLoad.clear();
