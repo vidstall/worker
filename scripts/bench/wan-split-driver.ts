@@ -28,6 +28,7 @@
 import { chromium, type BrowserContext } from 'playwright';
 
 type Role = 'produce' | 'consume';
+type E2eeMode = 'on' | 'off';
 
 export function parseRole(raw: string): { role: Role; relayPin: 'standby' | null; distinguishable: boolean } {
   switch (raw) {
@@ -58,7 +59,7 @@ interface DriverOpts {
   // wan-measure.ts reads `q.get('e2ee') === 'on'` and, when on, attaches the
   // real SFrame transform to BOTH legs — mirrors wan-playwright-driver.ts.
   // Default 'off' preserves plaintext behavior for callers that don't pass it.
-  e2ee: string;
+  e2ee: E2eeMode;
   // Fixed relay room to join for EVERY session, overriding the default `wan-<i>`.
   // WHY: the relay's standby cross-forward (RMS_ACTIVE_FORWARD) is keyed to the
   // ON-CHAIN assigned room id (RoomAssigned.room_id, a 0x… object id), NOT an
@@ -70,18 +71,44 @@ interface DriverOpts {
 
 export function parseArgs(argv: string[]): DriverOpts {
   // A missing value OR a neighbouring `--flag` (operator forgot the value) →
-  // fall back to the default rather than silently swallowing the next flag.
-  const g = (k: string, d: string): string => {
-    const i = argv.indexOf(`--${k}`);
-    const v = i >= 0 ? argv[i + 1] : undefined;
-    return v !== undefined && !v.startsWith('--') ? v : d;
-  };
+  // strict parsing below rejects it instead of silently changing the declared arm.
+  const valueFlags = new Set([
+    '--role', '--start-epoch', '--window-ms', '--teardown-ms', '--sessions',
+    '--page', '--relay', '--bench', '--peer-prefix', '--e2ee', '--room',
+  ]);
+  const switchFlags = new Set(['--real-camera']);
+  const values = new Map<string, string>();
+  const switches = new Set<string>();
+  for (let i = 0; i < argv.length; i += 1) {
+    const flag = argv[i]!;
+    if (!flag.startsWith('--')) throw new Error(`unexpected positional argument: ${flag}`);
+    if (switchFlags.has(flag)) {
+      if (switches.has(flag)) throw new Error(`duplicate option: ${flag}`);
+      switches.add(flag);
+      continue;
+    }
+    if (!valueFlags.has(flag)) throw new Error(`unknown option: ${flag}`);
+    if (values.has(flag)) throw new Error(`duplicate option: ${flag}`);
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`${flag} requires a value`);
+    }
+    values.set(flag, value);
+    i += 1;
+  }
+
+  const g = (k: string, d: string): string => values.get(`--${k}`) ?? d;
   // Numeric flag with a NaN guard — a typo (`--window-ms foo`) must ERROR, not
   // become NaN and make every setTimeout fire immediately (silent zero-windows).
-  const num = (k: string, d: number): number => {
+  const num = (k: string, d: number, minimum: number): number => {
     const raw = g(k, String(d));
-    const n = parseInt(raw, 10);
-    if (!Number.isFinite(n)) throw new Error(`--${k} must be an integer (got "${raw}").`);
+    if (!/^-?\d+$/.test(raw)) {
+      throw new Error(`--${k} must be a strict integer (got "${raw}").`);
+    }
+    const n = Number(raw);
+    if (!Number.isSafeInteger(n) || n < minimum) {
+      throw new Error(`--${k} must be >= ${minimum} (got "${raw}").`);
+    }
     return n;
   };
 
@@ -89,18 +116,30 @@ export function parseArgs(argv: string[]): DriverOpts {
   const { role, relayPin, distinguishable } = parseRole(rawRole);
 
   const startRaw = g('start-epoch', '');
-  const startEpochMs = parseInt(startRaw, 10);
-  if (!startRaw || !Number.isFinite(startEpochMs)) {
+  if (!/^\d+$/.test(startRaw)) {
     throw new Error(
       '--start-epoch <epoch-ms> is REQUIRED and must be IDENTICAL on both machines ' +
         '(the shared wall-clock anchor). Compute once with `node -e "console.log(Date.now()+120000)"` and pass the same value to both.',
     );
   }
+  const startEpochMs = Number(startRaw);
+  if (!Number.isSafeInteger(startEpochMs) || startEpochMs <= 0) {
+    throw new Error('--start-epoch must be a positive safe integer epoch-ms value');
+  }
 
-  const windowMs = num('window-ms', 25000); // per-session budget (~23 samples/session at 1 Hz after teardown)
-  const teardownMs = num('teardown-ms', 2000); // margin before window end to close the context cleanly
+  const windowMs = num('window-ms', 25000, 1); // per-session budget (~23 samples/session at 1 Hz after teardown)
+  const teardownMs = num('teardown-ms', 2000, 0); // margin before window end to close the context cleanly
+  const sessions = num('sessions', 30, 1);
   if (teardownMs >= windowMs) {
     throw new Error(`--teardown-ms (${teardownMs}) must be < --window-ms (${windowMs}), else every session is zero-length.`);
+  }
+  if (windowMs - teardownMs < 1000) {
+    throw new Error('--window-ms minus --teardown-ms must leave at least 1000ms of session budget');
+  }
+
+  const e2eeRaw = g('e2ee', 'off');
+  if (e2eeRaw !== 'on' && e2eeRaw !== 'off') {
+    throw new Error(`--e2ee must be either on or off (got "${e2eeRaw}").`);
   }
 
   return {
@@ -110,13 +149,13 @@ export function parseArgs(argv: string[]): DriverOpts {
     startEpochMs,
     windowMs,
     teardownMs,
-    sessions: num('sessions', 30),
+    sessions,
     pageBase: g('page', 'http://localhost:5173/bench/wan-measure-page.html'),
     relay: g('relay', 'ws://localhost:4000'),
     bench: g('bench', 'http://localhost:8081'),
-    realCamera: argv.includes('--real-camera'),
+    realCamera: switches.has('--real-camera'),
     peerPrefix: g('peer-prefix', role),
-    e2ee: g('e2ee', 'off'), // passthrough to both legs (ON-vs-OFF glass-to-glass); default off = plaintext
+    e2ee: e2eeRaw, // passthrough to both legs (ON-vs-OFF glass-to-glass); default off = plaintext
     roomOverride: (() => {
       const r = g('room', '');
       return r ? r : null;
@@ -124,7 +163,41 @@ export function parseArgs(argv: string[]): DriverOpts {
   };
 }
 
+/** Classify console proof that this client's requested E2EE leg was attached. */
+export function classifyE2eeAttachment(
+  role: Role,
+  message: string,
+): 'attached' | 'missing' | null {
+  const success =
+    role === 'produce'
+      ? '[wan-measure] E2EE encrypt attached'
+      : '[wan-measure] E2EE decrypt attached';
+  if (message.includes(success)) return 'attached';
+  if (message.includes('[wan-measure] fatal:')) return 'missing';
+  if (
+    message.includes('[wan-measure] E2EE') &&
+    message.includes('attachment FAILED')
+  ) {
+    return 'missing';
+  }
+  if (
+    message.includes('[wan-measure] e2ee=on') &&
+    (message.includes('NOT encrypted') || message.includes('NOT decrypted'))
+  ) {
+    return 'missing';
+  }
+  return null;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
+export function remainingSessionBudget(closeAtMs: number, nowMs = Date.now()): number {
+  const remainingMs = closeAtMs - nowMs;
+  if (remainingMs <= 0) {
+    throw new Error(`session attachment deadline already elapsed by ${Math.abs(remainingMs)}ms`);
+  }
+  return remainingMs;
+}
 
 /**
  * Build the bench-page URL for session `i`'s role+room. Pure (no browser) so the
@@ -158,18 +231,70 @@ export function buildSessionUrl(o: DriverOpts, i: number): string {
  * throw from newPage/goto still leaves the context tracked + closeable in the
  * caller's finally — no leaked context on the failure path.
  */
-async function openSession(ctx: BrowserContext, o: DriverOpts, i: number): Promise<void> {
+async function openSession(
+  ctx: BrowserContext,
+  o: DriverOpts,
+  i: number,
+  closeAtMs: number,
+): Promise<void> {
   const traceRoom = `wan-${i}`;
   const page = await ctx.newPage();
 
+  let attachmentSettled = false;
+  let resolveAttachment: (() => void) | null = null;
+  let rejectAttachment: ((error: Error) => void) | null = null;
+  const attachment =
+    o.e2ee === 'on'
+      ? new Promise<void>((resolve, reject) => {
+          resolveAttachment = resolve;
+          rejectAttachment = reject;
+        })
+      : null;
+  // A page can emit a failure while navigation is still pending. Attach a
+  // rejection observer immediately; the original promise remains rejected and
+  // is still consumed by the later race.
+  void attachment?.catch(() => {});
+
   // Surface the page's own logs — including consumeRemote's rendezvous-timeout
   // fatal — so the operator sees per-session success/failure live.
-  page.on('console', (msg) => console.log(`[${o.role} ${traceRoom}] ${msg.text()}`));
+  page.on('console', (msg) => {
+    const text = msg.text();
+    console.log(`[${o.role} ${traceRoom}] ${text}`);
+    if (attachmentSettled || attachment === null) return;
+    const evidence = classifyE2eeAttachment(o.role, text);
+    if (evidence === 'attached') {
+      attachmentSettled = true;
+      resolveAttachment?.();
+    } else if (evidence === 'missing') {
+      attachmentSettled = true;
+      rejectAttachment?.(
+        new Error(`E2EE ${o.role} transform was not attached for ${traceRoom}`),
+      );
+    }
+  });
   page.on('pageerror', (err) => console.log(`[${o.role} ${traceRoom}] PAGEERROR ${err.message}`));
 
   // Clamp a navigation hang to within this session's window (default goto
   // timeout is 30s, which can exceed windowMs) so the wall-clock bound is real.
-  await page.goto(buildSessionUrl(o, i), { timeout: Math.max(1000, o.windowMs - o.teardownMs) });
+  try {
+    await page.goto(buildSessionUrl(o, i), {
+      timeout: remainingSessionBudget(closeAtMs),
+    });
+    if (attachment !== null) {
+      const remainingMs = remainingSessionBudget(closeAtMs);
+      await Promise.race([
+        attachment,
+        sleep(remainingMs).then(() => {
+          throw new Error(
+            `Timed out waiting for E2EE ${o.role} attachment evidence for ${traceRoom}`,
+          );
+        }),
+      ]);
+    }
+  } catch (error) {
+    void attachment?.catch(() => {});
+    throw error;
+  }
 }
 
 async function main(): Promise<void> {
@@ -181,7 +306,7 @@ async function main(): Promise<void> {
     `wan-split-driver: role=${o.role} sessions=${o.sessions} window=${o.windowMs}ms\n` +
       `  anchor  E = ${o.startEpochMs} (${new Date(o.startEpochMs).toISOString()})\n` +
       `  last end  = ${lastEnd} (${new Date(lastEnd).toISOString()})\n` +
-      `  relay=${o.relay} bench=${o.bench} page=${o.pageBase}`,
+      `  relay=${o.relay} bench=${o.bench} page=${o.pageBase} e2ee=${o.e2ee}`,
   );
   if (Date.now() > o.startEpochMs) {
     console.log(
@@ -221,7 +346,7 @@ async function main(): Promise<void> {
       let ctx: BrowserContext | null = null;
       try {
         ctx = await browser.newContext();
-        await openSession(ctx, o, i);
+        await openSession(ctx, o, i, closeAt);
         await sleep(closeAt - Date.now());
         ran++;
         console.log(`session ${i + 1}/${o.sessions} (${`wan-${i}`}) done`);
@@ -242,6 +367,13 @@ async function main(): Promise<void> {
         ? `\nAssemble the run with join-g2g.ts → one row per context.room_id (wan-<i>) + per-session p50/p95/p99.`
         : `\n(produce side emits send-leg RTCStats; assemble on the machine that collected both, or pool JSONLs.)`),
   );
+
+  if (failed > 0 || skipped > 0 || ran !== o.sessions) {
+    throw new Error(
+      `Incomplete WAN arm: expected ${o.sessions} successful sessions, got ` +
+        `${ran} ran, ${failed} failed, ${skipped} skipped.`,
+    );
+  }
 }
 
 // Guard: only run as entrypoint, not when imported by tests.

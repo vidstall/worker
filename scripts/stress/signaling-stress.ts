@@ -24,24 +24,65 @@
 
 import { WebSocket, type WebSocketServer } from 'ws';
 import { randomUUID } from 'node:crypto';
-import { mkdir, appendFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createServer } from '../../apps/signaling/src/index.js';
 
 // ── CLI ───────────────────────────────────────────────────────────────
 
 type Scenario = 'smoke' | 's1' | 's3';
 
-interface Args {
+export interface Args {
   scenario: Scenario;
   peers: number;
   rooms: number;
   peersPerRoom: number;
   durationSec: number;
   outDir: string;
+  sourceIps: string[];
 }
 
-function parseArgs(argv: string[]): Args {
+const SCENARIOS = new Set<Scenario>(['smoke', 's1', 's3']);
+
+function positiveInt(raw: string, flag: string): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${flag} must be a positive integer, got ${raw}`);
+  }
+  return value;
+}
+
+function parseLoopbackSourceIps(raw: string): string[] {
+  const sourceIps = raw.split(',').map((ip) => ip.trim()).filter(Boolean);
+  if (sourceIps.length === 0) {
+    throw new Error('--source-ips requires a comma-separated list');
+  }
+  for (const ip of sourceIps) {
+    if (isIP(ip) !== 4 || !ip.startsWith('127.')) {
+      throw new Error(`--source-ips only accepts IPv4 loopback addresses (127.0.0.0/8), got ${ip}`);
+    }
+  }
+  if (new Set(sourceIps).size !== sourceIps.length) {
+    throw new Error('--source-ips must not contain duplicates');
+  }
+  return sourceIps;
+}
+
+export function selectSourceIp(sourceIps: readonly string[], peerIndex: number): string | undefined {
+  if (sourceIps.length === 0) return undefined;
+  return sourceIps[peerIndex % sourceIps.length];
+}
+
+export function validateTraceId(raw: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(raw)) {
+    throw new Error('BENCH_TRACE_ID must be 1-128 filename-safe characters');
+  }
+  return raw;
+}
+
+export function parseArgs(argv: string[]): Args {
   const args: Args = {
     scenario: 'smoke',
     peers: 3,
@@ -49,16 +90,25 @@ function parseArgs(argv: string[]): Args {
     peersPerRoom: 3,
     durationSec: 10,
     outDir: 'bench-output',
+    sourceIps: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = argv[i + 1];
-    if (a === '--scenario' && v) { args.scenario = v as Scenario; i++; }
-    else if (a === '--peers' && v) { args.peers = parseInt(v, 10); i++; }
-    else if (a === '--rooms' && v) { args.rooms = parseInt(v, 10); i++; }
-    else if (a === '--peers-per-room' && v) { args.peersPerRoom = parseInt(v, 10); i++; }
-    else if (a === '--duration' && v) { args.durationSec = parseInt(v, 10); i++; }
-    else if (a === '--out-dir' && v) { args.outDir = v; i++; }
+    if (v === undefined || v.startsWith('--')) {
+      throw new Error(`${a ?? 'argument'} requires a value`);
+    }
+    if (a === '--scenario') {
+      if (!SCENARIOS.has(v as Scenario)) throw new Error(`unknown scenario: ${v}`);
+      args.scenario = v as Scenario;
+    } else if (a === '--peers') args.peers = positiveInt(v, a);
+    else if (a === '--rooms') args.rooms = positiveInt(v, a);
+    else if (a === '--peers-per-room') args.peersPerRoom = positiveInt(v, a);
+    else if (a === '--duration') args.durationSec = positiveInt(v, a);
+    else if (a === '--out-dir') args.outDir = v;
+    else if (a === '--source-ips') args.sourceIps = parseLoopbackSourceIps(v);
+    else throw new Error(`unknown argument: ${a}`);
+    i++;
   }
   if (args.scenario === 's1') {
     args.rooms = 1;
@@ -110,8 +160,8 @@ class Writer {
   async flush(): Promise<void> {
     if (this.buf.length === 0) return;
     const lines = this.buf.map((e) => JSON.stringify(e)).join('\n') + '\n';
+    await writeFile(this.path, lines, { encoding: 'utf8', flag: 'wx' });
     this.buf = [];
-    await appendFile(this.path, lines, 'utf8');
   }
   getPath(): string { return this.path; }
 }
@@ -122,6 +172,7 @@ interface PeerStats {
   peerId: string;            // server-assigned (from welcome)
   syntheticId: string;       // driver-internal (room slot)
   roomId: string;
+  sourceIp: string | null;
   connectMs: number;
   welcomeMs: number;
   joinSentTs: number;
@@ -142,11 +193,13 @@ async function runPeer(
   roomId: string,
   durationSec: number,
   shared: Shared,
+  sourceIp?: string,
 ): Promise<PeerStats> {
   const stats: PeerStats = {
     peerId: '',
     syntheticId,
     roomId,
+    sourceIp: sourceIp ?? null,
     connectMs: 0,
     welcomeMs: 0,
     joinSentTs: 0,
@@ -161,7 +214,9 @@ async function runPeer(
   let openTs = 0;
 
   return new Promise<PeerStats>((resolve) => {
-    const ws = new WebSocket(serverUrl);
+    const ws = sourceIp === undefined
+      ? new WebSocket(serverUrl)
+      : new WebSocket(serverUrl, { localAddress: sourceIp });
     let endTimer: ReturnType<typeof setTimeout> | null = null;
     let sendTimer: ReturnType<typeof setInterval> | null = null;
     let resolved = false;
@@ -285,11 +340,13 @@ function snapshot(): ResourceSnapshot {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const traceId = process.env['BENCH_TRACE_ID'] ?? randomUUID();
+  const traceId = validateTraceId(process.env['BENCH_TRACE_ID'] ?? randomUUID());
   const startTs = Date.now();
 
   await mkdir(args.outDir, { recursive: true });
-  const outPath = join(args.outDir, `stress-${args.scenario}-${startTs}.jsonl`);
+  // Keep the trace id as the final filename token so the canonical bench replay
+  // (`loadTrace`) can discover stress artifacts without a rename/copy step.
+  const outPath = join(args.outDir, `stress-${args.scenario}-${startTs}-${traceId}.jsonl`);
   const writer = new Writer(traceId, args.scenario, `driver-${process.pid}`, outPath);
 
   // Boot in-process signaling server on a random free port (port 0 → OS picks).
@@ -310,6 +367,7 @@ async function main(): Promise<void> {
   console.log(`  rooms:         ${args.rooms} × ${args.peersPerRoom} peers/room`);
   console.log(`  duration:      ${args.durationSec}s`);
   console.log(`  server:        ${serverUrl}`);
+  console.log(`  source IPs:    ${args.sourceIps.length === 0 ? 'OS default' : args.sourceIps.join(', ')}`);
   console.log(`  trace_id:      ${traceId}`);
   console.log(`  jsonl:         ${outPath}`);
   console.log('');
@@ -330,11 +388,13 @@ async function main(): Promise<void> {
 
   // Spawn peers grouped by room.
   const peerPromises: Promise<PeerStats>[] = [];
+  let peerIndex = 0;
   for (let r = 0; r < args.rooms; r++) {
     const roomId = `stress-${args.scenario}-r${r}`;
     for (let p = 0; p < args.peersPerRoom; p++) {
       const syntheticId = `r${r}-p${p}`;
-      peerPromises.push(runPeer(serverUrl, syntheticId, roomId, args.durationSec, shared));
+      const sourceIp = selectSourceIp(args.sourceIps, peerIndex++);
+      peerPromises.push(runPeer(serverUrl, syntheticId, roomId, args.durationSec, shared, sourceIp));
       // Tiny stagger so welcome timestamps do not collide.
       await new Promise((r2) => setTimeout(r2, 25));
     }
@@ -349,6 +409,7 @@ async function main(): Promise<void> {
     writer.emit('T_connect_ms', ps.connectMs, {
       peer_id: ps.peerId || ps.syntheticId,
       room_id: ps.roomId,
+      source_ip: ps.sourceIp,
       rejected: ps.rejected,
       error: ps.error,
     });
@@ -356,6 +417,7 @@ async function main(): Promise<void> {
       writer.emit('T_welcome_ms', ps.welcomeMs, {
         peer_id: ps.peerId,
         room_id: ps.roomId,
+        source_ip: ps.sourceIp,
       });
     }
   }
@@ -398,6 +460,7 @@ async function main(): Promise<void> {
       rooms: args.rooms,
       peers_per_room: args.peersPerRoom,
       duration_sec: args.durationSec,
+      source_ips: args.sourceIps.length === 0 ? ['OS-default'] : args.sourceIps,
     },
     n_accepted: nAccepted,
     n_rejected: nRejected,
@@ -442,7 +505,10 @@ async function main(): Promise<void> {
   process.exit(hardBreakages.length === 0 ? 0 : 1);
 }
 
-main().catch((err) => {
-  console.error('stress driver crashed:', err);
-  process.exit(2);
-});
+const entrypoint = process.argv[1];
+if (entrypoint !== undefined && import.meta.url === pathToFileURL(entrypoint).href) {
+  main().catch((err) => {
+    console.error('stress driver crashed:', err);
+    process.exit(2);
+  });
+}
