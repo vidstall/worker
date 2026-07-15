@@ -34,7 +34,10 @@ export const FAUCET_URL = getFaucetHost('localnet');
 const __filename = fileURLToPath(import.meta.url);
 const HERE = resolve(__filename, '..');
 const WORKSPACE_ROOT = resolve(HERE, '..', '..', '..', '..', '..', '..');
-const CONTRACTS_DIR = join(WORKSPACE_ROOT, 'dvconf-contracts');
+// Evaluation harnesses may point this fixture at an isolated, pinned contracts
+// snapshot. The default remains the historical workspace sibling for every
+// integration-test caller.
+const CONTRACTS_DIR = resolve(process.env['DVCONF_CONTRACTS_DIR'] ?? join(WORKSPACE_ROOT, 'dvconf-contracts'));
 
 export interface LocalnetHandle {
   client: SuiClient;
@@ -224,7 +227,7 @@ async function setupSuiClient(alias: string): Promise<void> {
   await new Promise((r) => setTimeout(r, 2000));
 }
 
-/** Delete stale Pub.*.toml + Move.lock (chain-id mismatch after regenesis). */
+/** Delete stale Pub.*.toml +, by default, Move.lock (chain-id mismatch after regenesis). */
 function cleanStalePublishState(): void {
   for (const entry of readdirSync(CONTRACTS_DIR)) {
     if (entry.startsWith('Pub.') && entry.endsWith('.toml')) {
@@ -232,7 +235,10 @@ function cleanStalePublishState(): void {
     }
   }
   const moveLock = join(CONTRACTS_DIR, 'Move.lock');
-  if (existsSync(moveLock)) unlinkSync(moveLock);
+  // A pinned evaluation snapshot has no stale published-id state and must keep
+  // its dependency lock. This opt-in is intentionally process-local; existing
+  // integration callers retain the historical delete-and-resolve behaviour.
+  if (process.env['DVCONF_KEEP_MOVE_LOCK'] !== '1' && existsSync(moveLock)) unlinkSync(moveLock);
 }
 
 interface PublishOutput {

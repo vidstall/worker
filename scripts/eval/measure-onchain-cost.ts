@@ -47,22 +47,21 @@
  *     must equal info_operator); pubkey_session = wallet B (blake2b256 must equal sender).
  *   - distribute_rewards: room must be CLOSED and `num_proofs >= min_proofs_for_distribution`
  *     (=2), AND per RO-023c a relay needs >= 2 DISTINCT-validator proofs to be "covered".
- *     So TWO distinct validators each submit a proof for the SAME relay (only the FIRST is
- *     measured; the 2nd just satisfies the coverage threshold).
+ *     This K=2/N=4 closure run retains all EIGHT assigned validator×relay proofs,
+ *     giving each relay four distinct-validator attestations before distribution.
  *
  * Run:
- *   pnpm exec tsx scripts/eval/measure-onchain-cost.ts
- *     (or: npx tsx scripts/eval/measure-onchain-cost.ts)
+ *   pnpm exec tsx scripts/eval/measure-onchain-cost.ts \
+ *     --contracts-dir <isolated-17e1fce-snapshot> --run-id <id> [--out <new.jsonl>]
  *
  * Output:
- *   docs/80-research/evaluation/raw/cost-onchain-localnet-2026-07-13.jsonl
- *   (one JSON line per captured fn + one provenance meta line, all from ONE run)
+ *   A caller-supplied or run-id-derived, write-once K=2/N=4 JSONL artifact.
+ *   The legacy 2026-07-13 evidence path is explicitly rejected.
  *
  * NO git add / commit — measurement fixture only.
  */
 
-import { writeFileSync, mkdirSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bcs } from '@mysten/bcs';
 import type { SuiClient } from '@mysten/sui/client';
@@ -71,7 +70,7 @@ import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
 import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 
-import { bootLocalnet, type LocalnetHandle } from '../../apps/cp-daemon/src/__tests__/integration/localnet-fixture.ts';
+import type { LocalnetHandle } from '../../apps/cp-daemon/src/__tests__/integration/localnet-fixture.ts';
 import {
   createLogger,
   executeWithRetry,
@@ -90,6 +89,18 @@ import {
   serializeProofBcs,
   dualKeySign,
 } from '../../apps/validator-daemon/src/session-proof.ts';
+import { validateK2ProofRows, type K2ProofContext } from './cost-k2-evidence.ts';
+import {
+  assertLocalnetPortsFree,
+  captureActiveSuiEnvironment,
+  parseCostRunOptions,
+  readFrameworkRevision,
+  readGitState,
+  readSuiCliVersion,
+  resolveGitRef,
+  restoreSuiEnvironment,
+  writeTextExclusive,
+} from './cost-run-safety.ts';
 
 const MODULE = 'measure-onchain-cost';
 
@@ -97,17 +108,12 @@ const MODULE = 'measure-onchain-cost';
 const __filename = fileURLToPath(import.meta.url);
 const HERE = resolve(__filename, '..'); // scripts/eval
 const WORKSPACE_ROOT = resolve(HERE, '..', '..', '..'); // scripts/eval -> scripts -> dvconf-daemons -> workspace root
-const OUT_PATH = resolve(
-  WORKSPACE_ROOT,
-  'docs',
-  '80-research',
-  'evaluation',
-  'raw',
-  'cost-onchain-localnet-2026-07-13.jsonl',
-);
-
-const FRAMEWORK_REV = '8fc60f1';
+const DAEMONS_ROOT = resolve(HERE, '..', '..');
+const CONTRACTS_SOURCE_ROOT = resolve(WORKSPACE_ROOT, 'dvconf-contracts');
+const FRAMEWORK_REV = '94ad8ccd0ed6c089a9fe072ff80c918b5ab44943';
 const CLI_VERSION = '1.66.2';
+const K = 2 as const;
+const N = 4 as const;
 
 // ── raw JSONL row shapes ──────────────────────────────────────────────────
 
@@ -134,6 +140,28 @@ interface ProvenanceRow {
   cliVersion: string;
   network: 'localnet';
   timestamp: string;
+}
+
+interface K2ProvenanceRow extends ProvenanceRow {
+  schema: 'dvconf-cost-k2/1.0';
+  complete: true;
+  K: 2;
+  N: 4;
+  proofCount: 8;
+  runId: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  workspaceCommit: string;
+  workspaceDirty: boolean;
+  workspaceDirtyFingerprint: string | null;
+  contractCommit: string;
+  contractsSourceDirty: boolean;
+  contractsSourceDirtyFingerprint: string | null;
+  contractsSnapshotDir: string;
+  daemonCommit: string;
+  daemonDirty: boolean;
+  daemonDirtyFingerprint: string | null;
 }
 
 /**
@@ -295,10 +323,46 @@ async function fundAndWait(client: SuiClient, address: string, timeoutMs = 90_00
 async function main(): Promise<void> {
   const logger = createLogger(MODULE);
   const rows: CostRow[] = [];
+  const runOptions = parseCostRunOptions(process.argv.slice(2), WORKSPACE_ROOT);
+  await assertLocalnetPortsFree();
 
-  logger.info({ module: MODULE, action: 'boot' }, 'booting localnet + publishing package (1-3 min)...');
+  const frameworkRev = readFrameworkRevision(runOptions.contractsDir);
+  if (frameworkRev !== FRAMEWORK_REV) {
+    throw new Error(
+      `contracts snapshot framework mismatch: expected ${FRAMEWORK_REV}, got ${frameworkRev}`,
+    );
+  }
+  const suiCliVersion = readSuiCliVersion();
+  if (!suiCliVersion.includes(CLI_VERSION)) {
+    throw new Error(`Sui CLI mismatch: expected ${CLI_VERSION}, got ${suiCliVersion}`);
+  }
+  const workspaceGit = readGitState(WORKSPACE_ROOT);
+  const daemonGit = readGitState(DAEMONS_ROOT);
+  const contractsSourceGit = readGitState(CONTRACTS_SOURCE_ROOT);
+  const contractCommit = resolveGitRef(CONTRACTS_SOURCE_ROOT, runOptions.contractRef);
+  const previousSuiEnvironment = captureActiveSuiEnvironment();
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
+
+  // The fixture module reads these at module initialization, so import it only
+  // after the isolated snapshot and keep-lock policy are set.
+  process.env['DVCONF_CONTRACTS_DIR'] = runOptions.contractsDir;
+  process.env['DVCONF_KEEP_MOVE_LOCK'] = '1';
+
+  logger.info(
+    {
+      module: MODULE,
+      action: 'boot',
+      runId: runOptions.runId,
+      outputPath: runOptions.outputPath,
+      contractsDir: runOptions.contractsDir,
+      contractCommit,
+    },
+    'booting localnet + publishing pinned contracts snapshot (1-3 min)...',
+  );
   let handle: LocalnetHandle | null = null;
   try {
+    const { bootLocalnet } = await import('../../apps/cp-daemon/src/__tests__/integration/localnet-fixture.ts');
     // Generous port-wait headroom for a contended Windows host.
     handle = await bootLocalnet({ portWaitMs: 240_000 });
     const { client, config } = handle;
@@ -308,17 +372,14 @@ async function main(): Promise<void> {
     // ── provenance (protocol version + RGP) ──────────────────────────────
     const protocolConfig = await client.getProtocolConfig();
     const referenceGasPrice = await client.getReferenceGasPrice();
-    const provenance: ProvenanceRow = {
-      meta: true,
-      protocolVersion: String(protocolConfig.protocolVersion),
-      referenceGasPrice: String(referenceGasPrice),
-      frameworkRev: FRAMEWORK_REV,
-      cliVersion: CLI_VERSION,
-      network: 'localnet',
-      timestamp: new Date().toISOString(),
-    };
     logger.info(
-      { module: MODULE, action: 'provenance', protocolVersion: provenance.protocolVersion, rgp: provenance.referenceGasPrice },
+      {
+        module: MODULE,
+        action: 'provenance',
+        protocolVersion: String(protocolConfig.protocolVersion),
+        rgp: String(referenceGasPrice),
+        frameworkRev,
+      },
       'captured provenance',
     );
 
@@ -486,15 +547,62 @@ async function main(): Promise<void> {
     await measureDispatch2(client, config, cp, relay, validator, validatorKp, signaling, rows, logger);
 
     // ── write raw JSONL (provenance line first, then one line per fn) ────
-    mkdirSync(dirname(OUT_PATH), { recursive: true });
+    const proofRows = validateK2ProofRows(rows);
+    const postPublishFrameworkRev = readFrameworkRevision(runOptions.contractsDir);
+    if (postPublishFrameworkRev !== frameworkRev) {
+      throw new Error(
+        `pinned Move.lock changed during publish: before=${frameworkRev}, after=${postPublishFrameworkRev}`,
+      );
+    }
+    const endedAtMs = Date.now();
+    const endedAt = new Date(endedAtMs).toISOString();
+    const provenance: K2ProvenanceRow = {
+      meta: true,
+      schema: 'dvconf-cost-k2/1.0',
+      complete: true,
+      K,
+      N,
+      proofCount: 8,
+      runId: runOptions.runId,
+      protocolVersion: String(protocolConfig.protocolVersion),
+      referenceGasPrice: String(referenceGasPrice),
+      frameworkRev,
+      cliVersion: suiCliVersion,
+      network: 'localnet',
+      timestamp: endedAt,
+      startedAt,
+      endedAt,
+      durationMs: endedAtMs - startedAtMs,
+      workspaceCommit: workspaceGit.commit,
+      workspaceDirty: workspaceGit.dirty,
+      workspaceDirtyFingerprint: workspaceGit.dirtyFingerprint,
+      contractCommit,
+      contractsSourceDirty: contractsSourceGit.dirty,
+      contractsSourceDirtyFingerprint: contractsSourceGit.dirtyFingerprint,
+      contractsSnapshotDir: runOptions.contractsDir.replace(/\\/g, '/'),
+      daemonCommit: daemonGit.commit,
+      daemonDirty: daemonGit.dirty,
+      daemonDirtyFingerprint: daemonGit.dirtyFingerprint,
+    };
+
     const lines: string[] = [JSON.stringify(provenance)];
     for (const r of rows) {
       lines.push(JSON.stringify(r));
     }
-    writeFileSync(OUT_PATH, `${lines.join('\n')}\n`, 'utf8');
+    writeTextExclusive(runOptions.outputPath, `${lines.join('\n')}\n`);
 
     // ── console report table ────────────────────────────────────────────
-    logger.info({ module: MODULE, action: 'write', outPath: OUT_PATH, rowCount: rows.length, dispatch1RowCount }, 'raw JSONL written');
+    logger.info(
+      {
+        module: MODULE,
+        action: 'write',
+        outPath: runOptions.outputPath,
+        rowCount: rows.length,
+        proofCount: proofRows.length,
+        dispatch1RowCount,
+      },
+      'write-once raw JSONL written',
+    );
     process.stdout.write('\n=== ON-CHAIN GAS (localnet, REAL effects.gasUsed) ===\n');
     process.stdout.write('| fn | module | computationCost | storageCost | storageRebate | nonRefundableStorageFee | net | digest |\n');
     process.stdout.write('|----|--------|-----------------|-------------|---------------|-------------------------|-----|--------|\n');
@@ -505,11 +613,19 @@ async function main(): Promise<void> {
     }
     process.stdout.write('\n=== PROVENANCE ===\n');
     process.stdout.write(`${JSON.stringify(provenance)}\n`);
-    process.stdout.write(`\nOUT: ${OUT_PATH}\n`);
+    process.stdout.write(`\nOUT: ${runOptions.outputPath}\n`);
   } finally {
     if (handle !== null) {
       logger.info({ module: MODULE, action: 'teardown' }, 'tearing down localnet...');
       await handle.teardown();
+    }
+    try {
+      restoreSuiEnvironment(previousSuiEnvironment);
+    } catch (error) {
+      logger.error(
+        { module: MODULE, action: 'restore_sui_env', error: error instanceof Error ? error.message : String(error) },
+        'failed to restore pre-run Sui client environment',
+      );
     }
   }
 }
@@ -1053,8 +1169,8 @@ async function measureDispatch2(
   // Runs AFTER create_escrow (see ORDER-CRITICAL note above) but BEFORE the proofs
   // (submit_session_proof asserts the validator IS assigned).
   // Ballot: [relay1, relay2] (>= min_relay 2), [v0..v3] (>= required_validators 4), signaling.
+  const relayIds = [primaryRelay.minerId, relay2MinerId];
   {
-    const relayIds = [primaryRelay.minerId, relay2MinerId];
     const { row } = await measureCapture(
       client,
       cp.kp,
@@ -1085,35 +1201,41 @@ async function measureDispatch2(
   }
   logger.info({ module: MODULE, action: 'room_finalized', roomId }, 'room finalized via pairing proposal (validators assigned)');
 
-  // ── (d) submit_session_proof — the DOMINANT §5.3 term. MEASURED on V0.
-  //     V1 also submits a proof for the SAME relay (distinct validator) so the
-  //     relay reaches distinct-coverage = 2 for distribute_rewards. ──
-  const proofRelayId = primaryRelay.minerId; // both proofs attest the SAME relay → coverage=2
-
-  // The measured proof (V0). Reuses serializeProofBcs + dualKeySign from the daemon module.
-  const measuredProofRow = await measureSubmitSessionProof(
-    client,
-    config,
-    escrowId,
-    roomId,
-    proofRelayId,
-    validators[0]!,
-    logger,
+  // ── (d) submit_session_proof — measure the shipped K×N state exactly:
+  //     all four assigned validators attest both assigned relays (8 tx rows). ──
+  let proofOrdinal = 0;
+  for (let validatorIndex = 0; validatorIndex < validators.length; validatorIndex += 1) {
+    for (let relaySlot = 0; relaySlot < relayIds.length; relaySlot += 1) {
+      proofOrdinal += 1;
+      const relayMinerId = relayIds[relaySlot]!;
+      const measuredProofRow = await measureSubmitSessionProof(
+        client,
+        config,
+        escrowId,
+        roomId,
+        relayMinerId,
+        validators[validatorIndex]!,
+        logger,
+      );
+      const context: K2ProofContext = {
+        validator_index: validatorIndex,
+        relay_slot: relaySlot,
+        relay_miner_id: relayMinerId,
+        proof_ordinal: proofOrdinal,
+        K,
+        N,
+      };
+      const contextualRow: CostRow & { context: K2ProofContext } = {
+        ...measuredProofRow,
+        context,
+      };
+      rows.push(contextualRow);
+    }
+  }
+  logger.info(
+    { module: MODULE, action: 'proofs_submitted', proofCount: proofOrdinal, K, N },
+    'all K x N proof transactions submitted and measured',
   );
-  rows.push(measuredProofRow);
-
-  // A second DISTINCT-validator proof for the same relay (executed, not measured) —
-  // needed so distribute_rewards sees >= 2 distinct validators covering this relay.
-  await submitSessionProofExec(
-    client,
-    config,
-    escrowId,
-    roomId,
-    proofRelayId,
-    validators[1]!,
-    logger,
-  );
-  logger.info({ module: MODULE, action: 'proofs_submitted' }, 'two distinct-validator proofs submitted (relay covered)');
 
   // ── (e) room_manager::close_room (user-signed) — MEASURED (bonus row).
   //     distribute_rewards asserts the room is CLOSED. ──
@@ -1139,8 +1261,8 @@ async function measureDispatch2(
   }
   logger.info({ module: MODULE, action: 'room_closed', roomId }, 'room closed');
 
-  // ── (f) economic_layer::distribute_rewards — MEASURED. Crank pattern (any signer);
-  //     we use the user. Room CLOSED + 2 distinct proofs on the covered relay. ──
+  // ── (f) economic_layer::distribute_rewards — MEASURED only after all eight
+  //     K=2/N=4 proofs and close_room succeed. Crank pattern (any signer). ──
   {
     const { row } = await measureCapture(
       client,
