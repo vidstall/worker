@@ -41,7 +41,11 @@
  *
  * Env knobs: RTP_TIMEOUT_MS (default 50), BENCH_RUNS (default 30),
  * BENCH_WARMUP_MS (250), BENCH_SETTLE_MS (400), JITTER_BUFFER_MS (0),
- * HEARTBEAT_INTERVAL_MS (reserved/no-op).
+ * HEARTBEAT_INTERVAL_MS (reserved/no-op), BENCH_RUN_ID (UTC timestamp by
+ * default), BENCH_COMMIT (default unknown), and BENCH_EVIDENCE_DIR (default
+ * .evidence/verification), BENCH_RAW_DIR (default .logs/bench). Each run writes
+ * run-id-qualified raw/report artifacts instead of overwriting historical
+ * evidence.
  *
  * Run: pnpm exec vitest run --config vitest.relay-integration.config.ts \
  *        apps/relay/src/__tests__/integration/relay-overlap-mttr.integration.test.ts
@@ -50,7 +54,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import {
   createPrimaryPipeTransport,
@@ -75,6 +79,19 @@ const WARMUP_MS = envInt('BENCH_WARMUP_MS', 250);
 const SETTLE_MS = envInt('BENCH_SETTLE_MS', 400);
 const JITTER_BUFFER_MS = envInt('JITTER_BUFFER_MS', 0);
 const HEARTBEAT_INTERVAL_MS = envInt('HEARTBEAT_INTERVAL_MS', 0);
+const BENCH_RUN_ID =
+  process.env['BENCH_RUN_ID']?.trim() ||
+  new Date().toISOString().replace(/[:.]/g, '-');
+const BENCH_COMMIT = process.env['BENCH_COMMIT']?.trim() || 'unknown';
+const BENCH_EVIDENCE_DIR =
+  process.env['BENCH_EVIDENCE_DIR']?.trim() || '.evidence/verification';
+const BENCH_RAW_DIR = process.env['BENCH_RAW_DIR']?.trim() || '.logs/bench';
+
+if (!/^[A-Za-z0-9._-]+$/.test(BENCH_RUN_ID)) {
+  throw new Error(
+    `BENCH_RUN_ID must contain only letters, digits, dot, underscore, or hyphen; got ${JSON.stringify(BENCH_RUN_ID)}`,
+  );
+}
 
 // ── nearest-rank percentile (mirrors scripts/bench/replay.ts) ──────────────
 
@@ -404,7 +421,11 @@ function fmt(n: number): string {
   return n.toFixed(1);
 }
 
-function buildReport(results: RunResult[], failures: number): string {
+function buildReport(
+  results: RunResult[],
+  failures: number,
+  rawEvidencePath: string,
+): string {
   const mttr = results.map((r) => r.mttrMs).sort((a, b) => a - b);
   const detect = results.map((r) => r.detectMs).sort((a, b) => a - b);
   const resume = results.map((r) => r.resumeToFirstMs).sort((a, b) => a - b);
@@ -417,14 +438,18 @@ function buildReport(results: RunResult[], failures: number): string {
   const max = mttr[n - 1]!;
   const p95Pass = p95 <= 100;
   const p99Pass = p99 <= 200;
-  const verdict = p95Pass && p99Pass ? 'PASS' : 'FAIL';
+  const sampleCountPass = results.length >= 30;
+  const failuresPass = failures === 0;
+  const verdict = sampleCountPass && failuresPass && p95Pass && p99Pass ? 'PASS' : 'FAIL';
 
   const L: string[] = [];
   L.push('# Relay-Overlap M1 — Client-Perceived Cutover MTTR Bench');
   L.push('');
-  L.push('**Date:** 2026-06-05  ');
-  L.push('**Branch:** bench-3b-client-mttr (off spike-warmpipe-rtp)  ');
-  L.push(`**Verdict:** **${verdict}** vs success-metric P95 <= 100 ms / P99 <= 200 ms`);
+  L.push(`**Run ID:** ${BENCH_RUN_ID}  `);
+  L.push(`**Timestamp (UTC):** ${new Date().toISOString()}  `);
+  L.push(`**Bench commit:** ${BENCH_COMMIT}  `);
+  L.push(`**Raw JSONL:** \`${rawEvidencePath}\`  `);
+  L.push(`**Verdict:** **${verdict}** vs N >= 30, failures = 0, P95 <= 100 ms / P99 <= 200 ms`);
   L.push('');
   L.push('## Result');
   L.push('');
@@ -496,12 +521,30 @@ describe('relay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)', (
   it(
     `runs N=${RUNS} cutovers and meets P95<=100ms / P99<=200ms`,
     async () => {
+      const evidencePath = resolve(
+        process.cwd(),
+        BENCH_EVIDENCE_DIR,
+        `relay-overlap-m1-bench-${BENCH_RUN_ID}.md`,
+      );
+      const rawEvidencePath = resolve(
+        process.cwd(),
+        BENCH_RAW_DIR,
+        `adhoc-client-${BENCH_RUN_ID}.jsonl`,
+      );
+      if (existsSync(evidencePath) || existsSync(rawEvidencePath)) {
+        throw new Error(
+          `refusing to overwrite existing MTTR evidence: report=${evidencePath} raw=${rawEvidencePath}`,
+        );
+      }
+
       const writer = new LatencyWriter({
         source: 'client',
-        instance: 'relay-overlap-mttr',
-        outputDir: resolve(process.cwd(), '.logs/bench'),
+        instance: `relay-overlap-mttr:${BENCH_RUN_ID}`,
+        outputDir: resolve(process.cwd(), BENCH_RAW_DIR),
         scenario: 'adhoc',
+        traceId: BENCH_RUN_ID,
       });
+      expect(writer.getFilePath()).toBe(rawEvidencePath);
 
       const results: RunResult[] = [];
       let failures = 0;
@@ -516,6 +559,8 @@ describe('relay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)', (
             primary_pkts: r.primaryPkts,
             standby_pkts: r.standbyPkts,
             rtp_timeout_ms: RTP_TIMEOUT_MS,
+            run_id: BENCH_RUN_ID,
+            bench_commit: BENCH_COMMIT,
           });
           // eslint-disable-next-line no-console
           console.log(
@@ -534,13 +579,9 @@ describe('relay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)', (
 
       expect(results.length).toBeGreaterThan(0);
 
-      const report = buildReport(results, failures);
-      const evidencePath = resolve(
-        process.cwd(),
-        '.evidence/verification/relay-overlap-m1-bench-2026-06-05.md',
-      );
+      const report = buildReport(results, failures, rawEvidencePath);
       mkdirSync(dirname(evidencePath), { recursive: true });
-      writeFileSync(evidencePath, report, 'utf8');
+      writeFileSync(evidencePath, report, { encoding: 'utf8', flag: 'wx' });
       // eslint-disable-next-line no-console
       console.log(`\n[mttr-bench] report -> ${evidencePath}`);
       // eslint-disable-next-line no-console
@@ -551,6 +592,7 @@ describe('relay-overlap M1 — client-perceived cutover MTTR (P95/P99 bench)', (
       const p99 = percentile(mttr, 0.99);
       // Hard assertions on the advisor-gate success metric.
       expect(results.length).toBeGreaterThanOrEqual(30);
+      expect(failures).toBe(0);
       expect(p95).toBeLessThanOrEqual(100);
       expect(p99).toBeLessThanOrEqual(200);
     },
