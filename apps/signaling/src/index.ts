@@ -79,12 +79,13 @@ function ensureSignalingProbe(log: Logger): SignalingLatencyProbe | null {
   return cachedProbe;
 }
 
-function closeSignalingProbe(): void {
+/** Flush and reset the optional latency probe (daemon shutdown/test harness). */
+export function closeSignalingProbe(): void {
   if (cachedProbe !== null) {
     cachedProbe.close();
     cachedProbe = null;
-    probeInitialized = false;
   }
+  probeInitialized = false;
 }
 
 const PORT = parseInt(process.env['SIGNALING_PORT'] ?? '8080', 10);

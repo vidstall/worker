@@ -25,6 +25,7 @@
     "stress:s1": "tsx scripts/stress/signaling-stress.ts --scenario s1",
     "stress:s3": "tsx scripts/stress/signaling-stress.ts --scenario s3",
     "bench:replay": "tsx scripts/bench/replay.ts",
+    "bench:signaling-latency": "tsx scripts/bench/run-signaling-latency.ts",
     "bench:harness": "tsx scripts/bench/mediasoup-client-harness.ts",
     "bench:smoke": "tsx scripts/bench/run-smoke.ts --peers 2 --runs 5 --duration 60",
     "forensic": "tsx apps/forensic-cli/src/index.ts",

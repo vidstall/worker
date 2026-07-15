@@ -23,7 +23,7 @@ import type {
   LatencyEvent,
   LatencyMetric,
   LatencySource,
-} from '@dvconf/shared';
+} from '../../packages/shared/src/index.js';
 
 /** Below this sample count, percentiles are reported as null + tagged. */
 export const INSUFFICIENT_SAMPLES_THRESHOLD = 5;
