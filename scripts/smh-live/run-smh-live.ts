@@ -41,7 +41,7 @@ import {
   DEFAULT_CANARY_COVERAGE_PORT,
 } from './ports.js';
 import { readAssignedRelays, pollRelayPromoted, resolveRelayWsPort, readCurrentAssignedRelays } from './rpc-verify.js';
-import { readPlacementBasis } from './log-asserts.js';
+import { readPlacementBasis, readPromoteSubmit } from './log-asserts.js';
 import { assembleEvidence, SMH_LIVE_CAVEATS, type PhaseResult } from './evidence.js';
 import { launchFleet, pollUntil } from './media-fleet.js';
 
@@ -480,7 +480,9 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   lines.push(`pre-kill media: relay bytesForwarded (server-side) = ${fwdBytes}; client bytesReceived (@roamhq/wrtc, informational) = ${clientBytes}`);
   const mediaFlowing = fwdBytes > 0n;
 
+  const killBeforeMs = Date.now();
   const killOut = chaos('kill', primaryPort);
+  const killAfterMs = Date.now();
   lines.push(`chaos kill ${primaryPort} (RESOLVED primary, assigned_relays[0]=${oldPrimary}) -> ${killOut}`);
   await sleep(2_000);
   const primaryState = chaos('isopen', primaryPort);
@@ -493,6 +495,25 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
   // the kill. Poll up to 7 min. (A short-epoch rig would fire in seconds — see the hermetic test.)
   const promo = await pollRelayPromoted(client, config.packageId, roomId, oldPrimary, 420_000);
   lines.push(`RPC pollRelayPromoted(old=${oldPrimary}) -> ${JSON.stringify(promo)}`);
+
+  // T1-1 failover-promotion decomposition [primary kill]. Split the recovery latency into its two
+  // structurally-distinct halves by joining the cp watcher's `promote_submit` log (matched on
+  // oldPrimary, submit instant = pino `time`) to the kill t0 and the on-chain RelayPromoted envelope
+  // timestampMs. kill t0 = kill-COMPLETED (killAfterMs) so the chaos ps-spawn is excluded and the
+  // primary is provably dead by t0. Reported as a SEPARATE population from the stretch (2nd) kill.
+  const submitRec = readPromoteSubmit(newestLogLines('cp-1-'), oldPrimary);
+  const killToSubmitMs = submitRec ? submitRec.submitTimeMs - killAfterMs : null;
+  const submitToPromotedMs =
+    submitRec && promo?.promotedAtMs != null ? promo.promotedAtMs - submitRec.submitTimeMs : null;
+  lines.push('--- T1-1 promotion decomposition [primary kill] ---');
+  lines.push(`  kill t0: before=${killBeforeMs} after=${killAfterMs} (chaos ps-spawn=${killAfterMs - killBeforeMs}ms, EXCLUDED from kill->submit)`);
+  if (submitRec) {
+    lines.push(`  promote_submit: trace_id=${submitRec.traceId} time=${submitRec.submitTimeMs} (cp log, joined by oldPrimary)`);
+    lines.push(`  kill->promote_submit = ${killToSubmitMs}ms [config-arithmetic: strict >MAX_HEARTBEAT_EPOCHS(3) staleness x 60s localnet epochs; NOT a detection-time measurement, NOT MTTR]`);
+    lines.push(`  promote_submit->RelayPromoted = ${submitToPromotedMs ?? 'unavailable (RelayPromoted envelope carried no timestampMs)'}ms [measured localnet consensus-commit floor; NOT client-visible, NOT MTTR]`);
+  } else {
+    lines.push(`  promote_submit log NOT found for oldPrimary=${oldPrimary} -> decomposition unavailable this run`);
+  }
 
   // Verify the swap via LIVE assigned_relays (get_room_assignment), NOT the RoomAssigned event:
   // promote_relay mutates assigned_relays[0] + emits RelayPromoted but does NOT re-emit RoomAssigned,
@@ -525,13 +546,30 @@ async function runD2(logger: Logger, client: SuiClient, config: NetworkConfig, r
     const newPrimaryPort = await resolveRelayWsPort(client, config.packageId, config.relayRegistryId, promo.newPrimary);
     if (newPrimaryPort !== null) {
       try {
+        const kill2BeforeMs = Date.now();
         const k2 = chaos('kill', newPrimaryPort);
+        const kill2AfterMs = Date.now();
         lines.push(`chaos kill ${newPrimaryPort} (stretch, RESOLVED new primary ${promo.newPrimary}) -> ${k2}`);
         // Same ~4-epoch staleness gate as the first promotion (60s epochs) — poll up to 6 min.
         const promo2 = await pollRelayPromoted(client, config.packageId, roomId, promo.newPrimary, 360_000);
         stretch = promo2
           ? `2nd RelayPromoted new_primary=${promo2.newPrimary} epoch=${promo2.epoch}`
           : 'no 2nd promotion observed within 6min (non-fatal — dedup is per (room,oldPrimary), so this is a genuine 2nd swap when it fires)';
+        // T1-1 decomposition for the STRETCH (2nd) kill — SEPARATE non-pooled population (this leg
+        // degrades to 1 DISTINCT relay). oldPrimary of this leg = promo.newPrimary.
+        const submitRec2 = readPromoteSubmit(newestLogLines('cp-1-'), promo.newPrimary);
+        const kill2ToSubmitMs = submitRec2 ? submitRec2.submitTimeMs - kill2AfterMs : null;
+        const submit2ToPromotedMs =
+          submitRec2 && promo2?.promotedAtMs != null ? promo2.promotedAtMs - submitRec2.submitTimeMs : null;
+        lines.push('--- T1-1 promotion decomposition [stretch / 2nd kill — separate population] ---');
+        lines.push(`  kill t0: before=${kill2BeforeMs} after=${kill2AfterMs} (chaos ps-spawn=${kill2AfterMs - kill2BeforeMs}ms, EXCLUDED)`);
+        if (submitRec2) {
+          lines.push(`  promote_submit: trace_id=${submitRec2.traceId} time=${submitRec2.submitTimeMs}`);
+          lines.push(`  kill->promote_submit = ${kill2ToSubmitMs}ms [config-arithmetic; NOT detection, NOT MTTR]`);
+          lines.push(`  promote_submit->RelayPromoted = ${submit2ToPromotedMs ?? 'unavailable'}ms [measured localnet consensus-commit floor; NOT client-visible, NOT MTTR]`);
+        } else {
+          lines.push(`  promote_submit log NOT found for stretch oldPrimary=${promo.newPrimary} -> decomposition unavailable`);
+        }
       } catch (err) {
         stretch = `stretch error (non-fatal): ${String(err)}`;
       }

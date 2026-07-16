@@ -60,6 +60,33 @@ describe('parseRelayPromoted (Move fields room_id/old_primary/new_primary/epoch 
     ];
     expect(parseRelayPromoted(events, pkg, '0xroom', '0xdead')).toBeNull();
   });
+
+  // T1-1: the on-chain event ENVELOPE timestampMs (checkpoint/consensus-commit wall-clock, from
+  // queryEvents — NOT parsedJson) is the authoritative `RelayPromoted`-delivered instant used to
+  // decompose submit->RelayPromoted latency. Never client-visible, never MTTR.
+  it('surfaces the envelope timestampMs as promotedAtMs (numeric-string epoch-ms -> number)', () => {
+    const events = [
+      { type: `${pkg}::room_manager::RelayPromoted`, parsedJson: { room_id: '0xroom', old_primary: '0xdead', new_primary: '0xnew', epoch: '7' }, timestampMs: '1700000000123' },
+    ];
+    const r = parseRelayPromoted(events, pkg, '0xroom', '0xdead');
+    expect(r!.promotedAtMs).toBe(1700000000123);
+  });
+
+  it('sets promotedAtMs = null (NOT 0) when the event carries no envelope timestampMs', () => {
+    const events = [
+      { type: `${pkg}::room_manager::RelayPromoted`, parsedJson: { room_id: '0xroom', old_primary: '0xdead', new_primary: '0xnew', epoch: '7' } },
+    ];
+    const r = parseRelayPromoted(events, pkg, '0xroom', '0xdead');
+    expect(r!.promotedAtMs).toBeNull();
+  });
+
+  it('sets promotedAtMs = null (NOT 0) when timestampMs is explicitly null (Number(null)===0 trap)', () => {
+    const events = [
+      { type: `${pkg}::room_manager::RelayPromoted`, parsedJson: { room_id: '0xroom', old_primary: '0xdead', new_primary: '0xnew', epoch: '7' }, timestampMs: null },
+    ];
+    const r = parseRelayPromoted(events, pkg, '0xroom', '0xdead');
+    expect(r!.promotedAtMs).toBeNull();
+  });
 });
 
 describe('decodeMoveString (BCS vector<u8> -> utf8, ULEB128 length prefix — relay endpoint bytes)', () => {

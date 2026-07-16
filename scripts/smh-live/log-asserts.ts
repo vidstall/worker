@@ -16,6 +16,8 @@
  *       stays for completeness / the hermetic evidence note.)
  */
 
+import { normalizeSuiAddress } from '@mysten/sui/utils';
+
 function parse(line: string): Record<string, unknown> | null {
   try {
     return JSON.parse(line) as Record<string, unknown>;
@@ -46,4 +48,44 @@ const REDELIVERY = 'REQ-RMS-037: re-delivered stored reverse announces';
 /** True iff any line carries the REQ-RMS-037 standby reverse-announce re-delivery marker. */
 export function sawReopenRedelivery(lines: string[]): boolean {
   return lines.some((l) => l.includes(REDELIVERY));
+}
+
+/**
+ * A `promote_submit` record extracted from the cp watcher log — the anchor for BOTH halves of the
+ * T1-1 failover-promotion decomposition. `submitTimeMs` is the pino `time` (epoch-ms) of the submit
+ * line; `kill->submit` = submitTimeMs − kill t0, and `submit->RelayPromoted` = RelayPromoted envelope
+ * timestampMs − submitTimeMs.
+ */
+export interface PromoteSubmitRecord {
+  traceId: string;
+  submitTimeMs: number;
+  oldPrimary: string;
+  newPrimary: string;
+}
+
+/**
+ * Return the LAST `action==='promote_submit'` line whose `context.oldPrimary` matches `oldPrimary`
+ * (compared NORMALIZED — ids serialize un-padded on chain). `trace_id` + `action` are top-level; the
+ * primaries live under `context` (relay-heartbeat-watcher.ts:291-308). Anchored on the pino `time`
+ * field; returns null if none matches OR the matching line carries no numeric `time` (the submit
+ * instant cannot be anchored, so no interval is emitted rather than a corrupted one).
+ */
+export function readPromoteSubmit(lines: string[], oldPrimary: string): PromoteSubmitRecord | null {
+  const wantOld = normalizeSuiAddress(oldPrimary);
+  let last: PromoteSubmitRecord | null = null;
+  for (const line of lines) {
+    const o = parse(line);
+    if (!o || o['action'] !== 'promote_submit') continue;
+    const ctx = o['context'] as { oldPrimary?: unknown; newPrimary?: unknown } | undefined;
+    if (typeof ctx?.oldPrimary !== 'string' || typeof ctx?.newPrimary !== 'string') continue;
+    if (normalizeSuiAddress(ctx.oldPrimary) !== wantOld) continue;
+    if (typeof o['time'] !== 'number') continue;
+    last = {
+      traceId: typeof o['trace_id'] === 'string' ? o['trace_id'] : '',
+      submitTimeMs: o['time'],
+      oldPrimary: normalizeSuiAddress(ctx.oldPrimary),
+      newPrimary: normalizeSuiAddress(ctx.newPrimary),
+    };
+  }
+  return last;
 }

@@ -18,7 +18,7 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { Transaction } from '@mysten/sui/transactions';
 import type { SuiClient } from '@mysten/sui/client';
 
-type Ev = { type?: string; parsedJson?: unknown };
+type Ev = { type?: string; parsedJson?: unknown; timestampMs?: string | null };
 
 /**
  * Return the normalized `relay_ids` of the `RoomAssigned` event for `roomId`, or null
@@ -44,6 +44,14 @@ export function parseAssignedRelays(events: Ev[], pkg: string, roomId: string): 
 export interface Promotion {
   newPrimary: string;
   epoch: number;
+  /**
+   * Checkpoint/consensus-commit wall-clock (epoch-ms) of the `RelayPromoted` event, taken from the
+   * queryEvents ENVELOPE `timestampMs` (NOT `parsedJson`; the Move struct carries only a coarse Sui
+   * `epoch`). This is the authoritative submit->RelayPromoted endpoint (T1-1 decomposition). It is a
+   * consensus-commit instant — NOT client-visible, NOT MTTR. `null` when the envelope omits it
+   * (guarded: `Number(null) === 0` would silently corrupt a delta).
+   */
+  promotedAtMs: number | null;
 }
 
 /**
@@ -75,7 +83,13 @@ export function parseRelayPromoted(
       normalizeSuiAddress(pj.old_primary) === old &&
       typeof pj?.new_primary === 'string'
     ) {
-      return { newPrimary: normalizeSuiAddress(pj.new_primary), epoch: Number(pj.epoch) };
+      return {
+        newPrimary: normalizeSuiAddress(pj.new_primary),
+        epoch: Number(pj.epoch),
+        // NULL GUARD: envelope timestampMs is `string | null`; `!= null` maps BOTH undefined and
+        // null to `null` so a missing timestamp never becomes a bogus `0` epoch-ms.
+        promotedAtMs: ev.timestampMs != null ? Number(ev.timestampMs) : null,
+      };
     }
   }
   return null;
@@ -119,13 +133,20 @@ export async function pollRelayPromoted(
 ): Promise<Promotion | null> {
   const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
-    const res = await client.queryEvents({
-      query: { MoveEventType: `${pkg}::room_manager::RelayPromoted` },
-      limit: 50,
-      order: 'descending',
-    });
-    const p = parseRelayPromoted(res.data as Ev[], pkg, roomId, oldPrimary);
-    if (p) return p;
+    try {
+      const res = await client.queryEvents({
+        query: { MoveEventType: `${pkg}::room_manager::RelayPromoted` },
+        limit: 50,
+        order: 'descending',
+      });
+      const p = parseRelayPromoted(res.data as Ev[], pkg, roomId, oldPrimary);
+      if (p) return p;
+    } catch {
+      // Transient localnet RPC blip (e.g. ECONNREFUSED 9000 under regenesis load) — retry on the
+      // next tick instead of aborting the whole D2 run. A genuinely-down chain still times out to
+      // null (D2 FAIL, honest). Mirrors the readiness-poll try/catch (run-smh-live.ts:307). This is
+      // error-handling only; the measured timestamps are unchanged.
+    }
     await new Promise((r) => setTimeout(r, 2000));
   }
   return null;
