@@ -20,6 +20,7 @@ const base = {
   realCamera: false,
   peerPrefix: 'produce',
   roomOverride: null as string | null,
+  roomPrefix: 'wan-', // the parseArgs default — matches historical behavior
 };
 
 describe('wan-split-driver e2ee passthrough', () => {

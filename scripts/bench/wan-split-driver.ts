@@ -67,6 +67,12 @@ interface DriverOpts {
   // legs must join THAT assigned room. `trace`/JSONL row separation still uses
   // `wan-<i>` so per-session assembly is unchanged. Null → legacy `wan-<i>` room.
   roomOverride: string | null;
+  // Per-session room-name prefix (session i joins `<roomPrefix><i>` and its JSONL
+  // rows carry that as context.room_id). Default 'wan-' preserves the historical
+  // `wan-<i>` naming byte-for-byte for every existing caller; the P2 scheduler
+  // passes e.g. `p2b0off-` so each sub-run's rooms encode arm+block (plan
+  // 2026-07-16-p2-vm-only-cloud-wan-e2ee-window.md — rooms are never `wan-*`).
+  roomPrefix: string;
 }
 
 export function parseArgs(argv: string[]): DriverOpts {
@@ -75,6 +81,7 @@ export function parseArgs(argv: string[]): DriverOpts {
   const valueFlags = new Set([
     '--role', '--start-epoch', '--window-ms', '--teardown-ms', '--sessions',
     '--page', '--relay', '--bench', '--peer-prefix', '--e2ee', '--room',
+    '--room-prefix',
   ]);
   const switchFlags = new Set(['--real-camera']);
   const values = new Map<string, string>();
@@ -142,6 +149,14 @@ export function parseArgs(argv: string[]): DriverOpts {
     throw new Error(`--e2ee must be either on or off (got "${e2eeRaw}").`);
   }
 
+  // Default 'wan-' keeps every existing caller's room names (`wan-<i>`) unchanged.
+  // An EMPTY prefix would name rooms bare `0`,`1`,… — reject it so an operator
+  // typo can never silently drop the arm/block encoding from the room ids.
+  const roomPrefix = g('room-prefix', 'wan-');
+  if (roomPrefix.length === 0) {
+    throw new Error('--room-prefix must be a non-empty string (e.g. "wan-" or "p2b0off-").');
+  }
+
   return {
     role,
     relayPin,
@@ -160,6 +175,7 @@ export function parseArgs(argv: string[]): DriverOpts {
       const r = g('room', '');
       return r ? r : null;
     })(),
+    roomPrefix,
   };
 }
 
@@ -205,7 +221,7 @@ export function remainingSessionBudget(closeAtMs: number, nowMs = Date.now()): n
  * even when `roomOverride` pins the actual relay room to the on-chain assigned id.
  */
 export function buildSessionUrl(o: DriverOpts, i: number): string {
-  const traceRoom = `wan-${i}`;
+  const traceRoom = `${o.roomPrefix}${i}`;
   // The relay room actually JOINED: the on-chain assigned room when overridden,
   // else the per-session `wan-<i>`. Cross-relay forwarding needs the assigned id.
   const room = o.roomOverride ?? traceRoom;
@@ -237,7 +253,7 @@ async function openSession(
   i: number,
   closeAtMs: number,
 ): Promise<void> {
-  const traceRoom = `wan-${i}`;
+  const traceRoom = `${o.roomPrefix}${i}`;
   const page = await ctx.newPage();
 
   let attachmentSettled = false;
@@ -306,7 +322,7 @@ async function main(): Promise<void> {
     `wan-split-driver: role=${o.role} sessions=${o.sessions} window=${o.windowMs}ms\n` +
       `  anchor  E = ${o.startEpochMs} (${new Date(o.startEpochMs).toISOString()})\n` +
       `  last end  = ${lastEnd} (${new Date(lastEnd).toISOString()})\n` +
-      `  relay=${o.relay} bench=${o.bench} page=${o.pageBase} e2ee=${o.e2ee}`,
+      `  relay=${o.relay} bench=${o.bench} page=${o.pageBase} e2ee=${o.e2ee} rooms=${o.roomPrefix}<i>`,
   );
   if (Date.now() > o.startEpochMs) {
     console.log(
@@ -331,7 +347,7 @@ async function main(): Promise<void> {
       // clock-aligned with the other machine rather than run a lone half.
       if (Date.now() >= windowEnd) {
         skipped++;
-        console.log(`session ${i + 1}/${o.sessions} (${`wan-${i}`}) SKIPPED — window elapsed`);
+        console.log(`session ${i + 1}/${o.sessions} (${`${o.roomPrefix}${i}`}) SKIPPED — window elapsed`);
         continue;
       }
 
@@ -349,10 +365,10 @@ async function main(): Promise<void> {
         await openSession(ctx, o, i, closeAt);
         await sleep(closeAt - Date.now());
         ran++;
-        console.log(`session ${i + 1}/${o.sessions} (${`wan-${i}`}) done`);
+        console.log(`session ${i + 1}/${o.sessions} (${`${o.roomPrefix}${i}`}) done`);
       } catch (err) {
         failed++;
-        console.log(`session ${i + 1}/${o.sessions} (${`wan-${i}`}) FAILED — ${(err as Error).message}`);
+        console.log(`session ${i + 1}/${o.sessions} (${`${o.roomPrefix}${i}`}) FAILED — ${(err as Error).message}`);
       } finally {
         if (ctx) await ctx.close().catch(() => {});
       }
