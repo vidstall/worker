@@ -1,5 +1,5 @@
 // wan-playwright-driver.ts
-import { chromium, type BrowserContext } from 'playwright';
+import { chromium, type BrowserContext, type Page } from 'playwright';
 
 interface DriverOpts {
   sessions: number; pageBase: string; relay: string; bench: string; realCamera: boolean; holdMs: number; e2ee: string;
@@ -23,7 +23,7 @@ async function runSession(o: DriverOpts, i: number): Promise<void> {
   const room = `wan-${i}`;
   const flags = o.realCamera ? [] : ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'];
   const browser = await chromium.launch({ args: flags });
-  const mk = async (role: string): Promise<BrowserContext> => {
+  const mk = async (role: string): Promise<{ ctx: BrowserContext; page: Page }> => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     const u = new URL(o.pageBase);
@@ -33,13 +33,19 @@ async function runSession(o: DriverOpts, i: number): Promise<void> {
     if (o.realCamera) u.searchParams.set('camera', 'real');
     u.searchParams.set('e2ee', o.e2ee); // P2: both legs get the same flag (ON-vs-OFF glass-to-glass)
     await page.goto(u.toString());
-    return ctx;
+    return { ctx, page };
   };
   const producer = await mk('produce');
-  await new Promise((r) => setTimeout(r, 500)); // let the producer register before the consumer joins
+  // T2-2: launch the consumer only AFTER produce() has resolved on the producer page
+  // (window.__wanProducerReady) instead of a fixed 500 ms — otherwise consumeRemote's <=30s
+  // newProducer wait lands inside the consumer's join-to-first-frame t0->t1 and pollutes the metric.
+  await producer.page.waitForFunction(
+    () => (window as unknown as { __wanProducerReady?: boolean }).__wanProducerReady === true,
+    { timeout: 30000 },
+  );
   const consumer = await mk('consume');
   await new Promise((r) => setTimeout(r, o.holdMs));
-  await producer.close(); await consumer.close(); await browser.close();
+  await producer.ctx.close(); await consumer.ctx.close(); await browser.close();
   console.log(`session ${i + 1}/${o.sessions} done (trace=${trace})`);
 }
 

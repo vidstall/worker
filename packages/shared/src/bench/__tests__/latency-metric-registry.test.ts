@@ -21,6 +21,8 @@ describe('LatencyMetric registry', () => {
     w.write('L_g2g_optB_full', 120.5, { flow_id: 'p1' });
     w.write('t_hop_network', 15.2, { leg: 'inter-relay' });
     w.write('L_g2g_RTT_proxy', 65.0, { flow_id: 'p1' });
+    // T2-2 (2026-07-17): chain-free harness join-to-first-frame — tsc error until the enum is extended.
+    w.write('L_join_first_frame', 142.0, { flow_id: 'p1' });
     w.close();
 
     const metrics = readFileSync(w.getFilePath(), 'utf8')
@@ -28,6 +30,7 @@ describe('LatencyMetric registry', () => {
     expect(metrics).toEqual([
       'L_encode', 'L_jitterbuffer', 'L_decode', 'L_present',
       'L_rtt_send', 'L_rtt_recv', 'L_g2g_optB_full', 't_hop_network', 'L_g2g_RTT_proxy',
+      'L_join_first_frame',
     ]);
   });
 });

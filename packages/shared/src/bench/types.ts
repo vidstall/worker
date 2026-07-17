@@ -45,7 +45,10 @@ export type LatencyMetric =
   //    NETWORK hop time, not an endpoint pipeline-stage latency — the prefix break flags that distinction.
   | 't_hop_network'
   // … and the latent Node-harness metric, now registered (design §6 S5).
-  | 'L_g2g_RTT_proxy';
+  | 'L_g2g_RTT_proxy'
+  // chain-free harness join-to-first-frame (consume leg): pre-join performance.now() →
+  // first requestVideoFrameCallback with videoWidth>0 (T2-2, 2026-07-17, producer-already-live arm).
+  | 'L_join_first_frame';
 
 /** Source daemon that emitted the event. */
 export type LatencySource =
