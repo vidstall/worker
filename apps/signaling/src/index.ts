@@ -613,7 +613,7 @@ if (isMainModule) {
     const gracefulCfg = readGracefulShutdownConfig();
     const chainListener = new ChainEventListener({
       client: graphqlClient,
-      packageId: config.packageId,
+      packageId: config.originalPackageId ?? config.packageId,
       logger: logger.child({ component: 'self-shutdown-listener' }),
     });
 

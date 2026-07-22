@@ -47,9 +47,13 @@ interface TipQueryResult {
   };
 }
 
+// See events.ts's EVENTS_QUERY comment: `type` (pinned to the original
+// defining package) is used instead of `module` (pinned to whichever
+// package version was executing at emit time, which changes on every
+// upgrade) so the tip watermark doesn't go stale/empty after an upgrade.
 const TIP_QUERY = `
-  query ChainTip($module: String!) {
-    events(filter: { module: $module }, last: 1) {
+  query ChainTip($eventType: String!) {
+    events(filter: { type: $eventType }, last: 1) {
       nodes { timestamp }
     }
   }
@@ -58,6 +62,7 @@ const TIP_QUERY = `
 export interface ChainEventListenerOptions {
   /** Event queries only -- see @dvconf/shared's createGraphQLClient docstring. */
   client: SuiGraphQLClient;
+  /** The ORIGINAL defining package (NetworkConfig.originalPackageId), not the latest upgraded packageId -- see EventPoller's EVENTS_QUERY comment in @dvconf/shared. */
   packageId: string;
   logger: Logger;
   /** Base dir for the per-module cursors; default `process.env.DATA_DIR ?? '.'`. */
@@ -156,9 +161,9 @@ export class ChainEventListener {
     // from event #1 (never wedge a caught-up daemon in permanent replay).
     let tipTs: number | null = null;
     try {
-      const result: { data?: TipQueryResult } = await this.client.query<TipQueryResult, { module: string }>({
+      const result: { data?: TipQueryResult } = await this.client.query<TipQueryResult, { eventType: string }>({
         query: TIP_QUERY,
-        variables: { module: `${this.packageId}::${module}` },
+        variables: { eventType: `${this.packageId}::${module}` },
       });
       const t = result.data?.events.nodes[0]?.timestamp;
       const n = t ? Date.parse(t) : NaN;

@@ -1020,7 +1020,7 @@ if (isMainModule) {
     const myMinerId = signer.toSuiAddress();
     const roomPoller = new EventPoller({
       client: graphqlClient,
-      packageId: config.packageId,
+      packageId: config.originalPackageId ?? config.packageId,
       module: 'room_manager',
       pollingIntervalMs: pollIntervalMs,
       cursorPath: '.cursors/room_manager.json',
@@ -1157,7 +1157,7 @@ if (isMainModule) {
     const gracefulCfg = readGracefulShutdownConfig();
     const chainListener = new ChainEventListener({
       client: graphqlClient,
-      packageId: config.packageId,
+      packageId: config.originalPackageId ?? config.packageId,
       logger: logger.child({ component: 'self-shutdown-listener' }),
     });
     let selfShutdownWatcher: SelfShutdownWatcher | undefined;

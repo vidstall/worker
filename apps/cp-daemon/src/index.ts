@@ -929,7 +929,7 @@ async function main(): Promise<void> {
   // /healthz is NOT peer-polled, so a 503 would be safe anyway (F1=Option A).
   const listener = new ChainEventListener({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     logger: logger.child({ component: 'self-shutdown-listener' }),
   });
   const gracefulCfg = readGracefulShutdownConfig();
@@ -1223,7 +1223,7 @@ async function main(): Promise<void> {
   // before real-time polling starts (prevents race where relay registers before CP poller runs)
   for (const mod of ['relay_registry', 'signaling_registry', 'validator_registry', 'registration'] as const) {
     try {
-      const events = await queryHistoricalEvents(graphqlClient, config.packageId, mod, 100);
+      const events = await queryHistoricalEvents(graphqlClient, config.originalPackageId ?? config.packageId, mod, 100);
       rpcTotal++; // F61 rpc_error_rate: a successful queryEvents attempt (DOH-014)
       for (const ev of events) {
         await trackedHandler(ev);
@@ -1245,7 +1245,7 @@ async function main(): Promise<void> {
 
   const relayPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'relay_registry',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/relay_registry.json',
@@ -1254,7 +1254,7 @@ async function main(): Promise<void> {
 
   const cpPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'control_plane_registry',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/control_plane_registry.json',
@@ -1263,7 +1263,7 @@ async function main(): Promise<void> {
 
   const roomPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'room_manager',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/room_manager.json',
@@ -1272,7 +1272,7 @@ async function main(): Promise<void> {
 
   const signalingPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'signaling_registry',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/signaling_registry.json',
@@ -1281,7 +1281,7 @@ async function main(): Promise<void> {
 
   const economicPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'economic_layer',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/economic_layer.json',
@@ -1290,7 +1290,7 @@ async function main(): Promise<void> {
 
   const validatorPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'validator_registry',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/validator_registry.json',
@@ -1299,7 +1299,7 @@ async function main(): Promise<void> {
 
   const roleVotingPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'role_voting',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/role_voting.json',
@@ -1308,7 +1308,7 @@ async function main(): Promise<void> {
 
   const registrationPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'registration',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/registration.json',
@@ -1322,7 +1322,7 @@ async function main(): Promise<void> {
   // past rotations on restart would only re-evict already-evicted secrets (no-op).
   const turnCredentialPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'turn_credential',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/turn_credential.json',

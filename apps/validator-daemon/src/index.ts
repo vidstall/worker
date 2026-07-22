@@ -781,7 +781,7 @@ export async function startDaemon(overrides?: {
   // Start event poller for validator_registry events
   const eventPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'validator_registry',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/validator-events.json',
@@ -800,7 +800,7 @@ export async function startDaemon(overrides?: {
   // Start event poller for economic_layer EscrowCreated events (IC-3)
   const escrowPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: economicLayerModuleName,
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/economic-events.json',
@@ -843,7 +843,7 @@ export async function startDaemon(overrides?: {
   // Start event poller for room_manager RoomCreated/RoomClosed events
   const roomPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.packageId,
+    packageId: config.originalPackageId ?? config.packageId,
     module: 'room_manager',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: '.cursors/room_manager.json',
@@ -1538,7 +1538,7 @@ async function main(): Promise<void> {
     // SelfShutdownWatcher (node_health subscribe) + the /healthz isLive gate.
     const listener = new ChainEventListener({
       client: graphqlClient,
-      packageId: config.packageId,
+      packageId: config.originalPackageId ?? config.packageId,
       logger: logger.child({ component: 'self-shutdown-listener' }),
     });
     chainListener = listener;

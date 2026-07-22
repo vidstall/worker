@@ -21,6 +21,13 @@ import type { Logger } from 'pino';
 
 export interface EventPollerOptions {
   client: SuiGraphQLClient;
+  /**
+   * The package that ORIGINALLY defined the event struct(s) emitted by
+   * `module` -- i.e. NetworkConfig.originalPackageId, NOT the latest
+   * upgraded packageId. See the comment on EVENTS_QUERY for why: the
+   * query filters on the event's stable type, which is pinned to this
+   * package forever, not on which package version was executing.
+   */
   packageId: string;
   module: string;
   pollingIntervalMs: number;
@@ -43,9 +50,20 @@ interface EventsQueryResult {
   };
 }
 
+// Filters by event TYPE, not emitting MODULE. GraphQL's `module` filter
+// matches transactionModule.package -- the package version that was
+// EXECUTING when the event was emitted, which changes on every
+// `contract upgrade` (each upgrade calls entry points via a new latest
+// package address). `type` instead matches contents.type.repr, which Sui
+// pins to whichever package FIRST DEFINED the struct and never changes
+// across upgrades -- confirmed against devnet: a MinerRegistered emitted
+// via an old "latest" package still carries the original defining
+// package in its type, so `module` filtering permanently loses events
+// emitted before the most recent upgrade, while `type` filtering (keyed
+// on the stable original package) does not. See NetworkConfig.originalPackageId.
 const EVENTS_QUERY = `
-  query PollEvents($module: String!, $after: String) {
-    events(filter: { module: $module }, after: $after, first: 50) {
+  query PollEvents($eventType: String!, $after: String) {
+    events(filter: { type: $eventType }, after: $after, first: 50) {
       nodes {
         sender { address }
         sequenceNumber
@@ -94,10 +112,10 @@ export async function queryHistoricalEvents(
   while (hasMore && events.length < maxEvents) {
     const result: GraphQLQueryResult<EventsQueryResult> = await client.query<
       EventsQueryResult,
-      { module: string; after: string | null }
+      { eventType: string; after: string | null }
     >({
       query: EVENTS_QUERY,
-      variables: { module: `${packageId}::${module}`, after: cursor },
+      variables: { eventType: `${packageId}::${module}`, after: cursor },
     });
 
     if (result.errors && result.errors.length > 0) {
@@ -169,10 +187,10 @@ export class EventPoller {
     let hasMore = true;
 
     while (hasMore) {
-      const result = await this.client.query<EventsQueryResult, { module: string; after: string | null }>({
+      const result = await this.client.query<EventsQueryResult, { eventType: string; after: string | null }>({
         query: EVENTS_QUERY,
         variables: {
-          module: `${this.packageId}::${this.module}`,
+          eventType: `${this.packageId}::${this.module}`,
           after: this.cursor,
         },
       });
