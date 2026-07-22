@@ -13,6 +13,7 @@
 import 'dotenv/config';
 import {
   createSuiClient,
+  createGraphQLClient,
   loadNetworkConfig,
   loadKeypair,
   createLogger,
@@ -270,6 +271,8 @@ if (isMainModule) {
     // Load chain configuration
     const config = loadNetworkConfig();
     const client = createSuiClient(config.rpcUrl);
+    // Event queries only (roomPoller below) -- see createGraphQLClient's docstring.
+    const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
     const signer = loadKeypair('PRIVATE_KEY');
 
     const endpointUrl = process.env['RELAY_ENDPOINT_URL'] ?? `ws://127.0.0.1:${WS_PORT}`;
@@ -952,7 +955,7 @@ if (isMainModule) {
     // redundant room_manager poll the G3.2a extraction left in (opts.modules).
     const relayEndpointCache = new InMemoryRelayEndpointCache();
     const stopRelayEndpoints = await subscribeRelayEndpoints(
-      client,
+      graphqlClient,
       config.packageId,
       relayEndpointCache,
       logger,
@@ -1016,7 +1019,7 @@ if (isMainModule) {
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
     const myMinerId = signer.toSuiAddress();
     const roomPoller = new EventPoller({
-      client,
+      client: graphqlClient,
       packageId: config.packageId,
       module: 'room_manager',
       pollingIntervalMs: pollIntervalMs,
@@ -1153,7 +1156,7 @@ if (isMainModule) {
     // sequence with C-A (HealthMonitor → reactive) + C-B (heartbeat/healthz → LAST).
     const gracefulCfg = readGracefulShutdownConfig();
     const chainListener = new ChainEventListener({
-      client,
+      client: graphqlClient,
       packageId: config.packageId,
       logger: logger.child({ component: 'self-shutdown-listener' }),
     });

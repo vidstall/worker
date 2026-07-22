@@ -13,6 +13,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
 import {
   createSuiClient,
+  createGraphQLClient,
   loadNetworkConfig,
   loadKeypair,
   createLogger,
@@ -593,6 +594,8 @@ if (isMainModule) {
     // Load chain configuration
     const config = loadNetworkConfig();
     const client = createSuiClient(config.rpcUrl);
+    // Event queries only (capability_events poller) -- see createGraphQLClient's docstring.
+    const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
     const signer = loadKeypair('SIGNALING_KEYPAIR');
 
     const endpointUrl = process.env['ENDPOINT_URL'] ?? `ws://127.0.0.1:${PORT}`;
@@ -609,7 +612,7 @@ if (isMainModule) {
     // BEFORE healthz so the isLive closure can read its replay-degraded latch.
     const gracefulCfg = readGracefulShutdownConfig();
     const chainListener = new ChainEventListener({
-      client,
+      client: graphqlClient,
       packageId: config.packageId,
       logger: logger.child({ component: 'self-shutdown-listener' }),
     });
@@ -630,7 +633,7 @@ if (isMainModule) {
     // Step 1.5: Wire LIVE cap-token admission (W-P3, REQ-ADW-002) — real
     // capability_events poller + cached-epoch refresher feeding an AuthHook that
     // GATES room joins against on-chain cap-tokens.
-    const admission = await startCapTokenAdmission(client, config.packageId, logger);
+    const admission = await startCapTokenAdmission(client, graphqlClient, config.packageId, logger);
 
     // Step 1.6: Wire dual-relay endpoint cache (M1 Phase 3.2, REQ-RO-008, D-RO-3).
     // The cache is populated by subscribeRelayEndpoints, which polls
@@ -645,7 +648,7 @@ if (isMainModule) {
       10,
     );
     const stopRelayEndpoints = await subscribeRelayEndpoints(
-      client,
+      graphqlClient,
       config.packageId,
       relayEndpointCache,
       logger,

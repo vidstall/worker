@@ -30,21 +30,26 @@ function makeLoggerSpy(): Logger {
 }
 
 /**
- * Minimal SuiClient stub. `getLatestSuiSystemState` returns a controllable epoch;
- * `queryEvents` returns an empty page so the poller idles after one tick.
+ * Minimal SuiClient + SuiGraphQLClient stub pair. `getLatestSuiSystemState`
+ * returns a controllable epoch; the GraphQL `query` stub returns an empty
+ * events page so the poller idles after one tick.
  */
 function makeClientStub(epoch = '42'): {
   client: {
     getLatestSuiSystemState: ReturnType<typeof vi.fn>;
-    queryEvents: ReturnType<typeof vi.fn>;
+  };
+  graphqlClient: {
+    query: ReturnType<typeof vi.fn>;
   };
 } {
   return {
     client: {
       getLatestSuiSystemState: vi.fn().mockResolvedValue({ epoch }),
-      queryEvents: vi
-        .fn()
-        .mockResolvedValue({ data: [], hasNextPage: false, nextCursor: null }),
+    },
+    graphqlClient: {
+      query: vi.fn().mockResolvedValue({
+        data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+      }),
     },
   };
 }
@@ -59,18 +64,19 @@ describe('startCapTokenAdmission (REQ-ADW-002 — W-P3 live cap-token wiring)', 
   });
 
   it('(a) constructs a CapTokenCache and starts the real chain-event poller', async () => {
-    const { client } = makeClientStub();
+    const { client, graphqlClient } = makeClientStub();
     const subSpy = vi.spyOn(CapTokenCache.prototype, 'subscribeToChainEvents');
 
     const admission = await startCapTokenAdmission(
       client as never,
+      graphqlClient as never,
       PACKAGE_ID,
       logger,
     );
 
     expect(admission.cache).toBeInstanceOf(CapTokenCache);
     expect(subSpy).toHaveBeenCalledWith(
-      client,
+      graphqlClient,
       PACKAGE_ID,
       expect.objectContaining({ pollIntervalMs: expect.any(Number) }),
     );
@@ -80,10 +86,11 @@ describe('startCapTokenAdmission (REQ-ADW-002 — W-P3 live cap-token wiring)', 
   });
 
   it('(b) primes cachedEpoch from getLatestSuiSystemState; currentEpoch() is sync bigint', async () => {
-    const { client } = makeClientStub('77');
+    const { client, graphqlClient } = makeClientStub('77');
 
     const admission = await startCapTokenAdmission(
       client as never,
+      graphqlClient as never,
       PACKAGE_ID,
       logger,
     );
@@ -97,7 +104,7 @@ describe('startCapTokenAdmission (REQ-ADW-002 — W-P3 live cap-token wiring)', 
   });
 
   it('(c) shutdown() clears the epoch timer AND awaits the poller unsubscribe', async () => {
-    const { client } = makeClientStub();
+    const { client, graphqlClient } = makeClientStub();
     const unsubscribe = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(CapTokenCache.prototype, 'subscribeToChainEvents').mockResolvedValue(
       unsubscribe,
@@ -106,6 +113,7 @@ describe('startCapTokenAdmission (REQ-ADW-002 — W-P3 live cap-token wiring)', 
 
     const admission = await startCapTokenAdmission(
       client as never,
+      graphqlClient as never,
       PACKAGE_ID,
       logger,
     );
@@ -120,10 +128,11 @@ describe('startCapTokenAdmission (REQ-ADW-002 — W-P3 live cap-token wiring)', 
   });
 
   it('(d) produces an AuthHook usable as the createServer({ authHook }) input', async () => {
-    const { client } = makeClientStub();
+    const { client, graphqlClient } = makeClientStub();
 
     const admission = await startCapTokenAdmission(
       client as never,
+      graphqlClient as never,
       PACKAGE_ID,
       logger,
     );

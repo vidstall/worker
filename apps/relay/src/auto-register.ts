@@ -21,6 +21,31 @@ const RELAY_STAKE = 250_000_000n;
 /** Minimum stake for voting-mode registration (0.01 SUI). */
 const MIN_VOTING_STAKE = 10_000_000n;
 
+/** dvconf::core::constants::role_relay() — kept in sync manually (u8, stable). */
+const ROLE_RELAY = 2;
+
+/**
+ * Read a MinerCap's current on-chain role + the miner_id it was minted for.
+ */
+async function getMinerCapInfo(
+  client: SuiClient,
+  minerCapId: string,
+  logger: Logger,
+): Promise<{ minerId: string; role: number } | null> {
+  try {
+    const cap = await client.getObject({ id: minerCapId, options: { showContent: true } });
+    if (!cap.data) return null;
+    const fields = (cap.data.content as { fields: Record<string, string> })?.fields;
+    const minerId = fields?.['miner_id'];
+    const roleRaw = fields?.['role'];
+    if (!minerId || roleRaw === undefined) return null;
+    return { minerId, role: Number(roleRaw) };
+  } catch (err) {
+    logger.warn({ err, minerCapId }, 'Could not read MinerCap role');
+    return null;
+  }
+}
+
 /**
  * Check if a miner is registered in RelayRegistry via devInspect.
  */
@@ -121,6 +146,24 @@ export async function ensureRegistered(
     if (!stakePositionId) {
       logger.error('Cannot find StakePosition for step 2 registration. Manual intervention required.');
       process.exit(1);
+    }
+
+    // register_relay asserts cap.role == role_relay() (E_NOT_RELAY). A cap
+    // minted by registration::register() defaults to role_user() and only
+    // gets promoted once a CP casts a vote AND this miner applies it via
+    // apply_voted_role -- which the full auto-registration flow below does,
+    // but this MINER_CAP_ID-set shortcut never did, so a cap left over from
+    // a prior registration that never got its vote applied would abort
+    // Step 2 forever. Detect and apply it here before registering.
+    const capInfo = await getMinerCapInfo(client, envCapId, logger);
+    if (capInfo && capInfo.role !== ROLE_RELAY) {
+      logger.info(
+        { minerCapId: envCapId, role: capInfo.role },
+        'Cap role is not yet Relay — waiting for CP vote and applying it',
+      );
+      await waitForRoleAssignment(client, config, capInfo.minerId, logger);
+      await applyVotedRole(client, signer, config, envCapId, stakePositionId, logger);
+      logger.info({ minerCapId: envCapId }, 'Voted role applied — proceeding to Step 2');
     }
 
     await registerInRelayRegistry(client, signer, config, envCapId, stakePositionId, endpointUrl, region, logger);

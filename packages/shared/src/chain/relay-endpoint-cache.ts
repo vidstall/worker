@@ -21,10 +21,54 @@
  * No raw `console.*` in production paths (pino logger only).
  */
 
-import type { SuiClient, SuiEvent } from '@mysten/sui/client';
+import type { SuiEvent } from '@mysten/sui/client';
+import type { SuiGraphQLClient, GraphQLQueryResult } from '@mysten/sui/graphql';
 import type { Logger } from '../logger.js';
 
 const MODULE = 'relay-endpoint-cache';
+
+interface RelayEndpointGraphQLEventNode {
+  sender: { address: string } | null;
+  sequenceNumber: number;
+  timestamp: string | null;
+  transactionModule: { package: { address: string }; name: string } | null;
+  contents: { json: unknown; type: { repr: string } } | null;
+}
+
+interface RelayEndpointEventsQueryResult {
+  events: {
+    nodes: RelayEndpointGraphQLEventNode[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+}
+
+const RELAY_ENDPOINT_EVENTS_QUERY = `
+  query PollRelayEndpointEvents($module: String!, $after: String) {
+    events(filter: { module: $module }, after: $after, first: 50) {
+      nodes {
+        sender { address }
+        sequenceNumber
+        timestamp
+        transactionModule { package { address } name }
+        contents { json type { repr } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+function relayEndpointNodeToSuiEvent(node: RelayEndpointGraphQLEventNode): SuiEvent {
+  return {
+    id: { txDigest: '', eventSeq: String(node.sequenceNumber) },
+    packageId: node.transactionModule?.package.address ?? '',
+    transactionModule: node.transactionModule?.name ?? '',
+    sender: node.sender?.address ?? '',
+    type: node.contents?.type.repr ?? '',
+    parsedJson: node.contents?.json ?? {},
+    bcs: '',
+    timestampMs: node.timestamp ? String(Date.parse(node.timestamp)) : '0',
+  } as unknown as SuiEvent;
+}
 
 // ── RelayEndpointCache (public interface for injection / testing) ─────────────
 
@@ -87,6 +131,25 @@ export class InMemoryRelayEndpointCache implements RelayEndpointCache {
 // ── Chain subscription (populate the cache from chain events, D-RO-3) ──────────
 
 /**
+ * Decode a Move `vector<u8>` field as delivered by the ACTIVE transport.
+ * JSON-RPC's `parsedJson` renders it as a plain number array; GraphQL's
+ * `contents.json` renders the same field as a base64 string instead (the two
+ * transports disagree here even though everything else lines up) -- accept
+ * either so this doesn't silently break again on a future transport switch.
+ */
+function decodeVectorU8(value: unknown): number[] | null {
+  if (Array.isArray(value)) return value as number[];
+  if (typeof value === 'string') {
+    try {
+      return Array.from(Buffer.from(value, 'base64'));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Map a raw `relay_registry::RelayRegistered` event into a cache URL upsert.
  * `endpoint_url` is a UTF-8 byte vector (matching shared RelayRegistered type).
  */
@@ -96,9 +159,9 @@ function applyRelayRegistered(
   logger: Logger,
 ): void {
   const relayId = String(data['miner_id'] ?? '');
-  const endpointBytes = data['endpoint_url'];
-  if (relayId === '' || !Array.isArray(endpointBytes)) return;
-  cache.onRelayRegistered(relayId, endpointBytes as number[]);
+  const endpointBytes = decodeVectorU8(data['endpoint_url']);
+  if (relayId === '' || !endpointBytes) return;
+  cache.onRelayRegistered(relayId, endpointBytes);
   logger.debug(
     { module: MODULE, context: { relayId } },
     'relay-endpoint-cache: cached relay endpoint from RelayRegistered',
@@ -140,7 +203,7 @@ function applyRoomAssigned(
  * consumer (`resolvePrimaryEndpoint`, apps/relay) to populate the cache it reads.
  */
 export async function subscribeRelayEndpoints(
-  client: SuiClient,
+  client: SuiGraphQLClient,
   packageId: string,
   cache: InMemoryRelayEndpointCache,
   logger: Logger,
@@ -162,7 +225,9 @@ export async function subscribeRelayEndpoints(
   let inFlight: Promise<void> | null = null;
 
   // Per-module ascending cursor (in-memory; handlers are idempotent on re-delivery).
-  const cursors: Record<string, { txDigest: string; eventSeq: string } | null> = {
+  // Now an opaque GraphQL relay-style string, not {txDigest, eventSeq} (see
+  // events.ts's module docstring for why this migrated off JSON-RPC queryEvents).
+  const cursors: Record<string, string | null> = {
     relay_registry: null,
     room_manager: null,
   };
@@ -179,15 +244,23 @@ export async function subscribeRelayEndpoints(
   const pollModule = async (mod: 'relay_registry' | 'room_manager'): Promise<void> => {
     let hasMore = true;
     while (hasMore && running) {
-      const page = await client.queryEvents({
-        query: { MoveEventModule: { package: packageId, module: mod } },
-        cursor: cursors[mod] ?? undefined,
-        limit: 50,
-        order: 'ascending',
+      const result: GraphQLQueryResult<RelayEndpointEventsQueryResult> = await client.query<
+        RelayEndpointEventsQueryResult,
+        { module: string; after: string | null }
+      >({
+        query: RELAY_ENDPOINT_EVENTS_QUERY,
+        variables: { module: `${packageId}::${mod}`, after: cursors[mod] ?? null },
       });
-      for (const ev of page.data) dispatch(ev);
-      if (page.data.length > 0 && page.nextCursor) cursors[mod] = page.nextCursor;
-      hasMore = page.hasNextPage;
+      if (result.errors && result.errors.length > 0) {
+        throw new Error(`GraphQL events query failed: ${result.errors.map((e: { message: string }) => e.message).join('; ')}`);
+      }
+      const page = result.data?.events;
+      if (!page) {
+        throw new Error('GraphQL events query returned no data');
+      }
+      for (const node of page.nodes) dispatch(relayEndpointNodeToSuiEvent(node));
+      if (page.nodes.length > 0 && page.pageInfo.endCursor) cursors[mod] = page.pageInfo.endCursor;
+      hasMore = page.pageInfo.hasNextPage;
     }
   };
 

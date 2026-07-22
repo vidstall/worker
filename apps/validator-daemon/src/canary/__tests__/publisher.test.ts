@@ -26,11 +26,8 @@
 
 import { describe, it, expect } from 'vitest';
 
-// Cross-repo crypto reused only for layout self-checks (mirrors the forward-leg test).
-import {
-  readSframeTrailer,
-  SFRAME_TRAILER_LEN,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+// Client crypto (vendored into @dvconf/shared) reused only for layout self-checks.
+import { readSframeTrailer, SFRAME_TRAILER_LEN } from '@dvconf/shared';
 // The Phase-1.1 verifier is the SINGLE SOURCE OF TRUTH for the canary frame layout.
 import {
   verifyForwardedCanary,

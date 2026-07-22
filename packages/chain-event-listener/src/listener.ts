@@ -37,11 +37,27 @@
 import { join } from 'node:path';
 import { EventPoller } from '@dvconf/shared';
 import type { Logger } from '@dvconf/shared';
-import type { SuiClient, SuiEvent } from '@mysten/sui/client';
+import type { SuiEvent } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { ReplayGovernor, readReplayGovernorConfig } from './replay-governor.js';
 
+interface TipQueryResult {
+  events: {
+    nodes: { timestamp: string | null }[];
+  };
+}
+
+const TIP_QUERY = `
+  query ChainTip($module: String!) {
+    events(filter: { module: $module }, last: 1) {
+      nodes { timestamp }
+    }
+  }
+`;
+
 export interface ChainEventListenerOptions {
-  client: SuiClient;
+  /** Event queries only -- see @dvconf/shared's createGraphQLClient docstring. */
+  client: SuiGraphQLClient;
   packageId: string;
   logger: Logger;
   /** Base dir for the per-module cursors; default `process.env.DATA_DIR ?? '.'`. */
@@ -86,7 +102,7 @@ export type ListenerHandler = (
 ) => Promise<void>;
 
 export class ChainEventListener {
-  private readonly client: SuiClient;
+  private readonly client: SuiGraphQLClient;
   private readonly packageId: string;
   private readonly logger: Logger;
   private readonly dataDir: string;
@@ -140,13 +156,12 @@ export class ChainEventListener {
     // from event #1 (never wedge a caught-up daemon in permanent replay).
     let tipTs: number | null = null;
     try {
-      const page = await this.client.queryEvents({
-        query: { MoveEventModule: { package: this.packageId, module } },
-        limit: 1,
-        order: 'descending',
+      const result: { data?: TipQueryResult } = await this.client.query<TipQueryResult, { module: string }>({
+        query: TIP_QUERY,
+        variables: { module: `${this.packageId}::${module}` },
       });
-      const t = page.data[0]?.timestampMs;
-      const n = t ? Number(t) : NaN;
+      const t = result.data?.events.nodes[0]?.timestamp;
+      const n = t ? Date.parse(t) : NaN;
       tipTs = Number.isFinite(n) ? n : null;
     } catch {
       tipTs = null;

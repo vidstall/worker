@@ -32,12 +32,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
 
-// REAL client crypto (cross-repo, Mechanism A) — only for the per-frame layout
+// REAL client crypto (vendored into @dvconf/shared) — only for the per-frame layout
 // assertions; the verifier itself re-derives + recomputes. Nothing reimplemented.
-import {
-  readSframeTrailer,
-  SFRAME_TRAILER_LEN,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+import { readSframeTrailer, SFRAME_TRAILER_LEN } from '@dvconf/shared';
 // The audit modules under test (validator-daemon canary plane).
 import {
   verifyForwardedCanary,

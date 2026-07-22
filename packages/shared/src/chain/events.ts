@@ -1,17 +1,26 @@
 /**
  * Event poller with cursor-based pagination.
  *
- * Uses SuiClient.queryEvents (NOT the deprecated subscribeEvent).
- * Cursor is persisted to a JSON file for restart recovery.
+ * Uses SuiGraphQLClient's `events(filter:)` query (NOT the deprecated
+ * JSON-RPC `queryEvents` / `subscribeEvent`). devnet's public fullnode
+ * returns "Method not found" for `suix_queryEvents` -- see
+ * https://docs.sui.io/develop/accessing-data/json-rpc-migration -- so this
+ * class was migrated to GraphQL, which is Sui's documented queryEvents
+ * replacement. Cursor is persisted to a JSON file for restart recovery;
+ * note the cursor is now an OPAQUE STRING (GraphQL relay-style pagination
+ * cursor), not the old `{txDigest, eventSeq}` object, so any pre-existing
+ * cursor file from before this migration is incompatible and will be
+ * discarded (loadCursor falls back to a full from-genesis replay).
  */
 
-import type { SuiClient, SuiEvent, EventId } from '@mysten/sui/client';
+import type { SuiGraphQLClient, GraphQLQueryResult } from '@mysten/sui/graphql';
+import type { SuiEvent } from '@mysten/sui/client';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Logger } from 'pino';
 
 export interface EventPollerOptions {
-  client: SuiClient;
+  client: SuiGraphQLClient;
   packageId: string;
   module: string;
   pollingIntervalMs: number;
@@ -19,15 +28,109 @@ export interface EventPollerOptions {
   logger: Logger;
 }
 
+interface GraphQLEventNode {
+  sender: { address: string } | null;
+  sequenceNumber: number;
+  timestamp: string | null;
+  transactionModule: { package: { address: string }; name: string } | null;
+  contents: { json: unknown; type: { repr: string } } | null;
+}
+
+interface EventsQueryResult {
+  events: {
+    nodes: GraphQLEventNode[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+}
+
+const EVENTS_QUERY = `
+  query PollEvents($module: String!, $after: String) {
+    events(filter: { module: $module }, after: $after, first: 50) {
+      nodes {
+        sender { address }
+        sequenceNumber
+        timestamp
+        transactionModule { package { address } name }
+        contents { json type { repr } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+/**
+ * Adapt a GraphQL event node back into the JSON-RPC SuiEvent shape so
+ * every existing handler (event-handler.ts and friends) is untouched.
+ */
+function toSuiEvent(node: GraphQLEventNode, cursor: string): SuiEvent {
+  const timestampMs = node.timestamp ? String(Date.parse(node.timestamp)) : '0';
+  return {
+    id: { txDigest: cursor, eventSeq: String(node.sequenceNumber) },
+    packageId: node.transactionModule?.package.address ?? '',
+    transactionModule: node.transactionModule?.name ?? '',
+    sender: node.sender?.address ?? '',
+    type: node.contents?.type.repr ?? '',
+    parsedJson: node.contents?.json ?? {},
+    bcs: '',
+    timestampMs,
+  } as unknown as SuiEvent;
+}
+
+/**
+ * One-shot paginated fetch of ALL historical events for a module (no cursor
+ * persistence) -- for bootstrap-replay call sites that used to call
+ * `client.queryEvents(...)` directly instead of going through EventPoller.
+ */
+export async function queryHistoricalEvents(
+  client: SuiGraphQLClient,
+  packageId: string,
+  module: string,
+  maxEvents = 100,
+): Promise<SuiEvent[]> {
+  const events: SuiEvent[] = [];
+  let cursor: string | null = null;
+  let hasMore = true;
+
+  while (hasMore && events.length < maxEvents) {
+    const result: GraphQLQueryResult<EventsQueryResult> = await client.query<
+      EventsQueryResult,
+      { module: string; after: string | null }
+    >({
+      query: EVENTS_QUERY,
+      variables: { module: `${packageId}::${module}`, after: cursor },
+    });
+
+    if (result.errors && result.errors.length > 0) {
+      throw new Error(
+        `GraphQL events query failed: ${result.errors.map((e: { message: string }) => e.message).join('; ')}`,
+      );
+    }
+
+    const page = result.data?.events;
+    if (!page) {
+      throw new Error('GraphQL events query returned no data');
+    }
+
+    for (const node of page.nodes) {
+      events.push(toSuiEvent(node, page.pageInfo.endCursor ?? cursor ?? ''));
+    }
+
+    cursor = page.pageInfo.endCursor;
+    hasMore = page.pageInfo.hasNextPage;
+  }
+
+  return events;
+}
+
 export class EventPoller {
-  private readonly client: SuiClient;
+  private readonly client: SuiGraphQLClient;
   private readonly packageId: string;
   private readonly module: string;
   private readonly pollingIntervalMs: number;
   private readonly cursorPath: string;
   private readonly logger: Logger;
 
-  private cursor: EventId | null = null;
+  private cursor: string | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
 
@@ -66,28 +169,33 @@ export class EventPoller {
     let hasMore = true;
 
     while (hasMore) {
-      const page = await this.client.queryEvents({
-        query: {
-          MoveEventModule: {
-            package: this.packageId,
-            module: this.module,
-          },
+      const result = await this.client.query<EventsQueryResult, { module: string; after: string | null }>({
+        query: EVENTS_QUERY,
+        variables: {
+          module: `${this.packageId}::${this.module}`,
+          after: this.cursor,
         },
-        cursor: this.cursor ?? undefined,
-        limit: 50,
-        order: 'ascending',
       });
 
-      for (const event of page.data) {
-        await handler(event);
+      if (result.errors && result.errors.length > 0) {
+        throw new Error(`GraphQL events query failed: ${result.errors.map((e) => e.message).join('; ')}`);
       }
 
-      if (page.data.length > 0 && page.nextCursor) {
-        this.cursor = page.nextCursor;
+      const page = result.data?.events;
+      if (!page) {
+        throw new Error('GraphQL events query returned no data');
+      }
+
+      for (const node of page.nodes) {
+        await handler(toSuiEvent(node, page.pageInfo.endCursor ?? this.cursor ?? ''));
+      }
+
+      if (page.nodes.length > 0 && page.pageInfo.endCursor) {
+        this.cursor = page.pageInfo.endCursor;
         await this.saveCursor();
       }
 
-      hasMore = page.hasNextPage;
+      hasMore = page.pageInfo.hasNextPage;
     }
   }
 
@@ -104,15 +212,7 @@ export class EventPoller {
         }
       })
       .catch((err) => {
-        // Stale cursor after chain regenesis — reset to start from beginning
-        const msg = String(err?.message ?? '');
-        if (msg.includes('Could not find the referenced transaction')) {
-          this.logger.warn('Stale cursor detected (chain regenesis?). Resetting to start.');
-          this.cursor = null;
-          this.saveCursor().catch(() => {});
-        } else {
-          this.logger.error({ err }, 'EventPoller error, retrying');
-        }
+        this.logger.error({ err }, 'EventPoller error, retrying');
         if (this.running) {
           this.timer = setTimeout(
             () => this.poll(handler),
@@ -125,10 +225,8 @@ export class EventPoller {
   private async loadCursor(): Promise<void> {
     try {
       const data = await readFile(this.cursorPath, 'utf-8');
-      const parsed = JSON.parse(data) as { txDigest: string; eventSeq: string };
-      if (parsed.txDigest && parsed.eventSeq) {
-        this.cursor = parsed;
-      }
+      const parsed = JSON.parse(data) as { cursor?: string };
+      this.cursor = parsed.cursor ?? null;
     } catch {
       // No cursor file yet -- start from the beginning
       this.cursor = null;
@@ -139,7 +237,7 @@ export class EventPoller {
     if (!this.cursor) return;
     try {
       await mkdir(dirname(this.cursorPath), { recursive: true });
-      await writeFile(this.cursorPath, JSON.stringify(this.cursor), 'utf-8');
+      await writeFile(this.cursorPath, JSON.stringify({ cursor: this.cursor }), 'utf-8');
     } catch (err) {
       this.logger.warn({ err }, 'Failed to persist cursor');
     }

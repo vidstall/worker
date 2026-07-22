@@ -2,7 +2,8 @@
  * REQ-CFA-001 / D-CFA-10 — Canary-keying module (validator-daemon).
  *
  * Derives K_canary from a per-cell out-of-band `cellSecret` via the SHIPPED
- * `PathCKeyDerivation` salt-mix (dvconf-client/src/lib/crypto/e2ee-spike.ts) and hands
+ * `PathCKeyDerivation` salt-mix (@dvconf/shared, vendored from
+ * services/client/client/src/lib/crypto/e2ee-spike.ts) and hands
  * out restart-DURABLE monotone `canaryKid`s. This is a THIN wrapper: it does NOT
  * reimplement HKDF / the salt-mix — it maps cellSecret -> oobSecret and canaryKid ->
  * kid and delegates to PathC, so the "throw without oobSecret" covertness guard is
@@ -22,14 +23,11 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-// Cross-repo import (Mechanism A, mirrors the relay integration test): 5-level `../`
-// from apps/validator-daemon/src/canary -> the client crypto lib. The salt-mix is the
-// production stack's, verbatim.
 import {
   PathCKeyDerivation,
   type KeyDerivationInput,
-} from '../../../../../dvconf-client/src/lib/crypto/e2ee-spike.js';
-import { createLogger } from '@dvconf/shared';
+  createLogger,
+} from '@dvconf/shared';
 
 const MOD = 'canary/keying';
 const log = createLogger(MOD);

@@ -81,18 +81,16 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as mediasoup from 'mediasoup';
 import type { types as msTypes } from 'mediasoup';
 
-// ── REAL client crypto (cross-repo import, Mechanism A) ───────────────────────
-// 6-level `../` from this integration dir to the client lib. Vite resolves each
-// client module's OWN deps from dvconf-client/node_modules. NOTHING here
-// reimplements SFrame / AES-GCM / key derivation — the ciphertext is the
-// production stack's, verbatim (the P10 invariant).
+// ── REAL client crypto (vendored into @dvconf/shared) ───────────────────────
+// NOTHING here reimplements SFrame / AES-GCM / key derivation — the ciphertext
+// is the production stack's, verbatim (the P10 invariant).
 import {
   encryptFrame,
   decryptFrame,
   readSframeTrailer,
   SFRAME_TRAILER_LEN,
   codecOffsetForFrameType,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+} from '@dvconf/shared';
 // The 4 byte-identity helpers (+ VP8_PT) come from the SHARED util (Task 11 step 0a)
 // — extracted VERBATIM so the 1-hop and the REQ-RMS-020 multi-hop tests share ONE
 // byte-comparison framework (no copy-paste drift). NOTHING reimplements crypto.

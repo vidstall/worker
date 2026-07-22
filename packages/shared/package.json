@@ -14,12 +14,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@mysten/bcs": "^1.9.0",
     "@mysten/sui": "^1.0.0",
     "dotenv": "^16.0.0",
+    "libsodium-wrappers-sumo": "^0.8.4",
     "pino": "^9.0.0",
     "undici": "^6.27.0"
   },
   "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "^0.8.2",
     "pino-pretty": "^13.0.0"
   }
 }

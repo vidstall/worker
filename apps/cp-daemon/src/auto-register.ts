@@ -12,6 +12,76 @@ import { Transaction } from '@mysten/sui/transactions';
 import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, type NetworkConfig, type Logger } from '@dvconf/shared';
 
 /**
+ * Look up whether this wallet already owns a ControlPlaneCap (i.e. it
+ * already ran registration::register successfully on a prior boot), and if
+ * so, its miner_id and any owned StakePosition.
+ */
+async function findExistingCpCap(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  logger: Logger,
+): Promise<{ cpCapId: string; stakePositionId: string } | null> {
+  try {
+    const owner = signer.toSuiAddress();
+    const [capObjects, stakeObjects] = await Promise.all([
+      client.getOwnedObjects({
+        owner,
+        filter: { StructType: `${config.packageId}::caps::ControlPlaneCap` },
+        options: { showContent: false },
+      }),
+      client.getOwnedObjects({
+        owner,
+        filter: { StructType: `${config.packageId}::staking::StakePosition` },
+        options: { showContent: false },
+      }),
+    ]);
+    const cpCapId = capObjects.data[0]?.data?.objectId;
+    const stakePositionId = stakeObjects.data[0]?.data?.objectId;
+    if (!cpCapId || !stakePositionId) return null;
+    return { cpCapId, stakePositionId };
+  } catch (err) {
+    logger.warn({ err }, 'Could not check for an existing ControlPlaneCap');
+    return null;
+  }
+}
+
+/**
+ * Check if this CP is already registered in ControlPlaneRegistry via devInspect.
+ */
+async function isRegisteredInCpRegistry(
+  client: SuiClient,
+  config: NetworkConfig,
+  cpCapId: string,
+  logger: Logger,
+): Promise<boolean> {
+  try {
+    const cap = await client.getObject({ id: cpCapId, options: { showContent: true } });
+    const fields = (cap.data?.content as { fields: Record<string, string> } | undefined)?.fields;
+    const minerId = fields?.['miner_id'];
+    if (!minerId) return false;
+
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${config.packageId}::control_plane_registry::is_registered`,
+      arguments: [tx.object(config.cpRegistryId), tx.pure.id(minerId)],
+    });
+    const result = await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    });
+    if (result.results?.[0]?.returnValues?.[0]) {
+      const bytes = result.results[0].returnValues[0][0];
+      return bytes[0] === 1;
+    }
+    return false;
+  } catch (err) {
+    logger.warn({ err, cpCapId }, 'Could not verify ControlPlaneRegistry status via devInspect; assuming not registered');
+    return false;
+  }
+}
+
+/**
  * Ensure the CP daemon is registered on-chain.
  *
  * @returns The CP capability object ID.
@@ -79,11 +149,36 @@ export async function ensureRegistered(
   );
 
   if (!minerResult) {
-    logger.error(
-      'Auto-registration failed: ensure wallet has sufficient SUI balance. ' +
-      'Set CP_CAP_ID in .env if already registered.',
+    // Self-heal: registration::register aborts with E_ALREADY_REGISTERED on
+    // every restart after a successful prior boot that never got CP_CAP_ID
+    // persisted back into the deploy env (e.g. a Docker restart-policy
+    // trigger, host reboot, or daemon restart outside the deploy pipeline).
+    // Before giving up, check whether this wallet already owns a
+    // ControlPlaneCap from that earlier run and pick up from there instead
+    // of crash-looping forever.
+    logger.warn('Miner registration failed — checking for an existing ControlPlaneCap before giving up');
+    const existing = await findExistingCpCap(client, signer, config, logger);
+    if (!existing) {
+      logger.error(
+        'Auto-registration failed: ensure wallet has sufficient SUI balance. ' +
+        'Set CP_CAP_ID in .env if already registered.',
+      );
+      process.exit(1);
+    }
+    logger.info({ cpCapId: existing.cpCapId }, 'Found existing ControlPlaneCap — resuming from Step 2');
+    const alreadyInRegistry = await isRegisteredInCpRegistry(client, config, existing.cpCapId, logger);
+    if (!alreadyInRegistry) {
+      const healed = await registerCpInRegistry(client, signer, config, existing.cpCapId, existing.stakePositionId, logger);
+      if (!healed) {
+        logger.error('CP registration failed while self-healing from an existing cap. Manual intervention required.');
+        process.exit(1);
+      }
+    }
+    logger.info(
+      { cpCapId: existing.cpCapId },
+      `Recovered CP registration. Set CP_CAP_ID=${existing.cpCapId} in .env to skip this check on next startup.`,
     );
-    process.exit(1);
+    return { cpCapId: existing.cpCapId };
   }
 
   // Extract cap and StakePosition from created objects by type suffix.
@@ -111,6 +206,37 @@ export async function ensureRegistered(
   }
 
   // Step 2: Register as CP in ControlPlaneRegistry
+  const registered = await registerCpInRegistry(client, signer, config, cpCapId, stakePositionId, logger);
+  if (!registered) {
+    logger.error(
+      'CP registration failed after miner registration succeeded. ' +
+      'Manual intervention required.',
+    );
+    process.exit(1);
+  }
+
+  // register_cp mutates ControlPlaneRegistry and emits an event — it creates no new objects.
+  // The cpCapId was already extracted from Step 1 effects above.
+  logger.info(
+    { cpCapId },
+    `Auto-registered as CP. Set CP_CAP_ID=${cpCapId} in .env to skip registration on next startup.`,
+  );
+
+  return { cpCapId };
+}
+
+/**
+ * Register in ControlPlaneRegistry (Step 2). Shared by the fresh-registration
+ * path and the self-heal path above.
+ */
+async function registerCpInRegistry(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  cpCapId: string,
+  stakePositionId: string,
+  logger: Logger,
+): Promise<boolean> {
   const cpResult = await executeWithRetry(
     client,
     signer,
@@ -128,21 +254,5 @@ export async function ensureRegistered(
     'cp-registration',
     logger,
   );
-
-  if (!cpResult) {
-    logger.error(
-      'CP registration failed after miner registration succeeded. ' +
-      'Manual intervention required.',
-    );
-    process.exit(1);
-  }
-
-  // register_cp mutates ControlPlaneRegistry and emits an event — it creates no new objects.
-  // The cpCapId was already extracted from Step 1 effects above.
-  logger.info(
-    { cpCapId },
-    `Auto-registered as CP. Set CP_CAP_ID=${cpCapId} in .env to skip registration on next startup.`,
-  );
-
-  return { cpCapId };
+  return Boolean(cpResult);
 }

@@ -769,7 +769,7 @@ describe('REQ-RMS-022 (D1) — tri-state placement-capacity basis log', () => {
 
 describe('REQ-RMS-004 capacity-selected N-vector reaches submit_pairing_proposal unchanged', () => {
   it('REQ-RMS-004 records the capacity-selected N-vector via submit_pairing_proposal unchanged', async () => {
-    const spy = vi.spyOn(roomAssignment, 'submitProposal').mockResolvedValue(undefined);
+    const spy = vi.spyOn(roomAssignment, 'submitProposal').mockResolvedValue(true);
     roomAssignment.clearVotedRoom('room1'); // votedRooms is a module Set — clear so the proposal is not skipped as already-voted
 
     const logger = mockLogger();

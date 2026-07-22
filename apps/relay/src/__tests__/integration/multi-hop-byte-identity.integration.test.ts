@@ -20,7 +20,7 @@ import type { types as msTypes } from 'mediasoup';
 import {
   encryptFrame, decryptFrame, SFRAME_TRAILER_LEN,
   codecOffsetForFrameType, type KeyLookup,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+} from '@dvconf/shared';
 import { pipeRoomToSecondWorker } from '@dvconf/inter-relay-client';
 // The 4 byte-identity helpers come from the SHARED util (Task 11 step 0a) — NOT a hand
 // copy. VP8_PT is re-exported from there too, keeping one source of truth.

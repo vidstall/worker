@@ -101,6 +101,24 @@ function extractEventName(eventType: string): string {
 }
 
 /**
+ * Decode a Move `vector<u8>` field regardless of transport shape: JSON-RPC's
+ * `parsedJson` renders it as a number array, GraphQL's `contents.json` renders
+ * the same field as a base64 string instead (see relay-endpoint-cache.ts's
+ * decodeVectorU8 — same bug class, different call site).
+ */
+function decodeVectorU8ToNumbers(value: unknown): number[] | null {
+  if (Array.isArray(value)) return value as number[];
+  if (typeof value === 'string') {
+    try {
+      return Array.from(Buffer.from(value, 'base64'));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * W-P2 (D-W9) — fire-and-forget a cap-token issuer dispatch. `handleEvent` is a
  * synchronous void function (the poller awaits the handler, but each arm runs
  * sync); the issuer's `onX` handlers are async + already wrap their own bodies in
@@ -151,9 +169,8 @@ export function handleEvent(
   switch (eventName) {
     case 'RelayRegistered': {
       const e = data as unknown as RelayRegistered;
-      const regionStr = Array.isArray(e.region)
-        ? e.region.map((n) => String(n)).join(',')
-        : '';
+      const regionBytes = decodeVectorU8ToNumbers(e.region);
+      const regionStr = regionBytes ? regionBytes.map((n) => String(n)).join(',') : '';
       const candidate: NodeCandidate = {
         minerId: e.miner_id,
         rtt: 0n, // Unknown until validator probes
@@ -312,9 +329,8 @@ export function handleEvent(
 
     case 'SignalingRegistered': {
       const e = data as unknown as SignalingRegistered;
-      const regionStr = Array.isArray(e.region)
-        ? e.region.map((n) => String(n)).join(',')
-        : '';
+      const regionBytes = decodeVectorU8ToNumbers(e.region);
+      const regionStr = regionBytes ? regionBytes.map((n) => String(n)).join(',') : '';
       const candidate: SignalingCandidate = {
         minerId: e.miner_id,
         load: 0n,
@@ -594,13 +610,26 @@ export function handleEvent(
           signalingMinerId,
           submittedScore,
           logger,
-        ).then(() => {
-          logger.info(
-            { roomId: e.room_id, relays: topRelayIds, validators: topValidatorIds, signalingId: signalingMinerId },
-            'Pairing proposal submitted successfully',
-          );
+        ).then((success) => {
+          if (success) {
+            logger.info(
+              { roomId: e.room_id, relays: topRelayIds, validators: topValidatorIds, signalingId: signalingMinerId },
+              'Pairing proposal submitted successfully',
+            );
+            return;
+          }
+          // executeWithRetry exhausted its own retries (a transient chain-state
+          // race, not a permanent failure -- see room_manager E_INVALID_BALLOT
+          // history). Re-queue so the periodic retryPendingAssignments sweep
+          // (see createEventHandler) tries again later instead of dropping
+          // this room silently.
+          logger.warn({ roomId: e.room_id }, 'Pairing proposal failed after retries — re-queued for periodic retry');
+          pendingRooms.set(e.room_id, roomData);
+          pendingEscrows?.set(e.room_id, e);
         }).catch((err) => {
-          logger.error({ err, roomId: e.room_id }, 'Pairing proposal TX failed');
+          logger.error({ err, roomId: e.room_id }, 'Pairing proposal TX failed — re-queued for periodic retry');
+          pendingRooms.set(e.room_id, roomData);
+          pendingEscrows?.set(e.room_id, e);
         });
       } else {
         logger.warn({ roomId: e.room_id }, 'No TX context — pairing proposal skipped (test mode)');
@@ -612,6 +641,10 @@ export function handleEvent(
       // PAIR-03: Clear voted rooms when assignment is finalized
       const e = data as unknown as RoomAssigned;
       clearVotedRoom(e.room_id);
+      // Finalized by quorum (possibly without needing this CP's own vote) --
+      // stop the periodic retryPendingAssignments sweep from resubmitting.
+      pendingRooms.delete(e.room_id);
+      pendingEscrows?.delete(e.room_id);
       logger.info(
         { roomId: e.room_id, relayIds: e.relay_ids, signalingId: e.signaling_id },
         'Room assigned — cleared from voted rooms',
@@ -856,6 +889,7 @@ export function createEventHandler(
   validatorState: Map<string, NodeCandidate>;
   pendingRooms: Map<string, RoomCreated>;
   pendingEscrows: Map<string, EscrowCreated>;
+  retryPendingAssignments: () => void;
 } {
   const relayState = new Map<string, NodeCandidate>();
   const signalingState = new Map<string, SignalingCandidate>();
@@ -870,5 +904,36 @@ export function createEventHandler(
     );
   };
 
-  return { handler, relayState, signalingState, validatorState, pendingRooms, pendingEscrows };
+  /**
+   * Periodic sweep for rooms whose EscrowCreated processing was attempted
+   * but never reached a successful submitProposal (E_INVALID_BALLOT-style
+   * transient chain-state races, or a CP that was down/crash-looping when
+   * the original events fired and only later replayed them from genesis --
+   * see cli/infra.py / the `.cursors` EventPoller persistence gap). Any room
+   * still sitting in BOTH pendingRooms and pendingEscrows hasn't succeeded
+   * yet; re-dispatch a synthetic EscrowCreated for it, same mechanism the
+   * RoomCreated handler already uses for its own early-escrow race.
+   */
+  const retryPendingAssignments = (): void => {
+    for (const [roomId, escrowEvent] of pendingEscrows) {
+      const roomEvent = pendingRooms.get(roomId);
+      if (!roomEvent) continue; // still genuinely waiting on RoomCreated
+      if (votedRooms.has(roomId)) {
+        pendingRooms.delete(roomId);
+        pendingEscrows.delete(roomId);
+        continue;
+      }
+      logger.info({ roomId }, 'Retrying pairing proposal for a room that failed a prior attempt');
+      handleEvent(
+        {
+          type: `${txContext?.config.packageId}::economic_layer::EscrowCreated`,
+          parsedJson: escrowEvent as unknown as Record<string, unknown>,
+        } as unknown as SuiEvent,
+        relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+        capacityCtx?.attestedLoad, capacityCtx?.currentEpoch?.(), capacityCtx?.byzantineFlag?.(),
+      );
+    }
+  };
+
+  return { handler, relayState, signalingState, validatorState, pendingRooms, pendingEscrows, retryPendingAssignments };
 }

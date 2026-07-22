@@ -28,7 +28,7 @@ import {
   CANARY_FRAME_LEN,
   type VerifyInput,
 } from '../../verifier.js';
-import { SFRAME_TRAILER_LEN } from '../../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+import { SFRAME_TRAILER_LEN } from '@dvconf/shared';
 import { runCanaryVerifyRound, type CanaryVerifyDeps } from '../../verify-loop.js';
 import { type CanaryValidator, type RelayRoomScope } from '../../cell.js';
 import { type DivergenceProof } from '../../proof.js';

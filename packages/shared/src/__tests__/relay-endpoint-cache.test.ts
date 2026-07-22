@@ -26,10 +26,18 @@ function mockLogger() {
   } as any;
 }
 
-// ── Mock SuiClient ───────────────────────────────────────────────────────────
+// ── Mock SuiGraphQLClient ────────────────────────────────────────────────────
 
 /**
- * Mock SuiClient.queryEvents returning a fixed page per module on the FIRST
+ * GraphQL event node shape: `contents.json` carries the parsedJson-equivalent
+ * payload, with `type.repr` giving the full `pkg::module::Name` event type.
+ */
+function graphqlNode(type: string, json: unknown) {
+  return { sender: null, sequenceNumber: 0, timestamp: null, transactionModule: null, contents: { json, type: { repr: type } } };
+}
+
+/**
+ * Mock SuiGraphQLClient.query returning a fixed page per module on the FIRST
  * poll, then empty. `subscribeRelayEndpoints` primes once (await tick) so a
  * single poll populates the cache deterministically without timers.
  */
@@ -39,14 +47,12 @@ function makeMockSuiClient(events: {
 }) {
   const served = { relay_registry: false, room_manager: false };
   return {
-    queryEvents: vi.fn(async ({ query }: any) => {
-      const mod = query.MoveEventModule.module as 'relay_registry' | 'room_manager';
-      if (served[mod]) return { data: [], hasNextPage: false, nextCursor: null };
+    query: vi.fn(async ({ variables }: any) => {
+      const mod = (variables.module as string).split('::').pop() as 'relay_registry' | 'room_manager';
+      if (served[mod]) return { data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
       served[mod] = true;
       return {
-        data: events[mod] ?? [],
-        hasNextPage: false,
-        nextCursor: { txDigest: '0xtx', eventSeq: '1' },
+        data: { events: { nodes: events[mod] ?? [], pageInfo: { hasNextPage: false, endCursor: 'cursor-1' } } },
       };
     }),
   } as any;
@@ -88,15 +94,14 @@ describe('InMemoryRelayEndpointCache (D-RO-3: in-memory cache)', () => {
 // ── Tests: subscribeRelayEndpoints — cache population from chain events ───────
 
 describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => {
-  it('RelayRegistered event → cache.onRelayRegistered (id → ws URL from UTF-8 bytes)', async () => {
+  it('RelayRegistered event → cache.onRelayRegistered (id → ws URL, endpoint_url as base64 per GraphQL contents.json)', async () => {
     const url = 'ws://relay-x.test';
-    const urlBytes = Array.from(Buffer.from(url, 'utf8'));
     const client = makeMockSuiClient({
       relay_registry: [
-        {
-          type: '0xpkg::relay_registry::RelayRegistered',
-          parsedJson: { miner_id: '0xrelayX', endpoint_url: urlBytes },
-        },
+        graphqlNode('0xpkg::relay_registry::RelayRegistered', {
+          miner_id: '0xrelayX',
+          endpoint_url: Buffer.from(url, 'utf8').toString('base64'),
+        }),
       ],
     });
     const cache = new InMemoryRelayEndpointCache();
@@ -110,10 +115,10 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
   it('RoomAssigned event → cache.setRoomRelays (room → [primary, standby])', async () => {
     const client = makeMockSuiClient({
       room_manager: [
-        {
-          type: '0xpkg::room_manager::RoomAssigned',
-          parsedJson: { room_id: '0xroomA', relay_ids: ['0xprimary', '0xstandby'] },
-        },
+        graphqlNode('0xpkg::room_manager::RoomAssigned', {
+          room_id: '0xroomA',
+          relay_ids: ['0xprimary', '0xstandby'],
+        }),
       ],
     });
     const cache = new InMemoryRelayEndpointCache();
@@ -129,11 +134,11 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
     const sUrl = 'ws://standby.test';
     const client = makeMockSuiClient({
       relay_registry: [
-        { type: '0xpkg::relay_registry::RelayRegistered', parsedJson: { miner_id: '0xp', endpoint_url: Array.from(Buffer.from(pUrl, 'utf8')) } },
-        { type: '0xpkg::relay_registry::RelayRegistered', parsedJson: { miner_id: '0xs', endpoint_url: Array.from(Buffer.from(sUrl, 'utf8')) } },
+        graphqlNode('0xpkg::relay_registry::RelayRegistered', { miner_id: '0xp', endpoint_url: Buffer.from(pUrl, 'utf8').toString('base64') }),
+        graphqlNode('0xpkg::relay_registry::RelayRegistered', { miner_id: '0xs', endpoint_url: Buffer.from(sUrl, 'utf8').toString('base64') }),
       ],
       room_manager: [
-        { type: '0xpkg::room_manager::RoomAssigned', parsedJson: { room_id: '0xroomE', relay_ids: ['0xp', '0xs'] } },
+        graphqlNode('0xpkg::room_manager::RoomAssigned', { room_id: '0xroomE', relay_ids: ['0xp', '0xs'] }),
       ],
     });
     const cache = new InMemoryRelayEndpointCache();
@@ -144,8 +149,8 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
     expect(cache.getUrl('0xp')).toBe(pUrl);
     expect(cache.getUrl('0xs')).toBe(sUrl);
     // Default (no opts.modules) polls BOTH modules (symmetric to the filter test).
-    const polled = (client.queryEvents as any).mock.calls.map(
-      (c: any[]) => c[0].query.MoveEventModule.module,
+    const polled = (client.query as any).mock.calls.map(
+      (c: any[]) => (c[0].variables.module as string).split('::').pop(),
     );
     expect(polled).toContain('relay_registry');
     expect(polled).toContain('room_manager');
@@ -158,10 +163,10 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
     // redundant room_manager poll the G3.2a extraction left in place.
     const client = makeMockSuiClient({
       relay_registry: [
-        { type: '0xpkg::relay_registry::RelayRegistered', parsedJson: { miner_id: '0xr', endpoint_url: Array.from(Buffer.from('ws://r.test', 'utf8')) } },
+        graphqlNode('0xpkg::relay_registry::RelayRegistered', { miner_id: '0xr', endpoint_url: Buffer.from('ws://r.test', 'utf8').toString('base64') }),
       ],
       room_manager: [
-        { type: '0xpkg::room_manager::RoomAssigned', parsedJson: { room_id: '0xroomQ', relay_ids: ['0xr', '0xs'] } },
+        graphqlNode('0xpkg::room_manager::RoomAssigned', { room_id: '0xroomQ', relay_ids: ['0xr', '0xs'] }),
       ],
     });
     const cache = new InMemoryRelayEndpointCache();
@@ -173,8 +178,8 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
     // relay_registry arm populated; room_manager arm NOT polled at all.
     expect(cache.getUrl('0xr')).toBe('ws://r.test');
     expect(cache.getAssignedRelays('0xroomQ')).toEqual([]);
-    const polledModules = (client.queryEvents as any).mock.calls.map(
-      (c: any[]) => c[0].query.MoveEventModule.module,
+    const polledModules = (client.query as any).mock.calls.map(
+      (c: any[]) => (c[0].variables.module as string).split('::').pop(),
     );
     expect(polledModules).toContain('relay_registry');
     expect(polledModules).not.toContain('room_manager');
@@ -194,7 +199,7 @@ describe('subscribeRelayEndpoints — cache population (N2, REQ-RO-008)', () => 
   it('unknown event names are ignored (forward-compat)', async () => {
     const client = makeMockSuiClient({
       relay_registry: [
-        { type: '0xpkg::relay_registry::RelayLoadUpdated', parsedJson: { miner_id: '0xr', new_load: '5' } },
+        graphqlNode('0xpkg::relay_registry::RelayLoadUpdated', { miner_id: '0xr', new_load: '5' }),
       ],
     });
     const cache = new InMemoryRelayEndpointCache();

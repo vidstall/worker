@@ -8,12 +8,10 @@ import {
   readSframeTrailer,
   SFRAME_TRAILER_LEN,
   type KeyLookup,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
-import {
   KeyManager,
   type RosterMember,
-} from '../../../../../../dvconf-client/src/lib/crypto/key-manager.js';
-import { createSessionKeypair } from '../../../../../../dvconf-client/src/lib/crypto/session-keypair.js';
+  createSessionKeypair,
+} from '@dvconf/shared';
 
 export const VP8_PT = 101;
 

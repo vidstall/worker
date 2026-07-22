@@ -59,7 +59,7 @@ import {
   SFRAME_TRAILER_LEN,
   codecOffsetForFrameType,
   type KeyLookup,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+} from '@dvconf/shared';
 
 const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 

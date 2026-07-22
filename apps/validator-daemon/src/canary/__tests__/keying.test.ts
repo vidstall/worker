@@ -18,14 +18,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// ── REAL client crypto (cross-repo import, mirrors the relay integration test) ──
-// 5-level `../` from apps/validator-daemon/src/canary/__tests__ -> the client lib.
+// ── REAL client crypto (vendored into @dvconf/shared) ──
 // NOTHING here reimplements HKDF / Path C — the salt-mix is the production stack's.
-import { PathCKeyDerivation } from '../../../../../../dvconf-client/src/lib/crypto/e2ee-spike.js';
-import {
-  encryptFrame,
-  codecOffsetForFrameType,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
+import { PathCKeyDerivation, encryptFrame, codecOffsetForFrameType } from '@dvconf/shared';
 
 import {
   deriveCanaryKey,

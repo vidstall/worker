@@ -1,0 +1,58 @@
+{
+  "req": "REQ-MCS-006",
+  "phase": "W5 M1 P9",
+  "title": "scaled bandwidth bench >=3x@N=12 hard-gate",
+  "date": "2026-06-16",
+  "mediasoupVersion": "3.19.17",
+  "redHook": false,
+  "n12": {
+    "n": 12,
+    "pageSize": 9,
+    "baselineBytes": 1021360,
+    "optimizedBytes": 89096,
+    "ratio": 11.4636,
+    "speakerTileBytes": 32264,
+    "representativeThumbnailBytes": 7104,
+    "representativeOffPagePausedBytes": 0,
+    "baselinePerTile": [
+      85200,
+      85200,
+      85200,
+      84064,
+      85200,
+      85200,
+      85200,
+      85200,
+      85200,
+      85200,
+      85200,
+      85296
+    ],
+    "optimizedPerTile": [
+      32264,
+      7104,
+      7104,
+      7104,
+      7104,
+      7104,
+      7104,
+      7104,
+      7104,
+      0,
+      0,
+      0
+    ],
+    "windowMs": 800,
+    "settleMs": 1200
+  },
+  "honest_note": "Relay-side mechanism floor on a synthetic DirectTransport source. Forwarded outbound-rtp byteCount = bytes mediasoup placed on the consumer wire (ground truth). NOT WAN glass-to-glass, NOT browser getStats().inboundRtp (disclosed-separate). consumer.currentLayers is a lagging getter -> diagnostics only.",
+  "n25Demo": {
+    "n": 25,
+    "pageSize": 9,
+    "baselineBytes": 2101600,
+    "optimizedBytes": 90300,
+    "ratio": 23.2735,
+    "windowMs": 800,
+    "settleMs": 1200
+  }
+}

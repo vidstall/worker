@@ -42,15 +42,13 @@
  */
 
 import { createHash, createHmac } from 'node:crypto';
-// Cross-repo import (Mechanism A, mirrors keying.ts + the relay integration test):
-// 6-level `../` from apps/validator-daemon/src/canary -> the client crypto lib.
 import {
   encryptFrame,
   readSframeTrailer,
   SFRAME_TRAILER_LEN,
   codecOffsetForFrameType,
-} from '../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
-import { createLogger } from '@dvconf/shared';
+  createLogger,
+} from '@dvconf/shared';
 import { deriveCanaryKey, type CanaryKeyInput } from './keying.js';
 
 const MOD = 'canary/verifier';

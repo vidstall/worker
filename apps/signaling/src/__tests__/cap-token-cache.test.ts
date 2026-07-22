@@ -11,7 +11,19 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { SuiClient, SuiEvent } from '@mysten/sui/client';
+import type { SuiEvent } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
+
+function graphqlNodeFromSuiEvent(ev: SuiEvent) {
+  const parts = ev.type.split('::');
+  return {
+    sender: { address: ev.sender },
+    sequenceNumber: Number(ev.id.eventSeq),
+    timestamp: ev.timestampMs ? new Date(Number(ev.timestampMs)).toISOString() : null,
+    transactionModule: { package: { address: ev.packageId }, name: parts[1] ?? '' },
+    contents: { json: ev.parsedJson, type: { repr: ev.type } },
+  };
+}
 import { createLogger } from '@dvconf/shared';
 import {
   CapTokenCache,
@@ -245,25 +257,21 @@ describe('CapTokenCache', () => {
     // intermediate populated-then-evicted transition (REQ-ADM-005 ≤5s budget).
     let callCount = 0;
     const mockClient = {
-      queryEvents: vi.fn(async () => {
+      query: vi.fn(async () => {
         callCount += 1;
         if (callCount === 1) {
           return {
-            data: [issuedEvent],
-            nextCursor: { txDigest: 'tx-iss-1', eventSeq: '0' },
-            hasNextPage: false,
+            data: { events: { nodes: [graphqlNodeFromSuiEvent(issuedEvent)], pageInfo: { hasNextPage: false, endCursor: 'tx-iss-1' } } },
           };
         }
         if (callCount === 2) {
           return {
-            data: [revokedEvent],
-            nextCursor: { txDigest: 'tx-rev-1', eventSeq: '0' },
-            hasNextPage: false,
+            data: { events: { nodes: [graphqlNodeFromSuiEvent(revokedEvent)], pageInfo: { hasNextPage: false, endCursor: 'tx-rev-1' } } },
           };
         }
-        return { data: [], nextCursor: null, hasNextPage: false };
+        return { data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } };
       }),
-    } as unknown as SuiClient;
+    } as unknown as SuiGraphQLClient;
 
     const t0 = Date.now();
     const unsubscribe = await cache.subscribeToChainEvents(mockClient, PKG, {
@@ -294,19 +302,17 @@ describe('CapTokenCache', () => {
     expect(cache.has('0xtokIss')).toBe(false);
     expect(revokedElapsed).toBeLessThan(5_000);
 
-    expect((mockClient.queryEvents as any).mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect((mockClient.query as any).mock.calls.length).toBeGreaterThanOrEqual(2);
 
     await unsubscribe();
   });
 
   it('subscribeToChainEvents_idempotent_unsubscribe — repeated subscribe/unsubscribe leaks no timers', async () => {
     const mockClient = {
-      queryEvents: vi.fn(async () => ({
-        data: [],
-        nextCursor: null,
-        hasNextPage: false,
+      query: vi.fn(async () => ({
+        data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
       })),
-    } as unknown as SuiClient;
+    } as unknown as SuiGraphQLClient;
 
     const handles: Array<() => void | Promise<void>> = [];
     for (let i = 0; i < 10; i++) {

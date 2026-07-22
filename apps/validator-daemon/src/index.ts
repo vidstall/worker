@@ -22,6 +22,7 @@ import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import {
   createSuiClient,
+  createGraphQLClient,
   loadNetworkConfig,
   loadKeypair,
   generateSessionKeypair,
@@ -313,6 +314,8 @@ export async function startDaemon(overrides?: {
   // Load configuration
   const config = overrides?.config ?? loadNetworkConfig();
   const client = overrides?.client ?? createSuiClient(config.rpcUrl);
+  // Event queries only (EventPoller below) -- see createGraphQLClient's docstring.
+  const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
   const mainKeypair = overrides?.mainKeypair ?? loadKeypair('SUI_PRIVATE_KEY');
 
   const mainAddress = mainKeypair.getPublicKey().toSuiAddress();
@@ -777,7 +780,7 @@ export async function startDaemon(overrides?: {
 
   // Start event poller for validator_registry events
   const eventPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'validator_registry',
     pollingIntervalMs: pollIntervalMs,
@@ -796,7 +799,7 @@ export async function startDaemon(overrides?: {
 
   // Start event poller for economic_layer EscrowCreated events (IC-3)
   const escrowPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: economicLayerModuleName,
     pollingIntervalMs: pollIntervalMs,
@@ -839,7 +842,7 @@ export async function startDaemon(overrides?: {
 
   // Start event poller for room_manager RoomCreated/RoomClosed events
   const roomPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'room_manager',
     pollingIntervalMs: pollIntervalMs,
@@ -1528,11 +1531,13 @@ async function main(): Promise<void> {
   try {
     const config = loadNetworkConfig();
     const client = createSuiClient(config.rpcUrl);
+    // Event queries only (ChainEventListener below) -- see createGraphQLClient's docstring.
+    const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
 
     // P17 M2b-P9 (DOH-019/027): the ChainEventListener backing the F60
     // SelfShutdownWatcher (node_health subscribe) + the /healthz isLive gate.
     const listener = new ChainEventListener({
-      client,
+      client: graphqlClient,
       packageId: config.packageId,
       logger: logger.child({ component: 'self-shutdown-listener' }),
     });

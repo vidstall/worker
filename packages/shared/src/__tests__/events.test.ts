@@ -1,10 +1,14 @@
 /**
- * Tests for EventPoller — cursor-based event polling.
+ * Tests for EventPoller — cursor-based event polling via GraphQL
+ * (`events(filter:)`). Migrated off the deprecated JSON-RPC `queryEvents`,
+ * which devnet's public fullnode no longer supports — see events.ts's
+ * module docstring.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventPoller } from '../chain/events.js';
-import type { SuiClient, SuiEvent } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
+import type { SuiEvent } from '@mysten/sui/client';
 import type { Logger } from 'pino';
 import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -17,17 +21,17 @@ const mockLogger = {
   debug: vi.fn(),
 } as unknown as Logger;
 
-function makeSuiEvent(id: string, seq: string): SuiEvent {
+function makeGraphQLNode(cursor: string, seq: number) {
   return {
-    id: { txDigest: id, eventSeq: seq },
-    packageId: '0xpkg',
-    transactionModule: 'registration',
-    sender: '0xsender',
-    type: '0xpkg::registration::MinerRegistered',
-    parsedJson: { miner_id: '0xm1', owner: '0xo1', role: 0, stake_amount: '1000' },
-    bcs: '',
-    timestampMs: '1000',
-  } as unknown as SuiEvent;
+    sender: { address: '0xsender' },
+    sequenceNumber: seq,
+    timestamp: '2026-01-01T00:00:00.000Z',
+    transactionModule: { package: { address: '0xpkg' }, name: 'registration' },
+    contents: {
+      json: { miner_id: '0xm1', owner: '0xo1', role: 0, stake_amount: '1000' },
+      type: { repr: '0xpkg::registration::MinerRegistered' },
+    },
+  };
 }
 
 describe('EventPoller', () => {
@@ -47,19 +51,12 @@ describe('EventPoller', () => {
   });
 
   it('processes events in order', async () => {
-    const events = [
-      makeSuiEvent('tx1', '0'),
-      makeSuiEvent('tx1', '1'),
-      makeSuiEvent('tx2', '0'),
-    ];
-
+    const nodes = [makeGraphQLNode('c0', 0), makeGraphQLNode('c1', 1), makeGraphQLNode('c2', 2)];
     const mockClient = {
-      queryEvents: vi.fn(async () => ({
-        data: events,
-        nextCursor: { txDigest: 'tx2', eventSeq: '0' },
-        hasNextPage: false,
+      query: vi.fn(async () => ({
+        data: { events: { nodes, pageInfo: { hasNextPage: false, endCursor: 'c2' } } },
       })),
-    } as unknown as SuiClient;
+    } as unknown as SuiGraphQLClient;
 
     const poller = new EventPoller({
       client: mockClient,
@@ -76,19 +73,16 @@ describe('EventPoller', () => {
     });
 
     expect(received).toHaveLength(3);
-    expect(received[0]!.id.txDigest).toBe('tx1');
-    expect(received[0]!.id.eventSeq).toBe('0');
-    expect(received[2]!.id.txDigest).toBe('tx2');
+    expect(received[0]!.type).toBe('0xpkg::registration::MinerRegistered');
+    expect(received[2]!.id.eventSeq).toBe('2');
   });
 
   it('handles empty results (no events)', async () => {
     const mockClient = {
-      queryEvents: vi.fn(async () => ({
-        data: [],
-        nextCursor: null,
-        hasNextPage: false,
+      query: vi.fn(async () => ({
+        data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
       })),
-    } as unknown as SuiClient;
+    } as unknown as SuiGraphQLClient;
 
     const poller = new EventPoller({
       client: mockClient,
@@ -105,28 +99,34 @@ describe('EventPoller', () => {
     });
 
     expect(received).toHaveLength(0);
-    expect(mockClient.queryEvents).toHaveBeenCalledTimes(1);
+    expect(mockClient.query).toHaveBeenCalledTimes(1);
   });
 
   it('follows hasNextPage pagination', async () => {
     let callCount = 0;
     const mockClient = {
-      queryEvents: vi.fn(async () => {
+      query: vi.fn(async () => {
         callCount++;
         if (callCount === 1) {
           return {
-            data: [makeSuiEvent('page1', '0')],
-            nextCursor: { txDigest: 'page1', eventSeq: '0' },
-            hasNextPage: true,
+            data: {
+              events: {
+                nodes: [makeGraphQLNode('page1', 0)],
+                pageInfo: { hasNextPage: true, endCursor: 'page1' },
+              },
+            },
           };
         }
         return {
-          data: [makeSuiEvent('page2', '0')],
-          nextCursor: { txDigest: 'page2', eventSeq: '0' },
-          hasNextPage: false,
+          data: {
+            events: {
+              nodes: [makeGraphQLNode('page2', 0)],
+              pageInfo: { hasNextPage: false, endCursor: 'page2' },
+            },
+          },
         };
       }),
-    } as unknown as SuiClient;
+    } as unknown as SuiGraphQLClient;
 
     const poller = new EventPoller({
       client: mockClient,
@@ -142,8 +142,8 @@ describe('EventPoller', () => {
       received.push(event);
     });
 
-    // Should have made 2 queryEvents calls (followed hasNextPage)
-    expect(mockClient.queryEvents).toHaveBeenCalledTimes(2);
+    // Should have made 2 query calls (followed hasNextPage)
+    expect(mockClient.query).toHaveBeenCalledTimes(2);
     expect(received).toHaveLength(2);
     expect(received[0]!.id.txDigest).toBe('page1');
     expect(received[1]!.id.txDigest).toBe('page2');
@@ -151,12 +151,15 @@ describe('EventPoller', () => {
 
   it('persists cursor to file', async () => {
     const mockClient = {
-      queryEvents: vi.fn(async () => ({
-        data: [makeSuiEvent('persist-tx', '5')],
-        nextCursor: { txDigest: 'persist-tx', eventSeq: '5' },
-        hasNextPage: false,
+      query: vi.fn(async () => ({
+        data: {
+          events: {
+            nodes: [makeGraphQLNode('persist-cursor', 5)],
+            pageInfo: { hasNextPage: false, endCursor: 'persist-cursor' },
+          },
+        },
       })),
-    } as unknown as SuiClient;
+    } as unknown as SuiGraphQLClient;
 
     const poller = new EventPoller({
       client: mockClient,
@@ -171,7 +174,6 @@ describe('EventPoller', () => {
 
     // Read the cursor file and verify
     const cursorData = JSON.parse(await readFile(cursorPath, 'utf-8'));
-    expect(cursorData.txDigest).toBe('persist-tx');
-    expect(cursorData.eventSeq).toBe('5');
+    expect(cursorData.cursor).toBe('persist-cursor');
   });
 });

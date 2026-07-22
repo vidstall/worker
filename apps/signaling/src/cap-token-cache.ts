@@ -9,8 +9,52 @@
  * REQ-ADM-009: cache flips to strict-reject mode when chain RPC is unreachable >30s.
  */
 
-import type { SuiClient, SuiEvent } from '@mysten/sui/client';
+import type { SuiEvent } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { Logger } from '@dvconf/shared';
+
+interface CapTokenGraphQLEventNode {
+  sender: { address: string } | null;
+  sequenceNumber: number;
+  timestamp: string | null;
+  transactionModule: { package: { address: string }; name: string } | null;
+  contents: { json: unknown; type: { repr: string } } | null;
+}
+
+interface CapTokenEventsQueryResult {
+  events: {
+    nodes: CapTokenGraphQLEventNode[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+}
+
+const CAP_TOKEN_EVENTS_QUERY = `
+  query PollCapabilityEvents($module: String!, $after: String) {
+    events(filter: { module: $module }, after: $after, first: 50) {
+      nodes {
+        sender { address }
+        sequenceNumber
+        timestamp
+        transactionModule { package { address } name }
+        contents { json type { repr } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+function graphqlNodeToSuiEvent(node: CapTokenGraphQLEventNode): SuiEvent {
+  return {
+    id: { txDigest: '', eventSeq: String(node.sequenceNumber) },
+    packageId: node.transactionModule?.package.address ?? '',
+    transactionModule: node.transactionModule?.name ?? '',
+    sender: node.sender?.address ?? '',
+    type: node.contents?.type.repr ?? '',
+    parsedJson: node.contents?.json ?? {},
+    bcs: '',
+    timestampMs: node.timestamp ? String(Date.parse(node.timestamp)) : '0',
+  } as unknown as SuiEvent;
+}
 
 /** Cached snapshot of a RoomCapability for fast WS handshake lookup. */
 export interface CachedToken {
@@ -319,28 +363,31 @@ export class CapTokenCache {
 
   /**
    * Subscribe to `capability_events` chain events using cursor-based
-   * polling against `SuiClient.queryEvents`. Parsed payloads are forwarded
-   * into `handleEvent`. Idempotent: the returned `unsubscribe` is safe to call
-   * multiple times. Reconnect: poll loop swallows transient errors and retries
-   * on the next interval (exponential backoff is the SuiClient's responsibility
-   * via the shared http-retry wiring).
+   * polling against `SuiGraphQLClient`'s `events(filter:)` query -- NOT the
+   * legacy JSON-RPC `SuiClient.queryEvents`, which devnet's public fullnode
+   * now returns "Method not found" for (see
+   * https://docs.sui.io/develop/accessing-data/json-rpc-migration).
+   * Parsed payloads are forwarded into `handleEvent`. Idempotent: the
+   * returned `unsubscribe` is safe to call multiple times. Reconnect: poll
+   * loop swallows transient errors and retries on the next interval.
    *
    * Mirrors the `EventPoller` pattern in `packages/shared/src/chain/events.ts`
    * but stays self-contained because cap-token-cache lives in `apps/signaling`
    * (which has its own `@mysten/sui` dependency and does not import an
-   * EventPoller cursor file). Cursor is in-memory only; on daemon restart,
-   * the poller starts from the beginning of the package's event history and
-   * `handleEvent` is idempotent against re-delivery (put is a Map.set; revoke
-   * is delete; refresh is put-then-put).
+   * EventPoller cursor file). Cursor is in-memory only (now an opaque
+   * GraphQL relay-style string, not `{txDigest, eventSeq}`); on daemon
+   * restart, the poller starts from the beginning of the package's event
+   * history and `handleEvent` is idempotent against re-delivery (put is a
+   * Map.set; revoke is delete; refresh is put-then-put).
    */
   async subscribeToChainEvents(
-    suiClient: SuiClient,
+    graphqlClient: SuiGraphQLClient,
     packageId: string,
     opts?: { pollIntervalMs?: number },
   ): Promise<() => Promise<void>> {
     const intervalMs = opts?.pollIntervalMs ?? 2_000;
     let running = true;
-    let cursor: { txDigest: string; eventSeq: string } | null = null;
+    let cursor: string | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let inFlight: Promise<void> | null = null;
 
@@ -348,19 +395,24 @@ export class CapTokenCache {
       try {
         let hasMore = true;
         while (hasMore && running) {
-          const page = await suiClient.queryEvents({
-            query: { MoveEventModule: { package: packageId, module: 'capability_events' } },
-            cursor: cursor ?? undefined,
-            limit: 50,
-            order: 'ascending',
+          const result = await graphqlClient.query<CapTokenEventsQueryResult>({
+            query: CAP_TOKEN_EVENTS_QUERY,
+            variables: { module: `${packageId}::capability_events`, after: cursor },
           });
-          for (const ev of page.data) {
-            this.dispatchSuiEvent(ev);
+          if (result.errors && result.errors.length > 0) {
+            throw new Error(`GraphQL events query failed: ${result.errors.map((e) => e.message).join('; ')}`);
           }
-          if (page.data.length > 0 && page.nextCursor) {
-            cursor = page.nextCursor;
+          const page = result.data?.events;
+          if (!page) {
+            throw new Error('GraphQL events query returned no data');
           }
-          hasMore = page.hasNextPage;
+          for (const node of page.nodes) {
+            this.dispatchSuiEvent(graphqlNodeToSuiEvent(node));
+          }
+          if (page.nodes.length > 0 && page.pageInfo.endCursor) {
+            cursor = page.pageInfo.endCursor;
+          }
+          hasMore = page.pageInfo.hasNextPage;
         }
       } catch (err) {
         this.logger.warn(

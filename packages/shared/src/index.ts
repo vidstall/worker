@@ -63,10 +63,10 @@ export {
 } from './types/constants.js';
 
 // Chain helpers
-export { createSuiClient, loadNetworkConfig } from './chain/client.js';
+export { createSuiClient, createGraphQLClient, loadNetworkConfig } from './chain/client.js';
 export { loadKeypair, generateSessionKeypair } from './chain/keypair.js';
 export { executeWithRetry, extractCreatedObjectByType } from './chain/tx.js';
-export { EventPoller } from './chain/events.js';
+export { EventPoller, queryHistoricalEvents } from './chain/events.js';
 export type { EventPollerOptions } from './chain/events.js';
 export { waitForRoleAssignment, applyVotedRole } from './chain/role-assignment.js';
 // P17 M2b-P8 (DOH-021) — on-chain reads for the F60 reactive-shutdown wiring.
@@ -197,3 +197,65 @@ export { isBearerAuthorized } from './bearer-auth.js';
 // ONE source. fundAddress is injected so this stays test-free.
 export { createRoomWithRelay, extractRoomId, signAndAssert } from './chain/provision-room.js';
 export type { TxStatusLike } from './chain/provision-room.js';
+
+// Vendored SFrame/E2EE crypto (services/client/client/src/lib/{webrtc,crypto}/*.ts).
+// validator-daemon's canary forwarding-integrity verifier and relay's SFrame
+// integration tests need the EXACT client crypto ("reuses the SHIPPED client crypto
+// verbatim"), not a reimplementation. Vendored here (not imported cross-repo, since
+// services/client is a separate git submodule unreachable from the Docker build
+// context) so BOTH validator-daemon and relay import it WITHOUT a cross-app or
+// cross-repo import. Keep byte-identical to the client source; resync manually if it
+// changes there.
+export {
+  SFRAME_TRAILER_LEN,
+  SFRAME_IV_LEN,
+  MAX_CODEC_OFFSET,
+  codecOffsetForFrameType,
+  writeSframeTrailer,
+  readSframeTrailer,
+  deriveFrameIv,
+  encryptFrame,
+  decryptFrame,
+} from './crypto-webrtc/sframe-transform.js';
+export type {
+  FrameKind,
+  FrameHeader,
+  ParsedTrailer,
+  KeyLookup,
+} from './crypto-webrtc/sframe-transform.js';
+
+export {
+  initSodium,
+  bytesEqual,
+  generateSyntheticMember,
+  generateRoomKey,
+  sealRoomKeyToRoster,
+  openOwnEnvelope,
+  electCoordinator,
+  electCoordinatorWithLiveness,
+  ratchetOnJoin,
+  freshRekeyOnLeave,
+  KidKeyStore,
+  importRoomKeyNonExtractable,
+  PathAKeyDerivation,
+  PathCKeyDerivation,
+  bridgeMystenSeedToOpener,
+} from './crypto-webrtc/e2ee-spike.js';
+export type {
+  SyntheticMember,
+  SealedEnvelope,
+  E2EEKeyBundle,
+  KeyDerivationInput,
+  KeyDerivation,
+  MystenOpener,
+} from './crypto-webrtc/e2ee-spike.js';
+
+export { assertSenderIdSafe, KeyManager } from './crypto-webrtc/key-manager.js';
+export type { RosterMember, KeyManagerOptions } from './crypto-webrtc/key-manager.js';
+
+export { createSessionKeypair } from './crypto-webrtc/session-keypair.js';
+export type {
+  SessionOpener,
+  SessionKeypair,
+  CreateSessionKeypairOptions,
+} from './crypto-webrtc/session-keypair.js';

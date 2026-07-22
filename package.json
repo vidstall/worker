@@ -28,10 +28,6 @@
     "bench:signaling-latency": "tsx scripts/bench/run-signaling-latency.ts",
     "bench:harness": "tsx scripts/bench/mediasoup-client-harness.ts",
     "bench:smoke": "tsx scripts/bench/run-smoke.ts --peers 2 --runs 5 --duration 60",
-    "forensic": "tsx apps/forensic-cli/src/index.ts",
-    "forensic:smoke": "tsx apps/forensic-cli/src/index.ts smoke",
-    "forensic:collect": "tsx apps/forensic-cli/src/index.ts collect",
-    "forensic:report": "tsx apps/forensic-cli/src/index.ts report",
     "failover:smoke": "tsx scripts/failover/failover-smoke.ts",
     "smh:live": "tsx scripts/smh-live/run-smh-live.ts",
     "smh:live:test": "vitest run scripts/smh-live/__tests__"

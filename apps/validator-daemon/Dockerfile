@@ -13,9 +13,8 @@ FROM base AS deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 make g++ pkg-config \
     && rm -rf /var/lib/apt/lists/*
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json ./
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json .npmrc ./
 COPY apps/cp-daemon/package.json apps/cp-daemon/package.json
-COPY apps/forensic-cli/package.json apps/forensic-cli/package.json
 COPY apps/relay/package.json apps/relay/package.json
 COPY apps/signaling/package.json apps/signaling/package.json
 COPY apps/validator-daemon/package.json apps/validator-daemon/package.json

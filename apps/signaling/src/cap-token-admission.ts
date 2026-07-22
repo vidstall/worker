@@ -21,6 +21,7 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { Logger } from '@dvconf/shared';
 import { AuthHook } from './auth.js';
 import { CapTokenCache } from './cap-token-cache.js';
@@ -48,6 +49,7 @@ export interface CapTokenAdmission {
  */
 export async function startCapTokenAdmission(
   client: SuiClient,
+  graphqlClient: SuiGraphQLClient,
   packageId: string,
   logger: Logger,
   opts: StartCapTokenAdmissionOpts = {},
@@ -78,7 +80,7 @@ export async function startCapTokenAdmission(
 
   // Start the REAL capability_events poller. Returns an async unsubscribe.
   cache.announceColdStart('signaling-daemon-start');
-  const unsubscribe = await cache.subscribeToChainEvents(client, packageId, {
+  const unsubscribe = await cache.subscribeToChainEvents(graphqlClient, packageId, {
     pollIntervalMs: opts.pollIntervalMs ?? 2_000,
   });
 

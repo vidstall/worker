@@ -14,11 +14,13 @@ import type { SuiClient, SuiEvent } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import {
   createSuiClient,
+  createGraphQLClient,
   loadNetworkConfig,
   loadKeypair,
   createLogger,
   startHealthzServer,
   EventPoller,
+  queryHistoricalEvents,
   readIsPaused,
   InMemoryGenericClaimBoard,
   loadManifests,
@@ -906,6 +908,10 @@ async function main(): Promise<void> {
   // Load configuration
   const config = loadNetworkConfig();
   const client = createSuiClient(config.rpcUrl);
+  // Event queries only (EventPoller, bootstrap replay below) -- devnet's
+  // JSON-RPC queryEvents is gone (see createGraphQLClient's docstring), so
+  // this narrowly-scoped second client covers just that gap.
+  const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
   const signer = loadKeypair('CP_KEYPAIR');
 
   const address = signer.toSuiAddress();
@@ -922,7 +928,7 @@ async function main(): Promise<void> {
   // practice (the isLive capability is wired but currently VACUOUS for cp). cp
   // /healthz is NOT peer-polled, so a 503 would be safe anyway (F1=Option A).
   const listener = new ChainEventListener({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     logger: logger.child({ component: 'self-shutdown-listener' }),
   });
@@ -1168,7 +1174,7 @@ async function main(): Promise<void> {
     logger.info({ module: 'cp-daemon', feedUrl, feedPollMs }, 'REQ-RMS-022: attested-load poller started (RMS_ATTESTED_PLACEMENT=1)');
   }
 
-  const { handler, relayState, signalingState, validatorState } = createEventHandler(logger, undefined, {
+  const { handler, relayState, signalingState, validatorState, retryPendingAssignments } = createEventHandler(logger, undefined, {
     client,
     signer,
     config,
@@ -1179,6 +1185,16 @@ async function main(): Promise<void> {
   }, attestedPlacementActive && attestedLoadPoller
     ? { attestedLoad: attestedLoadPoller.attestedLoad } // currentEpoch/byzantineFlag stay M4b scope (both optional; spec §7 resolution)
     : undefined);
+
+  // Retry rooms whose pairing proposal failed after executeWithRetry's own
+  // retries were exhausted (a transient chain-state race, not a permanent
+  // failure -- see room_manager E_INVALID_BALLOT history). Without this,
+  // such a room stays stuck until the whole daemon restarts and replays
+  // events from genesis (a side effect of the .cursors persistence gap, not
+  // something to rely on).
+  const roomRetryIntervalMs = parseInt(process.env['ROOM_RETRY_INTERVAL_MS'] ?? '30000', 10);
+  const roomRetryTimer = setInterval(() => retryPendingAssignments(), roomRetryIntervalMs);
+  roomRetryTimer.unref?.();
 
   // ── F61 health signals (DOH-014) ──────────────────────────────────────────
   // rpc_error_rate: queryEvents failures / attempts, sampled at the bootstrap loop
@@ -1207,15 +1223,12 @@ async function main(): Promise<void> {
   // before real-time polling starts (prevents race where relay registers before CP poller runs)
   for (const mod of ['relay_registry', 'signaling_registry', 'validator_registry', 'registration'] as const) {
     try {
-      const events = await client.queryEvents({
-        query: { MoveEventModule: { package: config.packageId, module: mod } },
-        limit: 100,
-      });
+      const events = await queryHistoricalEvents(graphqlClient, config.packageId, mod, 100);
       rpcTotal++; // F61 rpc_error_rate: a successful queryEvents attempt (DOH-014)
-      for (const ev of events.data) {
+      for (const ev of events) {
         await trackedHandler(ev);
       }
-      logger.info({ module: mod, count: events.data.length }, 'Bootstrap: replayed historical events');
+      logger.info({ module: mod, count: events.length }, 'Bootstrap: replayed historical events');
     } catch (err) {
       rpcErrors++; // F61 rpc_error_rate: a failed queryEvents attempt (DOH-014)
       rpcTotal++;
@@ -1231,7 +1244,7 @@ async function main(): Promise<void> {
   const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
 
   const relayPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'relay_registry',
     pollingIntervalMs: pollIntervalMs,
@@ -1240,7 +1253,7 @@ async function main(): Promise<void> {
   });
 
   const cpPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'control_plane_registry',
     pollingIntervalMs: pollIntervalMs,
@@ -1249,7 +1262,7 @@ async function main(): Promise<void> {
   });
 
   const roomPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'room_manager',
     pollingIntervalMs: pollIntervalMs,
@@ -1258,7 +1271,7 @@ async function main(): Promise<void> {
   });
 
   const signalingPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'signaling_registry',
     pollingIntervalMs: pollIntervalMs,
@@ -1267,7 +1280,7 @@ async function main(): Promise<void> {
   });
 
   const economicPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'economic_layer',
     pollingIntervalMs: pollIntervalMs,
@@ -1276,7 +1289,7 @@ async function main(): Promise<void> {
   });
 
   const validatorPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'validator_registry',
     pollingIntervalMs: pollIntervalMs,
@@ -1285,7 +1298,7 @@ async function main(): Promise<void> {
   });
 
   const roleVotingPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'role_voting',
     pollingIntervalMs: pollIntervalMs,
@@ -1294,7 +1307,7 @@ async function main(): Promise<void> {
   });
 
   const registrationPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'registration',
     pollingIntervalMs: pollIntervalMs,
@@ -1308,7 +1321,7 @@ async function main(): Promise<void> {
   // (no historical replay): SecretRotated is an emergency kill-switch; replaying
   // past rotations on restart would only re-evict already-evicted secrets (no-op).
   const turnCredentialPoller = new EventPoller({
-    client,
+    client: graphqlClient,
     packageId: config.packageId,
     module: 'turn_credential',
     pollingIntervalMs: pollIntervalMs,

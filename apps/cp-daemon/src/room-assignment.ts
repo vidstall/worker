@@ -68,14 +68,14 @@ export async function submitProposal(
   signalingMinerId: string,
   submittedScore: bigint,
   logger: Logger,
-): Promise<void> {
+): Promise<boolean> {
   // PAIR-03: Skip rooms already voted on
   if (votedRooms.has(roomId)) {
     logger.debug({ roomId }, 'Already submitted proposal for this room, skipping');
-    return;
+    return true;
   }
 
-  await executeWithRetry(
+  const result = await executeWithRetry(
     client,
     signer,
     (tx: Transaction) => {
@@ -105,8 +105,15 @@ export async function submitProposal(
     logger,
   );
 
-  // Track as voted
+  // Track as voted only on genuine on-chain success -- executeWithRetry
+  // returns null (not a throw) once it exhausts retries, so this used to be
+  // marked "voted" even on failure, permanently blocking any future retry
+  // for that room (PAIR-03's dedup check above would short-circuit forever).
+  if (!result) {
+    return false;
+  }
   votedRooms.add(roomId);
+  return true;
 }
 
 /**

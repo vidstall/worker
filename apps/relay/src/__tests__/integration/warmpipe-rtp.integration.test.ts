@@ -53,7 +53,7 @@ import {
   buildPipeConnectFrame,
   type PipeConnectParams,
 } from '@dvconf/inter-relay-client';
-// REAL client crypto (cross-repo, 6× ../ to dvconf-client) — NOTHING reimplemented.
+// REAL client crypto (vendored into @dvconf/shared) — NOTHING reimplemented.
 import {
   encryptFrame,
   decryptFrame,
@@ -61,12 +61,10 @@ import {
   SFRAME_TRAILER_LEN,
   codecOffsetForFrameType,
   type KeyLookup,
-} from '../../../../../../dvconf-client/src/lib/webrtc/sframe-transform.js';
-import {
   KeyManager,
   type RosterMember,
-} from '../../../../../../dvconf-client/src/lib/crypto/key-manager.js';
-import { createSessionKeypair } from '../../../../../../dvconf-client/src/lib/crypto/session-keypair.js';
+  createSessionKeypair,
+} from '@dvconf/shared';
 
 // -- Shared codec set (mirrors mediasoup-manager.ts) --------------------
 

@@ -12,6 +12,7 @@ import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { NetworkConfig, Logger } from '@dvconf/shared';
 import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole } from '@dvconf/shared';
+import { Transaction } from '@mysten/sui/transactions';
 
 /** Minimum stake for Validator role — 0.1 SUI (100_000_000 MIST). */
 const MIN_STAKE_AMOUNT = 100_000_000n;
@@ -19,9 +20,64 @@ const MIN_STAKE_AMOUNT = 100_000_000n;
 /** Minimum stake for voting-mode registration (0.01 SUI). */
 const MIN_VOTING_STAKE = 10_000_000n;
 
+/** dvconf::core::constants::role_validator() — kept in sync manually (u8, stable). */
+const ROLE_VALIDATOR = 1;
+
 /** Encode a UTF-8 string as a u8 vector argument for Move vector<u8> params. */
 function strToU8Vec(s: string): number[] {
   return Array.from(new TextEncoder().encode(s));
+}
+
+/**
+ * Read a MinerCap's current on-chain role + the miner_id it was minted for.
+ */
+async function getMinerCapInfo(
+  client: SuiClient,
+  minerCapId: string,
+  logger: Logger,
+): Promise<{ minerId: string; role: number } | null> {
+  try {
+    const cap = await client.getObject({ id: minerCapId, options: { showContent: true } });
+    if (!cap.data) return null;
+    const fields = (cap.data.content as { fields: Record<string, string> })?.fields;
+    const minerId = fields?.['miner_id'];
+    const roleRaw = fields?.['role'];
+    if (!minerId || roleRaw === undefined) return null;
+    return { minerId, role: Number(roleRaw) };
+  } catch (err) {
+    logger.warn({ err, minerCapId }, 'Could not read MinerCap role');
+    return null;
+  }
+}
+
+/**
+ * Check if a miner is registered in ValidatorRegistry via devInspect.
+ */
+async function isRegisteredInValidatorRegistry(
+  client: SuiClient,
+  config: NetworkConfig,
+  minerId: string,
+  logger: Logger,
+): Promise<boolean> {
+  try {
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${config.packageId}::validator_registry::is_registered`,
+      arguments: [tx.object(config.validatorRegistryId), tx.pure.id(minerId)],
+    });
+    const result = await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+    });
+    if (result.results?.[0]?.returnValues?.[0]) {
+      const bytes = result.results[0].returnValues[0][0];
+      return bytes[0] === 1;
+    }
+    return false;
+  } catch (err) {
+    logger.warn({ err, minerId }, 'Could not verify ValidatorRegistry status via devInspect; assuming not registered');
+    return false;
+  }
 }
 
 /**
@@ -39,7 +95,79 @@ export async function ensureRegistered(
   // Check env first — skip registration if already registered
   const envCapId = process.env['VALIDATOR_CAP_ID'];
   if (envCapId) {
-    logger.info({ validatorCapId: envCapId }, 'VALIDATOR_CAP_ID found in env, skipping registration');
+    logger.info({ validatorCapId: envCapId }, 'VALIDATOR_CAP_ID found in env, checking ValidatorRegistry status');
+
+    // This cap may come from a wallet-pool lookup (see cli/wallet.py
+    // resolve_cap_id) that only confirms the cap object EXISTS -- not that
+    // it already carries role=Validator, or that register_validator's
+    // Step 2 ever ran for it. Both register_validator and
+    // self_assign_session_wallet (called later in startDaemon) assert
+    // cap.role == role_validator() (E_NOT_VALIDATOR/530), so a cap left at
+    // role_user() (never voted+applied) or never registered in
+    // ValidatorRegistry would abort downstream instead of here.
+    const capInfo = await getMinerCapInfo(client, envCapId, logger);
+    if (!capInfo) {
+      logger.error({ validatorCapId: envCapId }, 'Could not read MinerCap; manual intervention required.');
+      process.exit(1);
+    }
+
+    if (capInfo.role !== ROLE_VALIDATOR) {
+      logger.info(
+        { validatorCapId: envCapId, role: capInfo.role },
+        'Cap role is not yet Validator — waiting for CP vote and applying it',
+      );
+      const ownedObjects = await client.getOwnedObjects({
+        owner: signer.toSuiAddress(),
+        filter: { StructType: `${config.packageId}::staking::StakePosition` },
+        options: { showContent: true },
+      });
+      const stakePositionId = ownedObjects.data[0]?.data?.objectId;
+      if (!stakePositionId) {
+        logger.error('Cannot find StakePosition to apply voted role. Manual intervention required.');
+        process.exit(1);
+      }
+      await waitForRoleAssignment(client, config, capInfo.minerId, logger);
+      await applyVotedRole(client, signer, config, envCapId, stakePositionId, logger);
+      logger.info({ validatorCapId: envCapId }, 'Voted role applied');
+    }
+
+    const registered = await isRegisteredInValidatorRegistry(client, config, capInfo.minerId, logger);
+    if (!registered) {
+      logger.info({ validatorCapId: envCapId }, 'Not yet in ValidatorRegistry — running Step 2');
+      const ownedObjects = await client.getOwnedObjects({
+        owner: signer.toSuiAddress(),
+        filter: { StructType: `${config.packageId}::staking::StakePosition` },
+        options: { showContent: true },
+      });
+      const stakePositionId = ownedObjects.data[0]?.data?.objectId;
+      if (!stakePositionId) {
+        logger.error('Cannot find StakePosition for step 2 registration. Manual intervention required.');
+        process.exit(1);
+      }
+      const result = await executeWithRetry(
+        client,
+        signer,
+        (tx) => {
+          tx.moveCall({
+            target: `${config.packageId}::validator_registry::register_validator`,
+            arguments: [
+              tx.object(config.networkRegistryId),
+              tx.object(config.validatorRegistryId),
+              tx.object(envCapId),
+              tx.object(stakePositionId),
+            ],
+          });
+        },
+        'validator_registry::register_validator',
+        logger,
+      );
+      if (!result) {
+        logger.error('ValidatorRegistry registration failed after cap already existed. Manual intervention required.');
+        process.exit(1);
+      }
+      logger.info({ validatorCapId: envCapId }, 'Registered in ValidatorRegistry (Step 2)');
+    }
+
     return { validatorCapId: envCapId };
   }
 

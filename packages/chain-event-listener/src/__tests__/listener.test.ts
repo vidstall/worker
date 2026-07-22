@@ -175,7 +175,13 @@ const fakeEventAt = (id: string, tsMs: number | null): SuiEvent =>
 
 function mockTipClient(events: SuiEvent[]) {
   return {
-    queryEvents: vi.fn(async () => ({ data: events, hasNextPage: false })),
+    query: vi.fn(async () => ({
+      data: {
+        events: {
+          nodes: events.map((e) => ({ timestamp: e.timestampMs ? new Date(Number(e.timestampMs)).toISOString() : null })),
+        },
+      },
+    })),
   } as any;
 }
 
@@ -215,8 +221,8 @@ describe('ChainEventListener — replay wiring (P3, DOH-026/027/028)', () => {
     expect(s1).toEqual([false]);
     expect(l1.isDegraded()).toBe(false);
 
-    // (b) queryEvents rejects
-    const throwing = { queryEvents: vi.fn(async () => { throw new Error('rpc down'); }) } as any;
+    // (b) query rejects
+    const throwing = { query: vi.fn(async () => { throw new Error('rpc down'); }) } as any;
     const l2 = new ChainEventListener(baseOpts({ dataDir: '/tmp/x', client: throwing }));
     const s2: boolean[] = [];
     await l2.subscribe('node_health', vi.fn(async (_e, m) => { s2.push(m.replayed); }), { pollingIntervalMs: 1000 });
