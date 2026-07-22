@@ -138,7 +138,7 @@ export async function ensureRegistered(
     // Need StakePosition ID — query owned objects
     const ownedObjects = await client.getOwnedObjects({
       owner: signer.toSuiAddress(),
-      filter: { StructType: `${config.packageId}::staking::StakePosition` },
+      filter: { StructType: `${config.originalPackageId ?? config.packageId}::staking::StakePosition` },
       options: { showContent: true },
     });
 

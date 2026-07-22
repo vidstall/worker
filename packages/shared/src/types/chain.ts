@@ -13,6 +13,20 @@ export interface SuiObjectRef {
 export interface NetworkConfig {
   rpcUrl: string;
   packageId: string;
+  /**
+   * The package ID that ORIGINALLY defined the on-chain structs (caps,
+   * StakePosition, ...), as opposed to `packageId` which is the latest
+   * upgraded bytecode version. Sui pins a struct's fully-qualified type to
+   * its defining package forever, so an owned-object `StructType` filter
+   * must use this -- not `packageId` -- or it silently returns nothing
+   * after every contract upgrade even though the object is still valid.
+   * Entry-function calls (`${packageId}::module::function`) still need the
+   * latest `packageId`. Optional and falls back to `packageId` wherever
+   * unset (e.g. a fresh deployment that has never been upgraded, or a test
+   * fixture that doesn't care about the distinction) since they're
+   * identical until the first upgrade.
+   */
+  originalPackageId?: string;
   networkRegistryId: string;
   minerStoreId: string;
   cpRegistryId: string;

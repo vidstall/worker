@@ -92,6 +92,10 @@ export function loadNetworkConfig(): NetworkConfig {
   return {
     rpcUrl: (client as unknown as { url?: string }).url ?? network,
     packageId: required('PACKAGE_ID'),
+    // Optional: only vidctl-managed deployments write this (see
+    // cli/contract.py); see NetworkConfig.originalPackageId for why it must
+    // stay distinct from packageId after an upgrade.
+    originalPackageId: process.env['CONTRACT_ORIGINAL_PACKAGE_ID'] || undefined,
     networkRegistryId: required('NETWORK_REGISTRY_ID'),
     minerStoreId: required('MINER_STORE_ID'),
     cpRegistryId: required('CP_REGISTRY_ID'),

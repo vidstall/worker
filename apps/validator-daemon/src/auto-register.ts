@@ -118,7 +118,7 @@ export async function ensureRegistered(
       );
       const ownedObjects = await client.getOwnedObjects({
         owner: signer.toSuiAddress(),
-        filter: { StructType: `${config.packageId}::staking::StakePosition` },
+        filter: { StructType: `${config.originalPackageId ?? config.packageId}::staking::StakePosition` },
         options: { showContent: true },
       });
       const stakePositionId = ownedObjects.data[0]?.data?.objectId;
@@ -136,7 +136,7 @@ export async function ensureRegistered(
       logger.info({ validatorCapId: envCapId }, 'Not yet in ValidatorRegistry — running Step 2');
       const ownedObjects = await client.getOwnedObjects({
         owner: signer.toSuiAddress(),
-        filter: { StructType: `${config.packageId}::staking::StakePosition` },
+        filter: { StructType: `${config.originalPackageId ?? config.packageId}::staking::StakePosition` },
         options: { showContent: true },
       });
       const stakePositionId = ownedObjects.data[0]?.data?.objectId;
