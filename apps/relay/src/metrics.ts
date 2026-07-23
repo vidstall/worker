@@ -8,7 +8,30 @@
  * Requirements: RELAY-05, Phase 14 IC-5
  */
 
-export interface SessionMetrics {
+/**
+ * Extended call-quality fields (client-reported via `POST /stats/report`),
+ * additive to the original packetsLost/jitter pair `updateQuality` already
+ * carried. All optional — a caller that only ever passed packetsLost/jitter
+ * (the original 4-arg call shape) leaves these undefined.
+ */
+export interface SessionQualityExtra {
+  latencyMs?: number;
+  bitrateUpKbps?: number;
+  bitrateDownKbps?: number;
+  resolutionWidth?: number;
+  resolutionHeight?: number;
+  framerate?: number;
+  packetReorderingRate?: number;
+  encodeLatencyMs?: number;
+  decodeLatencyMs?: number;
+  freezeCount?: number;
+  pauseCount?: number;
+  connectionSetupMs?: number;
+  iceSuccess?: boolean;
+  reconnectMs?: number;
+}
+
+export interface SessionMetrics extends SessionQualityExtra {
   roomId: string;
   peerId: string;
   bytesForwarded: bigint;
@@ -79,12 +102,19 @@ export class MetricsTracker {
     peers.add(peerId);
   }
 
-  updateQuality(roomId: string, peerId: string, packetsLost: number, jitter: number): void {
+  updateQuality(
+    roomId: string,
+    peerId: string,
+    packetsLost: number,
+    jitter: number,
+    extra?: SessionQualityExtra,
+  ): void {
     const k = this.key(roomId, peerId);
     const existing = this.sessions.get(k);
     if (existing) {
       existing.packetsLost = packetsLost;
       existing.jitter = jitter;
+      if (extra) Object.assign(existing, extra);
     }
   }
 

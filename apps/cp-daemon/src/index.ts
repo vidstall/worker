@@ -19,6 +19,8 @@ import {
   loadKeypair,
   createLogger,
   startHealthzServer,
+  createMetricsRegistry,
+  startPromMetricsServer,
   EventPoller,
   queryHistoricalEvents,
   readIsPaused,
@@ -942,6 +944,18 @@ async function main(): Promise<void> {
   });
   logger.info({ port: healthz.port }, 'healthz listening');
 
+  // Worker-metrics: Prometheus scrape endpoint (CPU/RSS/heap via
+  // collectDefaultMetrics — cp-daemon has no meaningful "active session" count
+  // to wire into a concurrency gauge, so none is registered here).
+  const promMetrics = await startPromMetricsServer({
+    port: Number(process.env['CP_METRICS_PORT'] ?? 8092),
+    service: 'cp-daemon',
+    registry: createMetricsRegistry('cp-daemon'),
+    token: process.env['METRICS_AUTH_TOKEN'],
+    logger,
+  });
+  logger.info({ port: promMetrics.port }, 'prom metrics listening');
+
   // Auto-register if CP_CAP_ID not in env
   const { cpCapId } = await ensureRegistered(client, signer, config, logger);
 
@@ -1393,7 +1407,7 @@ async function main(): Promise<void> {
           attestedLoadPoller?.stop(); // REQ-RMS-022 (D1) — undefined when RMS_ATTESTED_PLACEMENT unset
         },
         stopHeartbeat, // C-B → LAST
-        closeHealthz: () => healthz.close(),
+        closeHealthz: () => Promise.all([healthz.close(), promMetrics.close()]).then(() => {}),
         // Leg 7d — the live /quorum/claims carrier (null when QUORUM_CLAIMS_ENABLED unset) tears
         // down in the LAST group, after healthz (mirror the turn-rpc/healthz liveness teardown).
         ...(stopQuorumClaimsServer && { closeQuorumClaimsServer: stopQuorumClaimsServer }),

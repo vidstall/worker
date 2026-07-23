@@ -882,7 +882,15 @@ if (isMainModule) {
     // Step 5: Start metrics HTTP server (default port 4001).
     // RO-020: thread the probe-state provider so /api/probe reflects the
     // standby's current role + warm-pipe liveness.
-    const metricsServer = startMetricsServer(metrics, logger, () => probeLiveness);
+    const metricsServer = startMetricsServer(
+      metrics,
+      logger,
+      () => probeLiveness,
+      // Call-quality feature (POST /stats/report admission check): resolve the
+      // live room state via the same late-bound signalingRef box getRoom uses
+      // elsewhere (index.ts is assembled before createSignalingServer runs).
+      (roomId) => signalingRef.getRoom?.(roomId),
+    );
 
     // F1 (REQ-RO-010/011): honest probe-liveness flip. Polls getStats() on the
     // standby's pipe consumer; sets pipeConsumerAlive on existence, rtcpAlive ONLY

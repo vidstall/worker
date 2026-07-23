@@ -29,6 +29,9 @@ import {
   EventPoller,
   createLogger,
   startHealthzServer,
+  createMetricsRegistry,
+  startPromMetricsServer,
+  createConcurrencyGauge,
   genTraceId,
   traceChild,
   economicLayerModuleName,
@@ -36,7 +39,7 @@ import {
   readIsPaused,
   readCapMinerId,
 } from '@dvconf/shared';
-import type { NetworkConfig, Logger, HealthzHandle } from '@dvconf/shared';
+import type { NetworkConfig, Logger, HealthzHandle, PromMetricsServerHandle } from '@dvconf/shared';
 import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvconf/shared';
 import {
   ChainEventListener,
@@ -1446,6 +1449,8 @@ export async function startValidatorSelfShutdownWatcher(args: {
 async function main(): Promise<void> {
   let state: DaemonState | null = null;
   let healthz: HealthzHandle | undefined;
+  let promMetrics: PromMetricsServerHandle | undefined;
+  let concurrencyGaugeInterval: ReturnType<typeof setInterval> | undefined;
   let chainListener: ChainEventListener | undefined;
   let selfShutdownWatcher: SelfShutdownWatcher | undefined;
   const gracefulCfg = readGracefulShutdownConfig();
@@ -1459,6 +1464,8 @@ async function main(): Promise<void> {
     if (state === null) {
       // Crashed/triggered before startDaemon resolved — just close healthz + exit.
       void healthz?.close();
+      if (concurrencyGaugeInterval) clearInterval(concurrencyGaugeInterval);
+      void promMetrics?.close();
       process.exit(0);
     }
     const s = state;
@@ -1517,7 +1524,11 @@ async function main(): Promise<void> {
             s.liveConsumer.shutdown();
             s.liveConsumer = null;
           }
-          await (healthz?.close() ?? Promise.resolve());
+          if (concurrencyGaugeInterval) clearInterval(concurrencyGaugeInterval);
+          await Promise.all([
+            healthz?.close() ?? Promise.resolve(),
+            promMetrics?.close() ?? Promise.resolve(),
+          ]);
         },
         exit: (code) => process.exit(code),
         config: gracefulCfg,
@@ -1553,7 +1564,25 @@ async function main(): Promise<void> {
     });
     logger.info({ port: healthz.port }, 'healthz listening');
 
+    // Worker-metrics: Prometheus scrape endpoint (CPU/RSS/heap via
+    // collectDefaultMetrics + dvconf_active_sessions sourced from the live
+    // activeRooms map, once startDaemon has populated `state`).
+    const promRegistry = createMetricsRegistry('validator-daemon');
+    const concurrencyGauge = createConcurrencyGauge(promRegistry, 'validator-daemon');
+    promMetrics = await startPromMetricsServer({
+      port: Number(process.env['VALIDATOR_METRICS_PORT'] ?? 8103),
+      service: 'validator-daemon',
+      registry: promRegistry,
+      token: process.env['METRICS_AUTH_TOKEN'],
+      logger,
+    });
+    logger.info({ port: promMetrics.port }, 'prom metrics listening');
+
     state = await startDaemon({ client, config });
+
+    concurrencyGaugeInterval = setInterval(() => {
+      concurrencyGauge.setActiveSessions(state?.activeRooms.size ?? 0);
+    }, 5000);
 
     // Validator is report-only on slash → arms { degraded, paused } (no slash).
     ({ watcher: selfShutdownWatcher } = await startValidatorSelfShutdownWatcher({

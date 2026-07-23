@@ -90,6 +90,19 @@ export type { IncomingHeaders } from './trace.js';
 export { startHealthzServer, healthzBody } from './healthz.js';
 export type { HealthzOptions, HealthzHandle } from './healthz.js';
 
+// Worker-metrics — shared Prometheus registry + scrape server + concurrency gauge.
+export {
+  createMetricsRegistry,
+  startPromMetricsServer,
+  createConcurrencyGauge,
+} from './metrics-prom.js';
+export type {
+  Registry,
+  PromMetricsServerOptions,
+  PromMetricsServerHandle,
+  ConcurrencyGauge,
+} from './metrics-prom.js';
+
 // Cap-token primitive contract types (F62 W1 Stage 1 + Phase 2.4-retro). Append-only
 // re-exports so daemon consumers (Phase 3.1 cap-token-issuer, Phase 3.2 signaling auth,
 // Phase 3.3 signaling cache) can import QuorumSig + Capability* types from the root.

@@ -18,6 +18,9 @@ import {
   loadKeypair,
   createLogger,
   startHealthzServer,
+  createMetricsRegistry,
+  startPromMetricsServer,
+  createConcurrencyGauge,
   genTraceId,
   traceChild,
   SIGNALING_SESSION_REWARD,
@@ -627,6 +630,23 @@ if (isMainModule) {
     });
     logger.info({ port: healthz.port }, 'healthz listening');
 
+    // Worker-metrics: Prometheus scrape endpoint (CPU/RSS/heap via
+    // collectDefaultMetrics + dvconf_active_sessions sourced from the live
+    // peerSockets map).
+    const promRegistry = createMetricsRegistry('signaling');
+    const concurrencyGauge = createConcurrencyGauge(promRegistry, 'signaling');
+    const promMetrics = await startPromMetricsServer({
+      port: Number(process.env['SIGNALING_METRICS_PORT'] ?? 8083),
+      service: 'signaling',
+      registry: promRegistry,
+      token: process.env['METRICS_AUTH_TOKEN'],
+      logger,
+    });
+    logger.info({ port: promMetrics.port }, 'prom metrics listening');
+    const stopConcurrencyGaugeUpdates = setInterval(() => {
+      concurrencyGauge.setActiveSessions(peerSockets.size);
+    }, 5000);
+
     // Step 1: Auto-register on-chain
     const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger);
 
@@ -751,7 +771,10 @@ if (isMainModule) {
           stopProbe: closeSignalingProbe,
           stopBench: closeBenchHttpServer,
           stopHeartbeat, // C-B: relocated from EARLY into the LAST group
-          closeHealthz: () => healthz.close(),
+          closeHealthz: () => {
+            clearInterval(stopConcurrencyGaugeUpdates);
+            return Promise.all([healthz.close(), promMetrics.close()]).then(() => {});
+          },
           closeWss: () =>
             new Promise<void>((resolve) =>
               wss.close(() => {
