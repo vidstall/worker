@@ -46,47 +46,12 @@ import type { types as msTypes } from 'mediasoup-client';
 import {
   LatencyWriter,
   isBenchEnabled,
+  ensureNodeWebRtcGlobals,
+  RelayClient,
+  createWiredTransport,
+  type RelayMessage,
+  type WsLike,
 } from '../../packages/shared/src/index.js';
-
-// ── Node WebRTC handler bootstrap (S25.C.6 — CI-16) ───────────────────
-
-/**
- * mediasoup-client `Device` was designed for browsers — its built-in handlers
- * (`Chrome111`, `Firefox120`, …) read `RTCPeerConnection`, `MediaStream`, etc.
- * from `globalThis`. In Node the globals are absent and `Device.load()` throws
- * `UnsupportedError: device not supported` (the failure surfaced at S25.C.6).
- *
- * Fix: lazy-import `@roamhq/wrtc` (already a workspace devDep — used by
- * `startAudioProducer`) and stitch its named exports onto `globalThis` once
- * per process before the first `Device` is created. We pick `Chrome111` as
- * the handler because @roamhq/wrtc's surface matches a recent Chromium build.
- *
- * Kept lazy so unit tests (which mock the WS and never construct a Device)
- * don't pay the native-binding cost or fail in environments without wrtc.
- */
-let wrtcGlobalsInstalled = false;
-async function ensureNodeWebRtcGlobals(): Promise<void> {
-  if (wrtcGlobalsInstalled) return;
-  const wrtcModule = (await import('@roamhq/wrtc')) as {
-    default?: Record<string, unknown>;
-    [k: string]: unknown;
-  };
-  const w = (wrtcModule.default ?? wrtcModule) as Record<string, unknown>;
-  const g = globalThis as unknown as Record<string, unknown>;
-  const names = [
-    'RTCPeerConnection',
-    'RTCSessionDescription',
-    'RTCIceCandidate',
-    'RTCRtpReceiver',
-    'RTCRtpSender',
-    'MediaStream',
-    'MediaStreamTrack',
-  ] as const;
-  for (const n of names) {
-    if (g[n] === undefined && w[n] !== undefined) g[n] = w[n];
-  }
-  wrtcGlobalsInstalled = true;
-}
 
 // ── Pure helpers ─────────────────────────────────────────────────────
 
@@ -501,110 +466,10 @@ export function peerLabel(index: number): string {
 }
 
 // ── Relay protocol client ────────────────────────────────────────────
-
-export interface RelayMessage {
-  type: string;
-  [k: string]: unknown;
-}
-
-export interface WsLike {
-  send: (data: string) => void;
-  on: (event: string, handler: (...args: unknown[]) => void) => void;
-  close: () => void;
-}
-
-interface PendingRequest {
-  predicate: (msg: RelayMessage) => boolean;
-  resolve: (msg: RelayMessage) => void;
-  reject: (err: Error) => void;
-}
-
-/**
- * Tiny request/response client over the relay's WS signaling. Push messages
- * (`newProducer`) are routed to an optional callback; everything else is
- * matched by predicate against the pending request queue (first match wins).
- */
-export class RelayClient {
-  private readonly ws: WsLike;
-  private readonly pending: PendingRequest[] = [];
-  private readonly onProducer: ((msg: RelayMessage) => void) | null;
-  readonly ready: Promise<void>;
-
-  constructor(
-    ws: WsLike,
-    onProducer: ((msg: RelayMessage) => void) | null = null,
-  ) {
-    this.ws = ws;
-    this.onProducer = onProducer;
-    this.ready = new Promise<void>((resolve) => {
-      this.ws.on('open', () => resolve());
-    });
-    this.ws.on('message', (...args: unknown[]) => {
-      const data = args[0];
-      const raw =
-        typeof data === 'string'
-          ? data
-          : data instanceof Buffer
-            ? data.toString('utf8')
-            : String(data);
-      let msg: RelayMessage;
-      try {
-        msg = JSON.parse(raw) as RelayMessage;
-      } catch {
-        return;
-      }
-      this.routeIncoming(msg);
-    });
-  }
-
-  /** Test seam — feed an incoming message into the routing logic. */
-  routeIncoming(msg: RelayMessage): void {
-    if (msg.type === 'newProducer' && this.onProducer !== null) {
-      this.onProducer(msg);
-      return;
-    }
-    for (let i = 0; i < this.pending.length; i++) {
-      if (this.pending[i]!.predicate(msg)) {
-        const [matched] = this.pending.splice(i, 1);
-        matched!.resolve(msg);
-        return;
-      }
-    }
-  }
-
-  send(msg: RelayMessage): void {
-    this.ws.send(JSON.stringify(msg));
-  }
-
-  waitFor(
-    predicate: (msg: RelayMessage) => boolean,
-    timeoutMs = 10_000,
-  ): Promise<RelayMessage> {
-    return new Promise((resolve, reject) => {
-      const entry: PendingRequest = {
-        predicate,
-        resolve: (m) => {
-          clearTimeout(timer);
-          resolve(m);
-        },
-        reject: (e) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-      };
-      const timer = setTimeout(() => {
-        const idx = this.pending.indexOf(entry);
-        if (idx >= 0) this.pending.splice(idx, 1);
-        reject(new Error('Relay response timeout'));
-      }, timeoutMs);
-      this.pending.push(entry);
-    });
-  }
-
-  close(): void {
-    this.ws.close();
-  }
-}
+// `RelayClient`/`RelayMessage`/`WsLike` now live in
+// `packages/shared/src/mediasoup-node/relay-client.ts` (imported above) so
+// both this harness and `apps/bot` share ONE implementation of the relay's
+// WS JSON request/response protocol.
 
 // ── Integration: virtual peer (validated in S23.3 against running relay) ──
 
@@ -693,56 +558,7 @@ export class VirtualPeer {
     if (this.device === null || this.client === null) {
       throw new Error('Device or client not ready');
     }
-    this.client.send({ type: 'createTransport', direction });
-    const params = await this.client.waitFor((m) => m.type === 'transportCreated');
-    const iceServers = this.opts.iceServers ?? [];
-    const transportParams: msTypes.TransportOptions = {
-      id: params['id'] as string,
-      iceParameters: params['iceParameters'] as msTypes.IceParameters,
-      iceCandidates: params['iceCandidates'] as msTypes.IceCandidate[],
-      dtlsParameters: params['dtlsParameters'] as msTypes.DtlsParameters,
-      // mediasoup-client honours the iceServers field even though it's
-      // optional — only matters when non-empty (Phase I/II of internet
-      // benchmark). Empty array preserves the pre-S28 localhost path.
-      ...(iceServers.length > 0 ? { iceServers } : {}),
-    };
-    const transport =
-      direction === 'send'
-        ? this.device.createSendTransport(transportParams)
-        : this.device.createRecvTransport(transportParams);
-    transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-      try {
-        this.client!.send({
-          type: 'connectTransport',
-          transportId: transport.id,
-          dtlsParameters,
-        });
-        callback();
-      } catch (err) {
-        errback(err as Error);
-      }
-    });
-    if (direction === 'send') {
-      transport.on('produce', ({ kind, rtpParameters }, callback, errback) => {
-        (async () => {
-          try {
-            this.client!.send({
-              type: 'produce',
-              transportId: transport.id,
-              kind,
-              rtpParameters,
-            });
-            const produced = await this.client!.waitFor(
-              (m) => m.type === 'produced',
-            );
-            callback({ id: produced['producerId'] as string });
-          } catch (err) {
-            errback(err as Error);
-          }
-        })().catch(errback);
-      });
-    }
-    return transport;
+    return createWiredTransport(this.device, this.client, direction, this.opts.iceServers ?? []);
   }
 
   private async startAudioProducer(): Promise<void> {

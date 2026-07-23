@@ -303,6 +303,16 @@ export async function removePeer(room: RoomState, peerId: string, logger: Logger
 
   room.peers.delete(peerId);
 
+  // Tell every remaining peer this one is gone -- the client's onPeerLeft
+  // (useRelay.ts) is what actually drops the departed peer's tile/stream from
+  // the video grid. Without this broadcast, closing this peer's producers
+  // above tears down the *media* on each remaining client's RTCPeerConnection
+  // but nothing ever tells the UI layer to remove the tile, so it sits frozen
+  // on its last-received frame indefinitely.
+  for (const remainingPeer of room.peers.values()) {
+    sendJson(remainingPeer.ws, { type: 'peerLeft', peerId });
+  }
+
   logger.info(
     { roomId: room.roomId, peerId, remainingPeers: room.peers.size },
     'Peer removed from room',

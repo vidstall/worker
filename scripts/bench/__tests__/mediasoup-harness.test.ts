@@ -34,12 +34,17 @@ import {
   parseArgs,
   peerLabel,
   buildIceServers,
-  RelayClient,
   CAPTURE_ENCODE_RENDER_MS,
   DEFAULT_STUN_URL,
+} from '../mediasoup-client-harness.js';
+// `RelayClient`/`RelayMessage`/`WsLike` were extracted to
+// `packages/shared/src/mediasoup-node/` (shared between this harness and
+// `apps/bot`) — imported directly from there now.
+import {
+  RelayClient,
   type RelayMessage,
   type WsLike,
-} from '../mediasoup-client-harness.js';
+} from '../../../packages/shared/src/index.js';
 
 // ── computeG2GoptB ───────────────────────────────────────────────────
 

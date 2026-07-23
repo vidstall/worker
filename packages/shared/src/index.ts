@@ -259,3 +259,19 @@ export type {
   SessionKeypair,
   CreateSessionKeypairOptions,
 } from './crypto-webrtc/session-keypair.js';
+
+// Node-only mediasoup-client protocol primitives (join/transport/produce wiring +
+// @roamhq/wrtc globalThis bootstrap), extracted from scripts/bench/mediasoup-client-harness.ts
+// so both the bench harness and apps/bot share ONE implementation of the relay wire protocol.
+export {
+  ensureNodeWebRtcGlobals,
+  loadWrtcNonstandard,
+  RelayClient,
+  createWiredTransport,
+} from './mediasoup-node/index.js';
+export type {
+  WrtcNonstandard,
+  RelayMessage,
+  WsLike,
+  IceServerLike,
+} from './mediasoup-node/index.js';

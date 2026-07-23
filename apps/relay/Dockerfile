@@ -30,6 +30,12 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --chown=dvconf:dvconf apps ./apps
 COPY --chown=dvconf:dvconf packages ./packages
 COPY --chown=dvconf:dvconf tsconfig.base.json ./
+# EventPoller/ChainEventListener persist cursors to <CWD>/.cursors/*.json
+# (DATA_DIR defaults to '.') -- /app itself stays root:root even after the
+# --chown COPYs above (WORKDIR created it before USER dvconf existed), so
+# dvconf can't mkdir a new top-level dir there. Precreate it owned by
+# dvconf or every cursor write silently EACCES-fails forever.
+RUN mkdir -p /app/.cursors && chown -R dvconf:dvconf /app/.cursors
 USER dvconf
 
 # 4000: client WS signaling; 4001: metrics + /healthz; 10000-10100/udp: mediasoup
