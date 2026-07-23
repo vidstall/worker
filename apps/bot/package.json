@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:once": "tsx src/run-once.ts",
     "start": "node --import tsx/esm src/index.ts",
     "build": "tsup src/index.ts --format esm --dts",
     "test": "vitest run"

@@ -3,8 +3,12 @@
 # (workspace:* deps symlink to sibling packages/*). Build with:
 #   docker buildx build -f services/worker/apps/bot/Dockerfile services/worker
 #
-# This is a manually-run dev/demo tool (see plan doc), not IaC-managed — it is
-# NOT wired into cli/context.py's DOCKER_SERVICES or scenario/*.toml.
+# Test/demo tool only (simulates a user; never touches contract role/staking
+# logic) but IS IaC-deployed as a singleton control server -- see
+# cli/context.py's DOCKER_SERVICES and scenario/digitalocean-sample.toml's
+# single `service = "bot"` worker. The admin dashboard's BotControlPanel
+# calls its HTTP API (POST/GET/DELETE /bots) to launch/list/stop sessions
+# instead of anyone running `pnpm --filter bot dev` by hand.
 
 FROM node:20-bookworm-slim AS base
 WORKDIR /app
@@ -37,4 +41,7 @@ COPY --chown=dvconf:dvconf tsconfig.base.json ./
 RUN mkdir -p /app/.cursors && chown -R dvconf:dvconf /app/.cursors
 USER dvconf
 
+EXPOSE 8095
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8095)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "--import", "tsx/esm", "apps/bot/src/index.ts"]
