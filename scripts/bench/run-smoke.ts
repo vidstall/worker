@@ -102,6 +102,7 @@ export interface PublishOutput {
   networkRegistryId: string;
   minerStoreId: string;
   roleVoteBoxId: string;
+  livenessVoteBoxId: string;
 }
 
 /**
@@ -116,6 +117,7 @@ export function parsePublishJson(json: SuiPublishResult): PublishOutput {
   let networkRegistryId: string | null = null;
   let minerStoreId: string | null = null;
   let roleVoteBoxId: string | null = null;
+  let livenessVoteBoxId: string | null = null;
 
   for (const change of json.objectChanges ?? []) {
     if (change.type === 'published') {
@@ -135,6 +137,8 @@ export function parsePublishJson(json: SuiPublishResult): PublishOutput {
         minerStoreId = objId;
       } else if (objType.includes('::role_voting::RoleVoteBox')) {
         roleVoteBoxId = objId;
+      } else if (objType.includes('::liveness_voting::LivenessVoteBox')) {
+        livenessVoteBoxId = objId;
       }
     } else if (isAddressOwned(owner)) {
       if (objType.includes('::network_registry::AdminCap')) {
@@ -165,6 +169,9 @@ export function parsePublishJson(json: SuiPublishResult): PublishOutput {
   if (roleVoteBoxId === null) {
     throw new Error('parsePublishJson: RoleVoteBox not in objectChanges');
   }
+  if (livenessVoteBoxId === null) {
+    throw new Error('parsePublishJson: LivenessVoteBox not in objectChanges');
+  }
   return {
     packageId,
     adminCapId,
@@ -172,6 +179,7 @@ export function parsePublishJson(json: SuiPublishResult): PublishOutput {
     networkRegistryId,
     minerStoreId,
     roleVoteBoxId,
+    livenessVoteBoxId,
   };
 }
 
@@ -215,6 +223,7 @@ export interface BenchIds {
   roomManagerId: string;
   signalingRegistryId: string;
   roleVoteBoxId: string;
+  livenessVoteBoxId: string;
 }
 
 /**
@@ -256,6 +265,7 @@ export function buildEnvContent(
     `ROOM_MANAGER_ID=${ids.roomManagerId}`,
     `SIGNALING_REGISTRY_ID=${ids.signalingRegistryId}`,
     `ROLE_VOTE_BOX_ID=${ids.roleVoteBoxId}`,
+    `LIVENESS_VOTE_BOX_ID=${ids.livenessVoteBoxId}`,
     `CP_KEYPAIR=${keys.CP_KEYPAIR}`,
     `SUI_PRIVATE_KEY=${keys.SUI_PRIVATE_KEY}`,
     `SIGNALING_KEYPAIR=${keys.SIGNALING_KEYPAIR}`,
@@ -877,6 +887,7 @@ export async function bringUpBench(opts: {
     networkRegistryId: publishOut.networkRegistryId,
     minerStoreId: publishOut.minerStoreId,
     roleVoteBoxId: publishOut.roleVoteBoxId,
+    livenessVoteBoxId: publishOut.livenessVoteBoxId,
     ...registries,
   };
 

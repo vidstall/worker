@@ -35,12 +35,15 @@ import type { NetworkConfig } from '@dvconf/shared';
 export const SUI_RPC_URL = 'http://127.0.0.1:9000';
 export const FAUCET_URL = getFaucetHost('localnet');
 
-// This file sits at dvconf-daemons/apps/validator-daemon/src/__tests__/integration/
-// → 6 levels up is the workspace root that also holds dvconf-contracts/.
+// This file sits at services/worker/apps/validator-daemon/src/__tests__/integration/
+// → 6 levels up is services/, which holds contract/ (this checkout's current
+// layout -- the module was originally named dvconf-contracts as a sibling of the
+// daemons package under a flat workspace root; the monorepo has since nested both
+// packages under services/, one level shallower than "workspace root" implies).
 const __filename = fileURLToPath(import.meta.url);
 const HERE = resolve(__filename, '..');
 const WORKSPACE_ROOT = resolve(HERE, '..', '..', '..', '..', '..', '..');
-const CONTRACTS_DIR = join(WORKSPACE_ROOT, 'dvconf-contracts');
+const CONTRACTS_DIR = resolve(process.env['DVCONF_CONTRACTS_DIR'] ?? join(WORKSPACE_ROOT, 'contract'));
 
 export interface LocalnetHandle {
   client: SuiClient;
@@ -203,15 +206,32 @@ export async function fundAddress(address: string): Promise<void> {
   await requestSuiFromFaucetV2({ host: FAUCET_URL, recipient: address });
 }
 
-/** new-env + switch + faucet-fund the active deployer address. */
+/**
+ * new-env + switch + faucet-fund the active deployer address.
+ *
+ * `--with-faucet`'s companion HTTP server can still be starting up for a moment
+ * after the JSON-RPC port (which waitForSuiRpc already confirmed) is accepting
+ * calls, so the first faucet call can race a "connection refused"-style failure
+ * on a freshly booted node -- retry a few times before giving up.
+ */
 async function setupSuiClient(alias: string): Promise<void> {
   await runCli('sui', ['client', 'new-env', '--alias', alias, '--rpc', SUI_RPC_URL]);
   await runCli('sui', ['client', 'switch', '--env', alias]);
-  const faucet = await runCli('sui', ['client', 'faucet', '--url', `${FAUCET_URL}/gas`]);
-  if (faucet.code !== 0) {
-    throw new Error(`sui client faucet failed: ${faucet.stderr.slice(0, 300)}`);
+
+  const maxAttempts = 5;
+  let lastFaucet: CliResult | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const faucet = await runCli('sui', ['client', 'faucet', '--url', `${FAUCET_URL}/gas`]);
+    if (faucet.code === 0) {
+      await new Promise((r) => setTimeout(r, 2000));
+      return;
+    }
+    lastFaucet = faucet;
+    await new Promise((r) => setTimeout(r, 3000));
   }
-  await new Promise((r) => setTimeout(r, 2000));
+  throw new Error(
+    `sui client faucet failed after ${maxAttempts} attempts: stderr=${lastFaucet?.stderr.slice(0, 300)} stdout=${lastFaucet?.stdout.slice(0, 300)}`,
+  );
 }
 
 /** Delete stale Pub.*.toml + Move.lock (chain-id mismatch after regenesis). */
@@ -231,6 +251,7 @@ interface PublishOutput {
   networkRegistryId: string;
   minerStoreId: string;
   roleVoteBoxId: string;
+  livenessVoteBoxId: string;
 }
 
 /** Publish the package via `sui client test-publish --json` + extract identities. */
@@ -253,6 +274,7 @@ async function publishPackage(): Promise<PublishOutput> {
   let networkRegistryId: string | null = null;
   let minerStoreId: string | null = null;
   let roleVoteBoxId: string | null = null;
+  let livenessVoteBoxId: string | null = null;
 
   for (const change of parsed.objectChanges ?? []) {
     if (change.type === 'published') {
@@ -267,6 +289,7 @@ async function publishPackage(): Promise<PublishOutput> {
       if (objType.includes('::network_registry::NetworkRegistry')) networkRegistryId = objId;
       else if (objType.includes('::miner_store::MinerStore')) minerStoreId = objId;
       else if (objType.includes('::role_voting::RoleVoteBox')) roleVoteBoxId = objId;
+      else if (objType.includes('::liveness_voting::LivenessVoteBox')) livenessVoteBoxId = objId;
     } else if (isAddressOwned(change.owner)) {
       if (objType.includes('::network_registry::AdminCap')) adminCapId = objId;
     }
@@ -277,7 +300,8 @@ async function publishPackage(): Promise<PublishOutput> {
   if (networkRegistryId === null) throw new Error('publishPackage: NetworkRegistry not in objectChanges');
   if (minerStoreId === null) throw new Error('publishPackage: MinerStore not in objectChanges');
   if (roleVoteBoxId === null) throw new Error('publishPackage: RoleVoteBox not in objectChanges');
-  return { packageId, adminCapId, networkRegistryId, minerStoreId, roleVoteBoxId };
+  if (livenessVoteBoxId === null) throw new Error('publishPackage: LivenessVoteBox not in objectChanges');
+  return { packageId, adminCapId, networkRegistryId, minerStoreId, roleVoteBoxId, livenessVoteBoxId };
 }
 
 /** Pluck the lone shared object from a `<module>::create` result. */
@@ -378,6 +402,7 @@ export async function bootLocalnet(
       networkRegistryId: publishOut.networkRegistryId,
       minerStoreId: publishOut.minerStoreId,
       roleVoteBoxId: publishOut.roleVoteBoxId,
+      livenessVoteBoxId: publishOut.livenessVoteBoxId,
       cpRegistryId: registries.cpRegistryId,
       relayRegistryId: registries.relayRegistryId,
       validatorRegistryId: registries.validatorRegistryId,

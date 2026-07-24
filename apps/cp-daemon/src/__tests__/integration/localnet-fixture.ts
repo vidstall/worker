@@ -35,9 +35,12 @@ const __filename = fileURLToPath(import.meta.url);
 const HERE = resolve(__filename, '..');
 const WORKSPACE_ROOT = resolve(HERE, '..', '..', '..', '..', '..', '..');
 // Evaluation harnesses may point this fixture at an isolated, pinned contracts
-// snapshot. The default remains the historical workspace sibling for every
-// integration-test caller.
-const CONTRACTS_DIR = resolve(process.env['DVCONF_CONTRACTS_DIR'] ?? join(WORKSPACE_ROOT, 'dvconf-contracts'));
+// snapshot. The default is contract/ under services/ (WORKSPACE_ROOT, per the 6
+// levels-up walk above, already resolves to services/, not the repo root) --
+// this checkout's current layout (the module was originally named
+// dvconf-contracts as a sibling under a flat workspace root; the monorepo has
+// since nested both packages under services/).
+const CONTRACTS_DIR = resolve(process.env['DVCONF_CONTRACTS_DIR'] ?? join(WORKSPACE_ROOT, 'contract'));
 
 export interface LocalnetHandle {
   client: SuiClient;
@@ -247,6 +250,7 @@ interface PublishOutput {
   networkRegistryId: string;
   minerStoreId: string;
   roleVoteBoxId: string;
+  livenessVoteBoxId: string;
 }
 
 /** Publish the package via `sui client test-publish --json` + extract identities. */
@@ -269,6 +273,7 @@ async function publishPackage(): Promise<PublishOutput> {
   let networkRegistryId: string | null = null;
   let minerStoreId: string | null = null;
   let roleVoteBoxId: string | null = null;
+  let livenessVoteBoxId: string | null = null;
 
   for (const change of parsed.objectChanges ?? []) {
     if (change.type === 'published') {
@@ -283,6 +288,7 @@ async function publishPackage(): Promise<PublishOutput> {
       if (objType.includes('::network_registry::NetworkRegistry')) networkRegistryId = objId;
       else if (objType.includes('::miner_store::MinerStore')) minerStoreId = objId;
       else if (objType.includes('::role_voting::RoleVoteBox')) roleVoteBoxId = objId; // auto-created by role_voting::init
+      else if (objType.includes('::liveness_voting::LivenessVoteBox')) livenessVoteBoxId = objId;
     } else if (isAddressOwned(change.owner)) {
       if (objType.includes('::network_registry::AdminCap')) adminCapId = objId;
     }
@@ -293,7 +299,8 @@ async function publishPackage(): Promise<PublishOutput> {
   if (networkRegistryId === null) throw new Error('publishPackage: NetworkRegistry not in objectChanges');
   if (minerStoreId === null) throw new Error('publishPackage: MinerStore not in objectChanges');
   if (roleVoteBoxId === null) throw new Error('publishPackage: RoleVoteBox not in objectChanges');
-  return { packageId, adminCapId, networkRegistryId, minerStoreId, roleVoteBoxId };
+  if (livenessVoteBoxId === null) throw new Error('publishPackage: LivenessVoteBox not in objectChanges');
+  return { packageId, adminCapId, networkRegistryId, minerStoreId, roleVoteBoxId, livenessVoteBoxId };
 }
 
 /** Pluck the lone shared object from a `<module>::create` result. */
@@ -396,6 +403,7 @@ export async function bootLocalnet(
       networkRegistryId: publishOut.networkRegistryId,
       minerStoreId: publishOut.minerStoreId,
       roleVoteBoxId: publishOut.roleVoteBoxId,
+      livenessVoteBoxId: publishOut.livenessVoteBoxId,
       cpRegistryId: registries.cpRegistryId,
       relayRegistryId: registries.relayRegistryId,
       validatorRegistryId: registries.validatorRegistryId,

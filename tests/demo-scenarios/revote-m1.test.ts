@@ -164,6 +164,7 @@ function buildConfig(publishOutput: { objectChanges?: ObjChange[] }): NetworkCon
     roomManagerId: byType('::RoomManager'),
     signalingRegistryId: byType('::SignalingRegistry'),
     roleVoteBoxId: byType('::RoleVoteBox'),
+    livenessVoteBoxId: byType('::LivenessVoteBox'),
   };
 }
 

@@ -27,6 +27,18 @@ export interface NetworkConfig {
    * identical until the first upgrade.
    */
   originalPackageId?: string;
+  /**
+   * The package ID that first introduced the `liveness_voting` module.
+   * Distinct from `originalPackageId` because `liveness_voting` was added
+   * in a LATER upgrade than the package's first-ever publish -- its event
+   * structs (e.g. `NodeEjectionApproved`) are pinned to THAT upgrade's
+   * package address, not the package-wide original. Using
+   * `originalPackageId` here silently matches zero events forever (see
+   * EventPoller's packageId doc). Falls back to `originalPackageId` (then
+   * `packageId`) for deployments where liveness_voting shipped at the
+   * original publish (no prior upgrade history to diverge from).
+   */
+  livenessVotingOriginPackageId?: string;
   networkRegistryId: string;
   minerStoreId: string;
   cpRegistryId: string;
@@ -36,6 +48,7 @@ export interface NetworkConfig {
   roomManagerId: string;
   signalingRegistryId: string;
   roleVoteBoxId: string;
+  livenessVoteBoxId: string;
 }
 
 /** Result of a successful transaction execution. */

@@ -79,6 +79,7 @@ import {
   type RelayRoomScope,
 } from './canary/cell.js';
 import { discoverActiveValidatorMinerIds } from './canary/validator-discovery.js';
+import { startLivenessSweep, type LivenessSweepHandle } from './liveness-sweep.js';
 import { buildRelayScopedValidatorPool, type ScopedRoom } from './canary/validator-pool.js';
 import {
   startCoverageServer,
@@ -172,6 +173,7 @@ export interface DaemonState {
   eventPoller: EventPoller | null;
   escrowPoller: EventPoller | null;
   roomPoller: EventPoller | null;
+  livenessSweep: LivenessSweepHandle | null;
   escrowMap: Map<string, string>;
   activeRooms: Map<string, ActiveRoom>;
   /** Stop function returned by startHeartbeat (F40). */
@@ -377,6 +379,7 @@ export async function startDaemon(overrides?: {
     eventPoller: null,
     escrowPoller: null,
     roomPoller: null,
+    livenessSweep: null,
     escrowMap,
     activeRooms,
     heartbeatStop: null,
@@ -921,6 +924,25 @@ export async function startDaemon(overrides?: {
       }
     }
   });
+
+  // "i expect that job belong to validator" -- validator-driven liveness enforcement:
+  // discovers stale relay/signaling/cp-daemon/validator nodes, casts cast_liveness_vote
+  // toward a validator-quorum, and cranks execute_ejection once NodeEjectionApproved
+  // fires. Independent cadence from the canary cell loop; CRASH-SAFE (see liveness-sweep.ts).
+  try {
+    const livenessOwnMinerId = (await readCapMinerId(client, validatorCapId, log)) ?? validatorMinerId;
+    state.livenessSweep = startLivenessSweep({
+      client,
+      graphqlClient,
+      config,
+      signer: mainKeypair,
+      minerCapId: validatorCapId,
+      ownMinerId: livenessOwnMinerId,
+      logger: log.child({ component: 'liveness-sweep' }),
+    });
+  } catch (err) {
+    log.error({ err }, 'liveness sweep failed to start (daemon continues)');
+  }
 
   return state;
 }
@@ -1494,6 +1516,8 @@ async function main(): Promise<void> {
           s.escrowPoller?.stop();
           s.roomPoller?.stop();
           s.eventPoller = s.escrowPoller = s.roomPoller = null;
+          s.livenessSweep?.stop();
+          s.livenessSweep = null;
           // REQ-CFA-004 (Task 5.1): the additive canary cell loop is a reactive side-loop
           // → stop it alongside the pollers (not in the liveness-LAST group).
           s.canaryCellLoop?.stop();

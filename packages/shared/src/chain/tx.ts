@@ -17,6 +17,22 @@ const MAX_DELAY_MS = 30_000;
 const MAX_RETRIES = 5;
 
 /**
+ * A Move abort is a DETERMINISTIC on-chain rejection (an `assert!` failed against
+ * current on-chain state) -- rebuilding and resubmitting the exact same
+ * transaction will fail with the exact same abort code every time within the
+ * retry window (on-chain state affecting the assert doesn't change in the
+ * seconds between retries), so retrying it is pure wasted gas-estimation calls
+ * and backoff delay. Fail fast on the first attempt instead of burning all
+ * MAX_RETRIES; a caller that wants to try again after on-chain state actually
+ * changes (e.g. a periodic sweep tick) will naturally re-invoke this on its own
+ * next cycle.
+ */
+function isMoveAbort(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes('MoveAbort');
+}
+
+/**
  * Execute a Sui transaction with automatic retry and exponential backoff.
  *
  * @param client    - SuiClient instance
@@ -57,6 +73,11 @@ export async function executeWithRetry(
         objectChanges: (result.objectChanges ?? []) as Record<string, unknown>[],
       };
     } catch (err) {
+      if (isMoveAbort(err)) {
+        logger.error({ err, attempt }, `${label} aborted on-chain (deterministic) -- not retrying`);
+        return null;
+      }
+
       logger.warn({ err, attempt, delay }, `${label} failed, retrying`);
 
       if (attempt === MAX_RETRIES) {

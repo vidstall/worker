@@ -96,6 +96,10 @@ export function loadNetworkConfig(): NetworkConfig {
     // cli/contract.py); see NetworkConfig.originalPackageId for why it must
     // stay distinct from packageId after an upgrade.
     originalPackageId: process.env['CONTRACT_ORIGINAL_PACKAGE_ID'] || undefined,
+    // See NetworkConfig.livenessVotingOriginPackageId -- distinct from
+    // originalPackageId because liveness_voting was added in a later
+    // upgrade than the package's first-ever publish.
+    livenessVotingOriginPackageId: process.env['LIVENESS_VOTING_ORIGIN_PACKAGE_ID'] || undefined,
     networkRegistryId: required('NETWORK_REGISTRY_ID'),
     minerStoreId: required('MINER_STORE_ID'),
     cpRegistryId: required('CP_REGISTRY_ID'),
@@ -105,5 +109,6 @@ export function loadNetworkConfig(): NetworkConfig {
     roomManagerId: required('ROOM_MANAGER_ID'),
     signalingRegistryId: required('SIGNALING_REGISTRY_ID'),
     roleVoteBoxId: required('ROLE_VOTE_BOX_ID'),
+    livenessVoteBoxId: required('LIVENESS_VOTE_BOX_ID'),
   };
 }

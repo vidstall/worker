@@ -11,10 +11,12 @@ import { defineConfig } from 'vitest/config';
  * mock-based (no localnet) and deliberately NOT matched here — it stays in the
  * unit run.
  *
- * The validator-daemon canary-slash E2E (Phase 4.1, REQ-CFA-006/007/008) is a
- * localnet-booting test too — matched by the PRECISE `canary-*` glob below so it
- * does NOT pull in the sibling `dual-probe-bw-delta.integration.test.ts` (a
- * loopback-HTTP/UDP bench gated behind `pnpm bench:m2`, not a localnet test).
+ * The validator-daemon canary-slash E2E (Phase 4.1, REQ-CFA-006/007/008) and the
+ * liveness-ejection E2E ("i expect that job belong to validator" -- validator-driven
+ * liveness enforcement) are localnet-booting tests too — matched by the PRECISE
+ * `canary-*` / `liveness-*` globs below so they do NOT pull in the sibling
+ * `dual-probe-bw-delta.integration.test.ts` (a loopback-HTTP/UDP bench gated behind
+ * `pnpm bench:m2`, not a localnet test).
  *
  * Single localnet at a time: forks pool, single fork, no file parallelism, long
  * timeouts to cover `sui start` + publish.
@@ -24,6 +26,7 @@ export default defineConfig({
     include: [
       '**/cp-daemon/**/__tests__/integration/**/*.integration.test.ts',
       '**/apps/validator-daemon/**/__tests__/integration/canary-*.integration.test.ts',
+      '**/apps/validator-daemon/**/__tests__/integration/liveness-*.integration.test.ts',
       // RMS-live LOCAL L3.3 capstone — the headline test (Assertion A boots a localnet,
       // Assertion B is in-process real-mediasoup). Run via `pnpm test:integration rms-live-local`.
       '**/apps/relay/**/__tests__/integration/live/rms-*.integration.test.ts',

@@ -69,6 +69,7 @@ function makeConfig(): NetworkConfig {
     roomManagerId: ID('07'),
     signalingRegistryId: ID('5a'),
     roleVoteBoxId: ID('b0'),
+    livenessVoteBoxId: ID('b1'),
   };
 }
 

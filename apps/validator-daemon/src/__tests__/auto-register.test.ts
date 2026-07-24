@@ -46,6 +46,7 @@ function mockConfig(): NetworkConfig {
     roomManagerId: '0xroom',
     signalingRegistryId: '0xsigreg',
     roleVoteBoxId: '0xvotebox',
+    livenessVoteBoxId: '0xlivenessbox',
   };
 }
 
