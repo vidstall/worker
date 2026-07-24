@@ -130,3 +130,71 @@ describe('startRoleVoting re-vote pass (RV-010)', () => {
     expect(mockExecuteWithRetry).not.toHaveBeenCalled();
   });
 });
+
+// ── reconciliation against on-chain truth (self-heal when a MinerRegistered
+// event was missed, e.g. this daemon started after the event fired) ──
+describe('startRoleVoting on-chain reconciliation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getRevoteCandidates().forEach(clearRevoteCandidate);
+  });
+
+  const MINER_ID = '0x' + '7'.repeat(64);
+  const U64_BYTES = (n: number) => [n, 0, 0, 0, 0, 0, 0, 0];
+  // BCS vector<address>: ULEB128 length prefix (1) + one 32-byte address.
+  const idVectorBytes = () => [1, ...Array.from({ length: 32 }, () => 0x77)];
+
+  it('backfills and votes a miner discovered only via on-chain reconciliation', async () => {
+    const signer = { toSuiAddress: () => '0xsender' } as any;
+    let capturedTarget: string | undefined;
+    let capturedMinerIdArg: string | undefined;
+    mockExecuteWithRetry.mockImplementation(
+      async (_c: unknown, _s: unknown, builder: (tx: any) => void, label: string) => {
+        const calls: any[] = [];
+        const tx = {
+          object: (x: string) => ({ o: x }),
+          pure: { id: (x: string) => ({ id: x }), u8: (n: number) => ({ u8: n }) },
+          moveCall: (m: any) => calls.push(m),
+        };
+        builder(tx);
+        capturedTarget = calls[0].target;
+        capturedMinerIdArg = calls[0].arguments[calls[0].arguments.length - 2].id; // second-to-last = miner_id
+        expect(label).toBe('cast-role-vote');
+      },
+    );
+
+    const devInspectTransactionBlock = vi
+      .fn()
+      // 0. reconcile: get_unassigned_miners -> one miner
+      .mockResolvedValueOnce({ results: [{ returnValues: [[idVectorBytes(), 'vector<address>']] }] })
+      // 1-4. readRegistryCounts (relay/validator/cp/signaling)
+      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
+      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
+      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
+      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
+      // 5. readMinerBandwidth -> 0 (not relay)
+      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(0), 'u64']] }] })
+      // 6. readMinerCpuCores -> 0 (validator)
+      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(0), 'u64']] }] });
+
+    const client = { devInspectTransactionBlock } as any;
+    const stop = startRoleVoting(client, signer, mockConfig(), '0xcap', mockLogger(), 60_000);
+    await vi.waitFor(() => expect(mockExecuteWithRetry).toHaveBeenCalled());
+    stop();
+
+    expect(capturedTarget).toBe('0xpkg::role_voting::cast_role_vote');
+    expect(capturedMinerIdArg?.toLowerCase()).toBe(MINER_ID.toLowerCase());
+  });
+
+  it('does not resubmit a vote for a miner already tracked/voted (dedup against reconciliation)', async () => {
+    const signer = { toSuiAddress: () => '0xsender' } as any;
+    const devInspectTransactionBlock = vi.fn().mockResolvedValue({
+      results: [{ returnValues: [[[0], 'vector<address>']] }], // empty vector<ID>
+    });
+    const client = { devInspectTransactionBlock } as any;
+    const stop = startRoleVoting(client, signer, mockConfig(), '0xcap', mockLogger(), 60_000);
+    await new Promise((r) => setTimeout(r, 20));
+    stop();
+    expect(mockExecuteWithRetry).not.toHaveBeenCalled();
+  });
+});

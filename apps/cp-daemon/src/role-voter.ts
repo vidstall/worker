@@ -11,7 +11,11 @@
 import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
+import { bcs } from '@mysten/sui/bcs';
 import { executeWithRetry, MinerRole, type NetworkConfig, type Logger } from '@dvconf/shared';
+
+/** `vector<ID>` decodes to an array of 0x-addresses. */
+const IdVectorSchema = bcs.vector(bcs.Address);
 
 /** Role constant mapping (matches Move constants.move). */
 const ROLE_RELAY = MinerRole.Relay;       // 2
@@ -233,6 +237,54 @@ export function trackUnassignedMiner(minerId: string): void {
 }
 
 /**
+ * Reconcile the in-memory unassigned-miner queue against on-chain truth.
+ *
+ * trackUnassignedMiner is only ever invoked from a live MinerRegistered event.
+ * If this CP-daemon process starts (or restarts) after that event already
+ * fired — e.g. mid-deploy, or because a miner's daemon crash-looped through
+ * a registration retry earlier — the miner is invisible to the in-memory
+ * queue forever, since the event won't fire again. This periodically reads
+ * miner_store::get_unassigned_miners (role=User) and backfills any miner_id
+ * not already tracked or voted, so the daemon self-heals without relying on
+ * having been alive for the exact moment of registration.
+ */
+async function reconcileUnassignedMiners(
+  client: SuiClient,
+  config: NetworkConfig,
+  sender: string,
+  logger: Logger,
+): Promise<void> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${config.packageId}::miner_store::get_unassigned_miners`,
+    arguments: [tx.object(config.minerStoreId)],
+  });
+
+  try {
+    const result = await client.devInspectTransactionBlock({ transactionBlock: tx, sender });
+    const bytes = result.results?.[0]?.returnValues?.[0]?.[0];
+    if (!bytes || bytes.length === 0) return;
+
+    const ids = IdVectorSchema.parse(Uint8Array.from(bytes)) as string[];
+    let discovered = 0;
+    for (const id of ids) {
+      if (!unassignedMiners.has(id) && !votedMiners.has(id)) {
+        unassignedMiners.add(id);
+        discovered++;
+      }
+    }
+    if (discovered > 0) {
+      logger.info(
+        { discovered, totalUnassigned: ids.length },
+        'Reconciled unassigned miners from on-chain state — backfilled miners missed by event stream',
+      );
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Failed to reconcile unassigned miners from on-chain state');
+  }
+}
+
+/**
  * Clear a miner from the voted set and unassigned set
  * (called when RoleAssigned event is received).
  */
@@ -291,6 +343,11 @@ export function startRoleVoting(
 
   const poll = async (): Promise<void> => {
     try {
+      // 0. Reconcile against on-chain truth — backfills any miner whose
+      // MinerRegistered event was missed (e.g. this daemon started after
+      // the event fired). See reconcileUnassignedMiners doc comment.
+      await reconcileUnassignedMiners(client, config, sender, logger);
+
       // 1. Check for unassigned miners + re-vote candidates (RV-010)
       const pendingMiners = Array.from(unassignedMiners).filter(id => !votedMiners.has(id));
       const pendingRevotes = Array.from(revoteCandidates).filter(id => !votedMiners.has(id));
