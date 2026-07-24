@@ -203,6 +203,22 @@ async function performFullRegistration(
   votingMode: boolean,
   logger: Logger,
 ): Promise<{ minerCapId: string }> {
+  // Before minting a brand-new identity, check whether an EARLIER attempt (e.g.
+  // a container restart mid-registration) already succeeded at Step 1.
+  // registration::register derives miner_id DETERMINISTICALLY from the wallet
+  // address, so retrying it blindly aborts E_ALREADY_REGISTERED (404) once a
+  // profile exists for this address -- and StakePosition is a SHARED object
+  // (transfer::share_object), invisible to getOwnedObjects, so the only way to
+  // recover its id is from the transaction that created it.
+  const prior = await findPriorRegistration(client, signer, config, logger);
+  if (prior) {
+    logger.info(
+      prior,
+      'Found MinerCap + StakePosition from a prior partial registration attempt — reusing instead of minting a new identity',
+    );
+    return finishRegistration(client, signer, config, endpointUrl, region, votingMode, prior.minerCapId, prior.stakePositionId, logger);
+  }
+
   // voting mode also stakes the full role threshold: apply_voted_role asserts
   // stake >= minimum_for_role (713). MIN_VOTING_STAKE (0.01) < signaling threshold.
   const stakeAmount = SIGNALING_STAKE;
@@ -264,12 +280,34 @@ async function performFullRegistration(
 
   logger.info({ minerCapId, stakePositionId }, 'Miner registered successfully (Step 1)');
 
-  // Voting mode: wait for CPs to vote on our role, then apply it
+  return finishRegistration(client, signer, config, endpointUrl, region, votingMode, minerCapId, stakePositionId, logger);
+}
+
+/**
+ * Voting-mode wait/apply + Step 2 SignalingRegistry enrollment, shared by both
+ * a fresh Step 1 mint and a recovered prior-attempt MinerCap + StakePosition.
+ */
+async function finishRegistration(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  endpointUrl: string,
+  region: string,
+  votingMode: boolean,
+  minerCapId: string,
+  stakePositionId: string,
+  logger: Logger,
+): Promise<{ minerCapId: string }> {
+  // Voting mode: wait for CPs to vote on our role, then apply it (skipped if
+  // this cap's role was already applied by a prior attempt).
   if (votingMode) {
-    const minerId = signer.toSuiAddress();
-    await waitForRoleAssignment(client, config, minerId, logger);
-    await applyVotedRole(client, signer, config, minerCapId, stakePositionId, logger);
-    logger.info('Voted role applied — proceeding to registry enrollment');
+    const capInfo = await getMinerCapInfo(client, minerCapId, logger);
+    if (capInfo && capInfo.role !== ROLE_SIGNALING) {
+      const minerId = signer.toSuiAddress();
+      await waitForRoleAssignment(client, config, minerId, logger);
+      await applyVotedRole(client, signer, config, minerCapId, stakePositionId, logger);
+      logger.info('Voted role applied — proceeding to registry enrollment');
+    }
   }
 
   // Step 2: Register in SignalingRegistry
@@ -281,6 +319,45 @@ async function performFullRegistration(
   );
 
   return { minerCapId };
+}
+
+/**
+ * Look for a prior `registration::register` transaction from this wallet whose
+ * effects created a MinerCap + StakePosition pair -- recovers from a crash
+ * between Step 1 succeeding and this daemon persisting/using its result. Only
+ * queryTransactionBlocks (not queryEvents, which some devnet fullnodes disable)
+ * is used, since StakePosition is a SHARED object and cannot be found via
+ * getOwnedObjects. Returns null (not an error) if none is found or the query
+ * itself is unavailable -- callers fall through to minting a fresh pair.
+ */
+async function findPriorRegistration(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  logger: Logger,
+): Promise<{ minerCapId: string; stakePositionId: string } | null> {
+  const pkg = config.originalPackageId ?? config.packageId;
+  try {
+    const result = await client.queryTransactionBlocks({
+      filter: { FromAddress: signer.toSuiAddress() },
+      options: { showObjectChanges: true },
+      order: 'descending',
+      limit: 20,
+    });
+
+    for (const tx of result.data) {
+      const created = tx.objectChanges?.filter((c) => c.type === 'created') ?? [];
+      const cap = created.find((c) => 'objectType' in c && c.objectType === `${pkg}::caps::MinerCap`);
+      const stake = created.find((c) => 'objectType' in c && c.objectType === `${pkg}::staking::StakePosition`);
+      if (cap && stake && 'objectId' in cap && 'objectId' in stake) {
+        return { minerCapId: cap.objectId, stakePositionId: stake.objectId };
+      }
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ err }, 'Could not query prior registration transactions; will mint a fresh MinerCap + StakePosition');
+    return null;
+  }
 }
 
 /**

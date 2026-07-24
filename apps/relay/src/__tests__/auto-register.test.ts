@@ -295,6 +295,62 @@ describe('ensureRegistered (relay)', () => {
     );
   });
 
+  it('recovers a prior partial registration attempt instead of re-minting (avoids E_ALREADY_REGISTERED)', async () => {
+    delete process.env['MINER_CAP_ID'];
+    const logger = mockLogger();
+
+    const mockClient = {
+      queryTransactionBlocks: vi.fn().mockResolvedValue({
+        data: [
+          {
+            digest: 'prior-tx',
+            objectChanges: [
+              { type: 'created', objectId: '0xprior-cap', objectType: '0xpkg::caps::MinerCap' },
+              { type: 'created', objectId: '0xprior-stake', objectType: '0xpkg::staking::StakePosition' },
+            ],
+          },
+        ],
+      }),
+    } as any;
+
+    // Only Step 2 should run — no miner-registration TX this time.
+    mockExecuteWithRetry.mockResolvedValueOnce(step2Effects());
+
+    const result = await ensureRegistered(
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+    );
+
+    expect(result.minerCapId).toBe('0xprior-cap');
+    expect(mockExecuteWithRetry).toHaveBeenCalledTimes(1);
+    expect(mockExecuteWithRetry).toHaveBeenCalledWith(
+      mockClient, mockSigner, expect.any(Function), 'relay-registration', logger,
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      { minerCapId: '0xprior-cap', stakePositionId: '0xprior-stake' },
+      expect.stringContaining('reusing instead of minting a new identity'),
+    );
+  });
+
+  it('falls through to a fresh mint when queryTransactionBlocks is unavailable', async () => {
+    delete process.env['MINER_CAP_ID'];
+    const logger = mockLogger();
+
+    const mockClient = {
+      queryTransactionBlocks: vi.fn().mockRejectedValue(new Error('Method not found')),
+    } as any;
+
+    mockExecuteWithRetry
+      .mockResolvedValueOnce(step1Effects())
+      .mockResolvedValueOnce(step2Effects());
+
+    const result = await ensureRegistered(
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+    );
+
+    expect(result.minerCapId).toBe('0xminer-cap');
+    expect(mockExecuteWithRetry).toHaveBeenCalledTimes(2);
+  });
+
   it('exits with error on registration failure', async () => {
     delete process.env['MINER_CAP_ID'];
     const logger = mockLogger();
