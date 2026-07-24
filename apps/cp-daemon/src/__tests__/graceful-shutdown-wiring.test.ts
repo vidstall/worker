@@ -29,6 +29,7 @@ function makeDeps() {
     stopRoleVoting: rec('stopRoleVoting'),
     stopRevoteWatcher: rec('stopRevoteWatcher'),
     stopRelayHeartbeatWatcher: rec('stopRelayHeartbeatWatcher'),
+    stopRoomHealthSweep: rec('stopRoomHealthSweep'),
     stopTurnIssuer: rec('stopTurnIssuer'),
     stopCapTokenIssuer: rec('stopCapTokenIssuer'),
     stopTurnRpc: rec('stopTurnRpc'),

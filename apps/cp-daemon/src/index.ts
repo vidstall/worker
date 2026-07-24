@@ -52,6 +52,14 @@ import { startRoleVoting } from './role-voter.js';
 import { startRevoteWatcher, makeMarkSubmitter, resolveScanIntervalEpochs } from './revote-watcher.js';
 import { SuiChainStateReader } from './sui-chain-state-reader.js';
 import {
+  startRoomHealthSweep,
+  makePromoteAfterEjectionSubmitter,
+  makeSpillRelaySubmitter,
+  makeReassignSignalingSubmitter,
+  resolveMaxHeartbeatEpochs as resolveRoomHealthMaxHeartbeatEpochs,
+} from './room-health-sweep.js';
+import { LiveRoomHealthChainStateReader } from './room-health-chain-state-reader.js';
+import {
   startRelayHeartbeatWatcher,
   makePromoteSubmitter,
   resolveMaxHeartbeatEpochs,
@@ -802,6 +810,8 @@ export interface CpShutdownDeps {
   stopRevoteWatcher: () => void;
   /** (3) reactive — the RO-009 relay-heartbeat (Layer C) watcher. */
   stopRelayHeartbeatWatcher: () => void;
+  /** (3) reactive — the room-health sweep (post-ejection relay/signaling reassignment). */
+  stopRoomHealthSweep: () => void;
   /** (3) reactive — the TURN issuer rotation loop. */
   stopTurnIssuer: () => void;
   /** (3) reactive — the F62 cap-token issuer epoch refresher. */
@@ -853,6 +863,7 @@ export function buildCpShutdownPlan(
       deps.stopRoleVoting();
       deps.stopRevoteWatcher();
       deps.stopRelayHeartbeatWatcher();
+      deps.stopRoomHealthSweep();
       deps.stopTurnIssuer();
       deps.stopCapTokenIssuer();
       deps.stopTurnRpc?.();
@@ -1034,6 +1045,34 @@ async function main(): Promise<void> {
     { module: 'cp-daemon', relayHeartbeatScanMs },
     'relay heartbeat watcher started (Layer C)',
   );
+
+  // Room health sweep — closes the gap where a validator-quorum liveness
+  // ejection (registration::execute_ejection) removes a relay/signaling node
+  // from its registry without ever touching RoomManager, leaving a room's
+  // assignment dangling forever. Complements relay-heartbeat-watcher (which
+  // owns the "primary stale, live standby already assigned" case): this sweep
+  // handles the "primary fully ejected" and "no live standby at all" relay
+  // gaps, plus signaling's entire failover path (it has no other mechanism).
+  const roomHealthReader = new LiveRoomHealthChainStateReader(client, config, logger);
+  const roomHealthScanMs = parseInt(
+    process.env['ROOM_HEALTH_SCAN_INTERVAL_MS'] ?? String(Number(sysState.epochDurationMs)),
+    10,
+  );
+  const roomHealthSweep = startRoomHealthSweep(
+    roomHealthReader,
+    {
+      promoteAfterEjection: makePromoteAfterEjectionSubmitter(client, signer, config, logger),
+      spillRelay: makeSpillRelaySubmitter(client, signer, config, cpCapId, logger),
+      reassignSignaling: makeReassignSignalingSubmitter(client, signer, config, logger),
+    },
+    logger,
+    {
+      pollIntervalMs: roomHealthScanMs,
+      maxHeartbeatEpochs: resolveRoomHealthMaxHeartbeatEpochs(process.env['ROOM_HEALTH_MAX_HEARTBEAT_EPOCHS'], logger),
+    },
+  );
+  const stopRoomHealthSweep = (): void => roomHealthSweep.stop();
+  logger.info({ module: 'cp-daemon', roomHealthScanMs }, 'room health sweep started');
 
   // Bootstrap TURN issuer (S30.B Option A — ADR-0005 hybrid 24h+on-slash rotation)
   const turnRotationIntervalMs = parseInt(
@@ -1391,6 +1430,7 @@ async function main(): Promise<void> {
         stopRoleVoting,
         stopRevoteWatcher,
         stopRelayHeartbeatWatcher,
+        stopRoomHealthSweep,
         stopTurnIssuer,
         stopCapTokenIssuer,
         stopTurnRpc: stopTurnRpc ? () => void stopTurnRpc() : undefined,
