@@ -107,6 +107,14 @@ async function isRegisteredInRelayRegistry(
  *
  * If MINER_CAP_ID is set, skips step 1.
  * If MINER_CAP_ID is set but not in RelayRegistry, runs step 2 only.
+ * If MINER_CAP_ID is set but its StakePosition is gone (e.g. the node was
+ * validator-quorum EJECTED -- execute_ejection destroys the StakePosition,
+ * not the MinerCap, and the contract has no path to re-attach a fresh stake
+ * to an existing cap), the old cap is permanently unusable. Falls back to a
+ * full re-registration instead of hard-failing: ejection is explicitly
+ * non-punitive/no-slash (the old stake was already returned in full to this
+ * same wallet), so that balance funds the fresh MinerCap + StakePosition here
+ * -- same wallet, same keypair, new on-chain identity.
  *
  * @returns The MinerCap object ID.
  */
@@ -119,6 +127,7 @@ export async function ensureRegistered(
   logger: Logger,
 ): Promise<{ minerCapId: string }> {
   const envCapId = process.env['MINER_CAP_ID'];
+  const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
 
   if (envCapId) {
     logger.info({ minerCapId: envCapId }, 'MINER_CAP_ID set — checking RelayRegistry status');
@@ -144,8 +153,12 @@ export async function ensureRegistered(
 
     const stakePositionId = ownedObjects.data[0]?.data?.objectId;
     if (!stakePositionId) {
-      logger.error('Cannot find StakePosition for step 2 registration. Manual intervention required.');
-      process.exit(1);
+      logger.warn(
+        { minerCapId: envCapId },
+        'MINER_CAP_ID has no StakePosition (likely ejected — the cap cannot be reused). ' +
+        'Falling back to full re-registration with a fresh MinerCap + StakePosition.',
+      );
+      return performFullRegistration(client, signer, config, endpointUrl, region, votingMode, logger);
     }
 
     // register_relay asserts cap.role == role_relay() (E_NOT_RELAY). A cap
@@ -171,8 +184,24 @@ export async function ensureRegistered(
   }
 
   logger.info('MINER_CAP_ID not set — attempting full auto-registration');
+  return performFullRegistration(client, signer, config, endpointUrl, region, votingMode, logger);
+}
 
-  const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
+/**
+ * Full Step 1 + Step 2 registration: mints a fresh MinerCap + StakePosition
+ * from the signer's own wallet balance, then enrolls in RelayRegistry.
+ * Shared by both "MINER_CAP_ID unset" (first-ever boot) and "MINER_CAP_ID
+ * set but its StakePosition is permanently gone" (post-ejection self-heal).
+ */
+async function performFullRegistration(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  endpointUrl: string,
+  region: string,
+  votingMode: boolean,
+  logger: Logger,
+): Promise<{ minerCapId: string }> {
   // voting mode also stakes the full role threshold: apply_voted_role asserts
   // stake >= minimum_for_role (E_INSUFFICIENT_STAKE_FOR_ROLE / 713). MIN_VOTING_STAKE
   // (0.01) is below every threshold (regression after D-S70-4 moved the stake guard

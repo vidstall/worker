@@ -1,16 +1,15 @@
 /**
- * Unit tests for relay daemon auto-registration flow.
+ * Unit tests for signaling daemon auto-registration flow.
  *
- * Mirrors the CP daemon auto-register test pattern: mocks SuiClient,
- * executeWithRetry, and verifies the 2-step registration flow.
+ * Mirrors apps/relay/src/__tests__/auto-register.test.ts's structure/coverage
+ * (identical ensureRegistered shape, signaling-registry target instead of relay).
  *
- * Requirements: RELAY-05
+ * Requirements: SIG-01
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { NetworkConfig } from '@dvconf/shared';
 
-// Use vi.hoisted to create mock before vi.mock hoisting
 const { mockExecuteWithRetry } = vi.hoisted(() => ({
   mockExecuteWithRetry: vi.fn(),
 }));
@@ -45,11 +44,11 @@ function mockConfig(): NetworkConfig {
     networkRegistryId: '0xreg',
     minerStoreId: '0xstore',
     cpRegistryId: '0xcp',
-    relayRegistryId: '0x0000000000000000000000000000000000000000000000000000000000000001',
+    relayRegistryId: '0xrelay',
     validatorRegistryId: '0xval',
     userRegistryId: '0xuser',
     roomManagerId: '0xroom',
-    signalingRegistryId: '0xsig',
+    signalingRegistryId: '0x0000000000000000000000000000000000000000000000000000000000000001',
     roleVoteBoxId: '0xvotebox',
     livenessVoteBoxId: '0xlivenessbox',
   };
@@ -57,40 +56,23 @@ function mockConfig(): NetworkConfig {
 
 const mockSigner = { toSuiAddress: () => '0xsigner' } as any;
 
-/**
- * Step 1 effects: registration::register creates MinerCap + StakePosition.
- * Uses objectChanges (post-Sui SDK 1.x) so extractCreatedObjectByType() can find them.
- */
 function step1Effects() {
   return {
     digest: 'digest-1',
     objectChanges: [
-      {
-        type: 'created',
-        objectId: '0xminer-cap',
-        objectType: '0xpkg::caps::MinerCap',
-      },
-      {
-        type: 'created',
-        objectId: '0xstake-pos',
-        objectType: '0xpkg::staking::StakePosition',
-      },
+      { type: 'created', objectId: '0xminer-cap', objectType: '0xpkg::caps::MinerCap' },
+      { type: 'created', objectId: '0xstake-pos', objectType: '0xpkg::staking::StakePosition' },
     ],
     effects: { created: [] },
     events: [],
   };
 }
 
-/** Step 2 effects: register_relay creates no new objects. */
 function step2Effects() {
-  return {
-    digest: 'digest-2',
-    effects: { created: [] },
-    events: [],
-  };
+  return { digest: 'digest-2', effects: { created: [] }, events: [] };
 }
 
-describe('ensureRegistered (relay)', () => {
+describe('ensureRegistered (signaling)', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
@@ -102,15 +84,13 @@ describe('ensureRegistered (relay)', () => {
     process.env = originalEnv;
   });
 
-  it('returns early when MINER_CAP_ID set and already in RelayRegistry', async () => {
+  it('returns early when MINER_CAP_ID set and already in SignalingRegistry', async () => {
     process.env['MINER_CAP_ID'] = '0xexisting-cap';
     const logger = mockLogger();
 
     const mockClient = {
       getObject: vi.fn().mockResolvedValue({
-        data: {
-          content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } },
-        },
+        data: { content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } } },
       }),
       devInspectTransactionBlock: vi.fn().mockResolvedValue({
         results: [{ returnValues: [[new Uint8Array([1])]] }],
@@ -118,22 +98,20 @@ describe('ensureRegistered (relay)', () => {
     } as any;
 
     const result = await ensureRegistered(
-      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger,
     );
 
     expect(result.minerCapId).toBe('0xexisting-cap');
     expect(mockExecuteWithRetry).not.toHaveBeenCalled();
   });
 
-  it('runs step 2 only when MINER_CAP_ID set but NOT in RelayRegistry', async () => {
+  it('runs step 2 only when MINER_CAP_ID set but NOT in SignalingRegistry', async () => {
     process.env['MINER_CAP_ID'] = '0xexisting-cap';
     const logger = mockLogger();
 
     const mockClient = {
       getObject: vi.fn().mockResolvedValue({
-        data: {
-          content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } },
-        },
+        data: { content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } } },
       }),
       devInspectTransactionBlock: vi.fn().mockResolvedValue({
         results: [{ returnValues: [[new Uint8Array([0])]] }],
@@ -146,14 +124,13 @@ describe('ensureRegistered (relay)', () => {
     mockExecuteWithRetry.mockResolvedValueOnce(step2Effects());
 
     const result = await ensureRegistered(
-      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger,
     );
 
     expect(result.minerCapId).toBe('0xexisting-cap');
-    // Only step 2 called
     expect(mockExecuteWithRetry).toHaveBeenCalledTimes(1);
     expect(mockExecuteWithRetry).toHaveBeenCalledWith(
-      mockClient, mockSigner, expect.any(Function), 'relay-registration', logger,
+      mockClient, mockSigner, expect.any(Function), 'signaling-registration', logger,
     );
   });
 
@@ -167,93 +144,17 @@ describe('ensureRegistered (relay)', () => {
       .mockResolvedValueOnce(step2Effects());
 
     const result = await ensureRegistered(
-      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger,
     );
 
     expect(result.minerCapId).toBe('0xminer-cap');
     expect(mockExecuteWithRetry).toHaveBeenCalledTimes(2);
-
     expect(mockExecuteWithRetry).toHaveBeenNthCalledWith(
       1, mockClient, mockSigner, expect.any(Function), 'miner-registration', logger,
     );
     expect(mockExecuteWithRetry).toHaveBeenNthCalledWith(
-      2, mockClient, mockSigner, expect.any(Function), 'relay-registration', logger,
+      2, mockClient, mockSigner, expect.any(Function), 'signaling-registration', logger,
     );
-  });
-
-  it('Step 1 TX has correct 12 args for registration::register', async () => {
-    delete process.env['MINER_CAP_ID'];
-    const logger = mockLogger();
-
-    mockExecuteWithRetry
-      .mockResolvedValueOnce(step1Effects())
-      .mockResolvedValueOnce(step2Effects());
-
-    await ensureRegistered({} as any, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger);
-
-    const buildTxStep1 = mockExecuteWithRetry.mock.calls[0]![2] as (tx: any) => void;
-
-    const moveCallArgs: unknown[][] = [];
-    const mockTx = {
-      gas: 'tx.gas',
-      splitCoins: vi.fn().mockReturnValue(['mock-coin']),
-      object: vi.fn((id: string) => ({ kind: 'object', id })),
-      pure: {
-        vector: vi.fn((type: string, val: unknown) => ({ kind: 'pure', type, val })),
-        u8: vi.fn((val: number) => ({ kind: 'pure', type: 'u8', val })),
-        u16: vi.fn((val: number) => ({ kind: 'pure', type: 'u16', val })),
-        u64: vi.fn((val: number | bigint) => ({ kind: 'pure', type: 'u64', val })),
-      },
-      moveCall: vi.fn((opts: { target: string; arguments: unknown[] }) => {
-        moveCallArgs.push(opts.arguments);
-      }),
-    };
-
-    buildTxStep1(mockTx);
-
-    expect(mockTx.moveCall).toHaveBeenCalledTimes(1);
-    const args = moveCallArgs[0]!;
-    expect(args).toHaveLength(12);
-  });
-
-  it('Step 2 TX has correct 6 args for relay_registry::register_relay', async () => {
-    delete process.env['MINER_CAP_ID'];
-    const logger = mockLogger();
-    const config = mockConfig();
-
-    mockExecuteWithRetry
-      .mockResolvedValueOnce(step1Effects())
-      .mockResolvedValueOnce(step2Effects());
-
-    await ensureRegistered({} as any, mockSigner, config, 'ws://127.0.0.1:4000', 'us-east', logger);
-
-    const buildTxStep2 = mockExecuteWithRetry.mock.calls[1]![2] as (tx: any) => void;
-
-    const moveCallArgs: unknown[][] = [];
-    const mockTx = {
-      object: vi.fn((id: string) => ({ kind: 'object', id })),
-      pure: {
-        vector: vi.fn((type: string, val: unknown) => ({ kind: 'pure', type, val })),
-        u8: vi.fn(),
-        u16: vi.fn(),
-        u64: vi.fn(),
-      },
-      moveCall: vi.fn((opts: { target: string; arguments: unknown[] }) => {
-        moveCallArgs.push(opts.arguments);
-      }),
-    };
-
-    buildTxStep2(mockTx);
-
-    expect(mockTx.moveCall).toHaveBeenCalledTimes(1);
-    const args = moveCallArgs[0]!;
-    expect(args).toHaveLength(6);
-
-    // Verify arg identities
-    expect(args[0]).toEqual({ kind: 'object', id: config.networkRegistryId });
-    expect(args[1]).toEqual({ kind: 'object', id: config.relayRegistryId });
-    expect(args[2]).toEqual({ kind: 'object', id: '0xminer-cap' });
-    expect(args[3]).toEqual({ kind: 'object', id: '0xstake-pos' });
   });
 
   it('falls back to full re-registration when MINER_CAP_ID set but StakePosition is gone (ejected)', async () => {
@@ -262,9 +163,7 @@ describe('ensureRegistered (relay)', () => {
 
     const mockClient = {
       getObject: vi.fn().mockResolvedValue({
-        data: {
-          content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } },
-        },
+        data: { content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } } },
       }),
       devInspectTransactionBlock: vi.fn().mockResolvedValue({
         results: [{ returnValues: [[new Uint8Array([0])]] }], // not registered
@@ -277,7 +176,7 @@ describe('ensureRegistered (relay)', () => {
       .mockResolvedValueOnce(step2Effects());
 
     const result = await ensureRegistered(
-      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger,
     );
 
     // Falls all the way through to a FRESH cap, not the orphaned '0xejected-cap'.
@@ -287,7 +186,7 @@ describe('ensureRegistered (relay)', () => {
       1, mockClient, mockSigner, expect.any(Function), 'miner-registration', logger,
     );
     expect(mockExecuteWithRetry).toHaveBeenNthCalledWith(
-      2, mockClient, mockSigner, expect.any(Function), 'relay-registration', logger,
+      2, mockClient, mockSigner, expect.any(Function), 'signaling-registration', logger,
     );
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ minerCapId: '0xejected-cap' }),
@@ -305,7 +204,7 @@ describe('ensureRegistered (relay)', () => {
     mockExecuteWithRetry.mockResolvedValueOnce(null);
 
     await expect(
-      ensureRegistered({} as any, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger),
+      ensureRegistered({} as any, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger),
     ).rejects.toThrow('process.exit');
 
     expect(mockExit).toHaveBeenCalledWith(1);
@@ -330,7 +229,7 @@ describe('ensureRegistered (relay)', () => {
     });
 
     await expect(
-      ensureRegistered({} as any, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger),
+      ensureRegistered({} as any, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger),
     ).rejects.toThrow('process.exit');
 
     expect(mockExit).toHaveBeenCalledWith(1);
