@@ -99,15 +99,70 @@ export async function ensureRegistered(
   config: NetworkConfig,
   logger: Logger,
 ): Promise<{ cpCapId: string }> {
-  // Check if already registered via env
+  // Check if already registered via env. Unlike relay/signaling/
+  // validator-daemon's equivalent fast paths, this used to return
+  // immediately without checking ControlPlaneRegistry membership -- so a CP
+  // ejected for a liveness gap (validator-driven, see execute_ejection)
+  // would boot forever believing it was still registered, since
+  // ensureRegistered() is the only place that ever re-enrolls it. Now
+  // verifies membership every boot and re-runs Step 2 if it was ejected,
+  // matching the other three daemons' self-heal behavior.
   const envCapId = process.env['CP_CAP_ID'];
   if (envCapId) {
-    logger.info({ cpCapId: envCapId }, 'CP already registered (from env)');
+    logger.info({ cpCapId: envCapId }, 'CP_CAP_ID set — verifying ControlPlaneRegistry status');
+    const stillRegistered = await isRegisteredInCpRegistry(client, config, envCapId, logger);
+    if (stillRegistered) {
+      logger.info({ cpCapId: envCapId }, 'CP already registered (from env)');
+      return { cpCapId: envCapId };
+    }
+    logger.warn(
+      { cpCapId: envCapId },
+      'CP_CAP_ID set but not found in ControlPlaneRegistry (likely ejected for a liveness gap) — re-enrolling',
+    );
+    const existing = await findExistingCpCap(client, signer, config, logger);
+    if (!existing) {
+      // registration::execute_ejection (and unregister()) both fully
+      // force_destroy the StakePosition, not just remove the registry
+      // entry -- so a genuinely ejected CP has no StakePosition left to
+      // reuse, same as relay/signaling's ejection self-heal. The old
+      // ControlPlaneCap is stranded (registration::register mints a fresh
+      // one deterministically per-address and would abort E_ALREADY_
+      // REGISTERED if this were a first-time miner profile, but the
+      // ejection cleanup already removed the miner_store profile too via
+      // remove_profile, so a fresh registration on the same wallet is
+      // valid). Fall back to a full re-registration instead of hard-failing.
+      logger.warn(
+        { cpCapId: envCapId },
+        'No StakePosition left for this wallet (fully ejected) — minting a fresh CP identity',
+      );
+      return performFullRegistration(client, signer, config, logger);
+    }
+    const healed = await registerCpInRegistry(client, signer, config, envCapId, existing.stakePositionId, logger);
+    if (!healed) {
+      logger.error({ cpCapId: envCapId }, 'CP re-registration failed after ejection. Manual intervention required.');
+      process.exit(1);
+    }
+    logger.info({ cpCapId: envCapId }, 'Re-enrolled in ControlPlaneRegistry after ejection.');
     return { cpCapId: envCapId };
   }
 
   logger.info('CP_CAP_ID not set — attempting auto-registration');
+  return performFullRegistration(client, signer, config, logger);
+}
 
+/**
+ * Full Step 1 + Step 2 registration: mints a fresh ControlPlaneCap +
+ * StakePosition from the signer's own wallet balance, then enrolls in
+ * ControlPlaneRegistry. Shared by "CP_CAP_ID unset" (first-ever boot) and
+ * "CP_CAP_ID set but fully ejected, StakePosition force-destroyed"
+ * (post-ejection self-heal).
+ */
+async function performFullRegistration(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  logger: Logger,
+): Promise<{ cpCapId: string }> {
   /**
    * CP stake: 1.0 SUI (1_000_000_000 MIST).
    * Dynamic CP threshold = base(0.5) + cp_count * step(0.1), so 1.0 SUI
