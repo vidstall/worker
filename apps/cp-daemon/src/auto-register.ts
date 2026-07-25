@@ -24,15 +24,22 @@ async function findExistingCpCap(
 ): Promise<{ cpCapId: string; stakePositionId: string } | null> {
   try {
     const owner = signer.toSuiAddress();
+    // Object type tags are pinned to the package that ORIGINALLY defined
+    // them, not the latest upgraded packageId -- must use originalPackageId
+    // here (see NetworkConfig's doc comment) or this silently returns
+    // nothing after any contract upgrade, even though the objects are
+    // still valid. relay/signaling/validator-daemon already do this
+    // correctly; this was the one copy that didn't.
+    const pkg = config.originalPackageId ?? config.packageId;
     const [capObjects, stakeObjects] = await Promise.all([
       client.getOwnedObjects({
         owner,
-        filter: { StructType: `${config.packageId}::caps::ControlPlaneCap` },
+        filter: { StructType: `${pkg}::caps::ControlPlaneCap` },
         options: { showContent: false },
       }),
       client.getOwnedObjects({
         owner,
-        filter: { StructType: `${config.packageId}::staking::StakePosition` },
+        filter: { StructType: `${pkg}::staking::StakePosition` },
         options: { showContent: false },
       }),
     ]);
