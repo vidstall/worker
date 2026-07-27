@@ -24,7 +24,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { MetricsTracker } from '../metrics.js';
-import { createSignalingServer } from '../signaling.js';
+import { createSignalingServer } from '../signaling/index.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 
 // ── Mock mediasoup types (copied from room-password-roster.test.ts harness) ──

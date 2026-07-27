@@ -47,7 +47,7 @@ import {
   InterRelayProducerRegistry,
   type InterRelaySocketLike,
 } from '@dvconf/inter-relay-client';
-import { createSignalingServer, type InterRelayContext } from '../../signaling.js';
+import { createSignalingServer, type InterRelayContext } from '../../signaling/index.js';
 import { createInterRelaySocketMap } from '../../inter-relay-socket-map.js';
 import { MetricsTracker } from '../../metrics.js';
 import type { MediasoupManager } from '../../mediasoup-manager.js';

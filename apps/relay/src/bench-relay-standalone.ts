@@ -20,7 +20,7 @@
 
 import { createLogger } from '@dvconf/shared';
 import { createMediasoupManager } from './mediasoup-manager.js';
-import { createSignalingServer } from './signaling.js';
+import { createSignalingServer } from './signaling/index.js';
 import { MetricsTracker } from './metrics.js';
 
 async function main(): Promise<void> {

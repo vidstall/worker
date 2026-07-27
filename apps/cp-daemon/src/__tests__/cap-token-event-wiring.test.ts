@@ -14,7 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SuiEvent } from '@mysten/sui/client';
 import { createEventHandler } from '../event-handler.js';
-import type { CapTokenIssuer } from '../cap-token-issuer.js';
+import type { CapTokenIssuer } from '../cap-token/index.js';
 import type { TurnIssuer } from '../turn-issuer.js';
 
 function mockLogger() {

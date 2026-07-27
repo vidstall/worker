@@ -36,7 +36,7 @@ import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { Transaction } from '@mysten/sui/transactions';
 import { randomUUID } from 'node:crypto';
 import { executeWithRetry, type Logger, type QuorumSig } from '@dvconf/shared';
-import type { SubmitFn, SubmitResult } from './cap-token-issuer.js';
+import type { SubmitFn, SubmitResult } from './cap-token/index.js';
 
 const MODULE = 'cap-token-submitter';
 

@@ -63,7 +63,7 @@ import { createLogger, type Logger } from '@dvconf/shared';
 import { bootLocalnet, fundAddress, type LocalnetHandle, SUI_RPC_URL } from './localnet-fixture.js';
 import { registerMiner, CP_STAKE_MIST, type BootstrapCpResult } from './revote-localnet-helpers.js';
 import { startCapTokenIssuer } from '../../index.js';
-import type { RoomAssignedEvent } from '../../cap-token-issuer.js';
+import type { RoomAssignedEvent } from '../../cap-token/index.js';
 import { CapTokenCache } from '../../../../signaling/src/cap-token-cache.js';
 import { AuthHook, type JoinAuthMessage } from '../../../../signaling/src/auth.js';
 

@@ -68,7 +68,7 @@ import {
   assembleCapTokenQuorum,
   type CapTokenIssueClaim,
   type CapTokenIssueAttestation,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 import {
   startQuorumClaimsServer,
 } from '../quorum-claims-server.js';

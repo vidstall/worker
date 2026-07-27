@@ -28,7 +28,7 @@ import {
   InfraPeerPubkeyCache,
   recoverInfraPeerClaim,
   type CapabilityIssuedLike,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 
 /** A real 32-byte ed25519 infra-peer pubkey (the value CapabilityIssued.peer_pubkey carries). */
 const REAL_PEER_PUBKEY = new Array(32).fill(0).map((_, i) => (i * 7 + 3) & 0xff);

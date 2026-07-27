@@ -21,7 +21,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import { MetricsTracker } from '../metrics.js';
-import { createSignalingServer } from '../signaling.js';
+import { createSignalingServer } from '../signaling/index.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 
 // ── Mock mediasoup types ───────────────────────────────────────────────────────

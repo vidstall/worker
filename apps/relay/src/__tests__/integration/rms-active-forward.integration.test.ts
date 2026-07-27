@@ -52,7 +52,7 @@ import {
   type InterRelaySocketLike,
 } from '@dvconf/inter-relay-client';
 // L1.3-b — Bridge A/B wiring under test (real-mediasoup ⇒ live signaling fan + N-1 mesh).
-import { createSignalingServer, type InterRelayContext } from '../../signaling.js';
+import { createSignalingServer, type InterRelayContext } from '../../signaling/index.js';
 import { createInterRelaySocketMap } from '../../inter-relay-socket-map.js';
 import { MetricsTracker } from '../../metrics.js';
 import type { MediasoupManager } from '../../mediasoup-manager.js';

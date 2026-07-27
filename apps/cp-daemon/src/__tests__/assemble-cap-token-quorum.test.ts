@@ -45,7 +45,7 @@ import {
   assembleCapTokenQuorum,
   type CapTokenIssueClaim,
   type CapTokenIssueAttestation,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 import type { CpOperator } from '../sui-chain-state-reader.js';
 
 /** hex string → number[] bytes (matches Move's id_to_bytes shape / bcs-equivalence helper). */

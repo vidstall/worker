@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolvePeerPubkey } from '../cap-token-issuer.js';
+import { resolvePeerPubkey } from '../cap-token/index.js';
 
 // A real 32-byte ed25519 public key, base64-encoded (the shape the client's
 // SessionKeypair.publicKeyB64 produces).

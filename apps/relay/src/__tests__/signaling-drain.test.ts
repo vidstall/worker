@@ -18,7 +18,7 @@ import { MetricsTracker } from '../metrics.js';
 import {
   createSignalingServer,
   type InterRelayContext,
-} from '../signaling.js';
+} from '../signaling/index.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import { InterRelayProducerRegistry } from '@dvconf/inter-relay-client';
 import { INTER_RELAY_SUBPROTOCOL } from '@dvconf/inter-relay-client';

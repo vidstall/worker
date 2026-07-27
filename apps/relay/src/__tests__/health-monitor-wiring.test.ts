@@ -18,7 +18,7 @@ vi.mock('@dvconf/health-monitor', async (importOriginal) => {
   return { ...actual, makeChainReporter: mockMakeChainReporter };
 });
 
-import { startHealthMonitor } from '../index.js';
+import { startHealthMonitor } from '../health-monitor-wiring.js';
 
 function mockLogger() {
   return {

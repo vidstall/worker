@@ -39,7 +39,7 @@ import {
   type SubmitFn as CapTokenSubmitFn,
   type SubmitResult as CapTokenSubmitResult,
   type CapabilityIssuedLike,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 import type { CpOperator } from '../sui-chain-state-reader.js';
 
 function mockLogger() {
@@ -155,7 +155,7 @@ describe('Leg 7c (b) — per-round readMinQuorum + discoveredCps from getActiveC
     // The keystore is built with a per-round readMinQuorum closure + the discovered set.
     // (This is exactly the wiring startCapTokenIssuer threads on the live multi-CP path.)
     const { InMemoryGenericClaimBoard } = await import('@dvconf/shared');
-    const { buildCapTokenIssueBoardConfig } = await import('../cap-token-issuer.js');
+    const { buildCapTokenIssueBoardConfig } = await import('../cap-token/index.js');
     const board = new InMemoryGenericClaimBoard([
       buildCapTokenIssueBoardConfig({ minDistinct: 2, onUnquorumedExpiry: () => {} }),
     ]);

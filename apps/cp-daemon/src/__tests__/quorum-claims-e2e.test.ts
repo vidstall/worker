@@ -38,7 +38,7 @@ import {
   buildCapTokenIssueBoardConfig,
   type CapTokenIssueClaim,
   type CapTokenIssueAttestation,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 import { buildLocalCpKeystore, selectQuorumClaimsBoard } from '../index.js';
 import type { CpOperator } from '../sui-chain-state-reader.js';
 

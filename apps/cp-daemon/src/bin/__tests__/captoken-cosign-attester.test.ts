@@ -16,7 +16,7 @@ import {
   buildCapTokenIssueBoardConfig,
   buildIssueCanonicalMsg,
   type CapTokenIssueClaim,
-} from '../../cap-token-issuer.js';
+} from '../../cap-token/index.js';
 import { postAttestation } from '../captoken-cosign-attester.js';
 
 /**

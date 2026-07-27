@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { InMemoryGenericClaimBoard } from '@dvconf/shared';
-import { buildCapTokenIssueBoardConfig } from '../../cap-token-issuer.js';
+import { buildCapTokenIssueBoardConfig } from '../../cap-token/index.js';
 import { buildIssueCanonicalMsg } from '../../captoken-issue-ptb.js';
 import { collectIssueQuorum, type IssueRequest } from '../captoken-cosign-leader.js';
 import { postAttestation } from '../captoken-cosign-attester.js';

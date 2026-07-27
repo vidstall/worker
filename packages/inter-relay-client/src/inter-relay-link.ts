@@ -19,7 +19,7 @@
 
 import { WebSocket } from 'ws';
 import type { Logger } from '@dvconf/shared';
-import { INTER_RELAY_SUBPROTOCOL } from './inter-relay.js';
+import { INTER_RELAY_SUBPROTOCOL } from './warm-pipe/index.js';
 
 export interface OpenInterRelayLinkOptions {
   /** The primary relay's WS URL (resolved from chain via the endpoint cache). */

@@ -34,7 +34,7 @@ import {
   manifestsToTrustedSpki,
   type SignedManifest,
 } from '@dvconf/shared';
-import { rebuildCanonicalAndSignIfMatches, type CapTokenIssueClaim } from '../cap-token-issuer.js';
+import { rebuildCanonicalAndSignIfMatches, type CapTokenIssueClaim } from '../cap-token/index.js';
 import { HttpQuorumClaimBoard } from '../quorum-claims-client.js';
 
 const MOD = 'cap-token/follower-attester';

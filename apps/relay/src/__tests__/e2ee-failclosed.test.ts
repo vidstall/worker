@@ -27,7 +27,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { MetricsTracker } from '../metrics.js';
-import { createSignalingServer, type InterRelayContext } from '../signaling.js';
+import { createSignalingServer, type InterRelayContext } from '../signaling/index.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import { InterRelayProducerRegistry } from '@dvconf/inter-relay-client';
 import type { types as msTypes } from 'mediasoup';

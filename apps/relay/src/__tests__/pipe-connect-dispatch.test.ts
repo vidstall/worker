@@ -15,7 +15,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import { MetricsTracker } from '../metrics.js';
-import { createSignalingServer, type InterRelayContext } from '../signaling.js';
+import { createSignalingServer, type InterRelayContext } from '../signaling/index.js';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import { InterRelayProducerRegistry, INTER_RELAY_SUBPROTOCOL } from '@dvconf/inter-relay-client';
 

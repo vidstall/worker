@@ -33,7 +33,7 @@ import {
   buildIssueCanonicalMsg,
   buildRevokeCanonicalMsg,
   buildRefreshCanonicalMsg,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 
 /** Helper: hex string → number[] bytes (matches Move's id_to_bytes shape). */
 function hex(s: string): number[] {

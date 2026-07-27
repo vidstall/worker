@@ -43,7 +43,7 @@ import {
   type PipeConnectParams,
   type PipePortAllocatorLike,
 } from '@dvconf/inter-relay-client';
-import { createSignalingServer, type InterRelayContext } from '../../signaling.js';
+import { createSignalingServer, type InterRelayContext } from '../../signaling/index.js';
 import { MetricsTracker } from '../../metrics.js';
 import type { MediasoupManager } from '../../mediasoup-manager.js';
 import {

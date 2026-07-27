@@ -11,7 +11,7 @@
  *   self-filtered by the cap's miner_id FIELD (not the cap object id).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { buildRelayShutdownPlan, startRelaySelfShutdownWatcher } from '../index.js';
+import { buildRelayShutdownPlan, startRelaySelfShutdownWatcher } from '../graceful-shutdown.js';
 
 function makeDeps() {
   const calls: string[] = [];

@@ -15,7 +15,7 @@
  * policy makes the wiring honour that intent so single-CP falls back to the legacy mint.
  */
 import { describe, it, expect } from 'vitest';
-import { shouldWireInfraPeerRecovery } from '../cap-token-issuer.js';
+import { shouldWireInfraPeerRecovery } from '../cap-token/index.js';
 
 describe('shouldWireInfraPeerRecovery — single-CP must NOT wire G3 recovery', () => {
   it('is FALSE for single-CP (threshold 1) → legacy resolvePeerPubkey mint, no fail-closed skip', () => {

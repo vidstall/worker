@@ -21,7 +21,7 @@ import {
   type CpKeystore,
   type CapTokenCacheLike,
   type EmergencyRotationEvent,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 
 function mockLogger() {
   return {

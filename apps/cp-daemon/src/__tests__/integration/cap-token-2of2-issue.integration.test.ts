@@ -197,7 +197,7 @@ describe('Cap-token 2-of-2 LIVE issue (gap #3, direct-sign)', () => {
 
   it('board-path: leader collects the follower attestation then submits a 2-of-2 issue', async () => {
     const { InMemoryGenericClaimBoard } = await import('@dvconf/shared');
-    const { buildCapTokenIssueBoardConfig } = await import('../../cap-token-issuer.js');
+    const { buildCapTokenIssueBoardConfig } = await import('../../cap-token/index.js');
     const { collectIssueQuorum } = await import('../../bin/captoken-cosign-leader.js');
     const { postAttestation } = await import('../../bin/captoken-cosign-attester.js');
     const client = new SuiClient({ url: SUI_RPC_URL });

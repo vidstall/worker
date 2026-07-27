@@ -25,7 +25,7 @@ import {
   type RoleChangedEvent,
   type RoleAssignedEvent,
   type RelaySlashedEvent,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 
 /** Match the existing cp-daemon test convention (turn-issuer/event-handler/role-voter style). */
 function mockLogger() {

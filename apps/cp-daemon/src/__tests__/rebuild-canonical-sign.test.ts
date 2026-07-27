@@ -28,7 +28,7 @@ import {
   buildIssueCanonicalMsg,
   rebuildCanonicalAndSignIfMatches,
   type CapTokenIssueClaim,
-} from '../cap-token-issuer.js';
+} from '../cap-token/index.js';
 
 /** hex string → number[] bytes (matches Move's id_to_bytes shape / bcs-equivalence helper). */
 function hex(s: string): number[] {
