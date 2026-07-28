@@ -10,6 +10,7 @@
  * Requirements: RELAY-05
  */
 
+import '@dvconf/shared/otel-bootstrap';
 import 'dotenv/config';
 import {
   createSuiClient,

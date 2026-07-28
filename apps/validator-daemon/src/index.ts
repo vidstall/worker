@@ -20,6 +20,7 @@
  * stays importable without editing call sites/tests.
  */
 
+import '@dvconf/shared/otel-bootstrap';
 import 'dotenv/config';
 import {
   createSuiClient,

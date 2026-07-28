@@ -7,6 +7,7 @@
  * Uses @dvconf/shared for all chain interactions (DAEMON-12) with exponential backoff (DAEMON-07).
  */
 
+import '@dvconf/shared/otel-bootstrap';
 import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
 import type { SuiClient, SuiEvent } from '@mysten/sui/client';

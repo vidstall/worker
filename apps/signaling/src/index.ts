@@ -8,9 +8,11 @@
  * Requirements: SIG-01, SIG-02
  */
 
+import '@dvconf/shared/otel-bootstrap';
 import 'dotenv/config';
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import {
   createSuiClient,
   createGraphQLClient,
@@ -64,6 +66,7 @@ import { DualRelayRouter } from './relay-dual-router.js';
 
 const logger = createLogger('signaling');
 const roomManager = new RoomManager();
+const signalingTracer = trace.getTracer('dvconf-signaling');
 
 let cachedProbe: SignalingLatencyProbe | null = null;
 let probeInitialized = false;
@@ -300,6 +303,30 @@ export function createServer(
         return;
       }
 
+      // Wraps dispatch in its own span (`ws.signal.<type>`) -- signaling's
+      // actual "request" lifecycle (join/offer/answer/ICE exchange) runs
+      // over this WS handler, and OTel has no official `ws` instrumentation
+      // package to cover it automatically (only http/undici are
+      // auto-instrumented, see otel-bootstrap.ts). No-ops cleanly when
+      // tracing isn't configured (startActiveSpan still runs, just against
+      // the OTel API's no-op default tracer/span). Only covers the
+      // synchronous dispatch below -- the fire-and-forget authHook.verifyJoin
+      // continuation in the 'join' case resolves after this span already
+      // ended, by design (see its own comment).
+      signalingTracer.startActiveSpan(`ws.signal.${msg.type}`, (span) => {
+        try {
+          dispatchMessage(msg);
+        } catch (err) {
+          span.recordException(err as Error);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+          throw err;
+        } finally {
+          span.end();
+        }
+      });
+    });
+
+    function dispatchMessage(msg: SignalingMessage): void {
       switch (msg.type) {
         case 'join': {
           // Stage 4 (REQ-ADM-010-partial): when an AuthHook is injected, every
@@ -398,7 +425,7 @@ export function createServer(
           logger.warn({ peerId, type: (msg as { type: string }).type }, 'Unknown message type');
         }
       }
-    });
+    }
 
     ws.on('close', () => {
       // Stop bench-ping probe before clearing peer state (S23.1.A2)

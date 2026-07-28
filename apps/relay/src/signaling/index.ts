@@ -17,6 +17,7 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import type { types as msTypes } from 'mediasoup';
 import type { Logger } from '@dvconf/shared';
 import type { MediasoupManager } from '../mediasoup-manager.js';
@@ -245,7 +246,30 @@ export function createSignalingServer(
       protocols.has(INTER_RELAY_SUBPROTOCOL) ? INTER_RELAY_SUBPROTOCOL : false,
   });
 
+  // Wraps every dispatched message in its own span (`ws.signal.<type>`) --
+  // relay's actual "request" lifecycle (call setup, ICE/mediasoup
+  // signaling) runs over this WS dispatcher, and OTel has no official `ws`
+  // instrumentation package to cover it automatically (only http/undici are
+  // auto-instrumented, see otel-bootstrap.ts). No-ops cleanly when tracing
+  // isn't configured (relaySignalingTracer.startActiveSpan still runs, just
+  // against the OTel API's no-op default tracer/span).
+  const relaySignalingTracer = trace.getTracer('dvconf-relay-signaling');
+
   async function handleMessage(ws: WebSocket, msg: SignalingMessage): Promise<void> {
+    await relaySignalingTracer.startActiveSpan(`ws.signal.${msg.type}`, async (span) => {
+      try {
+        await dispatchMessage(ws, msg);
+      } catch (err) {
+        span.recordException(err as Error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
+  }
+
+  async function dispatchMessage(ws: WebSocket, msg: SignalingMessage): Promise<void> {
     switch (msg.type) {
       case 'join': {
         await handleJoin(state, ws, msg, manager, metrics, config, interRelay, logger);
