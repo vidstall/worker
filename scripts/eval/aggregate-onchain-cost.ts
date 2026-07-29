@@ -23,14 +23,24 @@
  * Deterministic: fixed iteration order, integer MIST arithmetic, prints a SHA-256
  * of the canonical output block so raw->table is reproducible (Gate-1).
  *
- * Run:  npx tsx scripts/eval/aggregate-onchain-cost.ts [rawPath] [suiPriceUsd]
+ * Run:  npx tsx scripts/eval/aggregate-onchain-cost.ts [rawPath] [suiPriceUsd] [pushgatewayUrl]
+ *
+ * The optional 3rd arg (plus PUSHGATEWAY_TOKEN env var) pushes the headline
+ * N=4/ADR-0006 numbers below to the observer host's Pushgateway (see
+ * packages/shared/src/metrics-prom.ts's pushToGateway()) for the
+ * "Blockchain & Consensus" row of the xaisen-academic-eval Grafana
+ * dashboard -- this is a live-dashboard convenience, additive to (never a
+ * replacement for) the deterministic Markdown table above, which stays the
+ * canonical evidence artifact.
  */
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { pushToGateway } from '@dvconf/shared';
 
 const RAW = process.argv[2] ??
   'C:/Thesis/dvconf/docs/80-research/evaluation/raw/cost-onchain-localnet-2026-07-13.jsonl';
 const SUI_USD = Number(process.argv[3] ?? '1.50'); // manuscript design-assumption; NOT a pinned market quote
+const PUSHGATEWAY_URL = process.argv[4];
 const TARGET_USD = 0.01;                            // proposal design target per room
 const MIST_PER_SUI = 1_000_000_000n;
 
@@ -145,3 +155,19 @@ const canonical = out.join('\n');
 const sha = createHash('sha256').update(canonical, 'utf8').digest('hex');
 console.log(canonical);
 console.log(`\nOUTPUT-SHA256: ${sha}`);
+
+if (PUSHGATEWAY_URL) {
+  await pushToGateway({
+    baseUrl: PUSHGATEWAY_URL,
+    job: 'xaisen_onchain_cost',
+    instance: sha.slice(0, 16),
+    token: process.env['PUSHGATEWAY_TOKEN'],
+    metrics: [
+      { name: 'dvconf_onchain_cost_irreversible_usd', help: 'N=4 (ADR-0006) irreversible (comp+nonRefundable) session cost in USD', value: usd(B4) },
+      { name: 'dvconf_onchain_cost_net_usd', help: 'N=4 (ADR-0006) net session cost in USD', value: usd(C4) },
+      { name: 'dvconf_onchain_breakeven_sui_price_irreversible', help: 'Break-even SUI/USD price for the $0.01/room target, irreversible cost basis', value: breakevenB },
+      { name: 'dvconf_onchain_breakeven_sui_price_net', help: 'Break-even SUI/USD price for the $0.01/room target, net cost basis', value: breakevenC },
+    ],
+  });
+  console.log(`\npushed headline N=4 cost metrics to ${PUSHGATEWAY_URL}`);
+}

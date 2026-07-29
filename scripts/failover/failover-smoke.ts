@@ -5,6 +5,10 @@
  * the failover surface added by Task #30 (scope-B).
  *
  * Run: `pnpm failover:smoke`
+ * Optional: set PUSHGATEWAY_URL (+ PUSHGATEWAY_TOKEN) to also push each
+ * scenario's T_trigger_to_decision_ms to the observer host's Pushgateway,
+ * for a repeatable "failover drill" panel on the xaisen-academic-eval
+ * dashboard -- additive to (never a replacement for) the stdout JSON summary.
  */
 
 import {
@@ -16,6 +20,7 @@ import {
   type DetectorDecision,
   type DetectorInput,
 } from '../../apps/cp-daemon/src/failover-detector.js';
+import { pushToGateway } from '@dvconf/shared';
 
 interface ScenarioResult {
   decisions: number;
@@ -140,3 +145,23 @@ const summary = {
   smoke: process.exitCode === 1 ? 'fail' : 'ok',
 };
 console.log(JSON.stringify(summary, null, 2));
+
+const pushgatewayUrl = process.env['PUSHGATEWAY_URL'];
+if (pushgatewayUrl) {
+  const metrics = Object.entries(summary.scenarios_breakdown)
+    .filter(([, result]) => result.T_trigger_to_decision_ms !== null)
+    .map(([scenario, result]) => ({
+      name: 'dvconf_failover_smoke_trigger_to_decision_ms',
+      help: 'failover-smoke.ts synthetic-scenario trigger-to-decision latency, ms',
+      value: result.T_trigger_to_decision_ms as number,
+      labels: { scenario },
+    }));
+  await pushToGateway({
+    baseUrl: pushgatewayUrl,
+    job: 'xaisen_failover_smoke',
+    instance: String(Date.now()),
+    token: process.env['PUSHGATEWAY_TOKEN'],
+    metrics,
+  });
+  console.log(`pushed ${metrics.length} scenario results to ${pushgatewayUrl}`);
+}

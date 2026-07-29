@@ -16,6 +16,7 @@
  */
 
 import http from 'http';
+import { recordFailoverPhase } from './failover-metrics.js';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ export function createRelayHeartbeat(
 
   let consecutiveMisses = 0;
   let fired = false;
+  let firstMissAt = 0;
   let handle: ReturnType<typeof setInterval> | null = null;
 
   async function tick(): Promise<void> {
@@ -123,9 +125,11 @@ export function createRelayHeartbeat(
     if (ok) {
       consecutiveMisses = 0;
     } else {
+      if (consecutiveMisses === 0) firstMissAt = Date.now();
       consecutiveMisses++;
       if (consecutiveMisses >= missThreshold && !fired) {
         fired = true;
+        recordFailoverPhase('detect', (Date.now() - firstMissAt) / 1000);
         onStandbyReady(roomId);
       }
     }

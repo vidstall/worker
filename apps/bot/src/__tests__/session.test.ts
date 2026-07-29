@@ -55,6 +55,7 @@ const fakeBotConfig = {
   clientUrl: 'http://localhost:5173',
   port: 8095,
   controlToken: '',
+  metricsPort: 8096,
 };
 
 function baseDeps() {

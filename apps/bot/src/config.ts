@@ -31,6 +31,9 @@ export interface BotConfig {
   /** Bearer token required on `/bots*` routes. Empty string = auth disabled
    *  (a loud warning is logged at startup — see index.ts). */
   controlToken: string;
+  /** Prometheus metrics server port (separate listener from `port` above,
+   *  same pattern as cp-daemon/validator-daemon/signaling). Default 8096. */
+  metricsPort: number;
 }
 
 export function loadBotConfig(): BotConfig {
@@ -41,5 +44,6 @@ export function loadBotConfig(): BotConfig {
     clientUrl: process.env['CLIENT_URL'] || 'http://localhost:5173',
     port: Number(process.env['PORT'] ?? '8095'),
     controlToken: process.env['BOT_CONTROL_TOKEN'] ?? '',
+    metricsPort: Number(process.env['BOT_METRICS_PORT'] ?? '8096'),
   };
 }

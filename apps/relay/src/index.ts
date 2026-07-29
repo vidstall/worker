@@ -69,6 +69,7 @@ import {
 } from '@dvconf/inter-relay-client';
 import { resolvePrimaryEndpoint, resolveTreeParentDial, resolveRelayEndpoint } from './relay-endpoint-resolver.js';
 import { deriveTreePosition, computeTreeFanPlan, type TreePosition } from './tree-position.js';
+import { recordFailoverPhase } from './failover-metrics.js';
 
 const logger = createLogger('relay-daemon');
 
@@ -720,6 +721,7 @@ if (isMainModule) {
       // live room state via the same late-bound signalingRef box getRoom uses
       // elsewhere (index.ts is assembled before createSignalingServer runs).
       (roomId) => signalingRef.getRoom?.(roomId),
+      () => manager.getWorkerDiedCount(),
     );
 
     // F1 (REQ-RO-010/011): honest probe-liveness flip. Polls getStats() on the
@@ -732,6 +734,14 @@ if (isMainModule) {
     // (design §6; OQ-2 fallback (a): if a PAUSED consumer's RTCP never advances,
     // rtcpAlive stays provably-false → standby honestly unpaid). buildProbeResponse
     // / ProbeState are UNCHANGED (no metrics-server contract change).
+    // "promote" phase (t2): edge-detect rtcpAlive false->true right here, since
+    // createPipeLivenessObserver lives in the shared inter-relay-client package
+    // and must stay app-agnostic. lastNotAliveAt tracks the most recent instant
+    // rtcpAlive was known false; a transition to true reports its own local
+    // duration -- see failover-metrics.ts for why this is independent, not a
+    // cross-file t0->t2 correlation.
+    let rtcpWasAlive = false;
+    let lastNotAliveAt = Date.now();
     const pipeLiveness = createPipeLivenessObserver({
       getPipeConsumer: () => standbyWarmPipe.currentPipeConsumer(),
       // REQ-RMS-025 byte-proof: also read the pipe TRANSPORT bytes (bytesReceived+
@@ -743,6 +753,13 @@ if (isMainModule) {
         probeLiveness.pipeConsumerAlive = next.pipeConsumerAlive;
         probeLiveness.rtcpAlive = next.rtcpAlive;
         probeLiveness.pipeBytesObserved = next.pipeBytesObserved ?? 0;
+        if (next.rtcpAlive && !rtcpWasAlive) {
+          recordFailoverPhase('promote', (Date.now() - lastNotAliveAt) / 1000);
+        }
+        if (!next.rtcpAlive) {
+          lastNotAliveAt = Date.now();
+        }
+        rtcpWasAlive = next.rtcpAlive;
       },
     });
     pipeLiveness.start();

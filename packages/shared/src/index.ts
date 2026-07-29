@@ -65,10 +65,10 @@ export {
 // Chain helpers
 export { createSuiClient, createGraphQLClient, loadNetworkConfig } from './chain/client.js';
 export { loadKeypair, generateSessionKeypair } from './chain/keypair.js';
-export { executeWithRetry, extractCreatedObjectByType } from './chain/tx.js';
-export { EventPoller, queryHistoricalEvents } from './chain/events.js';
+export { executeWithRetry, extractCreatedObjectByType, registerTxMetrics } from './chain/tx.js';
+export { EventPoller, queryHistoricalEvents, registerEventPollerMetrics } from './chain/events.js';
 export type { EventPollerOptions } from './chain/events.js';
-export { waitForRoleAssignment, applyVotedRole } from './chain/role-assignment.js';
+export { waitForRoleAssignment, applyVotedRole, registerRoleAssignmentMetrics } from './chain/role-assignment.js';
 // P17 M2b-P8 (DOH-021) — on-chain reads for the F60 reactive-shutdown wiring.
 export { readIsPaused, readCapMinerId } from './chain/network-registry.js';
 
@@ -95,12 +95,17 @@ export {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  createDurationHistogram,
+  createCounter,
+  createGauge,
+  pushToGateway,
 } from './metrics-prom.js';
 export type {
   Registry,
   PromMetricsServerOptions,
   PromMetricsServerHandle,
   ConcurrencyGauge,
+  PushGatewayMetric,
 } from './metrics-prom.js';
 
 // Cap-token primitive contract types (F62 W1 Stage 1 + Phase 2.4-retro). Append-only

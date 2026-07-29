@@ -18,6 +18,39 @@ import type { SuiEvent } from '@mysten/sui/client';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Logger } from 'pino';
+import type { Histogram, Counter } from 'prom-client';
+import type { Registry } from '../metrics-prom.js';
+import { createDurationHistogram, createCounter } from '../metrics-prom.js';
+
+// Same opt-in, module-level pattern as chain/tx.ts's registerTxMetrics --
+// every EventPoller instance in a process shares this one registration
+// (one call per daemon at startup), labeled per-instance by its own
+// `module` (e.g. "registration", "room_manager") rather than needing a
+// registry threaded through the constructor.
+let pollerMetrics: { duration: Histogram<string>; processed: Counter<string>; service: string } | null = null;
+
+/**
+ * Wire `dvconf_chain_poll_duration_seconds{service,module}` and
+ * `dvconf_chain_events_processed_total{service,module}` into `registry` --
+ * called once per daemon process, not per EventPoller instance.
+ */
+export function registerEventPollerMetrics(registry: Registry, service: string): void {
+  pollerMetrics = {
+    service,
+    duration: createDurationHistogram(
+      registry,
+      'dvconf_chain_poll_duration_seconds',
+      'Wall-clock duration of one EventPoller.pollOnce() cycle (all pages)',
+      ['service', 'module'],
+    ),
+    processed: createCounter(
+      registry,
+      'dvconf_chain_events_processed_total',
+      'Events handled across all EventPoller.pollOnce() cycles',
+      ['service', 'module'],
+    ),
+  };
+}
 
 export interface EventPollerOptions {
   client: SuiGraphQLClient;
@@ -184,36 +217,48 @@ export class EventPoller {
 
   /** Single poll cycle -- exported for testing. */
   async pollOnce(handler: (event: SuiEvent) => Promise<void>): Promise<void> {
+    const t0 = Date.now();
+    let eventsProcessed = 0;
     let hasMore = true;
 
-    while (hasMore) {
-      const result = await this.client.query<EventsQueryResult, { eventType: string; after: string | null }>({
-        query: EVENTS_QUERY,
-        variables: {
-          eventType: `${this.packageId}::${this.module}`,
-          after: this.cursor,
-        },
-      });
+    try {
+      while (hasMore) {
+        const result = await this.client.query<EventsQueryResult, { eventType: string; after: string | null }>({
+          query: EVENTS_QUERY,
+          variables: {
+            eventType: `${this.packageId}::${this.module}`,
+            after: this.cursor,
+          },
+        });
 
-      if (result.errors && result.errors.length > 0) {
-        throw new Error(`GraphQL events query failed: ${result.errors.map((e) => e.message).join('; ')}`);
+        if (result.errors && result.errors.length > 0) {
+          throw new Error(`GraphQL events query failed: ${result.errors.map((e) => e.message).join('; ')}`);
+        }
+
+        const page = result.data?.events;
+        if (!page) {
+          throw new Error('GraphQL events query returned no data');
+        }
+
+        for (const node of page.nodes) {
+          await handler(toSuiEvent(node, page.pageInfo.endCursor ?? this.cursor ?? ''));
+          eventsProcessed++;
+        }
+
+        if (page.nodes.length > 0 && page.pageInfo.endCursor) {
+          this.cursor = page.pageInfo.endCursor;
+          await this.saveCursor();
+        }
+
+        hasMore = page.pageInfo.hasNextPage;
       }
-
-      const page = result.data?.events;
-      if (!page) {
-        throw new Error('GraphQL events query returned no data');
+    } finally {
+      if (pollerMetrics) {
+        pollerMetrics.duration.observe({ service: pollerMetrics.service, module: this.module }, (Date.now() - t0) / 1000);
+        if (eventsProcessed > 0) {
+          pollerMetrics.processed.inc({ service: pollerMetrics.service, module: this.module }, eventsProcessed);
+        }
       }
-
-      for (const node of page.nodes) {
-        await handler(toSuiEvent(node, page.pageInfo.endCursor ?? this.cursor ?? ''));
-      }
-
-      if (page.nodes.length > 0 && page.pageInfo.endCursor) {
-        this.cursor = page.pageInfo.endCursor;
-        await this.saveCursor();
-      }
-
-      hasMore = page.pageInfo.hasNextPage;
     }
   }
 

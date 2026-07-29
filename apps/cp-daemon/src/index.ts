@@ -21,6 +21,9 @@ import {
   startHealthzServer,
   createMetricsRegistry,
   startPromMetricsServer,
+  registerTxMetrics,
+  registerEventPollerMetrics,
+  registerRoleAssignmentMetrics,
   EventPoller,
   queryHistoricalEvents,
   readIsPaused,
@@ -47,7 +50,7 @@ import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createEventHandler } from './event-handler.js';
 import { startAttestedLoadPoller, type AttestedLoadPoller } from './attested-load-poller.js';
-import { startRoleVoting } from './role-voter.js';
+import { startRoleVoting, registerRoleVoterMetrics } from './role-voter.js';
 import { startRevoteWatcher, makeMarkSubmitter, resolveScanIntervalEpochs } from './revote-watcher.js';
 import { SuiChainStateReader } from './sui-chain-state-reader.js';
 import {
@@ -317,10 +320,19 @@ async function main(): Promise<void> {
   // Worker-metrics: Prometheus scrape endpoint (CPU/RSS/heap via
   // collectDefaultMetrics — cp-daemon has no meaningful "active session" count
   // to wire into a concurrency gauge, so none is registered here).
+  const cpPromRegistry = createMetricsRegistry('cp-daemon');
+  // Academic-eval blockchain-overhead metrics: every executeWithRetry() call
+  // in THIS process (role-voter's cast_role_vote, heartbeat, cap-token
+  // issuance, ...) gets dvconf_chain_tx_duration_seconds/retries_total for
+  // free once this is called -- see packages/shared/src/chain/tx.ts.
+  registerTxMetrics(cpPromRegistry, 'cp-daemon');
+  registerEventPollerMetrics(cpPromRegistry, 'cp-daemon');
+  registerRoleVoterMetrics(cpPromRegistry);
+  registerRoleAssignmentMetrics(cpPromRegistry, 'cp-daemon');
   const promMetrics = await startPromMetricsServer({
     port: Number(process.env['CP_METRICS_PORT'] ?? 8092),
     service: 'cp-daemon',
-    registry: createMetricsRegistry('cp-daemon'),
+    registry: cpPromRegistry,
     token: process.env['METRICS_AUTH_TOKEN'],
     logger,
   });

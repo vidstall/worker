@@ -12,7 +12,7 @@
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Registry, Gauge, collectDefaultMetrics } from 'prom-client';
+import { Registry, Gauge, Histogram, Counter, collectDefaultMetrics } from 'prom-client';
 import { isBearerAuthorized } from './bearer-auth.js';
 import type { Logger } from './logger.js';
 
@@ -112,4 +112,113 @@ export function createConcurrencyGauge(registry: Registry, service: string): Con
   return {
     setActiveSessions: (n: number) => gauge.set({ service }, n),
   };
+}
+
+/**
+ * Returns the raw `prom-client` `Gauge` for any metric name/label set other
+ * than `dvconf_active_sessions` (which `createConcurrencyGauge` above
+ * already owns) -- individual apps don't depend on `prom-client` directly
+ * (only `packages/shared` does), so this is the generic escape hatch for
+ * e.g. `dvconf_rooms_active` or `dvconf_rtc_jitter_ms`.
+ */
+export function createGauge(
+  registry: Registry,
+  name: string,
+  help: string,
+  labelNames: string[],
+): Gauge<string> {
+  return new Gauge({ name, help, labelNames, registers: [registry] });
+}
+
+// Default buckets skew toward sub-second latencies (chain polls, WS admission)
+// while still covering multi-second tails (chain tx confirmation, failover
+// rebuild) -- callers measuring something with a genuinely different scale
+// (e.g. a multi-minute quorum wait) should pass explicit buckets instead.
+const DEFAULT_DURATION_BUCKETS = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
+
+/**
+ * Returns the raw `prom-client` `Histogram` (not a bespoke wrapper, unlike
+ * `createConcurrencyGauge`) -- call sites need the full `.startTimer()`/
+ * `.observe()` API with differing label combinations (chain-tx method,
+ * failover phase, bot join-phase, ...), so wrapping it would just recreate
+ * that API under a different name.
+ */
+export function createDurationHistogram(
+  registry: Registry,
+  name: string,
+  help: string,
+  labelNames: string[],
+  buckets: number[] = DEFAULT_DURATION_BUCKETS,
+): Histogram<string> {
+  return new Histogram({ name, help, labelNames, buckets, registers: [registry] });
+}
+
+/** Returns the raw `prom-client` `Counter` -- see `createDurationHistogram`'s note on why this isn't wrapped further. */
+export function createCounter(
+  registry: Registry,
+  name: string,
+  help: string,
+  labelNames: string[],
+): Counter<string> {
+  return new Counter({ name, help, labelNames, registers: [registry] });
+}
+
+export type PushGatewayMetric = {
+  /** Prometheus metric name, e.g. `dvconf_loadtest_step_participants`. */
+  name: string;
+  help: string;
+  /** Bare gauge value -- one-shot eval-harness results, never a running counter. */
+  value: number;
+  /** Extra labels beyond the job/instance/grouping key path already carries. */
+  labels?: Record<string, string>;
+};
+
+/**
+ * One-shot push of eval-harness results to the observer host's Pushgateway
+ * (see `IaC/ansible/roles/docker_service/templates/observer-caddyfile.j2`'s
+ * bearer-gated `pushgateway.<ip>.sslip.io` site block). Used by
+ * `scripts/eval/{measure-onchain-cost,measure-chain-latency,run-scale-ramp}.ts`
+ * and `scripts/failover/failover-smoke.ts` -- none of these run continuously,
+ * so they can't be scraped directly the way daemons are; Pushgateway is the
+ * standard Prometheus pattern for batch/one-shot job results. Uses PUT (not
+ * POST) so each call fully replaces the metric set under this grouping key,
+ * matching Pushgateway's own recommended semantics for a single job run.
+ */
+export async function pushToGateway(opts: {
+  /** Base URL, e.g. `https://pushgateway.1-2-3-4.sslip.io`. */
+  baseUrl: string;
+  /** Pushgateway `job` label -- groups related runs, e.g. `xaisen_loadtest`. */
+  job: string;
+  /** Pushgateway `instance` label -- distinguishes runs within a job, e.g. a run_id. */
+  instance: string;
+  /** Extra grouping-key path segments beyond job/instance (Pushgateway supports arbitrary extra labels this way). */
+  groupingLabels?: Record<string, string>;
+  metrics: PushGatewayMetric[];
+  /** Bearer token for the Caddy-fronted push route; omit for a direct/internal pushgateway URL. */
+  token?: string;
+}): Promise<void> {
+  const groupingPath = Object.entries(opts.groupingLabels ?? {})
+    .map(([k, v]) => `/${encodeURIComponent(k)}/${encodeURIComponent(v)}`)
+    .join('');
+  const url = `${opts.baseUrl}/metrics/job/${encodeURIComponent(opts.job)}/instance/${encodeURIComponent(opts.instance)}${groupingPath}`;
+
+  const body = opts.metrics
+    .map((m) => {
+      const labelStr = m.labels
+        ? Object.entries(m.labels)
+            .map(([k, v]) => `${k}="${v.replace(/"/g, '\\"')}"`)
+            .join(',')
+        : '';
+      const labelPart = labelStr ? `{${labelStr}}` : '';
+      return `# HELP ${m.name} ${m.help}\n# TYPE ${m.name} gauge\n${m.name}${labelPart} ${m.value}`;
+    })
+    .join('\n');
+
+  const headers: Record<string, string> = { 'content-type': 'text/plain; version=0.0.4' };
+  if (opts.token) headers['authorization'] = `Bearer ${opts.token}`;
+
+  const res = await fetch(url, { method: 'PUT', headers, body: body + '\n' });
+  if (!res.ok) {
+    throw new Error(`pushToGateway: PUT ${url} failed with ${res.status} ${res.statusText}`);
+  }
 }

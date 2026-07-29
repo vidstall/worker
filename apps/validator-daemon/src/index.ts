@@ -31,6 +31,9 @@ import {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  registerTxMetrics,
+  registerEventPollerMetrics,
+  registerRoleAssignmentMetrics,
 } from '@dvconf/shared';
 import type { HealthzHandle, PromMetricsServerHandle } from '@dvconf/shared';
 import {
@@ -186,6 +189,13 @@ async function main(): Promise<void> {
     // activeRooms map, once startDaemon has populated `state`).
     const promRegistry = createMetricsRegistry('validator-daemon');
     const concurrencyGauge = createConcurrencyGauge(promRegistry, 'validator-daemon');
+    // Academic-eval blockchain-overhead metrics -- see cp-daemon/src/index.ts's
+    // identical call for why this is enough to instrument every
+    // executeWithRetry() in this process (heartbeat, session-proof, reward
+    // sweep, ...).
+    registerTxMetrics(promRegistry, 'validator-daemon');
+    registerEventPollerMetrics(promRegistry, 'validator-daemon');
+    registerRoleAssignmentMetrics(promRegistry, 'validator-daemon');
     promMetrics = await startPromMetricsServer({
       port: Number(process.env['VALIDATOR_METRICS_PORT'] ?? 8103),
       service: 'validator-daemon',

@@ -29,8 +29,13 @@ import {
   readTraceId,
   traceChild,
   createMetricsRegistry,
+  registerTxMetrics,
+  registerEventPollerMetrics,
+  registerRoleAssignmentMetrics,
   type Registry,
 } from '@dvconf/shared';
+import { registerFailoverMetrics } from './failover-metrics.js';
+import { registerRtcQualityMetrics } from './rtc-quality-metrics.js';
 import type { MetricsTracker } from './metrics.js';
 import { PeerStatsWindow, type PeerQualitySample } from './stats-window.js';
 import type { RoomState } from './room-handler.js';
@@ -344,6 +349,10 @@ function buildPeerQualityGauges(registry: Registry): PeerQualityGauges {
  * @param getRoom        - Optional resolver for live room state (call-quality
  *                         feature's `/stats/report` admission check). Omitted
  *                         ⇒ `/stats/report` rejects every report (403).
+ * @param getWorkerDiedCount - Optional resolver for the cumulative mediasoup
+ *                         Worker 'died' count (F61/DOH-014), exposed as
+ *                         `dvconf_relay_worker_died_total` for the academic-eval
+ *                         "Fault Tolerance" dashboard row. Omitted ⇒ gauge stays 0.
  * @returns The HTTP server instance (for graceful shutdown).
  */
 export function startMetricsServer(
@@ -351,6 +360,7 @@ export function startMetricsServer(
   logger: Logger,
   probeState?: ProbeStateProvider,
   getRoom?: GetRoomFn,
+  getWorkerDiedCount?: () => number,
 ): Server {
   const port = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
 
@@ -362,7 +372,20 @@ export function startMetricsServer(
   // (NOT a module singleton) so tests that spin up multiple servers stay isolated.
   const statsWindow = new PeerStatsWindow();
   const promRegistry = createMetricsRegistry('relay');
+  // Academic-eval blockchain-overhead metrics -- see cp-daemon/src/index.ts's
+  // identical call for why this is enough to instrument every
+  // executeWithRetry() in this process (auto-register, heartbeat, ...).
+  registerTxMetrics(promRegistry, 'relay');
+  registerEventPollerMetrics(promRegistry, 'relay');
+  registerRoleAssignmentMetrics(promRegistry, 'relay');
+  registerFailoverMetrics(promRegistry);
+  registerRtcQualityMetrics(promRegistry);
   const peerGauges = buildPeerQualityGauges(promRegistry);
+  const workerDiedGauge = new Gauge({
+    name: 'dvconf_relay_worker_died_total',
+    help: 'Cumulative count of mediasoup Worker died events (F61 health signal, DOH-014)',
+    registers: [promRegistry],
+  });
   const activeSessionsGauge = new Gauge({
     name: 'dvconf_relay_active_sessions',
     help: 'Active relay sessions (MetricsTracker)',
@@ -405,6 +428,7 @@ export function startMetricsServer(
     activeSessionsGauge.set(globalMetrics.activeSessions);
     roomCountGauge.set(globalMetrics.roomCount);
     bytesForwardedGauge.set(Number(globalMetrics.totalBytesForwarded));
+    workerDiedGauge.set(getWorkerDiedCount?.() ?? 0);
 
     for (const gauge of Object.values(peerGauges)) {
       gauge.reset();

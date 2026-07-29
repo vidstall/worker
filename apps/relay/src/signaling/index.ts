@@ -26,6 +26,7 @@ import type { RoomState } from '../room-handler.js';
 import { INTER_RELAY_SUBPROTOCOL } from '@dvconf/inter-relay-client';
 import type { InterRelaySocketMap } from '../inter-relay-socket-map.js';
 import { createSpillTrigger, type SpillTrigger } from '../spill-trigger.js';
+import { recordRtcQuality } from '../rtc-quality-metrics.js';
 import type { SignalingMessage } from './messages.js';
 import {
   createSignalingServerState,
@@ -201,7 +202,13 @@ export function createSignalingServer(
             try {
               const stats = await consumer.getStats();
               const outbound = stats.find((s) => s.type === 'outbound-rtp') as
-                | { byteCount?: number }
+                | {
+                    byteCount?: number;
+                    bitrate?: number;
+                    jitter?: number;
+                    fractionLost?: number;
+                    roundTripTime?: number;
+                  }
                 | undefined;
               const total = outbound?.byteCount ?? 0;
               const last = state.consumerLastByteCount.get(consumer.id) ?? 0;
@@ -210,8 +217,47 @@ export function createSignalingServer(
                 state.consumerLastByteCount.set(consumer.id, total);
                 metrics.trackBytes(roomId, peerId, delta);
               }
+              if (outbound) {
+                // Academic-eval "Media Quality" row: reuse this already-fetched
+                // outbound-rtp sample -- zero extra polling. `jitter` is in RTP
+                // timestamp units (RFC3550); convert via the stream's own
+                // clockRate rather than assuming a fixed rate (video=90000,
+                // audio=48000 typically differ).
+                const clockRate = consumer.rtpParameters.codecs[0]?.clockRate;
+                const jitterMs =
+                  clockRate && outbound.jitter !== undefined
+                    ? (outbound.jitter / clockRate) * 1000
+                    : undefined;
+                recordRtcQuality(roomId, peerId, 'down', {
+                  jitterMs,
+                  packetLossRatio: outbound.fractionLost,
+                  bitrateKbps: outbound.bitrate !== undefined ? outbound.bitrate / 1000 : undefined,
+                  rttMs: outbound.roundTripTime,
+                });
+              }
             } catch {
               /* consumer may have closed between iteration and getStats() */
+            }
+          }
+          for (const producer of peer.producers) {
+            try {
+              const stats = await producer.getStats();
+              const inbound = stats.find((s) => s.type === 'inbound-rtp') as
+                | { bitrate?: number; jitter?: number; fractionLost?: number; roundTripTime?: number }
+                | undefined;
+              if (inbound) {
+                const clockRate = producer.rtpParameters.codecs[0]?.clockRate;
+                const jitterMs =
+                  clockRate && inbound.jitter !== undefined ? (inbound.jitter / clockRate) * 1000 : undefined;
+                recordRtcQuality(roomId, peerId, 'up', {
+                  jitterMs,
+                  packetLossRatio: inbound.fractionLost,
+                  bitrateKbps: inbound.bitrate !== undefined ? inbound.bitrate / 1000 : undefined,
+                  rttMs: inbound.roundTripTime,
+                });
+              }
+            } catch {
+              /* producer may have closed between iteration and getStats() */
             }
           }
         }

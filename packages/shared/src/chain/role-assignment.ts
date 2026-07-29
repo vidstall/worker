@@ -8,6 +8,27 @@ import type { NetworkConfig } from '../types/chain.js';
 import type { Logger } from 'pino';
 import { executeWithRetry } from './tx.js';
 import { Transaction } from '@mysten/sui/transactions';
+import type { Counter } from 'prom-client';
+import type { Registry } from '../metrics-prom.js';
+import { createCounter } from '../metrics-prom.js';
+
+// Academic-eval decentralization metric, the completion-side counterpart to
+// role-voter.ts's dvconf_role_votes_cast_total -- one per role_voting.move's
+// 2/3 CP supermajority actually resulting in a completed on-chain role
+// assignment. Same opt-in module-level pattern as tx.ts's registerTxMetrics.
+let roleAssignmentCounter: Counter<string> | null = null;
+
+/** Wire `dvconf_role_assignments_total{service}` into `registry` -- call once at startup on the voted-on side (relay/signaling/validator-daemon). */
+export function registerRoleAssignmentMetrics(registry: Registry, service: string): void {
+  roleAssignmentCounter = createCounter(
+    registry,
+    'dvconf_role_assignments_total',
+    'Successful apply_voted_role transactions completed by this instance',
+    ['service'],
+  );
+  roleAssignmentMetricsService = service;
+}
+let roleAssignmentMetricsService = '';
 
 /**
  * Poll for role assignment matching our miner ID.
@@ -105,5 +126,6 @@ export async function applyVotedRole(
     throw new Error('apply_voted_role TX failed after retries');
   }
 
+  roleAssignmentCounter?.inc({ service: roleAssignmentMetricsService });
   logger.info({ minerCapId }, 'Voted role applied successfully');
 }

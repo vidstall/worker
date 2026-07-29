@@ -27,6 +27,7 @@
 import type { types as msTypes } from 'mediasoup';
 import type { RelayRole } from '@dvconf/inter-relay-client';
 import { pipeSrtpEnabled } from '@dvconf/inter-relay-client';
+import { recordFailoverPhase } from './failover-metrics.js';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -82,6 +83,16 @@ export interface RebuildResult {
  * @param snapshot - On-chain registry snapshot (not stale in-memory).
  */
 export async function rebuildFromRegistry(
+  manager: MediasoupManager,
+  snapshot: RegistrySnapshot,
+): Promise<RebuildResult> {
+  const t0 = Date.now();
+  const result = await rebuildFromRegistryInner(manager, snapshot);
+  recordFailoverPhase('rebuild', (Date.now() - t0) / 1000);
+  return result;
+}
+
+async function rebuildFromRegistryInner(
   manager: MediasoupManager,
   snapshot: RegistrySnapshot,
 ): Promise<RebuildResult> {

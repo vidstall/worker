@@ -53,6 +53,15 @@ export interface StartBotSessionDeps {
   networkConfig: NetworkConfig;
   botConfig: BotConfig;
   logger: Logger;
+  /**
+   * Optional per-phase duration callback (ms) for the academic-eval
+   * scalability dashboard's join-latency breakdown -- kept as a plain
+   * callback rather than importing a `prom-client` type directly, so this
+   * module (and its unit tests, which mock the whole `@dvconf/shared`
+   * import) stay decoupled from the metrics registry. `index.ts` wires this
+   * to `dvconf_bot_join_phase_seconds`.
+   */
+  onJoinPhase?: (phase: string, ms: number) => void;
 }
 
 function wantsVideo(mediaMode: MediaMode): boolean {
@@ -67,7 +76,7 @@ export async function startBotSession(
   opts: BotSessionOptions,
   deps: StartBotSessionDeps,
 ): Promise<BotSession> {
-  const { client, signer, networkConfig, botConfig, logger } = deps;
+  const { client, signer, networkConfig, botConfig, logger, onJoinPhase } = deps;
 
   if (opts.roomMode === 'join' && (!opts.roomId || opts.roomId.trim() === '')) {
     throw new Error('startBotSession: roomId is required when roomMode is "join"');
@@ -76,34 +85,51 @@ export async function startBotSession(
   const id = randomUUID();
   const mp4Path = opts.mp4Path ?? botConfig.mp4Path;
 
+  // Each phase below is already a sequential, isolated await bracketed by
+  // log calls -- timing is a pure addition, no control-flow change.
+  const timePhase = async <T>(phase: string, fn: () => Promise<T>): Promise<T> => {
+    const t0 = Date.now();
+    try {
+      return await fn();
+    } finally {
+      onJoinPhase?.(phase, Date.now() - t0);
+    }
+  };
+
   logger.info({ module: 'bot-session', sessionId: id }, 'registering user on-chain (idempotent)…');
-  await registerUser(client, signer, networkConfig, logger);
+  await timePhase('register', () => registerUser(client, signer, networkConfig, logger));
 
   let roomId: string;
   let relayUrl: string;
 
   if (opts.roomMode === 'create') {
     logger.info({ module: 'bot-session', sessionId: id }, 'creating room on-chain…');
-    const created = await createRoom(
-      client,
-      signer,
-      networkConfig,
-      { expectedParticipants: botConfig.expectedParticipants },
-      logger,
+    const created = await timePhase('create_room', () =>
+      createRoom(
+        client,
+        signer,
+        networkConfig,
+        { expectedParticipants: botConfig.expectedParticipants },
+        logger,
+      ),
     );
     roomId = created.roomId;
     logger.info(
       { module: 'bot-session', sessionId: id, roomId },
       'room created — polling for relay assignment (cp-daemon must be running)…',
     );
-    relayUrl = await resolveRoomRelayUrl(client, networkConfig, roomId, logger, CREATE_ROOM_POLL_OPTS);
+    relayUrl = await timePhase('resolve_relay', () =>
+      resolveRoomRelayUrl(client, networkConfig, roomId, logger, CREATE_ROOM_POLL_OPTS),
+    );
   } else {
     roomId = opts.roomId!;
     logger.info(
       { module: 'bot-session', sessionId: id, roomId },
       'joining existing room — resolving current relay assignment…',
     );
-    relayUrl = await resolveRoomRelayUrl(client, networkConfig, roomId, logger, JOIN_ROOM_POLL_OPTS);
+    relayUrl = await timePhase('resolve_relay', () =>
+      resolveRoomRelayUrl(client, networkConfig, roomId, logger, JOIN_ROOM_POLL_OPTS),
+    );
   }
 
   const joinUrl = `${botConfig.clientUrl}/rooms/${roomId}?pw=${botConfig.roomPassword}`;
@@ -115,26 +141,28 @@ export async function startBotSession(
     roomPassword: botConfig.roomPassword,
   });
   logger.info({ module: 'bot-session', sessionId: id, relayUrl }, 'joining relay…');
-  await peer.connect();
+  await timePhase('ws_connect', () => peer.connect());
   logger.info({ module: 'bot-session', sessionId: id, mediaMode: opts.mediaMode }, 'joined relay, starting media…');
 
   const stopFns: Array<() => void> = [];
 
   if (wantsVideo(opts.mediaMode) || wantsAudio(opts.mediaMode)) {
-    const nonstandard = await loadWrtcNonstandard();
+    await timePhase('media_start', async () => {
+      const nonstandard = await loadWrtcNonstandard();
 
-    if (wantsVideo(opts.mediaMode)) {
-      const dims = await probeVideoDimensions(mp4Path);
-      const videoSource = new nonstandard.RTCVideoSource();
-      stopFns.push(startVideoSource({ mp4Path, dims, videoSource, logger }));
-      await peer.produceVideo(videoSource.createTrack());
-    }
+      if (wantsVideo(opts.mediaMode)) {
+        const dims = await probeVideoDimensions(mp4Path);
+        const videoSource = new nonstandard.RTCVideoSource();
+        stopFns.push(startVideoSource({ mp4Path, dims, videoSource, logger }));
+        await peer.produceVideo(videoSource.createTrack());
+      }
 
-    if (wantsAudio(opts.mediaMode)) {
-      const audioSource = new nonstandard.RTCAudioSource();
-      stopFns.push(startAudioSource({ mp4Path, audioSource, logger }));
-      await peer.produceAudio(audioSource.createTrack());
-    }
+      if (wantsAudio(opts.mediaMode)) {
+        const audioSource = new nonstandard.RTCAudioSource();
+        stopFns.push(startAudioSource({ mp4Path, audioSource, logger }));
+        await peer.produceAudio(audioSource.createTrack());
+      }
+    });
   }
 
   logger.info(

@@ -23,6 +23,11 @@ import {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  createCounter,
+  createGauge,
+  registerTxMetrics,
+  registerEventPollerMetrics,
+  registerRoleAssignmentMetrics,
   genTraceId,
   traceChild,
   SIGNALING_SESSION_REWARD,
@@ -662,6 +667,30 @@ if (isMainModule) {
     // peerSockets map).
     const promRegistry = createMetricsRegistry('signaling');
     const concurrencyGauge = createConcurrencyGauge(promRegistry, 'signaling');
+    // Academic-eval blockchain-overhead metrics -- see cp-daemon/src/index.ts's
+    // identical call for why this is enough to instrument every
+    // executeWithRetry() in this process (auto-register, heartbeat, ...).
+    registerTxMetrics(promRegistry, 'signaling');
+    registerEventPollerMetrics(promRegistry, 'signaling');
+    registerRoleAssignmentMetrics(promRegistry, 'signaling');
+    // Academic-eval scalability metrics (see .claude/plans -- these are live
+    // fleet signals, complementary to the BENCH_LATENCY-gated microbench
+    // suite, not a replacement for it). sessionsRouted is a cumulative
+    // module-level counter (rooms.ts) -- prom-client's Counter only exposes
+    // .inc(delta), so the interval below tracks the last-seen value itself.
+    const roomsActiveGauge = createGauge(
+      promRegistry,
+      'dvconf_rooms_active',
+      'Currently open rooms (non-empty peer sets) for this service',
+      ['service'],
+    );
+    const sessionsTotalCounter = createCounter(
+      promRegistry,
+      'dvconf_sessions_total',
+      'Cumulative completed room sessions (all peers left) for this service',
+      ['service'],
+    );
+    let lastSessionsRouted = getSessionsRouted();
     const promMetrics = await startPromMetricsServer({
       port: Number(process.env['SIGNALING_METRICS_PORT'] ?? 8083),
       service: 'signaling',
@@ -672,6 +701,12 @@ if (isMainModule) {
     logger.info({ port: promMetrics.port }, 'prom metrics listening');
     const stopConcurrencyGaugeUpdates = setInterval(() => {
       concurrencyGauge.setActiveSessions(peerSockets.size);
+      roomsActiveGauge.set({ service: 'signaling' }, roomManager.getStats().rooms);
+      const sessionsRouted = getSessionsRouted();
+      if (sessionsRouted > lastSessionsRouted) {
+        sessionsTotalCounter.inc({ service: 'signaling' }, sessionsRouted - lastSessionsRouted);
+        lastSessionsRouted = sessionsRouted;
+      }
     }, 5000);
 
     // Step 1: Auto-register on-chain

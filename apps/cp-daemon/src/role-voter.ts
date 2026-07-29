@@ -12,10 +12,36 @@ import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
-import { executeWithRetry, MinerRole, type NetworkConfig, type Logger } from '@dvconf/shared';
+import {
+  executeWithRetry,
+  MinerRole,
+  createCounter,
+  type NetworkConfig,
+  type Logger,
+  type Registry,
+} from '@dvconf/shared';
 
 /** `vector<ID>` decodes to an array of 0x-addresses. */
 const IdVectorSchema = bcs.vector(bcs.Address);
+
+// Academic-eval decentralization metric: the Move contract requires a 2/3
+// CP supermajority (role_voting.move's base_threshold_bps = 6667) before a
+// miner gets assigned a role -- this counter makes that voting ACTIVITY
+// visible over time on the dashboard (votes cast, not the on-chain quorum
+// tally itself, which would need a devInspect read per sample instead of
+// a cheap local increment). Same opt-in module-level pattern as
+// packages/shared/src/chain/tx.ts's registerTxMetrics.
+let roleVoteCounter: ReturnType<typeof createCounter> | null = null;
+
+/** Wire `dvconf_role_votes_cast_total` into `registry` -- call once at cp-daemon startup. */
+export function registerRoleVoterMetrics(registry: Registry): void {
+  roleVoteCounter = createCounter(
+    registry,
+    'dvconf_role_votes_cast_total',
+    'Successful cast_role_vote transactions submitted by this CP',
+    [],
+  );
+}
 
 /** Role constant mapping (matches Move constants.move). */
 const ROLE_RELAY = MinerRole.Relay;       // 2
@@ -197,7 +223,7 @@ async function castVote(
   role: number,
   logger: Logger,
 ): Promise<void> {
-  await executeWithRetry(
+  const result = await executeWithRetry(
     client,
     signer,
     (tx: Transaction) => {
@@ -227,6 +253,7 @@ async function castVote(
     'cast-role-vote',
     logger,
   );
+  if (result) roleVoteCounter?.inc();
 }
 
 /**
