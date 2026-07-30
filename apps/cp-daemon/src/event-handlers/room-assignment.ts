@@ -23,6 +23,7 @@ import {
 } from '../admission-capacity.js';
 import { timedCanonicalSort } from '../latency-probe.js';
 import { submitProposal, pickSignalingNode, votedRooms } from '../room-assignment.js';
+import { probeCandidates } from '../relay-liveness-probe.js';
 import type { EventHandlerCtx } from '../event-handler.js';
 
 export function handleEscrowCreated(
@@ -183,6 +184,26 @@ export function handleEscrowCreated(
     return;
   }
 
+  // The RECORDED ballot must be >= MIN_RELAY (on-chain floor), even though only `chosen` serves the
+  // room. Order: chosen first, then capacity-eligible peers, then back-fill from the rest of the
+  // consensus-sorted relays to reach MIN_RELAY (a ballot, not a live assignment). rankedRelays is
+  // already consensus-sorted (canonicalSort), chosen-first below. Factored out (not just inlined)
+  // so the liveness-probe retry path below can rebuild a ballot around a REPLACEMENT `chosen`
+  // without duplicating this logic -- padding entries never actually serve traffic, so they don't
+  // need to be re-derived from a liveness-filtered pool, only `chosen` (index 0) does.
+  const buildBallotForChosen = (chosen: RelayCapacity): string[] | null => {
+    const chosenFirst: string[] = [chosen.minerId];
+    const eligiblePeers = capacities
+      .filter((c) => c.minerId !== chosen.minerId && c.attestedLoadPaths + roomLoad <= c.cWorker)
+      .map((c) => c.minerId);
+    const restByConsensus = rankedRelays
+      .map((r) => r.minerId)
+      .filter((id) => id !== chosen.minerId && !eligiblePeers.includes(id)); // not chosen, not already an eligible peer
+    const ballot = [...chosenFirst, ...eligiblePeers, ...restByConsensus]; // de-dup guaranteed by the filters
+    if (ballot.length < MIN_RELAY) return null;
+    return ballot.slice(0, MIN_RELAY); // exactly MIN_RELAY for K_r=1 M1; chosen is index 0
+  };
+
   let topRelayIds: string[];
   if (kR <= 1) {
     // ── M1 PATH (preserved verbatim): single active relay + ballot padded to MIN_RELAY. ──
@@ -194,26 +215,15 @@ export function handleEscrowCreated(
       pendingEscrows?.set(e.room_id, e);
       return;
     }
-    // The RECORDED ballot must be >= MIN_RELAY (on-chain floor), even though only `chosen` serves the
-    // room. Order: chosen first, then capacity-eligible peers, then back-fill from the rest of the
-    // consensus-sorted relays to reach MIN_RELAY (a ballot, not a live assignment). rankedRelays is
-    // already consensus-sorted (canonicalSort), chosen-first below.
-    const chosenFirst: string[] = [chosen.minerId];
-    const eligiblePeers = capacities
-      .filter((c) => c.minerId !== chosen.minerId && c.attestedLoadPaths + roomLoad <= c.cWorker)
-      .map((c) => c.minerId);
-    const restByConsensus = rankedRelays
-      .map((r) => r.minerId)
-      .filter((id) => id !== chosen.minerId && !eligiblePeers.includes(id)); // not chosen, not already an eligible peer
-    const ballot = [...chosenFirst, ...eligiblePeers, ...restByConsensus]; // de-dup guaranteed by the filters
-    if (ballot.length < MIN_RELAY) {
+    const ballot = buildBallotForChosen(chosen);
+    if (!ballot) {
       // The ENTIRE pool has < MIN_RELAY relays — cannot record a valid ballot; defer (graceful).
-      logger.warn({ roomId: e.room_id, poolSize: ballot.length, minRelay: MIN_RELAY }, 'Fewer than MIN_RELAY relays exist — deferring (cannot satisfy on-chain ballot floor)');
+      logger.warn({ roomId: e.room_id, poolSize: capacities.length, minRelay: MIN_RELAY }, 'Fewer than MIN_RELAY relays exist — deferring (cannot satisfy on-chain ballot floor)');
       pendingRooms.set(e.room_id, roomData);
       pendingEscrows?.set(e.room_id, e);
       return;
     }
-    topRelayIds = ballot.slice(0, MIN_RELAY); // exactly MIN_RELAY for K_r=1 M1; chosen is index 0
+    topRelayIds = ballot;
   } else {
     // ── REQ-RMS-021: kR>1 ACTIVE relays (>=3 for the LOCAL demo). All emitted ids ACTIVELY serve. ──
     const activeRelays = selectActiveRelays(capacities, roomLoad, kR);
@@ -255,38 +265,84 @@ export function handleEscrowCreated(
 
   // Submit proposal TX (fire-and-forget with retry) — PAIR-01
   if (txContext) {
-    submitProposal(
-      txContext.client,
-      txContext.signer,
-      txContext.config,
-      txContext.cpCapId,
-      e.room_id,
-      topRelayIds,
-      topValidatorIds,
-      signalingMinerId,
-      submittedScore,
-      logger,
-    ).then((success) => {
-      if (success) {
-        logger.info(
-          { roomId: e.room_id, relays: topRelayIds, validators: topValidatorIds, signalingId: signalingMinerId },
-          'Pairing proposal submitted successfully',
-        );
-        return;
-      }
-      // executeWithRetry exhausted its own retries (a transient chain-state
-      // race, not a permanent failure -- see room_manager E_INVALID_BALLOT
-      // history). Re-queue so the periodic retryPendingAssignments sweep
-      // (see createEventHandler) tries again later instead of dropping
-      // this room silently.
-      logger.warn({ roomId: e.room_id }, 'Pairing proposal failed after retries — re-queued for periodic retry');
-      pendingRooms.set(e.room_id, roomData);
-      pendingEscrows?.set(e.room_id, e);
-    }).catch((err) => {
-      logger.error({ err, roomId: e.room_id }, 'Pairing proposal TX failed — re-queued for periodic retry');
-      pendingRooms.set(e.room_id, roomData);
-      pendingEscrows?.set(e.room_id, e);
-    });
+    const doSubmit = (relayIds: string[]) => {
+      submitProposal(
+        txContext.client,
+        txContext.signer,
+        txContext.config,
+        txContext.cpCapId,
+        e.room_id,
+        relayIds,
+        topValidatorIds,
+        signalingMinerId,
+        submittedScore,
+        logger,
+      ).then((success) => {
+        if (success) {
+          logger.info(
+            { roomId: e.room_id, relays: relayIds, validators: topValidatorIds, signalingId: signalingMinerId },
+            'Pairing proposal submitted successfully',
+          );
+          return;
+        }
+        // executeWithRetry exhausted its own retries (a transient chain-state
+        // race, not a permanent failure -- see room_manager E_INVALID_BALLOT
+        // history). Re-queue so the periodic retryPendingAssignments sweep
+        // (see createEventHandler) tries again later instead of dropping
+        // this room silently.
+        logger.warn({ roomId: e.room_id }, 'Pairing proposal failed after retries — re-queued for periodic retry');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
+      }).catch((err) => {
+        logger.error({ err, roomId: e.room_id }, 'Pairing proposal TX failed — re-queued for periodic retry');
+        pendingRooms.set(e.room_id, roomData);
+        pendingEscrows?.set(e.room_id, e);
+      });
+    };
+
+    // Opt-in liveness gate (default OFF -- byte-identical to the path above
+    // when unset, same "STRICT env-gate" convention as RMS_KR_MIN above).
+    // Only `activeServingIds` (index 0 for kR<=1, all of topRelayIds for
+    // kR>1) actually serve traffic -- ballot padding beyond that never
+    // reaches a bot, so it's never probed.
+    if (process.env['RMS_RELAY_HEALTH_PROBE'] === '1') {
+      const activeServingIds = kR <= 1 ? [topRelayIds[0]!] : topRelayIds;
+      void (async () => {
+        const alive = await probeCandidates(txContext.client, txContext.config, activeServingIds, logger);
+        if (activeServingIds.every((id) => alive.has(id))) {
+          doSubmit(topRelayIds);
+          return;
+        }
+        // At least one actively-serving candidate failed its liveness probe
+        // (e.g. a heartbeating-but-stale-endpoint relay, see
+        // relay_registry.move's update_endpoint_url doc comment) -- retry
+        // ONCE against the pool with dead candidates excluded, instead of
+        // handing back a relay we just confirmed is unreachable.
+        const livePool = capacities.filter((c) => alive.has(c.minerId) || !activeServingIds.includes(c.minerId));
+        const retryBallot =
+          kR <= 1
+            ? (() => {
+                const chosen = selectPlacementRelay(livePool, roomLoad);
+                return chosen ? buildBallotForChosen(chosen) : null;
+              })()
+            : (() => {
+                const activeRelays = selectActiveRelays(livePool, roomLoad, kR);
+                return activeRelays.length >= kR ? activeRelays.map((r) => r.minerId) : null;
+              })();
+        if (!retryBallot) {
+          logger.error(
+            { roomId: e.room_id, deadCandidates: activeServingIds.filter((id) => !alive.has(id)) },
+            'No live relay candidate survived liveness probing after retry — deferring assignment',
+          );
+          pendingRooms.set(e.room_id, roomData);
+          pendingEscrows?.set(e.room_id, e);
+          return;
+        }
+        doSubmit(retryBallot);
+      })();
+    } else {
+      doSubmit(topRelayIds);
+    }
   } else {
     logger.warn({ roomId: e.room_id }, 'No TX context — pairing proposal skipped (test mode)');
   }

@@ -136,7 +136,13 @@ export async function ensureRegistered(
 
     const registered = await isRegisteredInRelayRegistry(client, config, envCapId, logger);
     if (registered) {
-      logger.info({ minerCapId: envCapId }, 'Already registered in RelayRegistry');
+      logger.info({ minerCapId: envCapId }, 'Already registered in RelayRegistry — refreshing endpoint_url');
+      // register_relay writes endpoint_url exactly once and refuses to run
+      // again -- push our CURRENT address every startup so a droplet recreate
+      // (new public IP under this same recycled wallet) doesn't leave the
+      // registry pointing at a dead host forever (see update_endpoint_url's
+      // doc comment in relay_registry.move).
+      await updateEndpointUrlInRelayRegistry(client, signer, config, envCapId, endpointUrl, logger);
       return { minerCapId: envCapId };
     }
 
@@ -321,6 +327,11 @@ async function finishRegistration(
   const alreadyInRegistry = await isRegisteredInRelayRegistry(client, config, minerCapId, logger);
   if (!alreadyInRegistry) {
     await registerInRelayRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);
+  } else {
+    // Recovered a prior attempt that had already reached Step 2 -- still
+    // refresh endpoint_url in case this recovery is itself happening on a
+    // different host/IP than the original attempt.
+    await updateEndpointUrlInRelayRegistry(client, signer, config, minerCapId, endpointUrl, logger);
   }
 
   logger.info(
@@ -413,6 +424,55 @@ async function registerInRelayRegistry(
   }
 
   logger.info({ minerCapId }, 'Registered in RelayRegistry (Step 2)');
+}
+
+/**
+ * Refresh the registered endpoint_url for an already-registered relay
+ * (Step 2's `update_endpoint_url`, not `register_relay` -- which refuses to
+ * run again for an already-registered miner_id). Best-effort: unlike a
+ * fresh registration, a failed refresh doesn't block the daemon from
+ * starting -- it just means the on-chain registry keeps serving a stale
+ * address to cp-daemon's room assignment until the next successful retry
+ * (next restart, or a future periodic refresh).
+ *
+ * On-chain signature:
+ *   relay_registry::update_endpoint_url(net_reg, registry, cap, endpoint_url, ctx)
+ */
+async function updateEndpointUrlInRelayRegistry(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  minerCapId: string,
+  endpointUrl: string,
+  logger: Logger,
+): Promise<void> {
+  const result = await executeWithRetry(
+    client,
+    signer,
+    (tx: Transaction) => {
+      tx.moveCall({
+        target: `${config.packageId}::relay_registry::update_endpoint_url`,
+        arguments: [
+          tx.object(config.networkRegistryId),          // net_reg: &NetworkRegistry
+          tx.object(config.relayRegistryId),             // registry: &mut RelayRegistry
+          tx.object(minerCapId),                         // cap: &MinerCap
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(endpointUrl))), // endpoint_url
+        ],
+      });
+    },
+    'relay-endpoint-refresh',
+    logger,
+  );
+
+  if (!result) {
+    logger.warn(
+      { minerCapId, endpointUrl },
+      'Could not refresh RelayRegistry endpoint_url; continuing with the stale on-chain value.',
+    );
+    return;
+  }
+
+  logger.info({ minerCapId, endpointUrl }, 'Refreshed RelayRegistry endpoint_url');
 }
 
 // relayModeFromEnv() removed — mode is per-room, not per-relay (MCU-01).

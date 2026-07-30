@@ -38,8 +38,17 @@ export class RelayClient {
   constructor(ws: WsLike, onProducer: ((msg: RelayMessage) => void) | null = null) {
     this.ws = ws;
     this.onProducer = onProducer;
-    this.ready = new Promise<void>((resolve) => {
+    this.ready = new Promise<void>((resolve, reject) => {
       this.ws.on('open', () => resolve());
+      // Without this, a connect failure (dead/unreachable relay endpoint --
+      // e.g. a stale on-chain registration) emits 'error' on `ws` with zero
+      // listeners attached, which Node's EventEmitter special-cases into a
+      // synchronous throw that crashes the whole process instead of just
+      // rejecting `ready` and failing this one session/request.
+      this.ws.on('error', (...args: unknown[]) => {
+        const err = args[0];
+        reject(err instanceof Error ? err : new Error(String(err)));
+      });
     });
     this.ws.on('message', (...args: unknown[]) => {
       const data = args[0];

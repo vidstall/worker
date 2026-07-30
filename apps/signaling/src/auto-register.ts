@@ -137,7 +137,13 @@ export async function ensureRegistered(
 
     const registered = await isRegisteredInSignalingRegistry(client, config, envCapId, logger);
     if (registered) {
-      logger.info({ minerCapId: envCapId }, 'Already registered in SignalingRegistry');
+      logger.info({ minerCapId: envCapId }, 'Already registered in SignalingRegistry — refreshing endpoint_url');
+      // register_signaling writes endpoint_url exactly once and refuses to run
+      // again -- push our CURRENT address every startup so a droplet recreate
+      // (new public IP under this same recycled wallet) doesn't leave the
+      // registry pointing at a dead host forever (see update_endpoint_url's
+      // doc comment in signaling_registry.move).
+      await updateEndpointUrlInSignalingRegistry(client, signer, config, envCapId, endpointUrl, logger);
       return { minerCapId: envCapId };
     }
 
@@ -321,6 +327,11 @@ async function finishRegistration(
   const alreadyInRegistry = await isRegisteredInSignalingRegistry(client, config, minerCapId, logger);
   if (!alreadyInRegistry) {
     await registerInSignalingRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);
+  } else {
+    // Recovered a prior attempt that had already reached Step 2 -- still
+    // refresh endpoint_url in case this recovery is itself happening on a
+    // different host/IP than the original attempt.
+    await updateEndpointUrlInSignalingRegistry(client, signer, config, minerCapId, endpointUrl, logger);
   }
 
   logger.info(
@@ -409,4 +420,52 @@ async function registerInSignalingRegistry(
   }
 
   logger.info({ minerCapId }, 'Registered in SignalingRegistry (Step 2)');
+}
+
+/**
+ * Refresh the registered endpoint_url for an already-registered signaling
+ * node (Step 2's `update_endpoint_url`, not `register_signaling` -- which
+ * refuses to run again for an already-registered miner_id). Best-effort:
+ * unlike a fresh registration, a failed refresh doesn't block the daemon
+ * from starting -- it just means the on-chain registry keeps serving a
+ * stale address until the next successful retry (next restart).
+ *
+ * On-chain signature:
+ *   signaling_registry::update_endpoint_url(net_reg, registry, cap, endpoint_url, ctx)
+ */
+async function updateEndpointUrlInSignalingRegistry(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  minerCapId: string,
+  endpointUrl: string,
+  logger: Logger,
+): Promise<void> {
+  const result = await executeWithRetry(
+    client,
+    signer,
+    (tx: Transaction) => {
+      tx.moveCall({
+        target: `${config.packageId}::signaling_registry::update_endpoint_url`,
+        arguments: [
+          tx.object(config.networkRegistryId),          // net_reg: &NetworkRegistry
+          tx.object(config.signalingRegistryId),         // registry: &mut SignalingRegistry
+          tx.object(minerCapId),                         // cap: &MinerCap
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(endpointUrl))), // endpoint_url
+        ],
+      });
+    },
+    'signaling-endpoint-refresh',
+    logger,
+  );
+
+  if (!result) {
+    logger.warn(
+      { minerCapId, endpointUrl },
+      'Could not refresh SignalingRegistry endpoint_url; continuing with the stale on-chain value.',
+    );
+    return;
+  }
+
+  logger.info({ minerCapId, endpointUrl }, 'Refreshed SignalingRegistry endpoint_url');
 }

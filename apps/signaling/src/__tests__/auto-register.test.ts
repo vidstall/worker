@@ -84,7 +84,7 @@ describe('ensureRegistered (signaling)', () => {
     process.env = originalEnv;
   });
 
-  it('returns early when MINER_CAP_ID set and already in SignalingRegistry', async () => {
+  it('refreshes endpoint_url when MINER_CAP_ID set and already in SignalingRegistry', async () => {
     process.env['MINER_CAP_ID'] = '0xexisting-cap';
     const logger = mockLogger();
 
@@ -97,12 +97,52 @@ describe('ensureRegistered (signaling)', () => {
       }),
     } as any;
 
+    mockExecuteWithRetry.mockResolvedValueOnce(step2Effects());
+
     const result = await ensureRegistered(
       mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger,
     );
 
     expect(result.minerCapId).toBe('0xexisting-cap');
-    expect(mockExecuteWithRetry).not.toHaveBeenCalled();
+    // No fresh registration TX -- just a best-effort endpoint_url refresh, so
+    // a droplet recreate under this same recycled wallet doesn't leave the
+    // registry pointing at a dead host (see signaling_registry.move's
+    // update_endpoint_url).
+    expect(mockExecuteWithRetry).toHaveBeenCalledTimes(1);
+    expect(mockExecuteWithRetry).toHaveBeenCalledWith(
+      mockClient, mockSigner, expect.any(Function), 'signaling-endpoint-refresh', logger,
+    );
+  });
+
+  it('endpoint_url refresh is best-effort -- a failed refresh does not exit the process', async () => {
+    process.env['MINER_CAP_ID'] = '0xexisting-cap';
+    const logger = mockLogger();
+
+    const mockClient = {
+      getObject: vi.fn().mockResolvedValue({
+        data: { content: { fields: { miner_id: '0x' + '0'.repeat(62) + '02' } } },
+      }),
+      devInspectTransactionBlock: vi.fn().mockResolvedValue({
+        results: [{ returnValues: [[new Uint8Array([1])]] }],
+      }),
+    } as any;
+
+    mockExecuteWithRetry.mockResolvedValueOnce(null);
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit');
+    });
+
+    const result = await ensureRegistered(
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:8080', 'us-east', logger,
+    );
+
+    expect(result.minerCapId).toBe('0xexisting-cap');
+    expect(mockExit).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ minerCapId: '0xexisting-cap' }),
+      expect.stringContaining('Could not refresh SignalingRegistry endpoint_url'),
+    );
+    mockExit.mockRestore();
   });
 
   it('runs step 2 only when MINER_CAP_ID set but NOT in SignalingRegistry', async () => {
