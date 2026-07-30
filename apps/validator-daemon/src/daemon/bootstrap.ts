@@ -171,7 +171,7 @@ export async function startDaemon(overrides?: {
   const mainAddress = mainKeypair.getPublicKey().toSuiAddress();
 
   // Auto-register if needed
-  const { validatorCapId } = await ensureRegistered(client, mainKeypair, config, log);
+  const { validatorCapId } = await ensureRegistered(client, mainKeypair, config, log, graphqlClient);
 
   // Generate session wallet -- fresh Ed25519Keypair, NOT derived from main wallet
   const { keypair: sessionKeypair, address: sessionAddress } = generateSessionKeypair();

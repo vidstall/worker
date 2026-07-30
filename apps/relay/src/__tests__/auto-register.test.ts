@@ -295,49 +295,61 @@ describe('ensureRegistered (relay)', () => {
     );
   });
 
+  /** Builds a mock GraphQLQueryResult for one page of an address's transaction history. */
+  function graphqlObjectChangesPage(objectType: string, objectAddress: string) {
+    return {
+      data: {
+        address: {
+          transactions: {
+            nodes: [
+              {
+                digest: 'prior-tx',
+                effects: {
+                  objectChanges: {
+                    nodes: [{ address: objectAddress, idCreated: true, outputState: { asMoveObject: { contents: { type: { repr: objectType } } } } }],
+                  },
+                },
+              },
+            ],
+            pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
+          },
+        },
+      },
+    };
+  }
+
   it('recovers a prior partial registration attempt instead of re-minting (avoids E_ALREADY_REGISTERED)', async () => {
     delete process.env['MINER_CAP_ID'];
     const logger = mockLogger();
 
-    const mockClient = {
-      queryTransactionBlocks: vi.fn().mockResolvedValue({
-        data: [
-          {
-            digest: 'prior-tx',
-            objectChanges: [
-              { type: 'created', objectId: '0xprior-cap', objectType: '0xpkg::caps::MinerCap' },
-              { type: 'created', objectId: '0xprior-stake', objectType: '0xpkg::staking::StakePosition' },
-            ],
-          },
-        ],
-      }),
+    const mockClient = {} as any;
+    const mockGraphqlClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce(graphqlObjectChangesPage('0xpkg::caps::MinerCap', '0xprior-cap'))
+        .mockResolvedValueOnce(graphqlObjectChangesPage('0xpkg::staking::StakePosition', '0xprior-stake')),
     } as any;
 
     // Only Step 2 should run — no miner-registration TX this time.
     mockExecuteWithRetry.mockResolvedValueOnce(step2Effects());
 
     const result = await ensureRegistered(
-      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger, mockGraphqlClient,
     );
 
     expect(result.minerCapId).toBe('0xprior-cap');
     expect(mockExecuteWithRetry).toHaveBeenCalledTimes(1);
-    expect(mockExecuteWithRetry).toHaveBeenCalledWith(
-      mockClient, mockSigner, expect.any(Function), 'relay-registration', logger,
-    );
     expect(logger.info).toHaveBeenCalledWith(
       { minerCapId: '0xprior-cap', stakePositionId: '0xprior-stake' },
       expect.stringContaining('reusing instead of minting a new identity'),
     );
   });
 
-  it('falls through to a fresh mint when queryTransactionBlocks is unavailable', async () => {
+  it('falls through to a fresh mint when no graphqlClient is available', async () => {
     delete process.env['MINER_CAP_ID'];
     const logger = mockLogger();
 
-    const mockClient = {
-      queryTransactionBlocks: vi.fn().mockRejectedValue(new Error('Method not found')),
-    } as any;
+    const mockClient = {} as any;
 
     mockExecuteWithRetry
       .mockResolvedValueOnce(step1Effects())
@@ -345,6 +357,25 @@ describe('ensureRegistered (relay)', () => {
 
     const result = await ensureRegistered(
       mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger,
+    );
+
+    expect(result.minerCapId).toBe('0xminer-cap');
+    expect(mockExecuteWithRetry).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls through to a fresh mint when the GraphQL prior-registration query fails', async () => {
+    delete process.env['MINER_CAP_ID'];
+    const logger = mockLogger();
+
+    const mockClient = {} as any;
+    const mockGraphqlClient = { query: vi.fn().mockRejectedValue(new Error('GraphQL unavailable')) } as any;
+
+    mockExecuteWithRetry
+      .mockResolvedValueOnce(step1Effects())
+      .mockResolvedValueOnce(step2Effects());
+
+    const result = await ensureRegistered(
+      mockClient, mockSigner, mockConfig(), 'ws://127.0.0.1:4000', 'us-east', logger, mockGraphqlClient,
     );
 
     expect(result.minerCapId).toBe('0xminer-cap');

@@ -379,7 +379,9 @@ export function makePromoteSubmitter(
       signer,
       (tx: Transaction) => {
         tx.moveCall({
-          target: `${config.packageId}::room_manager::promote_relay`,
+          // promote_relay is defined in the room_manager_failover satellite
+          // module (failover.move), not room_manager itself.
+          target: `${config.packageId}::room_manager_failover::promote_relay`,
           arguments: [
             tx.object(config.networkRegistryId), // net_reg: &NetworkRegistry
             tx.object(config.roomManagerId),      // manager: &mut RoomManager

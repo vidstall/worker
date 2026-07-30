@@ -7,6 +7,7 @@
  * `bootstrap.ts`'s `startDaemon`.
  */
 
+import { join } from 'node:path';
 import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { EventPoller, economicLayerModuleName, readCapMinerId } from '@dvconf/shared';
 import type { Logger } from '@dvconf/shared';
@@ -14,6 +15,11 @@ import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvco
 import { startLivenessSweep } from '../liveness-sweep.js';
 import { handleRoomClosed } from './measurement-cycle.js';
 import type { DaemonState } from './state.js';
+
+/** Base dir for these cursors -- DATA_DIR (mirrors ChainEventListener's own
+ *  default), NOT process.cwd(), so a container recreate (redeploy) doesn't
+ *  force a full event-history replay from genesis. */
+const cursorDir = (name: string): string => join(process.env.DATA_DIR ?? '.', '.cursors', name);
 
 /**
  * Start the validator_registry / EscrowCreated / RoomCreated+RoomClosed+RoomAssigned
@@ -38,7 +44,7 @@ export async function startEventPollers(
     packageId: config.originalPackageId ?? config.packageId,
     module: 'validator_registry',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/validator-events.json',
+    cursorPath: cursorDir('validator-events.json'),
     logger: log,
   });
 
@@ -57,7 +63,7 @@ export async function startEventPollers(
     packageId: config.originalPackageId ?? config.packageId,
     module: economicLayerModuleName,
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/economic-events.json',
+    cursorPath: cursorDir('economic-events.json'),
     logger: log,
   });
 
@@ -94,13 +100,18 @@ export async function startEventPollers(
     }
   });
 
-  // Start event poller for room_manager RoomCreated/RoomClosed events
+  // Start event poller for room_manager RoomCreated/RoomClosed events.
+  // module is 'room_manager_events' (NOT 'room_manager') -- RoomCreated etc.
+  // are defined in the companion room_manager_events module (LOC-budget
+  // split, room_manager/events.move), and events are pinned to whichever
+  // module FIRST DEFINED the struct -- confirmed via live GraphQL
+  // introspection against a real create_room tx.
   const roomPoller = new EventPoller({
     client: graphqlClient,
     packageId: config.originalPackageId ?? config.packageId,
-    module: 'room_manager',
+    module: 'room_manager_events',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/room_manager.json',
+    cursorPath: cursorDir('room_manager.json'),
     logger: log.child({ poller: 'room_manager' }),
   });
 

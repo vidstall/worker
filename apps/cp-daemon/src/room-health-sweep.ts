@@ -383,7 +383,9 @@ export function makePromoteAfterEjectionSubmitter(
       signer,
       (tx: Transaction) => {
         tx.moveCall({
-          target: `${config.packageId}::room_manager::promote_relay_after_ejection`,
+          // promote_relay_after_ejection is defined in the room_manager_failover
+          // satellite module (failover.move), not room_manager itself.
+          target: `${config.packageId}::room_manager_failover::promote_relay_after_ejection`,
           arguments: [
             tx.object(config.networkRegistryId),
             tx.object(config.roomManagerId),
@@ -420,7 +422,9 @@ export function makeSpillRelaySubmitter(
       signer,
       (tx: Transaction) => {
         tx.moveCall({
-          target: `${config.packageId}::room_manager::authorize_spill_relay`,
+          // authorize_spill_relay is defined in the room_manager_reassignment
+          // satellite module (reassignment.move), not room_manager itself.
+          target: `${config.packageId}::room_manager_reassignment::authorize_spill_relay`,
           arguments: [
             tx.object(config.networkRegistryId),
             tx.object(config.roomManagerId),
@@ -458,7 +462,9 @@ export function makeReassignSignalingSubmitter(
       signer,
       (tx: Transaction) => {
         tx.moveCall({
-          target: `${config.packageId}::room_manager::reassign_signaling`,
+          // reassign_signaling is defined in the room_manager_reassignment
+          // satellite module (reassignment.move), not room_manager itself.
+          target: `${config.packageId}::room_manager_reassignment::reassign_signaling`,
           arguments: [
             tx.object(config.networkRegistryId),
             tx.object(config.roomManagerId),

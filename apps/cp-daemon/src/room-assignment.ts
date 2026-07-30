@@ -84,7 +84,12 @@ export async function submitProposal(
       const validatorVec = tx.pure.vector('id', validatorMinerIds);
 
       tx.moveCall({
-        target: `${config.packageId}::room_manager::submit_pairing_proposal`,
+        // submit_pairing_proposal is DEFINED in the room_manager_pairing satellite
+        // module (pairing.move), not room_manager itself -- same LOC-budget-split
+        // pattern as room_manager_events (see chain/events.ts). Confirmed live:
+        // targeting room_manager::submit_pairing_proposal 400'd with "Function not
+        // found" on devnet.
+        target: `${config.packageId}::room_manager_pairing::submit_pairing_proposal`,
         arguments: [
           tx.object(config.networkRegistryId),      // &NetworkRegistry
           tx.object(config.roomManagerId),           // &mut RoomManager
@@ -138,7 +143,9 @@ export async function submitSpillAuthorization(
     signer,
     (tx: Transaction) => {
       tx.moveCall({
-        target: `${config.packageId}::room_manager::authorize_spill_relay`,
+        // authorize_spill_relay is defined in the room_manager_reassignment
+        // satellite module (reassignment.move), not room_manager itself.
+        target: `${config.packageId}::room_manager_reassignment::authorize_spill_relay`,
         arguments: [
           tx.object(config.networkRegistryId), // &NetworkRegistry
           tx.object(config.roomManagerId),      // &mut RoomManager

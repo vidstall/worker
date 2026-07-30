@@ -8,7 +8,7 @@ describe('extractRoomId', () => {
   it('reads room_id from a RoomCreated event', () => {
     const result: TxStatusLike = {
       digest: '0xabc',
-      events: [{ type: '0x2::room_manager::RoomCreated', parsedJson: { room_id: '0x7c60b80e' } }],
+      events: [{ type: '0x2::room_manager_events::RoomCreated', parsedJson: { room_id: '0x7c60b80e' } }],
     };
     expect(extractRoomId(result)).toBe('0x000000000000000000000000000000000000000000000000000000007c60b80e');
   });
@@ -23,7 +23,7 @@ describe('createRoomWithRelay fundAddress injection', () => {
     const client = {
       signAndExecuteTransaction: vi.fn().mockResolvedValue({
         digest: '0xd', effects: { status: { status: 'success' } },
-        events: [{ type: '0x2::room_manager::RoomCreated', parsedJson: { room_id: '0x1' } }],
+        events: [{ type: '0x2::room_manager_events::RoomCreated', parsedJson: { room_id: '0x1' } }],
         objectChanges: [],
       }),
       waitForTransaction: vi.fn().mockResolvedValue({}),

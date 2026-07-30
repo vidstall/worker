@@ -70,11 +70,14 @@ import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
 import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { LocalnetHandle } from '../../apps/cp-daemon/src/__tests__/integration/localnet-fixture.ts';
 import {
+  createGraphQLClient,
   createLogger,
   executeWithRetry,
   extractCreatedObjectByType,
+  fetchEventsForDigest,
   type NetworkConfig,
   type Logger,
   type TxResult,
@@ -238,6 +241,7 @@ async function signAndCapture(
   build: (tx: Transaction) => void,
   label: string,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<TxResult> {
   const tx = new Transaction();
   build(tx);
@@ -253,10 +257,17 @@ async function signAndCapture(
     throw new Error(`${label} failed on-chain: status=${status?.status ?? 'unknown'} error=${status?.error ?? '(none)'}`);
   }
   logger.info({ module: MODULE, action: label, digest: result.digest }, `${label} succeeded on-chain`);
+  let events = (result.events ?? []) as Record<string, unknown>[];
+  if (events.length === 0 && graphqlClient) {
+    // devnet's public fullnode returns empty `events` on the JSON-RPC execute
+    // response (event-shaped reads are deprecated there); harmless no-op on
+    // localnet, where JSON-RPC events already come back populated.
+    events = (await fetchEventsForDigest(graphqlClient, result.digest)) as unknown as Record<string, unknown>[];
+  }
   return {
     digest: result.digest,
     effects,
-    events: (result.events ?? []) as Record<string, unknown>[],
+    events,
     objectChanges: (result.objectChanges ?? []) as Record<string, unknown>[],
   };
 }
@@ -269,8 +280,9 @@ async function measureCapture(
   module: string,
   build: (tx: Transaction) => void,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ row: CostRow; result: TxResult }> {
-  const result = await signAndCapture(client, signer, build, fn, logger);
+  const result = await signAndCapture(client, signer, build, fn, logger, graphqlClient);
   return { row: makeRow(fn, module, result), result };
 }
 
@@ -366,6 +378,10 @@ async function main(): Promise<void> {
     // Generous port-wait headroom for a contended Windows host.
     handle = await bootLocalnet({ portWaitMs: 240_000 });
     const { client, config } = handle;
+    // Event queries only (RoomCreated/EscrowCreated lookups below) -- no-op
+    // on localnet's JSON-RPC (which already returns events populated), but
+    // matches the same client shape devnet callers need.
+    const graphqlClient = createGraphQLClient('localnet');
 
     logger.info({ module: MODULE, action: 'booted', packageId: config.packageId }, 'localnet up + package published');
 
@@ -544,7 +560,7 @@ async function main(): Promise<void> {
     // BLOCK B — DISPATCH-2: hard ed25519 fns + full room lifecycle + bonus rows.
     // Appended AFTER Block A so the 10 trivial rows above are untouched.
     // ═══════════════════════════════════════════════════════════════════════
-    await measureDispatch2(client, config, cp, relay, validator, validatorKp, signaling, rows, logger);
+    await measureDispatch2(client, config, cp, relay, validator, validatorKp, signaling, rows, logger, graphqlClient);
 
     // ── write raw JSONL (provenance line first, then one line per fn) ────
     const proofRows = validateK2ProofRows(rows);
@@ -1059,6 +1075,7 @@ async function measureDispatch2(
   signaling: SeededKey,
   rows: CostRow[],
   logger: Logger,
+  graphqlClient: SuiGraphQLClient,
 ): Promise<void> {
   logger.info({ module: MODULE, action: 'dispatch2_start' }, 'Dispatch-2: building room-lifecycle preconditions...');
 
@@ -1127,6 +1144,7 @@ async function measureDispatch2(
         });
       },
       logger,
+      graphqlClient,
     );
     rows.push(row);
     roomId = extractRoomIdFromResult(result);
@@ -1157,6 +1175,7 @@ async function measureDispatch2(
         });
       },
       logger,
+      graphqlClient,
     );
     rows.push(row);
     escrowId = extractEscrowId(result);
@@ -1178,7 +1197,9 @@ async function measureDispatch2(
       'room_manager',
       (tx) => {
         tx.moveCall({
-          target: `${config.packageId}::room_manager::submit_pairing_proposal`,
+          // submit_pairing_proposal is defined in the room_manager_pairing
+          // satellite module (pairing.move), not room_manager itself.
+          target: `${config.packageId}::room_manager_pairing::submit_pairing_proposal`,
           arguments: [
             tx.object(config.networkRegistryId),
             tx.object(config.roomManagerId),

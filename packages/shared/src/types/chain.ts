@@ -61,5 +61,14 @@ export interface TxResult {
 
 // ── Move module name constants ────────────────────────────────────
 
-/** Module name for economic_layer.move (used with EventPoller). */
-export const economicLayerModuleName = 'economic_layer' as const;
+/**
+ * Module name to use with EventPoller when watching for economic_layer's
+ * events (EscrowCreated, etc.). NOT 'economic_layer' -- those structs are
+ * actually DEFINED in the companion economic_layer_events module
+ * (LOC-budget split, economic_layer/events.move), and events are pinned to
+ * whichever module FIRST DEFINED the struct, not economic_layer.move (which
+ * only calls the emit wrapper). Confirmed via live GraphQL introspection
+ * against a real create_escrow tx: filtering by 'economic_layer' matched
+ * zero events; 'economic_layer_events' matched EscrowCreated correctly.
+ */
+export const economicLayerModuleName = 'economic_layer_events' as const;

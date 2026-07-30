@@ -227,8 +227,15 @@ export function startAudioSource(opts: StartAudioSourceOpts): () => void {
   const timer = setInterval(() => {
     const chunk = queue.shift();
     if (chunk === undefined) return;
+    // chunk.buffer is Node's shared Buffer pool (8192 bytes), not a
+    // tightly-sized ArrayBuffer -- @roamhq/wrtc's native binding validates
+    // samples.buffer.byteLength against numberOfFrames*channelCount*2
+    // directly (ignoring byteOffset/length), so passing the pooled buffer
+    // as-is throws "Expected a .byteLength of 960, not 8192". slice() copies
+    // into a freshly-sized ArrayBuffer, decoupled from the pool.
+    const exact = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.length);
     opts.audioSource.onData({
-      samples: new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2),
+      samples: new Int16Array(exact),
       sampleRate: AUDIO_SAMPLE_RATE,
       bitsPerSample: 16,
       channelCount: AUDIO_CHANNELS,

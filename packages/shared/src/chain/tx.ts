@@ -6,6 +6,7 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { Transaction } from '@mysten/sui/transactions';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { Histogram, Counter } from 'prom-client';
@@ -13,6 +14,7 @@ import type { TxResult } from '../types/chain.js';
 import type { Logger } from 'pino';
 import type { Registry } from '../metrics-prom.js';
 import { createDurationHistogram, createCounter } from '../metrics-prom.js';
+import { fetchEventsForDigest } from './events.js';
 
 const BASE_DELAY_MS = 1_000;
 const MULTIPLIER = 2;
@@ -79,6 +81,10 @@ function isMoveAbort(err: unknown): boolean {
  * @param buildTx   - Callback that populates the Transaction
  * @param label     - Human-readable label for logging
  * @param logger    - Pino logger instance
+ * @param graphqlClient - Optional. devnet's public fullnode returns empty
+ *   `events` on the JSON-RPC execute response (event-shaped reads are
+ *   deprecated there -- see chain/events.ts's docstring); when provided, an
+ *   empty `result.events` is backfilled via `fetchEventsForDigest` instead.
  * @returns TxResult on success, null if all retries exhausted
  */
 export async function executeWithRetry(
@@ -87,6 +93,7 @@ export async function executeWithRetry(
   buildTx: (tx: Transaction) => void,
   label: string,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<TxResult | null> {
   let delay = BASE_DELAY_MS;
   const t0 = Date.now();
@@ -113,11 +120,16 @@ export async function executeWithRetry(
 
       logger.info({ digest: result.digest, attempt }, `${label} succeeded`);
 
+      let events = (result.events ?? []) as Record<string, unknown>[];
+      if (events.length === 0 && graphqlClient) {
+        events = (await fetchEventsForDigest(graphqlClient, result.digest)) as unknown as Record<string, unknown>[];
+      }
+
       return finish(
         {
           digest: result.digest,
           effects: (result.effects ?? {}) as Record<string, unknown>,
-          events: (result.events ?? []) as Record<string, unknown>[],
+          events,
           objectChanges: (result.objectChanges ?? []) as Record<string, unknown>[],
         },
         attempt,

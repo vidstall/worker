@@ -18,6 +18,7 @@
  *   - apps/cp-daemon/src/relay-chain-state-reader.ts (get_room_assignment usage)
  */
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
@@ -99,13 +100,21 @@ export async function registerUser(
   }
 }
 
-/** Create a new room on-chain. Returns the new room's id. */
+/**
+ * Create a new room on-chain. Returns the new room's id.
+ *
+ * @param graphqlClient - Optional. devnet's public fullnode returns empty
+ *   `events` on the JSON-RPC execute response (event-shaped reads are
+ *   deprecated there); when provided, `extractRoomId`'s `RoomCreated` lookup
+ *   is backfilled via GraphQL instead of the (empty) JSON-RPC response.
+ */
 export async function createRoom(
   client: SuiClient,
   signer: Ed25519Keypair,
   config: NetworkConfig,
   opts: RoomProvisionOpts,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<RoomProvisionResult> {
   const roomResult = await signAndAssert(
     client,
@@ -125,10 +134,52 @@ export async function createRoom(
     },
     'create_room',
     logger,
+    graphqlClient,
   );
 
   const roomId = extractRoomId(roomResult);
   return { roomId };
+}
+
+/**
+ * 1 SUI escrow deposit — mirrors scripts/demo/escrow-driver.ts's ESCROW_AMOUNT_MIST.
+ * cp-daemon's room-assignment handler will not assign a relay to a room until
+ * it observes this room's EscrowCreated event (see event-handlers/room-assignment.ts's
+ * "waiting for escrow before assignment" gate) -- without this, resolveRoomRelayUrl
+ * polls forever and the bot session never starts.
+ */
+const ESCROW_AMOUNT_MIST = 1_000_000_000n;
+
+/**
+ * Create the room's escrow deposit (economic_layer::create_escrow). Must be
+ * called by the same signer that created the room (create_escrow asserts
+ * room_creator == ctx.sender()).
+ */
+export async function createEscrow(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  roomId: string,
+  logger: Logger,
+): Promise<void> {
+  await signAndAssert(
+    client,
+    signer,
+    (tx) => {
+      const [payment] = tx.splitCoins(tx.gas, [tx.pure.u64(ESCROW_AMOUNT_MIST)]);
+      tx.moveCall({
+        target: `${config.packageId}::economic_layer::create_escrow`,
+        arguments: [
+          tx.object(config.networkRegistryId),
+          tx.object(config.roomManagerId),
+          tx.pure.id(roomId),
+          payment!,
+        ],
+      });
+    },
+    'create_escrow',
+    logger,
+  );
 }
 
 /** Backward-compatible composition: register (idempotent) then create a room. */
@@ -138,9 +189,10 @@ export async function registerAndCreateRoom(
   config: NetworkConfig,
   opts: RoomProvisionOpts,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<RoomProvisionResult> {
   await registerUser(client, signer, config, logger);
-  return createRoom(client, signer, config, opts, logger);
+  return createRoom(client, signer, config, opts, logger, graphqlClient);
 }
 
 /**

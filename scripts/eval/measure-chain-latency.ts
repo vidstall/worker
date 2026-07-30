@@ -48,8 +48,10 @@ import {
   serializeProofBcs,
 } from '../../apps/validator-daemon/src/session-proof.ts';
 import {
+  createGraphQLClient,
   createLogger,
   EventPoller,
+  fetchEventsForDigest,
   type Logger,
   type NetworkConfig,
 } from '../../packages/shared/src/index.ts';
@@ -87,6 +89,10 @@ const EXPECTED_RELAYS = 2;
 const EXPECTED_VALIDATORS = 4;
 const PROOFS_PER_ROOM = EXPECTED_RELAYS * EXPECTED_VALIDATORS;
 const FAUCET_URL = getFaucetHost('localnet');
+// Event queries only (exactEvent's RoomCreated/EscrowCreated/etc. lookups) --
+// no-op on localnet's JSON-RPC (which already returns events populated), but
+// matches the same fallback devnet callers need (see chain/events.ts docstring).
+const GRAPHQL_CLIENT = createGraphQLClient('localnet');
 
 const __filename = fileURLToPath(import.meta.url);
 const HERE = resolve(__filename, '..');
@@ -747,6 +753,9 @@ async function executeUnmeasured(
     options: { showEffects: true, showEvents: true, showObjectChanges: true },
   });
   assertTxSuccess(finality, `${label} finality`);
+  if (!result.events || result.events.length === 0) {
+    result.events = await fetchEventsForDigest(GRAPHQL_CLIENT, result.digest);
+  }
   return result;
 }
 
@@ -767,6 +776,9 @@ async function executeTimed(
   });
   const rpcReturn = nowPair();
   assertTxSuccess(result, label);
+  if (!result.events || result.events.length === 0) {
+    result.events = await fetchEventsForDigest(GRAPHQL_CLIENT, result.digest);
+  }
   return { result, digest: result.digest, submit, rpcReturn };
 }
 
@@ -927,7 +939,9 @@ async function submitPairing(
 ): Promise<void> {
   await executeUnmeasured(client, roster.cp.kp, 'submit_pairing_proposal', (tx) => {
     tx.moveCall({
-      target: `${config.packageId}::room_manager::submit_pairing_proposal`,
+      // submit_pairing_proposal is defined in the room_manager_pairing
+      // satellite module (pairing.move), not room_manager itself.
+      target: `${config.packageId}::room_manager_pairing::submit_pairing_proposal`,
       arguments: [
         tx.object(config.networkRegistryId),
         tx.object(config.roomManagerId),

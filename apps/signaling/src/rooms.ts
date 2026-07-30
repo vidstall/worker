@@ -6,6 +6,7 @@
  */
 
 import type { WebSocket } from 'ws';
+import { createGauge, createDurationHistogram, type Registry } from '@dvconf/shared';
 
 // ── Economic tracking (off-chain only) ──────────────────────────────
 // Tracks completed room sessions for reward eligibility reporting.
@@ -17,6 +18,30 @@ let sessionsRouted = 0;
 /** Get the total number of completed room sessions. */
 export function getSessionsRouted(): number {
   return sessionsRouted;
+}
+
+// Monitoring-redesign gap #3: dvconf_rooms_active (index.ts) only exposes the
+// aggregate open-room count -- there was no per-room detail at all, needed
+// for the new Rooms dashboard. Same opt-in module-level registration pattern
+// as role-voter.ts/role-assignment.ts; RoomManager owns these since join/
+// leave (where per-room participant count and lifetime are known) live here.
+let roomParticipantsGauge: ReturnType<typeof createGauge> | null = null;
+let roomDurationHistogram: ReturnType<typeof createDurationHistogram> | null = null;
+
+/** Wire `dvconf_room_participants{roomId}` and `dvconf_room_duration_seconds` into `registry` -- call once at signaling startup. */
+export function registerRoomMetrics(registry: Registry): void {
+  roomParticipantsGauge = createGauge(
+    registry,
+    'dvconf_room_participants',
+    'Current participant count for this room',
+    ['roomId'],
+  );
+  roomDurationHistogram = createDurationHistogram(
+    registry,
+    'dvconf_room_duration_seconds',
+    'Duration a room stayed open, from first join to the last peer leaving',
+    [],
+  );
 }
 
 /** Message sent to peers when another peer joins or leaves. */
@@ -39,6 +64,9 @@ export class RoomManager {
   /** ws -> peer info (for reverse lookup on disconnect). */
   private peers = new Map<WebSocket, PeerInfo>();
 
+  /** roomId -> first-join timestamp (ms), for dvconf_room_duration_seconds. */
+  private roomCreatedAt = new Map<string, number>();
+
   /**
    * Add a peer to a room. Broadcasts 'peer-joined' to existing room members.
    */
@@ -50,6 +78,7 @@ export class RoomManager {
 
     if (!this.rooms.has(roomId)) {
       this.rooms.set(roomId, new Set());
+      this.roomCreatedAt.set(roomId, Date.now());
     }
 
     const room = this.rooms.get(roomId)!;
@@ -65,6 +94,7 @@ export class RoomManager {
     // Add the new peer
     room.add(ws);
     this.peers.set(ws, { peerId, roomId });
+    roomParticipantsGauge?.set({ roomId }, room.size);
   }
 
   /**
@@ -93,6 +123,14 @@ export class RoomManager {
       if (room.size === 0) {
         this.rooms.delete(roomId);
         sessionsRouted++;
+        roomParticipantsGauge?.remove({ roomId });
+        const createdAt = this.roomCreatedAt.get(roomId);
+        if (createdAt !== undefined) {
+          roomDurationHistogram?.observe((Date.now() - createdAt) / 1000);
+          this.roomCreatedAt.delete(roomId);
+        }
+      } else {
+        roomParticipantsGauge?.set({ roomId }, room.size);
       }
     }
 

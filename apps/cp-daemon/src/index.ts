@@ -10,6 +10,7 @@
 import '@dvconf/shared/otel-bootstrap';
 import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import type { SuiClient, SuiEvent } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import {
@@ -339,7 +340,7 @@ async function main(): Promise<void> {
   logger.info({ port: promMetrics.port }, 'prom metrics listening');
 
   // Auto-register if CP_CAP_ID not in env
-  const { cpCapId } = await ensureRegistered(client, signer, config, logger);
+  const { cpCapId } = await ensureRegistered(client, signer, config, logger, graphqlClient);
 
   // Start heartbeat loop
   const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
@@ -666,13 +667,17 @@ async function main(): Promise<void> {
 
   // Poll relay_registry events
   const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
+  // DATA_DIR (mirrors ChainEventListener's own default), NOT process.cwd(),
+  // so a container recreate (redeploy) doesn't force a full event-history
+  // replay from genesis.
+  const cursorDir = (name: string): string => join(process.env['DATA_DIR'] ?? '.', '.cursors', name);
 
   const relayPoller = new EventPoller({
     client: graphqlClient,
     packageId: config.originalPackageId ?? config.packageId,
     module: 'relay_registry',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/relay_registry.json',
+    cursorPath: cursorDir('relay_registry.json'),
     logger: logger.child({ poller: 'relay_registry' }),
   });
 
@@ -681,16 +686,24 @@ async function main(): Promise<void> {
     packageId: config.originalPackageId ?? config.packageId,
     module: 'control_plane_registry',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/control_plane_registry.json',
+    cursorPath: cursorDir('control_plane_registry.json'),
     logger: logger.child({ poller: 'control_plane_registry' }),
   });
 
   const roomPoller = new EventPoller({
     client: graphqlClient,
     packageId: config.originalPackageId ?? config.packageId,
-    module: 'room_manager',
+    // room_manager.move's RoomCreated/RoomAssigned etc. structs are actually
+    // DEFINED in the companion room_manager_events module (LOC-budget split
+    // -- see room_manager/events.move) -- events are pinned to whichever
+    // module FIRST DEFINED the struct, not the module that called the emit
+    // wrapper, so this filter must name room_manager_events or it silently
+    // matches zero events forever. Confirmed via live GraphQL introspection
+    // against a real create_room tx (module 'room_manager' returned no
+    // events at all; 'room_manager_events' returned the RoomCreated node).
+    module: 'room_manager_events',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/room_manager.json',
+    cursorPath: cursorDir('room_manager.json'),
     logger: logger.child({ poller: 'room_manager' }),
   });
 
@@ -699,16 +712,19 @@ async function main(): Promise<void> {
     packageId: config.originalPackageId ?? config.packageId,
     module: 'signaling_registry',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/signaling_registry.json',
+    cursorPath: cursorDir('signaling_registry.json'),
     logger: logger.child({ poller: 'signaling_registry' }),
   });
 
   const economicPoller = new EventPoller({
     client: graphqlClient,
     packageId: config.originalPackageId ?? config.packageId,
-    module: 'economic_layer',
+    // Same LOC-budget split as room_manager above -- EscrowCreated etc. are
+    // defined in economic_layer_events (economic_layer/events.move), not
+    // economic_layer itself.
+    module: 'economic_layer_events',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/economic_layer.json',
+    cursorPath: cursorDir('economic_layer.json'),
     logger: logger.child({ poller: 'economic_layer' }),
   });
 
@@ -717,25 +733,29 @@ async function main(): Promise<void> {
     packageId: config.originalPackageId ?? config.packageId,
     module: 'validator_registry',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/validator_registry.json',
+    cursorPath: cursorDir('validator_registry.json'),
     logger: logger.child({ poller: 'validator_registry' }),
   });
 
   const roleVotingPoller = new EventPoller({
     client: graphqlClient,
     packageId: config.originalPackageId ?? config.packageId,
-    module: 'role_voting',
+    // Same LOC-budget split -- role_voting.move's events are defined in the
+    // companion role_voting_events module (`use dvconf::role_voting_events`).
+    module: 'role_voting_events',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/role_voting.json',
+    cursorPath: cursorDir('role_voting.json'),
     logger: logger.child({ poller: 'role_voting' }),
   });
 
   const registrationPoller = new EventPoller({
     client: graphqlClient,
     packageId: config.originalPackageId ?? config.packageId,
-    module: 'registration',
+    // Same LOC-budget split -- registration.move's events are defined in the
+    // companion registration_events module (`use dvconf::registration_events`).
+    module: 'registration_events',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/registration.json',
+    cursorPath: cursorDir('registration.json'),
     logger: logger.child({ poller: 'registration' }),
   });
 
@@ -749,7 +769,7 @@ async function main(): Promise<void> {
     packageId: config.originalPackageId ?? config.packageId,
     module: 'turn_credential',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/turn_credential.json',
+    cursorPath: cursorDir('turn_credential.json'),
     logger: logger.child({ poller: 'turn_credential' }),
   });
 

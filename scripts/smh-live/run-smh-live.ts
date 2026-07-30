@@ -26,6 +26,7 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
 import {
   createSuiClient,
+  createGraphQLClient,
   loadNetworkConfig,
   executeWithRetry,
   createLogger,
@@ -33,6 +34,7 @@ import {
   type Logger,
 } from '../../packages/shared/src/index.js';
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import {
   requiredPorts,
   scanCollisions,
@@ -205,7 +207,13 @@ async function registerUser(client: SuiClient, kp: Ed25519Keypair, config: Netwo
 }
 
 /** create_room (pattern scripts/load-test.ts) → the created Room object id (== RoomAssigned.room_id). */
-async function createRoom(client: SuiClient, kp: Ed25519Keypair, config: NetworkConfig, logger: Logger): Promise<string> {
+async function createRoom(
+  client: SuiClient,
+  kp: Ed25519Keypair,
+  config: NetworkConfig,
+  logger: Logger,
+  graphqlClient: SuiGraphQLClient,
+): Promise<string> {
   const result = await executeWithRetry(
     client,
     kp,
@@ -224,6 +232,7 @@ async function createRoom(client: SuiClient, kp: Ed25519Keypair, config: Network
     },
     'create_room',
     logger,
+    graphqlClient,
   );
   if (!result) throw new Error('create_room failed');
   // create_room stores the room in the RoomManager TABLE (no standalone Room object — verified
@@ -259,7 +268,8 @@ async function createEscrow(client: SuiClient, kp: Ed25519Keypair, config: Netwo
 async function seedRoom(client: SuiClient, config: NetworkConfig, logger: Logger): Promise<string> {
   const user = await createFundedUser(logger);
   await registerUser(client, user, config, logger);
-  const roomId = await createRoom(client, user, config, logger);
+  const graphqlClient = createGraphQLClient('localnet');
+  const roomId = await createRoom(client, user, config, logger, graphqlClient);
   await createEscrow(client, user, config, roomId, logger);
   return roomId;
 }

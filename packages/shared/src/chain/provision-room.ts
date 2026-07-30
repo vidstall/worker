@@ -6,10 +6,12 @@
  * Move sigs verbatim: user_registry.move:63, room_manager.move:247, room_manager.move:644.
  */
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { NetworkConfig, Logger } from '../index.js';
+import { fetchEventsForDigest } from './events.js';
 
 const MODULE = 'provision-room';
 const GAS_BUDGET = 100_000_000;
@@ -23,13 +25,21 @@ export interface TxStatusLike {
   digest: string;
 }
 
-/** Sign+execute a built TX, wait for finality, assert success. */
+/**
+ * Sign+execute a built TX, wait for finality, assert success.
+ *
+ * @param graphqlClient - Optional. devnet's public fullnode returns empty
+ *   `events` on the JSON-RPC execute response (event-shaped reads are
+ *   deprecated there -- see chain/events.ts's docstring); when provided, an
+ *   empty `result.events` is backfilled via `fetchEventsForDigest` instead.
+ */
 export async function signAndAssert(
   client: SuiClient,
   signer: Ed25519Keypair,
   build: (tx: Transaction) => void,
   label: string,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<TxStatusLike> {
   const tx = new Transaction();
   build(tx);
@@ -49,12 +59,24 @@ export async function signAndAssert(
     throw new Error(`${label} failed on-chain: status=${status ?? 'unknown'} error=${err}`);
   }
   logger.info({ module: MODULE, action: label, context: { digest: result.digest } }, `${label} succeeded on-chain`);
+  if ((!result.events || result.events.length === 0) && graphqlClient) {
+    result.events = await fetchEventsForDigest(graphqlClient, result.digest);
+  }
   return result;
 }
 
-/** Read the RoomCreated event's room_id. */
+/**
+ * Read the RoomCreated event's room_id. The event struct is defined in the
+ * `room_manager_events` module (room_manager/events.move), NOT `room_manager`
+ * itself (room_manager.move only calls the emit wrapper) -- confirmed via a
+ * live GraphQL query against a real create_room tx, whose event type read
+ * `<pkg>::room_manager_events::RoomCreated`. This mismatch silently never
+ * mattered until fetchEventsForDigest started actually returning events
+ * (previously `result.events` was always empty on devnet, so this line never
+ * got a real event to check against).
+ */
 export function extractRoomId(result: TxStatusLike): string {
-  const evt = (result.events ?? []).find((e) => (e.type ?? '').includes('::room_manager::RoomCreated'));
+  const evt = (result.events ?? []).find((e) => (e.type ?? '').includes('::room_manager_events::RoomCreated'));
   const roomId = (evt?.parsedJson as { room_id?: unknown })?.room_id;
   if (typeof roomId !== 'string') {
     throw new Error('extractRoomId: RoomCreated event missing or malformed');
@@ -75,6 +97,7 @@ export async function createRoomWithRelay(
   config: NetworkConfig,
   logger: Logger,
   fundAddress: (address: string) => Promise<void>,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<string> {
   await fundAddress(userKp.getPublicKey().toSuiAddress());
   await new Promise((r) => setTimeout(r, 1500));
@@ -84,7 +107,7 @@ export async function createRoomWithRelay(
       target: `${config.packageId}::user_registry::register_user`,
       arguments: [tx.object(config.networkRegistryId), tx.object(config.userRegistryId), tx.pure.vector('u8', [99])],
     });
-  }, 'register_user', logger);
+  }, 'register_user', logger, graphqlClient);
 
   const roomResult = await signAndAssert(client, userKp, (tx) => {
     tx.moveCall({
@@ -98,12 +121,14 @@ export async function createRoomWithRelay(
         tx.pure.u8(0), // room_class_hint = small
       ],
     });
-  }, 'create_room', logger);
+  }, 'create_room', logger, graphqlClient);
   const roomId = extractRoomId(roomResult);
 
   await signAndAssert(client, deployer, (tx) => {
     tx.moveCall({
-      target: `${config.packageId}::room_manager::assign_relay_and_signaling`,
+      // assign_relay_and_signaling is defined in the room_manager_pairing
+      // satellite module (pairing.move), not room_manager itself.
+      target: `${config.packageId}::room_manager_pairing::assign_relay_and_signaling`,
       arguments: [
         tx.object(config.networkRegistryId),
         tx.object(config.roomManagerId),

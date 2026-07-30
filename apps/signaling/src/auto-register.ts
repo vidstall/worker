@@ -10,9 +10,10 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
-import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, type NetworkConfig, type Logger } from '@dvconf/shared';
+import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, findCreatedObjectByType, type NetworkConfig, type Logger } from '@dvconf/shared';
 
 /** Signaling stake: 0.05 SUI = 50_000_000 MIST (per constants.move DEFAULT_SIGNALING_THRESHOLD). */
 const SIGNALING_STAKE = 50_000_000n;
@@ -126,6 +127,7 @@ export async function ensureRegistered(
   endpointUrl: string,
   region: string,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ minerCapId: string }> {
   const envCapId = process.env['MINER_CAP_ID'];
   const votingMode = process.env['REGISTRATION_MODE'] === 'voting';
@@ -159,7 +161,7 @@ export async function ensureRegistered(
         'MINER_CAP_ID has no StakePosition (likely ejected — the cap cannot be reused). ' +
         'Falling back to full re-registration with a fresh MinerCap + StakePosition.',
       );
-      return performFullRegistration(client, signer, config, endpointUrl, region, votingMode, logger);
+      return performFullRegistration(client, signer, config, endpointUrl, region, votingMode, logger, graphqlClient);
     }
 
     // register_signaling asserts cap.role == role_signaling() (E_NOT_SIGNALING).
@@ -185,7 +187,7 @@ export async function ensureRegistered(
   }
 
   logger.info('MINER_CAP_ID not set — attempting full auto-registration');
-  return performFullRegistration(client, signer, config, endpointUrl, region, votingMode, logger);
+  return performFullRegistration(client, signer, config, endpointUrl, region, votingMode, logger, graphqlClient);
 }
 
 /**
@@ -202,6 +204,7 @@ async function performFullRegistration(
   region: string,
   votingMode: boolean,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ minerCapId: string }> {
   // Before minting a brand-new identity, check whether an EARLIER attempt (e.g.
   // a container restart mid-registration) already succeeded at Step 1.
@@ -210,7 +213,7 @@ async function performFullRegistration(
   // profile exists for this address -- and StakePosition is a SHARED object
   // (transfer::share_object), invisible to getOwnedObjects, so the only way to
   // recover its id is from the transaction that created it.
-  const prior = await findPriorRegistration(client, signer, config, logger);
+  const prior = await findPriorRegistration(signer, config, logger, graphqlClient);
   if (prior) {
     logger.info(
       prior,
@@ -310,8 +313,15 @@ async function finishRegistration(
     }
   }
 
-  // Step 2: Register in SignalingRegistry
-  await registerInSignalingRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);
+  // Step 2: Register in SignalingRegistry -- a recovered (self-healed)
+  // registration may already be enrolled from before an earlier crash
+  // (register_signaling has no idempotency guard of its own and aborts
+  // E_ALREADY_REGISTERED), so check first instead of assuming a fresh Step 1
+  // mint always means Step 2 is pending.
+  const alreadyInRegistry = await isRegisteredInSignalingRegistry(client, config, minerCapId, logger);
+  if (!alreadyInRegistry) {
+    await registerInSignalingRegistry(client, signer, config, minerCapId, stakePositionId, endpointUrl, region, logger);
+  }
 
   logger.info(
     { minerCapId },
@@ -324,34 +334,30 @@ async function finishRegistration(
 /**
  * Look for a prior `registration::register` transaction from this wallet whose
  * effects created a MinerCap + StakePosition pair -- recovers from a crash
- * between Step 1 succeeding and this daemon persisting/using its result. Only
- * queryTransactionBlocks (not queryEvents, which some devnet fullnodes disable)
- * is used, since StakePosition is a SHARED object and cannot be found via
- * getOwnedObjects. Returns null (not an error) if none is found or the query
- * itself is unavailable -- callers fall through to minting a fresh pair.
+ * between Step 1 succeeding and this daemon persisting/using its result. Uses
+ * GraphQL's `findCreatedObjectByType` (shared/chain/events.ts), NOT
+ * `client.queryTransactionBlocks`, which is deprecated JSON-RPC on devnet's
+ * public fullnode. StakePosition is a SHARED object and cannot be found via
+ * getOwnedObjects, hence the transaction-history scan. Returns null (not an
+ * error, and also when `graphqlClient` is unset) if none is found -- callers
+ * fall through to minting a fresh pair.
  */
 async function findPriorRegistration(
-  client: SuiClient,
   signer: Ed25519Keypair,
   config: NetworkConfig,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ minerCapId: string; stakePositionId: string } | null> {
+  if (!graphqlClient) {
+    return null;
+  }
   const pkg = config.originalPackageId ?? config.packageId;
+  const address = signer.toSuiAddress();
   try {
-    const result = await client.queryTransactionBlocks({
-      filter: { FromAddress: signer.toSuiAddress() },
-      options: { showObjectChanges: true },
-      order: 'descending',
-      limit: 20,
-    });
-
-    for (const tx of result.data) {
-      const created = tx.objectChanges?.filter((c) => c.type === 'created') ?? [];
-      const cap = created.find((c) => 'objectType' in c && c.objectType === `${pkg}::caps::MinerCap`);
-      const stake = created.find((c) => 'objectType' in c && c.objectType === `${pkg}::staking::StakePosition`);
-      if (cap && stake && 'objectId' in cap && 'objectId' in stake) {
-        return { minerCapId: cap.objectId, stakePositionId: stake.objectId };
-      }
+    const minerCapId = await findCreatedObjectByType(graphqlClient, address, `${pkg}::caps::MinerCap`);
+    const stakePositionId = await findCreatedObjectByType(graphqlClient, address, `${pkg}::staking::StakePosition`);
+    if (minerCapId && stakePositionId) {
+      return { minerCapId, stakePositionId };
     }
     return null;
   } catch (err) {

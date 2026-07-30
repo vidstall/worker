@@ -52,6 +52,7 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
 import {
   createSuiClient,
+  createGraphQLClient,
   createLogger,
   loadNetworkConfig,
   signAndAssert,
@@ -157,6 +158,9 @@ async function main(): Promise<void> {
   // *_REGISTRY_ID from env and derives config.rpcUrl from SUI_NETWORK.
   const config = loadNetworkConfig();
   const client = createSuiClient(config.rpcUrl);
+  // Event queries only (RoomCreated lookup below) -- devnet's public
+  // fullnode returns empty `events` on JSON-RPC execute responses.
+  const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
 
   // Fresh, single-use user per run (mirrors provision-room.ts:70). The SAME user must
   // create both the room and the escrow — create_escrow asserts room_creator ==
@@ -195,6 +199,7 @@ async function main(): Promise<void> {
     },
     'create_room',
     logger,
+    graphqlClient,
   );
   const roomId = extractRoomId(roomResult);
   logger.info({ module: MODULE, action: 'create_room', context: { roomId } }, 'room created');

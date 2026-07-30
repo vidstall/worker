@@ -9,9 +9,10 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { NetworkConfig, Logger } from '@dvconf/shared';
-import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole } from '@dvconf/shared';
+import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, findCreatedObjectByType } from '@dvconf/shared';
 import { Transaction } from '@mysten/sui/transactions';
 
 /** Minimum stake for Validator role — 0.1 SUI (100_000_000 MIST). */
@@ -91,6 +92,7 @@ export async function ensureRegistered(
   signer: Ed25519Keypair,
   config: NetworkConfig,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ validatorCapId: string }> {
   // Check env first — skip registration if already registered
   const envCapId = process.env['VALIDATOR_CAP_ID'];
@@ -220,33 +222,63 @@ export async function ensureRegistered(
     logger,
   );
 
+  let minerCapId: string;
+  let stakePositionId: string;
+  let alreadyVoted = false;
+
   if (!minerResult) {
-    logger.error(
-      'Auto-registration failed: ensure wallet has sufficient SUI balance. ' +
-      'Set VALIDATOR_CAP_ID in .env if already registered.',
+    // Self-heal: registration::register aborts with E_ALREADY_REGISTERED on
+    // every restart after a successful prior boot that never got
+    // VALIDATOR_CAP_ID persisted back into the deploy env (e.g. Step 1
+    // succeeded but the daemon then crashed waiting on the role vote,
+    // Docker's restart policy relaunched it, and it's back here with no
+    // memory of the earlier success). Unlike relay/cp-daemon, this path had
+    // no recovery at all -- it just hard-exited, permanently wedging the
+    // validator even after a CP had already voted it in. Mirror relay's
+    // findPriorRegistration self-heal here instead of giving up.
+    logger.warn('Miner registration failed — checking for a prior partial registration attempt before giving up');
+    const prior = await findPriorRegistration(signer, config, logger, graphqlClient);
+    if (!prior) {
+      logger.error(
+        'Auto-registration failed: ensure wallet has sufficient SUI balance. ' +
+        'Set VALIDATOR_CAP_ID in .env if already registered.',
+      );
+      process.exit(1);
+    }
+    logger.info(
+      prior,
+      'Found MinerCap + StakePosition from a prior partial registration attempt — reusing instead of minting a new identity',
     );
-    process.exit(1);
-  }
+    minerCapId = prior.minerCapId;
+    stakePositionId = prior.stakePositionId;
 
-  // Extract both objects created by registration::register for Validator role:
-  //   - MinerCap  (caps::new_miner_cap + transfer::public_transfer)
-  //   - StakePosition (staking::create + staking::transfer_to)
-  const minerCapId = extractCreatedObjectByType(minerResult, '::caps::MinerCap');
-  const stakePositionId = extractCreatedObjectByType(minerResult, '::staking::StakePosition');
+    // The recovered cap may already carry role=Validator (vote was applied
+    // before the earlier crash) -- re-applying would abort, so check first.
+    const capInfo = await getMinerCapInfo(client, minerCapId, logger);
+    alreadyVoted = capInfo?.role === ROLE_VALIDATOR;
+  } else {
+    // Extract both objects created by registration::register for Validator role:
+    //   - MinerCap  (caps::new_miner_cap + transfer::public_transfer)
+    //   - StakePosition (staking::create + staking::transfer_to)
+    const createdCapId = extractCreatedObjectByType(minerResult, '::caps::MinerCap');
+    const createdStakeId = extractCreatedObjectByType(minerResult, '::staking::StakePosition');
 
-  if (!minerCapId) {
-    logger.error({ effects: minerResult.effects }, 'Failed to extract MinerCap ID from TX effects');
-    process.exit(1);
-  }
-  if (!stakePositionId) {
-    logger.error({ effects: minerResult.effects }, 'Failed to extract StakePosition ID from TX effects');
-    process.exit(1);
-  }
+    if (!createdCapId) {
+      logger.error({ effects: minerResult.effects }, 'Failed to extract MinerCap ID from TX effects');
+      process.exit(1);
+    }
+    if (!createdStakeId) {
+      logger.error({ effects: minerResult.effects }, 'Failed to extract StakePosition ID from TX effects');
+      process.exit(1);
+    }
+    minerCapId = createdCapId;
+    stakePositionId = createdStakeId;
 
-  logger.info({ minerCapId, stakePositionId }, 'Miner registration succeeded');
+    logger.info({ minerCapId, stakePositionId }, 'Miner registration succeeded');
+  }
 
   // Voting mode: wait for CPs to vote on our role, then apply it
-  if (votingMode) {
+  if (votingMode && !alreadyVoted) {
     const minerId = signer.toSuiAddress();
     await waitForRoleAssignment(client, config, minerId, logger);
     await applyVotedRole(client, signer, config, minerCapId, stakePositionId, logger);
@@ -260,27 +292,34 @@ export async function ensureRegistered(
   //   cap: &MinerCap,                    arg 2 — owned (from Step 1)
   //   stake: &StakePosition,             arg 3 — owned (from Step 1)
   // )
-  const validatorResult = await executeWithRetry(
-    client,
-    signer,
-    (tx) => {
-      tx.moveCall({
-        target: `${config.packageId}::validator_registry::register_validator`,
-        arguments: [
-          tx.object(config.networkRegistryId),   // 0 &NetworkRegistry
-          tx.object(config.validatorRegistryId), // 1 &mut ValidatorRegistry
-          tx.object(minerCapId),                 // 2 &MinerCap (from Step 1)
-          tx.object(stakePositionId),            // 3 &StakePosition (from Step 1)
-        ],
-      });
-    },
-    'validator_registry::register_validator',
-    logger,
-  );
+  // A recovered (self-healed) registration may already be enrolled in
+  // ValidatorRegistry from before the earlier crash -- register_validator
+  // has no idempotency guard of its own, so check first to avoid a
+  // needless abort.
+  const alreadyInRegistry = await isRegisteredInValidatorRegistry(client, config, signer.toSuiAddress(), logger);
+  if (!alreadyInRegistry) {
+    const validatorResult = await executeWithRetry(
+      client,
+      signer,
+      (tx) => {
+        tx.moveCall({
+          target: `${config.packageId}::validator_registry::register_validator`,
+          arguments: [
+            tx.object(config.networkRegistryId),   // 0 &NetworkRegistry
+            tx.object(config.validatorRegistryId), // 1 &mut ValidatorRegistry
+            tx.object(minerCapId),                 // 2 &MinerCap (from Step 1)
+            tx.object(stakePositionId),             // 3 &StakePosition (from Step 1)
+          ],
+        });
+      },
+      'validator_registry::register_validator',
+      logger,
+    );
 
-  if (!validatorResult) {
-    logger.error('Validator registry registration failed after miner registration succeeded');
-    process.exit(1);
+    if (!validatorResult) {
+      logger.error('Validator registry registration failed after miner registration succeeded');
+      process.exit(1);
+    }
   }
 
   // register_validator does not create a new cap — the MinerCap from Step 1 is the validator cap
@@ -293,4 +332,39 @@ export async function ensureRegistered(
   );
 
   return { validatorCapId };
+}
+
+/**
+ * Look up a MinerCap + StakePosition minted for this wallet by an earlier,
+ * partially-completed registration attempt (mirrors relay's auto-register.ts
+ * findPriorRegistration). StakePosition is a SHARED object
+ * (transfer::share_object), invisible to getOwnedObjects, so the only way
+ * to recover its id is from the transaction that created it. Uses GraphQL's
+ * `findCreatedObjectByType` (shared/chain/events.ts), NOT
+ * `client.queryTransactionBlocks`, which is deprecated JSON-RPC on devnet's
+ * public fullnode. Returns null (not an error, and also when `graphqlClient`
+ * is unset) if none is found -- callers fall through to minting a fresh pair.
+ */
+async function findPriorRegistration(
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
+): Promise<{ minerCapId: string; stakePositionId: string } | null> {
+  if (!graphqlClient) {
+    return null;
+  }
+  const pkg = config.originalPackageId ?? config.packageId;
+  const address = signer.toSuiAddress();
+  try {
+    const minerCapId = await findCreatedObjectByType(graphqlClient, address, `${pkg}::caps::MinerCap`);
+    const stakePositionId = await findCreatedObjectByType(graphqlClient, address, `${pkg}::staking::StakePosition`);
+    if (minerCapId && stakePositionId) {
+      return { minerCapId, stakePositionId };
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ err }, 'Could not query prior registration transactions; will mint a fresh MinerCap + StakePosition');
+    return null;
+  }
 }

@@ -39,6 +39,7 @@ import { pathToFileURL } from 'node:url';
 import { Transaction } from '@mysten/sui/transactions';
 import {
   createSuiClient,
+  createGraphQLClient,
   createLogger,
   loadNetworkConfig,
   executeWithRetry,
@@ -173,6 +174,9 @@ async function main(): Promise<void> {
 
   const config = loadNetworkConfig();
   const client = createSuiClient(config.rpcUrl);
+  // Event queries only (CapabilityIssued lookup below) -- devnet's public
+  // fullnode returns empty `events` on JSON-RPC execute responses.
+  const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
   const signer = loadKeypair('SUI_PRIVATE_KEY'); // the single CP operator
 
   // ── QuorumConfigState id (NOT carried by NetworkConfig) ──────────────────
@@ -231,6 +235,7 @@ async function main(): Promise<void> {
       ),
     'issue-capability-token',
     logger,
+    graphqlClient,
   );
   if (result === null) {
     throw new Error('issue-cap-token-demo: executeWithRetry exhausted retries (no TxResult)');

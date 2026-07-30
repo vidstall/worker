@@ -14,7 +14,7 @@
  *
  * CRITICAL: never log the private key.
  */
-import { createSuiClient, loadNetworkConfig, loadKeypair, createLogger } from '@dvconf/shared';
+import { createSuiClient, createGraphQLClient, loadNetworkConfig, loadKeypair, createLogger } from '@dvconf/shared';
 import { loadBotConfig } from './config.js';
 import { startBotSession, type MediaMode, type RoomMode } from './session.js';
 
@@ -43,6 +43,7 @@ async function main(): Promise<void> {
   const networkConfig = loadNetworkConfig();
   const signer = loadKeypair('PRIVATE_KEY');
   const client = createSuiClient(networkConfig.rpcUrl);
+  const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
 
   const roomMode = readRoomMode();
   const roomId = process.env['ROOM_ID'];
@@ -53,7 +54,7 @@ async function main(): Promise<void> {
 
   const session = await startBotSession(
     { roomMode, roomId, mediaMode },
-    { client, signer, networkConfig, botConfig, logger },
+    { client, signer, networkConfig, botConfig, logger, graphqlClient },
   );
   logger.info(
     { module: 'bot-run-once', roomId: session.roomId, joinUrl: session.joinUrl },

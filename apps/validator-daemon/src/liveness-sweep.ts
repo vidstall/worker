@@ -42,6 +42,7 @@
  * SelfShutdownWatcher).
  */
 
+import { join } from 'node:path';
 import type { SuiClient } from '@mysten/sui/client';
 import type { SuiGraphQLClient, GraphQLQueryResult } from '@mysten/sui/graphql';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
@@ -57,6 +58,11 @@ import {
 } from '@dvconf/shared';
 
 const MOD = 'liveness-sweep';
+
+/** Base dir for these cursors -- DATA_DIR (mirrors ChainEventListener's own
+ *  default), NOT process.cwd(), so a container recreate (redeploy) doesn't
+ *  force a full event-history replay from genesis. */
+const cursorDir = (name: string): string => join(process.env.DATA_DIR ?? '.', '.cursors', name);
 
 const ZERO = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
@@ -256,7 +262,7 @@ class HeartbeatTracker {
           packageId: config.originalPackageId ?? config.packageId,
           module,
           pollingIntervalMs: pollIntervalMs,
-          cursorPath: `.cursors/liveness-${module}-heartbeat.json`,
+          cursorPath: cursorDir(`liveness-${module}-heartbeat.json`),
           logger: logger.child({ poller: module }),
         }),
     );
@@ -553,9 +559,13 @@ export function startLivenessSweep(opts: LivenessSweepOptions): LivenessSweepHan
     // originalPackageId here silently matches zero events forever. See
     // NetworkConfig.livenessVotingOriginPackageId.
     packageId: config.livenessVotingOriginPackageId ?? config.originalPackageId ?? config.packageId,
-    module: 'liveness_voting',
+    // NOT 'liveness_voting' -- NodeEjectionApproved is defined in the
+    // companion liveness_voting_events module (LOC-budget split,
+    // liveness_voting/events.move), and events are pinned to whichever
+    // module FIRST DEFINED the struct.
+    module: 'liveness_voting_events',
     pollingIntervalMs: pollIntervalMs,
-    cursorPath: '.cursors/liveness-voting-events.json',
+    cursorPath: cursorDir('liveness-voting-events.json'),
     logger: logger.child({ poller: 'liveness_voting' }),
   });
 

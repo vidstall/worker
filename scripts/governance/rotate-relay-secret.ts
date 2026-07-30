@@ -27,6 +27,7 @@ import { pathToFileURL } from 'node:url';
 import type { Transaction } from '@mysten/sui/transactions';
 import {
   createSuiClient,
+  createGraphQLClient,
   createLogger,
   loadNetworkConfig,
   loadKeypair,
@@ -101,6 +102,9 @@ async function main(): Promise<void> {
   // createSuiClient takes the network/url, NOT the whole config (sibling idiom:
   // request-revote.ts / revoke-cap-token.ts both pass config.rpcUrl).
   const client = createSuiClient(config.rpcUrl);
+  // Event queries only (SecretRotated lookup below) -- devnet's public
+  // fullnode returns empty `events` on JSON-RPC execute responses.
+  const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
   // Sibling idiom: SUI_PRIVATE_KEY is loaded via the shared loadKeypair helper, NOT
   // Ed25519Keypair.fromSecretKey directly. Here it MUST be the AdminCap owner key.
   const signer = loadKeypair('SUI_PRIVATE_KEY');
@@ -121,6 +125,7 @@ async function main(): Promise<void> {
     (tx: Transaction) => buildRotateRelaySecretTx(tx, config, args),
     'emergency-rotate-relay-secret',
     logger,
+    graphqlClient,
   );
   if (result === null) {
     throw new Error('rotate-relay-secret: tx submission failed (retries exhausted)');

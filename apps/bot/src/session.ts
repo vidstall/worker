@@ -12,12 +12,14 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { NetworkConfig, Logger } from '@dvconf/shared';
 import { loadWrtcNonstandard } from '@dvconf/shared';
 import {
   registerUser,
   createRoom,
+  createEscrow,
   resolveRoomRelayUrl,
   CREATE_ROOM_POLL_OPTS,
   JOIN_ROOM_POLL_OPTS,
@@ -54,6 +56,13 @@ export interface StartBotSessionDeps {
   botConfig: BotConfig;
   logger: Logger;
   /**
+   * Optional. devnet's public fullnode returns empty `events` on the
+   * JSON-RPC execute response (event-shaped reads are deprecated there);
+   * when provided, `createRoom`'s RoomCreated lookup is backfilled via
+   * GraphQL instead of the (empty) JSON-RPC response.
+   */
+  graphqlClient?: SuiGraphQLClient;
+  /**
    * Optional per-phase duration callback (ms) for the academic-eval
    * scalability dashboard's join-latency breakdown -- kept as a plain
    * callback rather than importing a `prom-client` type directly, so this
@@ -76,7 +85,7 @@ export async function startBotSession(
   opts: BotSessionOptions,
   deps: StartBotSessionDeps,
 ): Promise<BotSession> {
-  const { client, signer, networkConfig, botConfig, logger, onJoinPhase } = deps;
+  const { client, signer, networkConfig, botConfig, logger, onJoinPhase, graphqlClient } = deps;
 
   if (opts.roomMode === 'join' && (!opts.roomId || opts.roomId.trim() === '')) {
     throw new Error('startBotSession: roomId is required when roomMode is "join"');
@@ -111,12 +120,15 @@ export async function startBotSession(
         networkConfig,
         { expectedParticipants: botConfig.expectedParticipants },
         logger,
+        graphqlClient,
       ),
     );
     roomId = created.roomId;
+    logger.info({ module: 'bot-session', sessionId: id, roomId }, 'room created — depositing escrow…');
+    await timePhase('create_escrow', () => createEscrow(client, signer, networkConfig, roomId, logger));
     logger.info(
       { module: 'bot-session', sessionId: id, roomId },
-      'room created — polling for relay assignment (cp-daemon must be running)…',
+      'escrow deposited — polling for relay assignment (cp-daemon must be running)…',
     );
     relayUrl = await timePhase('resolve_relay', () =>
       resolveRoomRelayUrl(client, networkConfig, roomId, logger, CREATE_ROOM_POLL_OPTS),

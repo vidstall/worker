@@ -8,9 +8,9 @@ import type { NetworkConfig } from '../types/chain.js';
 import type { Logger } from 'pino';
 import { executeWithRetry } from './tx.js';
 import { Transaction } from '@mysten/sui/transactions';
-import type { Counter } from 'prom-client';
+import type { Counter, Histogram } from 'prom-client';
 import type { Registry } from '../metrics-prom.js';
-import { createCounter } from '../metrics-prom.js';
+import { createCounter, createDurationHistogram } from '../metrics-prom.js';
 
 // Academic-eval decentralization metric, the completion-side counterpart to
 // role-voter.ts's dvconf_role_votes_cast_total -- one per role_voting.move's
@@ -18,13 +18,25 @@ import { createCounter } from '../metrics-prom.js';
 // assignment. Same opt-in module-level pattern as tx.ts's registerTxMetrics.
 let roleAssignmentCounter: Counter<string> | null = null;
 
-/** Wire `dvconf_role_assignments_total{service}` into `registry` -- call once at startup on the voted-on side (relay/signaling/validator-daemon). */
+// Monitoring-redesign gap #1: waitForRoleAssignment() was a bare polling loop
+// with zero metrics -- the CP role-assignment wait (this incident's own
+// invisible bottleneck) only surfaced when we queried on-chain state by hand.
+// Reuses the same opt-in module-level pattern as roleAssignmentCounter above.
+let roleAssignmentWaitHistogram: Histogram<string> | null = null;
+
+/** Wire `dvconf_role_assignments_total{service}` and `dvconf_role_assignment_wait_seconds{service,result}` into `registry` -- call once at startup on the voted-on side (relay/signaling/validator-daemon). */
 export function registerRoleAssignmentMetrics(registry: Registry, service: string): void {
   roleAssignmentCounter = createCounter(
     registry,
     'dvconf_role_assignments_total',
     'Successful apply_voted_role transactions completed by this instance',
     ['service'],
+  );
+  roleAssignmentWaitHistogram = createDurationHistogram(
+    registry,
+    'dvconf_role_assignment_wait_seconds',
+    'Time spent in waitForRoleAssignment polling for a CP-voted role, by outcome',
+    ['service', 'result'],
   );
   roleAssignmentMetricsService = service;
 }
@@ -44,6 +56,7 @@ export async function waitForRoleAssignment(
   pollIntervalMs = 3_000,
 ): Promise<number> {
   const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
   logger.info({ minerId }, 'Waiting for role assignment via CP voting...');
 
   while (Date.now() < deadline) {
@@ -70,6 +83,10 @@ export async function waitForRoleAssignment(
         if (bytes.length >= 2 && bytes[0] === 1) {
           const role = bytes[1];
           logger.info({ minerId, role }, 'Role assigned by voting');
+          roleAssignmentWaitHistogram?.observe(
+            { service: roleAssignmentMetricsService, result: 'assigned' },
+            (Date.now() - startedAt) / 1000,
+          );
           return role;
         }
       }
@@ -80,6 +97,10 @@ export async function waitForRoleAssignment(
     await new Promise(r => setTimeout(r, pollIntervalMs));
   }
 
+  roleAssignmentWaitHistogram?.observe(
+    { service: roleAssignmentMetricsService, result: 'timeout' },
+    (Date.now() - startedAt) / 1000,
+  );
   throw new Error(`Role assignment timeout after ${timeoutMs}ms for miner ${minerId}`);
 }
 

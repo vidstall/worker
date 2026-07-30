@@ -54,7 +54,7 @@ import {
   type ThresholdEnv,
 } from '@dvconf/health-monitor';
 import { buildHealthSignals, type SignalingHealthDeps } from './health-signals.js';
-import { RoomManager, getSessionsRouted } from './rooms.js';
+import { RoomManager, getSessionsRouted, registerRoomMetrics } from './rooms.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
 import {
@@ -673,6 +673,7 @@ if (isMainModule) {
     registerTxMetrics(promRegistry, 'signaling');
     registerEventPollerMetrics(promRegistry, 'signaling');
     registerRoleAssignmentMetrics(promRegistry, 'signaling');
+    registerRoomMetrics(promRegistry);
     // Academic-eval scalability metrics (see .claude/plans -- these are live
     // fleet signals, complementary to the BENCH_LATENCY-gated microbench
     // suite, not a replacement for it). sessionsRouted is a cumulative
@@ -710,7 +711,7 @@ if (isMainModule) {
     }, 5000);
 
     // Step 1: Auto-register on-chain
-    const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger);
+    const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger, graphqlClient);
 
     // Step 1.5: Wire LIVE cap-token admission (W-P3, REQ-ADW-002) — real
     // capability_events poller + cached-epoch refresher feeding an AuthHook that

@@ -7,9 +7,10 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
-import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, type NetworkConfig, type Logger } from '@dvconf/shared';
+import { executeWithRetry, extractCreatedObjectByType, waitForRoleAssignment, applyVotedRole, findCreatedObjectByType, type NetworkConfig, type Logger } from '@dvconf/shared';
 
 /**
  * Look up whether this wallet already owns a ControlPlaneCap (i.e. it
@@ -21,6 +22,7 @@ async function findExistingCpCap(
   signer: Ed25519Keypair,
   config: NetworkConfig,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ cpCapId: string; stakePositionId: string } | null> {
   try {
     const owner = signer.toSuiAddress();
@@ -31,20 +33,23 @@ async function findExistingCpCap(
     // still valid. relay/signaling/validator-daemon already do this
     // correctly; this was the one copy that didn't.
     const pkg = config.originalPackageId ?? config.packageId;
-    const [capObjects, stakeObjects] = await Promise.all([
+    // StakePosition is a SHARED object (transfer::share_object) -- invisible
+    // to getOwnedObjects, which only ever returned undefined for it here
+    // (this was the one copy of this self-heal that never noticed: relay's
+    // and validator-daemon's equivalents already had to work around the
+    // exact same thing, just via a since-deprecated queryTransactionBlocks
+    // call instead of a permanently-wrong getOwnedObjects one). Recovered
+    // via GraphQL (findCreatedObjectByType, shared/chain/events.ts) instead,
+    // scanning this wallet's created-object history forward from genesis.
+    const [capObjects, stakePositionId] = await Promise.all([
       client.getOwnedObjects({
         owner,
         filter: { StructType: `${pkg}::caps::ControlPlaneCap` },
         options: { showContent: false },
       }),
-      client.getOwnedObjects({
-        owner,
-        filter: { StructType: `${pkg}::staking::StakePosition` },
-        options: { showContent: false },
-      }),
+      graphqlClient ? findCreatedObjectByType(graphqlClient, owner, `${pkg}::staking::StakePosition`) : Promise.resolve(null),
     ]);
     const cpCapId = capObjects.data[0]?.data?.objectId;
-    const stakePositionId = stakeObjects.data[0]?.data?.objectId;
     if (!cpCapId || !stakePositionId) return null;
     return { cpCapId, stakePositionId };
   } catch (err) {
@@ -98,6 +103,7 @@ export async function ensureRegistered(
   signer: Ed25519Keypair,
   config: NetworkConfig,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ cpCapId: string }> {
   // Check if already registered via env. Unlike relay/signaling/
   // validator-daemon's equivalent fast paths, this used to return
@@ -119,7 +125,7 @@ export async function ensureRegistered(
       { cpCapId: envCapId },
       'CP_CAP_ID set but not found in ControlPlaneRegistry (likely ejected for a liveness gap) — re-enrolling',
     );
-    const existing = await findExistingCpCap(client, signer, config, logger);
+    const existing = await findExistingCpCap(client, signer, config, logger, graphqlClient);
     if (!existing) {
       // registration::execute_ejection (and unregister()) both fully
       // force_destroy the StakePosition, not just remove the registry
@@ -135,7 +141,7 @@ export async function ensureRegistered(
         { cpCapId: envCapId },
         'No StakePosition left for this wallet (fully ejected) — minting a fresh CP identity',
       );
-      return performFullRegistration(client, signer, config, logger);
+      return performFullRegistration(client, signer, config, logger, graphqlClient);
     }
     const healed = await registerCpInRegistry(client, signer, config, envCapId, existing.stakePositionId, logger);
     if (!healed) {
@@ -147,7 +153,59 @@ export async function ensureRegistered(
   }
 
   logger.info('CP_CAP_ID not set — attempting auto-registration');
-  return performFullRegistration(client, signer, config, logger);
+  return performFullRegistration(client, signer, config, logger, graphqlClient);
+}
+
+/**
+ * staking::determine_role assigns role=CP only if stake_amount >=
+ * cp_threshold + cp_count * CP_THRESHOLD_STEP -- a dynamic, ever-growing
+ * floor (cp_count only ever goes up; nothing decrements it short of an
+ * unregister/ejection). Falling short of it is NOT an abort -- register()
+ * just silently mints a plain MinerCap with role=user instead of a
+ * ControlPlaneCap, and the wallet can never re-register afterward
+ * (register() unconditionally rejects any address with an existing
+ * profile, regardless of role). A hardcoded stake eventually goes stale
+ * as cp_count grows across the network's lifetime and wedges every CP
+ * that registers after it does -- so read the live threshold instead.
+ *
+ * CP_THRESHOLD_STEP mirrors constants::CP_THRESHOLD_STEP (0.1 SUI); it's a
+ * compile-time Move constant, not readable off any object, so it has to be
+ * duplicated here same as the base threshold assumption this replaces.
+ */
+async function resolveCpStake(
+  client: SuiClient,
+  config: NetworkConfig,
+  logger: Logger,
+): Promise<bigint> {
+  const CP_STAKE_FLOOR = 1_000_000_000n; // 1.0 SUI
+  const CP_THRESHOLD_STEP = 100_000_000n; // +0.1 SUI per existing CP
+  const SAFETY_MARGIN = 300_000_000n; // headroom for CPs registering concurrently in this same batch
+
+  try {
+    const [registryObj, storeObj] = await Promise.all([
+      client.getObject({ id: config.networkRegistryId, options: { showContent: true } }),
+      client.getObject({ id: config.minerStoreId, options: { showContent: true } }),
+    ]);
+    const registryFields = (registryObj.data?.content as { fields: Record<string, unknown> } | undefined)?.fields;
+    const thresholdFields = (registryFields?.['role_thresholds'] as { fields: Record<string, string> } | undefined)
+      ?.fields;
+    const cpThreshold = BigInt(thresholdFields?.['cp_threshold'] ?? CP_STAKE_FLOOR.toString());
+
+    const storeFields = (storeObj.data?.content as { fields: Record<string, unknown> } | undefined)?.fields;
+    const cpMinersFields = (storeFields?.['cp_miners'] as { fields: { contents: unknown[] } } | undefined)?.fields;
+    const cpCount = BigInt(cpMinersFields?.contents?.length ?? 0);
+
+    const dynamicThreshold = cpThreshold + cpCount * CP_THRESHOLD_STEP + SAFETY_MARGIN;
+    const stake = dynamicThreshold > CP_STAKE_FLOOR ? dynamicThreshold : CP_STAKE_FLOOR;
+    logger.info(
+      { cpThreshold: cpThreshold.toString(), cpCount: cpCount.toString(), stake: stake.toString() },
+      'Resolved live CP stake requirement',
+    );
+    return stake;
+  } catch (err) {
+    logger.warn({ err }, 'Could not read live CP threshold — falling back to static CP_STAKE floor');
+    return CP_STAKE_FLOOR;
+  }
 }
 
 /**
@@ -162,13 +220,8 @@ async function performFullRegistration(
   signer: Ed25519Keypair,
   config: NetworkConfig,
   logger: Logger,
+  graphqlClient?: SuiGraphQLClient,
 ): Promise<{ cpCapId: string }> {
-  /**
-   * CP stake: 1.0 SUI (1_000_000_000 MIST).
-   * Dynamic CP threshold = base(0.5) + cp_count * step(0.1), so 1.0 SUI
-   * covers up to 5 existing CPs.
-   */
-  const CP_STAKE = 1_000_000_000n;
   /** Minimum stake for voting-mode registration (0.01 SUI). */
   const MIN_VOTING_STAKE = 10_000_000n;
 
@@ -178,7 +231,7 @@ async function performFullRegistration(
   if (process.env['REGISTRATION_MODE'] === 'voting') {
     logger.info('REGISTRATION_MODE=voting ignored for CP — CPs always self-register directly');
   }
-  const stakeAmount = CP_STAKE;
+  const stakeAmount = await resolveCpStake(client, config, logger);
 
   // Step 1: Register as a miner with role=CP (or role=0 in voting mode)
   const minerResult = await executeWithRetry(
@@ -219,7 +272,7 @@ async function performFullRegistration(
     // ControlPlaneCap from that earlier run and pick up from there instead
     // of crash-looping forever.
     logger.warn('Miner registration failed — checking for an existing ControlPlaneCap before giving up');
-    const existing = await findExistingCpCap(client, signer, config, logger);
+    const existing = await findExistingCpCap(client, signer, config, logger, graphqlClient);
     if (!existing) {
       logger.error(
         'Auto-registration failed: ensure wallet has sufficient SUI balance. ' +

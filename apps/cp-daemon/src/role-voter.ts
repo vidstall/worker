@@ -16,6 +16,7 @@ import {
   executeWithRetry,
   MinerRole,
   createCounter,
+  createDurationHistogram,
   type NetworkConfig,
   type Logger,
   type Registry,
@@ -33,12 +34,26 @@ const IdVectorSchema = bcs.vector(bcs.Address);
 // packages/shared/src/chain/tx.ts's registerTxMetrics.
 let roleVoteCounter: ReturnType<typeof createCounter> | null = null;
 
-/** Wire `dvconf_role_votes_cast_total` into `registry` -- call once at cp-daemon startup. */
+// Monitoring-redesign gap #2: dvconf_role_votes_cast_total only counts votes
+// cast, not how long a miner sat unassigned before this CP got to it --
+// tracked per-miner via minerDiscoveredAt below (populated wherever a miner
+// first enters unassignedMiners, either the live event path or the
+// self-heal reconcile backfill).
+let roleVoteLatencyHistogram: ReturnType<typeof createDurationHistogram> | null = null;
+const minerDiscoveredAt = new Map<string, number>();
+
+/** Wire `dvconf_role_votes_cast_total` and `dvconf_role_vote_latency_seconds` into `registry` -- call once at cp-daemon startup. */
 export function registerRoleVoterMetrics(registry: Registry): void {
   roleVoteCounter = createCounter(
     registry,
     'dvconf_role_votes_cast_total',
     'Successful cast_role_vote transactions submitted by this CP',
+    [],
+  );
+  roleVoteLatencyHistogram = createDurationHistogram(
+    registry,
+    'dvconf_role_vote_latency_seconds',
+    'Time from a miner first being seen as unassigned to this CP casting its role vote',
     [],
   );
 }
@@ -260,6 +275,9 @@ async function castVote(
  * Add a miner to the unassigned set (called from event handler on MinerRegistered with role=0).
  */
 export function trackUnassignedMiner(minerId: string): void {
+  if (!unassignedMiners.has(minerId)) {
+    minerDiscoveredAt.set(minerId, Date.now());
+  }
   unassignedMiners.add(minerId);
 }
 
@@ -296,6 +314,7 @@ async function reconcileUnassignedMiners(
     let discovered = 0;
     for (const id of ids) {
       if (!unassignedMiners.has(id) && !votedMiners.has(id)) {
+        minerDiscoveredAt.set(id, Date.now());
         unassignedMiners.add(id);
         discovered++;
       }
@@ -318,6 +337,7 @@ async function reconcileUnassignedMiners(
 export function clearVotedMiner(minerId: string): void {
   votedMiners.delete(minerId);
   unassignedMiners.delete(minerId);
+  minerDiscoveredAt.delete(minerId);
 }
 
 /**
@@ -429,6 +449,11 @@ export function startRoleVoting(
         try {
           await castVote(client, signer, config, cpCapId, minerId, role, logger);
           votedMiners.add(minerId);
+          const discoveredAt = minerDiscoveredAt.get(minerId);
+          if (discoveredAt !== undefined) {
+            roleVoteLatencyHistogram?.observe((Date.now() - discoveredAt) / 1000);
+            minerDiscoveredAt.delete(minerId);
+          }
 
           logger.info(
             { minerId, role: roleNames[role] ?? String(role) },

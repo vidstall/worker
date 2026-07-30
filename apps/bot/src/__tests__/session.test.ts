@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const registerUserMock = vi.fn();
 const createRoomMock = vi.fn();
+const createEscrowMock = vi.fn();
 const resolveRoomRelayUrlMock = vi.fn();
 
 vi.mock('../chain.js', () => ({
   registerUser: registerUserMock,
   createRoom: createRoomMock,
+  createEscrow: createEscrowMock,
   resolveRoomRelayUrl: resolveRoomRelayUrlMock,
   CREATE_ROOM_POLL_OPTS: { timeoutMs: 30_000, pollIntervalMs: 2_000 },
   JOIN_ROOM_POLL_OPTS: { timeoutMs: 10_000, pollIntervalMs: 1_000 },
@@ -72,6 +74,7 @@ describe('startBotSession', () => {
   beforeEach(() => {
     registerUserMock.mockReset().mockResolvedValue(undefined);
     createRoomMock.mockReset();
+    createEscrowMock.mockReset().mockResolvedValue(undefined);
     resolveRoomRelayUrlMock.mockReset();
     connectMock.mockReset().mockResolvedValue(undefined);
     produceVideoMock.mockReset().mockResolvedValue(undefined);

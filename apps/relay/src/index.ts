@@ -12,6 +12,7 @@
 
 import '@dvconf/shared/otel-bootstrap';
 import 'dotenv/config';
+import { join } from 'node:path';
 import {
   createSuiClient,
   createGraphQLClient,
@@ -117,7 +118,7 @@ if (isMainModule) {
     );
 
     // Step 1: Auto-register on-chain
-    const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger);
+    const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger, graphqlClient);
 
     // Step 2: Create mediasoup Workers
     const manager = await createMediasoupManager(logger);
@@ -870,15 +871,23 @@ if (isMainModule) {
     interRelayContext.fanToTreeNeighbors = RMS_TREE_ACTIVE ? fanToTreeNeighbors : undefined;
     interRelayContext.treeActive = RMS_TREE_ACTIVE;
 
-    // Step 7: Poll room_manager events for MCU room assignments
+    // Step 7: Poll room_manager events for MCU room assignments.
+    // module is 'room_manager_events' (NOT 'room_manager') -- RoomAssigned
+    // etc. are defined in the companion room_manager_events module
+    // (LOC-budget split, room_manager/events.move); events are pinned to
+    // whichever module FIRST DEFINED the struct -- confirmed via live
+    // GraphQL introspection against a real create_room tx.
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
     const myMinerId = signer.toSuiAddress();
     const roomPoller = new EventPoller({
       client: graphqlClient,
       packageId: config.originalPackageId ?? config.packageId,
-      module: 'room_manager',
+      module: 'room_manager_events',
       pollingIntervalMs: pollIntervalMs,
-      cursorPath: '.cursors/room_manager.json',
+      // DATA_DIR (mirrors ChainEventListener's own default), NOT process.cwd(),
+      // so a container recreate (redeploy) doesn't force a full event-history
+      // replay from genesis.
+      cursorPath: join(process.env['DATA_DIR'] ?? '.', '.cursors', 'room_manager.json'),
       logger: logger.child({ poller: 'room_manager' }),
     });
     roomPoller.start(async (event) => {

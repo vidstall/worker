@@ -127,6 +127,174 @@ function toSuiEvent(node: GraphQLEventNode, cursor: string): SuiEvent {
   } as unknown as SuiEvent;
 }
 
+interface TransactionEventsQueryResult {
+  transactionEffects: {
+    events: {
+      nodes: GraphQLEventNode[];
+    };
+  } | null;
+}
+
+// Query.transactionEffects (NOT transactionBlock -- verified via live schema
+// introspection against fullnode.devnet.sui.io/graphql: the @mysten/sui SDK's
+// bundled generated schema type still names it "transactionBlock", but the
+// GraphQL service itself has since renamed the root field, so the earlier
+// version of this query 400'd with "Unknown field \"transactionBlock\"" and
+// silently degraded to an empty event list at every call site).
+// transactionEffects IS the effects object -- `events` hangs directly off it,
+// there is no separate nested `effects` field like the old schema had.
+const TRANSACTION_EVENTS_QUERY = `
+  query TransactionEvents($digest: String!) {
+    transactionEffects(digest: $digest) {
+      events(first: 50) {
+        nodes {
+          sender { address }
+          sequenceNumber
+          timestamp
+          transactionModule { package { address } name }
+          contents { json type { repr } }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Fetch the events emitted by ONE already-executed transaction, by digest --
+ * the GraphQL replacement for reading `.events` off a JSON-RPC
+ * `signAndExecuteTransaction`/`executeTransactionBlock` response, which comes
+ * back empty on devnet's public fullnode (JSON-RPC event-shaped reads are
+ * deprecated there -- see this file's own top-of-file docstring). Used by
+ * `chain/tx.ts::executeWithRetry` and `chain/provision-room.ts::signAndAssert`
+ * to backfill `result.events` when it comes back empty.
+ */
+export async function fetchEventsForDigest(client: SuiGraphQLClient, digest: string): Promise<SuiEvent[]> {
+  const result = await client.query<TransactionEventsQueryResult, { digest: string }>({
+    query: TRANSACTION_EVENTS_QUERY,
+    variables: { digest },
+  });
+
+  if (result.errors && result.errors.length > 0) {
+    throw new Error(
+      `GraphQL transaction-events query failed for ${digest}: ${result.errors.map((e: { message: string }) => e.message).join('; ')}`,
+    );
+  }
+
+  const nodes = result.data?.transactionEffects?.events.nodes ?? [];
+  return nodes.map((node) => toSuiEvent(node, digest));
+}
+
+interface ObjectChangeNode {
+  address: string;
+  idCreated: boolean;
+  outputState: { asMoveObject: { contents: { type: { repr: string } } } | null } | null;
+}
+
+interface AddressTransactionsQueryResult {
+  address: {
+    transactions: {
+      nodes: Array<{
+        digest: string;
+        effects: { objectChanges: { nodes: ObjectChangeNode[] } } | null;
+      }>;
+      pageInfo: { hasNextPage: boolean; hasPreviousPage: boolean; startCursor: string | null; endCursor: string | null };
+    };
+  } | null;
+}
+
+// Paginates FORWARD from the beginning of the address's history (first/after),
+// not backward from the most recent transactions (last/before) -- a
+// registration tx is typically the FIRST thing an address ever does, so
+// scanning from genesis finds it in one page, whereas scanning from "most
+// recent N" can miss it forever once enough later transactions (heartbeats,
+// etc.) have accumulated. Replaces `client.queryTransactionBlocks(...)`,
+// which is deprecated JSON-RPC on devnet's public fullnode (confirmed via
+// direct curl: same "JSON-RPC on public fullnodes has been deprecated"
+// error as every other event-shaped read fixed in this file).
+const ADDRESS_TRANSACTIONS_QUERY = `
+  query AddressTransactions($address: SuiAddress!, $after: String) {
+    address(address: $address) {
+      transactions(filter: { sentAddress: $address }, first: 50, after: $after) {
+        nodes {
+          digest
+          effects {
+            objectChanges(first: 50) {
+              nodes {
+                address
+                idCreated
+                outputState {
+                  asMoveObject {
+                    contents { type { repr } }
+                  }
+                }
+              }
+            }
+          }
+        }
+        pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      }
+    }
+  }
+`;
+
+/**
+ * Find the first-created on-chain object of type `objectType` among the
+ * objects an `address` has created across its ENTIRE transaction history,
+ * scanning forward from genesis. Used to recover a wallet's own MinerCap /
+ * StakePosition / ValidatorCap object IDs after a partial registration
+ * attempt (self-heal), replacing `client.queryTransactionBlocks(...)` --
+ * see this file's own docstring and ADDRESS_TRANSACTIONS_QUERY's comment.
+ * Returns null if no matching object is found within `maxPages` pages.
+ */
+export async function findCreatedObjectByType(
+  client: SuiGraphQLClient,
+  address: string,
+  objectType: string,
+  maxPages = 20,
+): Promise<string | null> {
+  let after: string | null = null;
+  let hasNextPage = true;
+  let pages = 0;
+
+  while (hasNextPage && pages < maxPages) {
+    const result: GraphQLQueryResult<AddressTransactionsQueryResult> = await client.query<
+      AddressTransactionsQueryResult,
+      { address: string; after: string | null }
+    >({
+      query: ADDRESS_TRANSACTIONS_QUERY,
+      variables: { address, after },
+    });
+
+    if (result.errors && result.errors.length > 0) {
+      throw new Error(
+        `GraphQL address-transactions query failed for ${address}: ${result.errors.map((e: { message: string }) => e.message).join('; ')}`,
+      );
+    }
+
+    const txs = result.data?.address?.transactions;
+    if (!txs) {
+      return null;
+    }
+
+    for (const tx of txs.nodes) {
+      const changes = tx.effects?.objectChanges.nodes ?? [];
+      for (const change of changes) {
+        if (!change.idCreated) continue;
+        const repr = change.outputState?.asMoveObject?.contents.type.repr;
+        if (repr === objectType) {
+          return change.address;
+        }
+      }
+    }
+
+    hasNextPage = txs.pageInfo.hasNextPage;
+    after = txs.pageInfo.endCursor;
+    pages++;
+  }
+
+  return null;
+}
+
 /**
  * One-shot paginated fetch of ALL historical events for a module (no cursor
  * persistence) -- for bootstrap-replay call sites that used to call
@@ -184,6 +352,14 @@ export class EventPoller {
   private cursor: string | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  // Tracks the in-flight poll cycle (including its cursor-save write) so
+  // `stop()` can be awaited to completion -- without this, a caller that
+  // stops the poller as part of a self-shutdown/process.exit sequence can
+  // race an in-flight saveCursor() write, truncating the cursor file (a
+  // truncated/unparseable cursor reads back as "no cursor" on next boot,
+  // forcing a full replay from genesis -- for a self-shutdown arm gated on
+  // `meta.replayed` this becomes a re-trigger, not a one-time recovery).
+  private inFlight: Promise<void> = Promise.resolve();
 
   constructor(options: EventPollerOptions) {
     this.client = options.client;
@@ -205,13 +381,18 @@ export class EventPoller {
     this.poll(handler);
   }
 
-  /** Stop polling. */
-  stop(): void {
+  /**
+   * Stop polling. Awaits the in-flight poll cycle (if any) so a caller that
+   * immediately exits the process afterward can't race an in-progress
+   * cursor-save write (see the `inFlight` field doc above).
+   */
+  async stop(): Promise<void> {
     this.running = false;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    await this.inFlight;
     this.logger.info({ module: this.module }, 'EventPoller stopped');
   }
 
@@ -265,7 +446,7 @@ export class EventPoller {
   private poll(handler: (event: SuiEvent) => Promise<void>): void {
     if (!this.running) return;
 
-    this.pollOnce(handler)
+    this.inFlight = this.pollOnce(handler)
       .then(() => {
         if (this.running) {
           this.timer = setTimeout(

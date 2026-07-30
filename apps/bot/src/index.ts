@@ -17,6 +17,7 @@
  */
 import {
   createSuiClient,
+  createGraphQLClient,
   loadNetworkConfig,
   loadKeypair,
   createLogger,
@@ -24,6 +25,7 @@ import {
   startPromMetricsServer,
   createConcurrencyGauge,
   createDurationHistogram,
+  createCounter,
 } from '@dvconf/shared';
 import { loadBotConfig } from './config.js';
 import { startBotSession, type BotSession, type BotSessionOptions } from './session.js';
@@ -35,6 +37,11 @@ async function main(): Promise<void> {
   const networkConfig = loadNetworkConfig();
   const signer = loadKeypair('PRIVATE_KEY');
   const client = createSuiClient(networkConfig.rpcUrl);
+  // Event queries only (RoomCreated lookup in createRoom) -- see
+  // createGraphQLClient's docstring: devnet's public fullnode returns empty
+  // `events` on JSON-RPC execute responses, so room creation backfills via
+  // GraphQL instead.
+  const graphqlClient = createGraphQLClient(process.env['SUI_NETWORK'] ?? 'localnet');
 
   // Worker-metrics: Prometheus scrape endpoint (CPU/RSS/heap via
   // collectDefaultMetrics + dvconf_active_sessions sourced from the live
@@ -48,16 +55,40 @@ async function main(): Promise<void> {
     'Wall-clock duration of each startBotSession phase (register/create_room/resolve_relay/ws_connect/media_start)',
     ['phase'],
   );
+  // Monitoring-redesign gap #4: session count/failure rate had no metric of
+  // their own beyond the phase-latency breakdown above. session.ts stays
+  // decoupled from the metrics registry by design (see its onJoinPhase doc
+  // comment) -- both counters are fully observable from this call boundary
+  // (start = the call itself, error = the returned promise rejecting), so no
+  // new callback/deps plumbing into session.ts is needed.
+  const sessionsTotalCounter = createCounter(
+    promRegistry,
+    'dvconf_bot_sessions_total',
+    'Bot sessions started by this daemon',
+    [],
+  );
+  const sessionErrorsTotalCounter = createCounter(
+    promRegistry,
+    'dvconf_bot_session_errors_total',
+    'Bot sessions that failed to start (startBotSession rejected)',
+    [],
+  );
 
-  const startSession = (opts: BotSessionOptions): Promise<BotSession> =>
-    startBotSession(opts, {
+  const startSession = (opts: BotSessionOptions): Promise<BotSession> => {
+    sessionsTotalCounter.inc();
+    return startBotSession(opts, {
       client,
       signer,
       networkConfig,
       botConfig,
       logger,
+      graphqlClient,
       onJoinPhase: (phase, ms) => joinPhaseHistogram.observe({ phase }, ms / 1000),
+    }).catch((err: unknown) => {
+      sessionErrorsTotalCounter.inc();
+      throw err;
     });
+  };
 
   const { server, sessions } = startServer(
     { port: botConfig.port, controlToken: botConfig.controlToken, startSession },

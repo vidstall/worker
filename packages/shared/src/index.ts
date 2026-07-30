@@ -66,7 +66,7 @@ export {
 export { createSuiClient, createGraphQLClient, loadNetworkConfig } from './chain/client.js';
 export { loadKeypair, generateSessionKeypair } from './chain/keypair.js';
 export { executeWithRetry, extractCreatedObjectByType, registerTxMetrics } from './chain/tx.js';
-export { EventPoller, queryHistoricalEvents, registerEventPollerMetrics } from './chain/events.js';
+export { EventPoller, queryHistoricalEvents, registerEventPollerMetrics, fetchEventsForDigest, findCreatedObjectByType } from './chain/events.js';
 export type { EventPollerOptions } from './chain/events.js';
 export { waitForRoleAssignment, applyVotedRole, registerRoleAssignmentMetrics } from './chain/role-assignment.js';
 // P17 M2b-P8 (DOH-021) — on-chain reads for the F60 reactive-shutdown wiring.

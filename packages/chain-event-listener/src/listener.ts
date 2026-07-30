@@ -254,9 +254,11 @@ export class ChainEventListener {
    */
   async stop(): Promise<void> {
     const count = this.pollers.length;
-    for (const poller of this.pollers) {
-      poller.stop();
-    }
+    // EventPoller.stop() is itself async now (awaits its in-flight poll
+    // cycle, including any pending cursor-save write) -- await all of them
+    // so a caller that exits the process right after this resolves can't
+    // race a cursor write into a truncated/unreadable file.
+    await Promise.all(this.pollers.map((poller) => poller.stop()));
     this.pollers.length = 0;
     this.logger.info({ pollers: count }, 'ChainEventListener stopped');
   }

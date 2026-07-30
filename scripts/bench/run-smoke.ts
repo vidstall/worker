@@ -36,9 +36,11 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SuiClient } from '@mysten/sui/client';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { requestSuiFromFaucetV2, getFaucetHost } from '@mysten/sui/faucet';
+import { createGraphQLClient, fetchEventsForDigest } from '../../packages/shared/src/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1223,8 +1225,17 @@ export async function createBenchRoom(
   });
   await sui.waitForTransaction({ digest: result.digest });
 
+  // devnet's public fullnode returns empty `events` on the JSON-RPC execute
+  // response (event-shaped reads are deprecated there); harmless no-op on
+  // localnet (bench's usual target), where JSON-RPC events already work.
+  let events = result.events ?? [];
+  if (events.length === 0) {
+    const graphqlClient: SuiGraphQLClient = createGraphQLClient('localnet');
+    events = await fetchEventsForDigest(graphqlClient, result.digest);
+  }
+
   const roomId = parseRoomIdFromEvents(
-    result as SuiTxResult,
+    { events } as SuiTxResult,
     '::room_manager::RoomCreated',
   );
   console.log(`[bench] created bench room id=${roomId} mode=${opts.relayMode ?? 'sfu'} expected=${expected}`);

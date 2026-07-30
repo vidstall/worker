@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { EventPoller } from '../chain/events.js';
+import { EventPoller, fetchEventsForDigest } from '../chain/events.js';
 import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { SuiEvent } from '@mysten/sui/client';
 import type { Logger } from 'pino';
@@ -175,5 +175,55 @@ describe('EventPoller', () => {
     // Read the cursor file and verify
     const cursorData = JSON.parse(await readFile(cursorPath, 'utf-8'));
     expect(cursorData.cursor).toBe('persist-cursor');
+  });
+});
+
+describe('fetchEventsForDigest', () => {
+  it('maps transactionEffects.events.nodes to SuiEvent[], keyed by the real digest', async () => {
+    const mockClient = {
+      query: vi.fn(async (opts: { variables: { digest: string } }) => ({
+        data: {
+          transactionEffects: {
+            events: { nodes: [makeGraphQLNode(opts.variables.digest, 0)] },
+          },
+        },
+      })),
+    } as unknown as SuiGraphQLClient;
+
+    const events = await fetchEventsForDigest(mockClient, 'ABC123');
+
+    expect(mockClient.query).toHaveBeenCalledTimes(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.type).toBe('0xpkg::registration::MinerRegistered');
+    expect(events[0]!.id.txDigest).toBe('ABC123');
+    expect(events[0]!.id.eventSeq).toBe('0');
+  });
+
+  it('returns an empty array when the transaction has no events', async () => {
+    const mockClient = {
+      query: vi.fn(async () => ({
+        data: { transactionEffects: { events: { nodes: [] } } },
+      })),
+    } as unknown as SuiGraphQLClient;
+
+    const events = await fetchEventsForDigest(mockClient, 'EMPTY');
+    expect(events).toHaveLength(0);
+  });
+
+  it('returns an empty array when transactionEffects is missing', async () => {
+    const mockClient = {
+      query: vi.fn(async () => ({ data: { transactionEffects: null } })),
+    } as unknown as SuiGraphQLClient;
+
+    const events = await fetchEventsForDigest(mockClient, 'MISSING');
+    expect(events).toHaveLength(0);
+  });
+
+  it('throws when the GraphQL response carries errors', async () => {
+    const mockClient = {
+      query: vi.fn(async () => ({ errors: [{ message: 'boom' }] })),
+    } as unknown as SuiGraphQLClient;
+
+    await expect(fetchEventsForDigest(mockClient, 'ERR')).rejects.toThrow('GraphQL transaction-events query failed');
   });
 });
