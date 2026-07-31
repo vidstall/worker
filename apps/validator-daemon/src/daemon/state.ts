@@ -95,6 +95,15 @@ export interface DaemonState {
    * one static RELAY_METRICS_URL. Empty -> resolveProbeEndpoint falls back to RELAY_METRICS_URL.
    */
   relayMetricsUrls: Map<string, string>;
+  /**
+   * Monitoring-redesign gap #6: the latest validator-observed STUN
+   * RTT/jitter/loss per relayMinerId (mirrors relayStunLossBps above, same
+   * "written in measureRelay, read by a periodic Prometheus gauge refresh in
+   * index.ts" seam). Cross-host network-path visibility -- distinct from
+   * relayStunLossBps, which folds loss into the canary classifier budget;
+   * this is the raw sample, exported as-is.
+   */
+  relayPathSamples: Map<string, { rttMs: bigint; jitterMs: bigint; lossBps: bigint }>;
   /** Stop function for the F61 HealthMonitor (DOH-018). */
   healthMonitorStop: (() => void) | null;
   /**

@@ -73,6 +73,10 @@ interface RespawningProcessOpts {
   logger: Logger;
   label: string;
   onData: (chunk: Buffer) => void;
+  /** Monitoring-redesign gap #1: count only, never log stderr content. */
+  onStderrData?: () => void;
+  /** Fires right before scheduling a respawn (unexpected exit). */
+  onRespawn?: () => void;
 }
 
 /** Spawn a process piping stdout to `onData`; respawn (with backoff) on an
@@ -86,7 +90,10 @@ function spawnRespawning(opts: RespawningProcessOpts): () => void {
     const proc = spawn(opts.bin, opts.args);
     current = proc;
     proc.stdout.on('data', opts.onData);
-    proc.stderr.on('data', () => { /* ffmpeg logs progress to stderr; not surfaced */ });
+    proc.stderr.on('data', () => {
+      /* ffmpeg logs progress to stderr; not surfaced */
+      opts.onStderrData?.();
+    });
     proc.on('error', (err) => {
       opts.logger.warn({ module: 'ffmpeg-source', label: opts.label, err: String(err) }, `${opts.label} process error`);
     });
@@ -96,6 +103,7 @@ function spawnRespawning(opts: RespawningProcessOpts): () => void {
         { module: 'ffmpeg-source', label: opts.label, code, signal },
         `${opts.label} exited unexpectedly (loop=${'-stream_loop -1'} should prevent this under normal operation) — respawning`,
       );
+      opts.onRespawn?.();
       setTimeout(launch, RESPAWN_BACKOFF_MS);
     });
   };
@@ -134,6 +142,10 @@ export interface StartVideoSourceOpts {
   dims: VideoDimensions;
   videoSource: InstanceType<WrtcNonstandard['RTCVideoSource']>;
   logger: Logger;
+  /** Monitoring-redesign gap #1: ffmpeg health counters, all optional. */
+  onFrameDrop?: () => void;
+  onStderrData?: () => void;
+  onRespawn?: () => void;
 }
 
 /** Spawn the looping video-decode ffmpeg process and feed I420 frames into
@@ -149,7 +161,10 @@ export function startVideoSource(opts: StartVideoSourceOpts): () => void {
 
   const frameBuffer = new FrameBuffer(frameSize, (frame) => {
     queue.push(frame);
-    if (queue.length > MAX_QUEUE) queue.shift(); // drop oldest if consumer falls behind
+    if (queue.length > MAX_QUEUE) {
+      queue.shift(); // drop oldest if consumer falls behind
+      opts.onFrameDrop?.();
+    }
   });
 
   const stopProcess = spawnRespawning({
@@ -167,6 +182,8 @@ export function startVideoSource(opts: StartVideoSourceOpts): () => void {
     logger: opts.logger,
     label: 'ffmpeg-video',
     onData: (chunk) => frameBuffer.push(chunk),
+    onStderrData: opts.onStderrData,
+    onRespawn: opts.onRespawn,
   });
 
   const intervalMs = 1000 / fps;
@@ -193,6 +210,10 @@ export interface StartAudioSourceOpts {
   mp4Path: string;
   audioSource: InstanceType<WrtcNonstandard['RTCAudioSource']>;
   logger: Logger;
+  /** Monitoring-redesign gap #1: ffmpeg health counters, all optional. */
+  onFrameDrop?: () => void;
+  onStderrData?: () => void;
+  onRespawn?: () => void;
 }
 
 /** Spawn the looping audio-decode ffmpeg process and feed 10ms PCM chunks
@@ -204,7 +225,10 @@ export function startAudioSource(opts: StartAudioSourceOpts): () => void {
 
   const frameBuffer = new FrameBuffer(AUDIO_BYTES_PER_CHUNK, (chunk) => {
     queue.push(chunk);
-    if (queue.length > MAX_QUEUE) queue.shift();
+    if (queue.length > MAX_QUEUE) {
+      queue.shift();
+      opts.onFrameDrop?.();
+    }
   });
 
   const stopProcess = spawnRespawning({
@@ -222,6 +246,8 @@ export function startAudioSource(opts: StartAudioSourceOpts): () => void {
     logger: opts.logger,
     label: 'ffmpeg-audio',
     onData: (chunk) => frameBuffer.push(chunk),
+    onStderrData: opts.onStderrData,
+    onRespawn: opts.onRespawn,
   });
 
   const timer = setInterval(() => {

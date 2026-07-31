@@ -1,12 +1,12 @@
 /**
- * OpenTelemetry bootstrap for the 4 request-serving daemons (relay,
- * signaling, cp-daemon, validator-daemon). Side-effect-only module --
+ * OpenTelemetry bootstrap for the 5 request-serving daemons (relay,
+ * signaling, cp-daemon, validator-daemon, bot). Side-effect-only module --
  * MUST be the literal first import in each app's entrypoint, before
  * `dotenv/config`, so auto-instrumentation patches `http`/`undici` before
  * anything else requires them.
  *
  * No-ops entirely when OTEL_EXPORTER_OTLP_ENDPOINT is unset (local dev,
- * tests, bot, and any fleet host before the operator seeds
+ * tests, and any fleet host before the operator seeds
  * secrets/services/otel.env -- see cli/infra/secrets.py's
  * otel_exporter_vars()) -- so importing this file is always safe.
  *

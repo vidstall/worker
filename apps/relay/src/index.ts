@@ -723,6 +723,7 @@ if (isMainModule) {
       // elsewhere (index.ts is assembled before createSignalingServer runs).
       (roomId) => signalingRef.getRoom?.(roomId),
       () => manager.getWorkerDiedCount(),
+      () => manager.workers,
     );
 
     // F1 (REQ-RO-010/011): honest probe-liveness flip. Polls getStats() on the

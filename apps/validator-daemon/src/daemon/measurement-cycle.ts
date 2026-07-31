@@ -10,7 +10,7 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { genTraceId, traceChild, MIN_PROOFS_FOR_DISTRIBUTION } from '@dvconf/shared';
 import type { Logger } from '@dvconf/shared';
 import { collectMeasurements } from '../measurements.js';
-import { createRelayProbe, type RelayProbeEndpoint } from '../probe.js';
+import { createRelayProbe, type RelayProbeEndpoint, type RelayMetricsResult } from '../probe.js';
 import { readRelayMetricsUrls } from '../relay-metrics-resolver.js';
 import {
   buildSessionProof,
@@ -210,8 +210,27 @@ async function measureRoom(
     return;
   }
 
+  // Client-reported relay-down hint (accelerant only, see probe.ts's
+  // clientReportedDeadRelayHint): observed on the STANDBY's leg, since a
+  // client can only report through a relay it can still reach. Captured via
+  // onMetrics so it costs no extra HTTP fetch.
+  let standbyReportedPrimaryDown = false;
+
   for (const { relayMinerId, isStandby } of relays) {
-    await measureRelay(state, roomId, relayMinerId, isStandby, validatorMinerId, log, traceId);
+    const onMetrics = isStandby
+      ? (metrics: RelayMetricsResult | null): void => {
+          if (metrics?.clientReportedDeadRelayHint === true) standbyReportedPrimaryDown = true;
+        }
+      : undefined;
+    await measureRelay(state, roomId, relayMinerId, isStandby, validatorMinerId, log, traceId, onMetrics);
+  }
+
+  if (standbyReportedPrimaryDown && room?.primaryRelayId) {
+    log.warn(
+      { roomId, primaryRelayId: room.primaryRelayId },
+      'client-reported relay-down hint: immediate extra primary re-probe (advisory-only, not liveness-vote-triggering)',
+    );
+    await measureRelay(state, roomId, room.primaryRelayId, false, validatorMinerId, log, traceId);
   }
 }
 
@@ -230,6 +249,7 @@ async function measureRelay(
   validatorMinerId: string,
   log: Logger,
   traceId: string,
+  onMetrics?: (metrics: RelayMetricsResult | null) => void,
 ): Promise<void> {
   // RO-019b: derive the measurement from a REAL probe (STUN RTT + relay
   // metrics HTTP) instead of the removed random simulation. Per-relay endpoint
@@ -238,7 +258,23 @@ async function measureRelay(
   // G3 (partial): probe THIS relay's own metrics endpoint (resolved from chain), not one static
   // URL — so the cp's dynamically-chosen primary relay is reached (404 -> bytes=0 otherwise).
   const perRelayMetrics = state.relayMetricsUrls.get(normalizeSuiAddress(relayMinerId));
-  const probe = createRelayProbe(roomId, () => resolveProbeEndpoint(isStandby, perRelayMetrics), undefined, traceId);
+  const probe = createRelayProbe(
+    roomId,
+    () => resolveProbeEndpoint(isStandby, perRelayMetrics),
+    {
+      ...(onMetrics ? { onMetrics } : {}),
+      // Monitoring-redesign gap #6: stash the raw STUN sample for index.ts's
+      // periodic gauge refresh to read (same seam as relayStunLossBps below).
+      onStunSample: (id, stun) => {
+        state.relayPathSamples.set(id, {
+          rttMs: stun.avgLatencyMs,
+          jitterMs: stun.jitterMs,
+          lossBps: stun.packetLossBps,
+        });
+      },
+    },
+    traceId,
+  );
   const measurement = await collectMeasurements(relayMinerId, probe);
 
   // F61 health signals (DOH-014): a reachable cycle (unreachableSample =>

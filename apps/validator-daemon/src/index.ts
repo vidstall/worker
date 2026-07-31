@@ -31,6 +31,7 @@ import {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  createGauge,
   registerTxMetrics,
   registerEventPollerMetrics,
   registerRoleAssignmentMetrics,
@@ -43,6 +44,7 @@ import {
   readGracefulShutdownConfig,
 } from '@dvconf/chain-event-listener';
 import { closeValidatorProbe } from './latency-probe.js';
+import { registerCanaryMetrics } from './canary/canary-metrics.js';
 import {
   startDaemon,
   buildValidatorShutdownPlan,
@@ -196,6 +198,34 @@ async function main(): Promise<void> {
     registerTxMetrics(promRegistry, 'validator-daemon');
     registerEventPollerMetrics(promRegistry, 'validator-daemon');
     registerRoleAssignmentMetrics(promRegistry, 'validator-daemon');
+    // Monitoring-redesign gap #6: cross-host network-path visibility --
+    // exports the STUN RTT/jitter/loss measurement-cycle already collects
+    // per relay (state.relayPathSamples, written in measureRelay) as
+    // labeled gauges, refreshed on the same interval as concurrencyGauge below.
+    const relayPathRttGauge = createGauge(
+      promRegistry,
+      'dvconf_validator_relay_rtt_ms',
+      'Validator-observed STUN RTT to a relay, ms',
+      ['relay'],
+    );
+    const relayPathJitterGauge = createGauge(
+      promRegistry,
+      'dvconf_validator_relay_jitter_ms',
+      'Validator-observed STUN jitter to a relay, ms',
+      ['relay'],
+    );
+    const relayPathLossGauge = createGauge(
+      promRegistry,
+      'dvconf_validator_relay_loss_bps',
+      'Validator-observed STUN packet loss to a relay, basis points',
+      ['relay'],
+    );
+    // Monitoring-redesign gap #4: canary coverage/quorum/divergence-promoted metrics
+    // (INV-A/C non-secret aggregate counts only), set right where verify-loop.ts
+    // already computes those values (see startDaemon's onCoverageSample/onQuorumSample/
+    // onDivergencePromoted deps).
+    const canaryMetrics = registerCanaryMetrics(promRegistry);
+
     promMetrics = await startPromMetricsServer({
       port: Number(process.env['VALIDATOR_METRICS_PORT'] ?? 8103),
       service: 'validator-daemon',
@@ -205,10 +235,22 @@ async function main(): Promise<void> {
     });
     logger.info({ port: promMetrics.port }, 'prom metrics listening');
 
-    state = await startDaemon({ client, config });
+    state = await startDaemon({ client, config, canaryMetrics });
 
     concurrencyGaugeInterval = setInterval(() => {
       concurrencyGauge.setActiveSessions(state?.activeRooms.size ?? 0);
+      // Monitoring-redesign gap #6: re-set from state.relayPathSamples each
+      // tick (reset first so a relay that's dropped out of rotation doesn't
+      // keep reporting a stale last-known sample forever).
+      relayPathRttGauge.reset();
+      relayPathJitterGauge.reset();
+      relayPathLossGauge.reset();
+      for (const [relayMinerId, sample] of state?.relayPathSamples ?? []) {
+        const labels = { relay: relayMinerId };
+        relayPathRttGauge.set(labels, Number(sample.rttMs));
+        relayPathJitterGauge.set(labels, Number(sample.jitterMs));
+        relayPathLossGauge.set(labels, Number(sample.lossBps));
+      }
     }, 5000);
 
     // Validator is report-only on slash → arms { degraded, paused } (no slash).

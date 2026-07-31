@@ -47,8 +47,15 @@ wsl -d Ubuntu -- bash -c 'cd /mnt/c/Thesis/dvconf/dvconf-daemons/scripts/infra/a
 |---|---|---|---|
 | `00-verify-state.yml` | Read VM identity, users, binaries, ports, containers | NO (read-only) | none |
 | `10-deploy-daemons.yml` | (TBD Batch B) clone repo, install deps, systemd units | YES | 00-verify pass |
-| `20-configure-coturn.yml` | (TBD Batch B) coturn config + secrets | YES (sudo) | 10 done |
+| `20-configure-coturn.yml` | (TBD Batch B) coturn realm/secret/external-ip config | YES (sudo) | 10 done |
 | `30-start-services.yml` | (TBD Batch B) start + verify all daemons | YES | 20 done |
+
+Monitoring-redesign gap #7 (scoped down) is already handled by `bootstrap-vm.sh`'s
+`configure_coturn_metrics` -- coturn's native Prometheus metrics listener (port
+9641) is enabled at bootstrap time, independent of `20-configure-coturn.yml`'s
+still-TBD realm/secret/external-ip config. Point the observer host's
+`prometheus.yml.j2` at it via `xaisen_coturn_targets` (see
+`IaC/ansible/inventory/group_vars/all/main.yml`).
 
 ## Inventory
 

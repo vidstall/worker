@@ -15,6 +15,7 @@
  *
  * CRITICAL: never log the private key.
  */
+import '@dvconf/shared/otel-bootstrap';
 import {
   createSuiClient,
   createGraphQLClient,
@@ -73,6 +74,28 @@ async function main(): Promise<void> {
     'Bot sessions that failed to start (startBotSession rejected)',
     [],
   );
+  // Monitoring-redesign gap #1: ffmpeg pipeline health had no metrics at all
+  // (respawns/stderr chatter/frame drops were only ever logged, never
+  // counted). session.ts stays decoupled from the registry, same as
+  // onJoinPhase above -- these are just 3 more callbacks.
+  const ffmpegRespawnsTotalCounter = createCounter(
+    promRegistry,
+    'dvconf_bot_ffmpeg_respawns_total',
+    'ffmpeg child-process respawns (unexpected exit) across all bot sessions',
+    [],
+  );
+  const ffmpegStderrLinesTotalCounter = createCounter(
+    promRegistry,
+    'dvconf_bot_ffmpeg_stderr_lines_total',
+    'Cumulative ffmpeg stderr data events (count only, content never surfaced)',
+    [],
+  );
+  const frameDropsTotalCounter = createCounter(
+    promRegistry,
+    'dvconf_bot_frame_drops_total',
+    'Video/audio frames dropped due to consumer backpressure',
+    [],
+  );
 
   const startSession = (opts: BotSessionOptions): Promise<BotSession> => {
     sessionsTotalCounter.inc();
@@ -84,6 +107,9 @@ async function main(): Promise<void> {
       logger,
       graphqlClient,
       onJoinPhase: (phase, ms) => joinPhaseHistogram.observe({ phase }, ms / 1000),
+      onFfmpegRespawn: () => ffmpegRespawnsTotalCounter.inc(),
+      onFfmpegStderrData: () => ffmpegStderrLinesTotalCounter.inc(),
+      onFrameDrop: () => frameDropsTotalCounter.inc(),
     }).catch((err: unknown) => {
       sessionErrorsTotalCounter.inc();
       throw err;

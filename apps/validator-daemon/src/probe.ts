@@ -46,6 +46,14 @@ export interface RelayMetricsResult {
   duration: bigint;
   /** Currently active peers. */
   activePeers: bigint;
+  /**
+   * Best-effort, LOW-TRUST accelerant (see relay's `POST /relay-down-hint`):
+   * a client reported its primary relay WS just died. Present only while
+   * fresh on the relay side. Never itself authoritative — purely a signal
+   * to re-probe sooner; the actual liveness-vote decision stays exclusively
+   * validator-daemon's own independently-probed conclusion.
+   */
+  clientReportedDeadRelayHint?: boolean;
 }
 
 // ─── STUN Constants (RFC 5389) ──────────────────────────────────
@@ -287,6 +295,7 @@ export async function fetchRelayMetrics(
             jitter: number;
             duration: number;
             activePeers: number;
+            clientReportedDeadRelayHint?: boolean;
           };
 
           const result: RelayMetricsResult = {
@@ -296,6 +305,7 @@ export async function fetchRelayMetrics(
             jitter: BigInt(json.jitter),
             duration: BigInt(json.duration),
             activePeers: BigInt(json.activePeers),
+            ...(json.clientReportedDeadRelayHint === true ? { clientReportedDeadRelayHint: true } : {}),
           };
 
           logger.info(
@@ -436,12 +446,31 @@ export interface RelayProbeEndpoint {
 export interface RelayProbeHooks {
   /** RO-020 standby-liveness fetch (defaults to {@link fetchProbeLiveness}). */
   fetchLiveness?: (livenessBaseUrl: string, traceId?: string) => Promise<ProbeLivenessResult | null>;
+  /** STUN RTT/jitter/loss probe (defaults to {@link stunProbe}). */
+  stunProbe?: (stunHost: string, stunPort: number) => Promise<StunProbeResult>;
   /** Relay metrics fetch (defaults to {@link fetchRelayMetrics}, room-bound). */
   fetchMetrics?: (
     metricsBaseUrl: string,
     roomId: string,
     traceId?: string,
   ) => Promise<RelayMetricsResult | null>;
+  /**
+   * Observes the raw {@link RelayMetricsResult} right after the metrics fetch
+   * resolves (or `null` when unreachable/skipped) — lets callers (e.g.
+   * measurement-cycle.ts's client-reported relay-down-hint re-probe) read the
+   * result without a duplicate HTTP fetch. Purely additive/observational;
+   * never affects the returned {@link ProbeSample}.
+   */
+  onMetrics?: (metrics: RelayMetricsResult | null) => void;
+  /**
+   * Monitoring-redesign gap #6: observes the raw {@link StunProbeResult}
+   * right after the STUN leg resolves — lets callers (e.g.
+   * measurement-cycle.ts) export cross-host RTT/jitter/loss as Prometheus
+   * gauges without a duplicate probe. Purely additive/observational; never
+   * fires when the STUN leg is skipped/unconfigured (never called with null
+   * — a caller wanting "did the leg run" already knows from its own config).
+   */
+  onStunSample?: (relayMinerId: string, stun: StunProbeResult) => void;
 }
 
 /** A zero/failed probe sample (relay unreachable / not configured). */
@@ -480,6 +509,9 @@ export function createRelayProbe(
 ): MeasurementProbe {
   const fetchLiveness = hooks?.fetchLiveness ?? fetchProbeLiveness;
   const fetchMetrics = hooks?.fetchMetrics ?? fetchRelayMetrics;
+  const runStunProbe = hooks?.stunProbe ?? stunProbe;
+  const onMetrics = hooks?.onMetrics;
+  const onStunSample = hooks?.onStunSample;
 
   return async (relayMinerId: string): Promise<ProbeSample> => {
     const endpoint = resolveEndpoint(relayMinerId);
@@ -505,7 +537,8 @@ export function createRelayProbe(
     let stun: StunProbeResult | null = null;
     if (endpoint.stunHost && endpoint.stunPort) {
       try {
-        stun = await stunProbe(endpoint.stunHost, endpoint.stunPort);
+        stun = await runStunProbe(endpoint.stunHost, endpoint.stunPort);
+        onStunSample?.(relayMinerId, stun);
       } catch (err) {
         logger.warn({ err, relayMinerId }, 'STUN probe failed; falling back to metrics-only');
       }
@@ -516,6 +549,7 @@ export function createRelayProbe(
     if (endpoint.metricsBaseUrl) {
       metrics = await fetchMetrics(endpoint.metricsBaseUrl, roomId, traceId);
     }
+    onMetrics?.(metrics);
 
     // When the standby liveness gate fired, force a zero-duration sample so the
     // standby proof reads "did not answer" — never paid (RO-016 liveness gate).

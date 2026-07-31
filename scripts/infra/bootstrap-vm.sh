@@ -17,8 +17,11 @@
 #
 # After it finishes:
 #   - Node 20 + pnpm 9 + sui CLI + coturn + certbot installed
+#   - coturn's native Prometheus metrics listener enabled (port 9641,
+#     monitoring-redesign gap #7 -- scoped down: realm/secret/external-ip
+#     still a manual step, see verify()'s printed next steps)
 #   - UFW configured (SSH 22, signaling 443, coturn 3478/UDP+TCP +
-#     5349/TLS, mediasoup RTP range 40000-49999/UDP)
+#     5349/TLS + 9641/TCP metrics, mediasoup RTP range 40000-49999/UDP)
 #   - System user `dvconf` exists with home dir
 #   - Repo NOT cloned — teammate clones manually so they pick the right
 #     ref + commit
@@ -147,6 +150,31 @@ install_sui() {
     sui --version | tee -a "$LOG_FILE"
 }
 
+# ── coturn Prometheus listener (monitoring-redesign gap #7, scoped down) ─
+
+configure_coturn_metrics() {
+    log "── coturn Prometheus listener ──"
+
+    local conf=/etc/turnserver.conf
+    if [ -f "$conf" ] && grep -q '^prometheus$' "$conf"; then
+        log "coturn prometheus listener already enabled in $conf, skipping"
+        return
+    fi
+
+    # Enables coturn's NATIVE Prometheus metrics listener (coturn >= 4.5.2 --
+    # Ubuntu 22.04's apt coturn is 4.5.2-3) on its documented default port
+    # 9641. Scoped down deliberately: this does NOT touch realm/
+    # static-auth-secret/external-ip -- those remain the manual step in
+    # verify()'s printed next-steps below.
+    {
+        echo ""
+        echo "# monitoring-redesign gap #7: native Prometheus metrics listener (default port 9641)"
+        echo "prometheus"
+    } >> "$conf"
+
+    log "appended 'prometheus' listener directive to $conf (port 9641, default)"
+}
+
 # ── Firewall ─────────────────────────────────────────────────────────
 
 configure_ufw() {
@@ -173,6 +201,7 @@ configure_ufw() {
     ufw allow 3478/udp comment 'coturn stun/turn udp'
     ufw allow 3478/tcp comment 'coturn turn tcp'
     ufw allow 5349/tcp comment 'coturn turns tls'
+    ufw allow 9641/tcp comment 'coturn prometheus metrics (monitoring-redesign gap #7)'
 
     # mediasoup RTP/RTCP range — internet-benchmark-plan § 4 invariants
     ufw allow 40000:49999/udp comment 'mediasoup rtp/rtcp'
@@ -222,6 +251,7 @@ verify() {
     log "  2. git clone <repo> ~/dvconf && cd ~/dvconf/dvconf-daemons"
     log "  3. pnpm install --frozen-lockfile"
     log "  4. Configure coturn: edit /etc/turnserver.conf (realm, static-auth-secret, external-ip)"
+    log "     (the 'prometheus' metrics listener directive is already appended -- port 9641)"
     log "  5. systemctl enable --now coturn"
     log "  6. Run \`sudo certbot certonly --standalone -d signaling.<your-domain>\` for WSS cert"
     log "  7. Follow internet-benchmark-plan.md § 5 Phase I row 'Deploy 4 daemons on VM'"
@@ -244,6 +274,7 @@ main() {
     install_pnpm
     install_sui
     create_dvconf_user
+    configure_coturn_metrics
     configure_ufw
     verify
 

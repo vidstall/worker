@@ -157,6 +157,22 @@ export interface CanaryVerifyDeps {
   submit: CanarySlashSubmit;
   /** Gate tuning. */
   config: CanaryVerifyConfig;
+  /**
+   * Monitoring-redesign gap #4 (optional; default no-op -> byte-identical without it).
+   * Fired once per scope, right where `perReceiver.size` is already computed (the
+   * distinct-receiver breadth for that (relay,room) scope this round).
+   */
+  onCoverageSample?: (relayMinerId: string, distinctValidators: number) => void;
+  /**
+   * Monitoring-redesign gap #4 (optional). Fired once per open cell, right where the
+   * >=2-distinct-attester quorum gate is already evaluated (step 7).
+   */
+  onQuorumSample?: (relayMinerId: string, met: boolean) => void;
+  /**
+   * Monitoring-redesign gap #4 (optional). Fired once per proof actually assembled +
+   * submitted (step 7) -- the chain-visible "promoted" moment.
+   */
+  onDivergencePromoted?: () => void;
 }
 
 /**
@@ -272,6 +288,7 @@ export async function runCanaryVerifyRound(
       perReceiver.set(receiverMinerId, vr.divergences);
     }
     perReceiverCount = Math.max(perReceiverCount, perReceiver.size);
+    deps.onCoverageSample?.(scope.relayId, perReceiver.size);
 
     // (3) fold this round's drop tally into the PERSISTED per-relay accumulator (keyed by relayId).
     const tally = tallyRound(perReceiver, cap.expectedCtrs.length || deps.config.sendRate);
@@ -351,7 +368,9 @@ export async function runCanaryVerifyRound(
   // Each co-observer is an equal assembler+submitter over its own board, so censoring requires
   // compromising ALL >=2 honest boards = exactly the on-chain >=2-distinct threshold.
   for (const open of await deps.localBoard.listOpen()) {
-    if (distinctAttesterCount(open.attestations) >= MIN_ATTESTERS) {
+    const quorumMet = distinctAttesterCount(open.attestations) >= MIN_ATTESTERS;
+    deps.onQuorumSample?.(open.claim.relayMinerId, quorumMet);
+    if (quorumMet) {
       const proof = assembleProofFromAttestations(open.claim, open.attestations);
       // C1 jittered self-submit: de-synchronize the now-redundant submitters before the submit. The
       // on-chain VecSet + markSubmitted below + the already-slashed abort absorb any double-submit
@@ -359,6 +378,7 @@ export async function runCanaryVerifyRound(
       if (deps.jitter) await deps.jitter();
       await deps.submit(proof);
       await deps.localBoard.markSubmitted(open.key);
+      deps.onDivergencePromoted?.();
     }
   }
 

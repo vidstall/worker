@@ -10,6 +10,7 @@
  *   GET  /metrics/prom     — Prometheus text-format scrape (call-quality feature)
  *   GET  /metrics/summary  — JSON aggregation over live peer quality samples
  *   POST /stats/report     — client-reported per-peer quality sample ingestion
+ *   POST /relay-down-hint  — client-reported "my primary relay just died" hint
  *   GET  /api/probe        — standby-liveness channel (RO-020)
  *   GET  /healthz          — heartbeat channel (RO-020 / NG-8)
  *
@@ -23,6 +24,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { IncomingMessage } from 'node:http';
 import { Gauge } from 'prom-client';
+import type { types as msTypes } from 'mediasoup';
 import {
   type Logger,
   healthzBody,
@@ -270,6 +272,35 @@ const REQUIRED_SAMPLE_FIELDS: ReadonlyArray<keyof PeerQualitySample> = [
   'reconnectMs',
 ];
 
+// ── POST /relay-down-hint — client-reported "primary relay just died" hint ──
+//
+// A best-effort, LOW-TRUST accelerant: it never itself triggers a liveness
+// vote or ejection (that stays exclusively validator-daemon's own actively-
+// probed conclusion, see liveness-sweep.ts). It only makes validator-daemon
+// re-probe the room's primary sooner than its normal ~60s cycle. Admission
+// gate mirrors /stats/report: peerId must be a currently-admitted member of
+// roomId ON THE RELAY RECEIVING THE POST (i.e. the still-alive standby —
+// the client never tells us which relay died, and doesn't need to: the
+// receiving relay's own identity is enough for validator-daemon to resolve
+// the room's primary/standby pair).
+
+const RELAY_DOWN_HINT_TTL_MS = 70_000;
+const RELAY_DOWN_HINT_MIN_INTERVAL_MS = 2000;
+
+interface RelayDownHintBody {
+  roomId: string;
+  peerId: string;
+}
+
+/** Structural validator for the POST /relay-down-hint body. Pure — no I/O. */
+function parseRelayDownHintBody(body: unknown): RelayDownHintBody | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const b = body as Record<string, unknown>;
+  if (typeof b['roomId'] !== 'string' || b['roomId'] === '') return null;
+  if (typeof b['peerId'] !== 'string' || b['peerId'] === '') return null;
+  return { roomId: b['roomId'], peerId: b['peerId'] };
+}
+
 /** Structural validator for the POST /stats/report body. Pure — no I/O. */
 function parseStatsReportBody(body: unknown): StatsReportBody | null {
   if (typeof body !== 'object' || body === null) return null;
@@ -353,6 +384,11 @@ function buildPeerQualityGauges(registry: Registry): PeerQualityGauges {
  *                         Worker 'died' count (F61/DOH-014), exposed as
  *                         `dvconf_relay_worker_died_total` for the academic-eval
  *                         "Fault Tolerance" dashboard row. Omitted ⇒ gauge stays 0.
+ * @param getWorkers     - Optional resolver for the live mediasoup Worker list
+ *                         (monitoring-redesign gap #5), backing per-worker
+ *                         `dvconf_relay_worker_ru_{utime,stime}_ms` /
+ *                         `_ru_maxrss_kb` gauges via `Worker.getResourceUsage()`.
+ *                         Omitted ⇒ those gauges are simply absent (no worker rows).
  * @returns The HTTP server instance (for graceful shutdown).
  */
 export function startMetricsServer(
@@ -361,6 +397,7 @@ export function startMetricsServer(
   probeState?: ProbeStateProvider,
   getRoom?: GetRoomFn,
   getWorkerDiedCount?: () => number,
+  getWorkers?: () => msTypes.Worker[],
 ): Server {
   const port = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
 
@@ -386,6 +423,28 @@ export function startMetricsServer(
     help: 'Cumulative count of mediasoup Worker died events (F61 health signal, DOH-014)',
     registers: [promRegistry],
   });
+  // Monitoring-redesign gap #5: mediasoup Worker resource usage was never
+  // scraped (only the 'died' event count above). ru_utime/ru_stime are
+  // already reported in ms by mediasoup's WorkerResourceUsage type (not raw
+  // timeval structs); ru_maxrss is KB per the underlying getrusage(2) convention.
+  const workerRuUtimeGauge = new Gauge({
+    name: 'dvconf_relay_worker_ru_utime_ms',
+    help: 'mediasoup Worker user CPU time, ms (getResourceUsage().ru_utime)',
+    labelNames: ['worker'],
+    registers: [promRegistry],
+  });
+  const workerRuStimeGauge = new Gauge({
+    name: 'dvconf_relay_worker_ru_stime_ms',
+    help: 'mediasoup Worker system CPU time, ms (getResourceUsage().ru_stime)',
+    labelNames: ['worker'],
+    registers: [promRegistry],
+  });
+  const workerRuMaxrssGauge = new Gauge({
+    name: 'dvconf_relay_worker_ru_maxrss_kb',
+    help: 'mediasoup Worker max resident set size, KB (getResourceUsage().ru_maxrss)',
+    labelNames: ['worker'],
+    registers: [promRegistry],
+  });
   const activeSessionsGauge = new Gauge({
     name: 'dvconf_relay_active_sessions',
     help: 'Active relay sessions (MetricsTracker)',
@@ -405,6 +464,23 @@ export function startMetricsServer(
   // `/stats/report` rate limit: last-accepted-report wall-clock ts per peerId.
   const lastReportAt = new Map<string, number>();
 
+  // `/relay-down-hint` state: fresh-hint-per-room store + its own (separate)
+  // per-peerId rate limit map.
+  const relayDownHints = new Map<string, { reportedAtMs: number }>();
+  const lastRelayDownHintAt = new Map<string, number>();
+  const relayDownHintGauge = new Gauge({
+    name: 'dvconf_relay_down_hint_active',
+    help: 'Client-reported relay-down hint currently fresh for this room (1) or not (0)',
+    labelNames: ['roomId'],
+    registers: [promRegistry],
+  });
+
+  /** True iff roomId has a hint recorded within the last RELAY_DOWN_HINT_TTL_MS. */
+  function hasFreshRelayDownHint(roomId: string, now: number): boolean {
+    const hint = relayDownHints.get(roomId);
+    return hint !== undefined && now - hint.reportedAtMs < RELAY_DOWN_HINT_TTL_MS;
+  }
+
   const workerId =
     process.env['RELAY_INSTANCE'] ?? process.env['WORKER_ID'] ?? hostname();
 
@@ -423,15 +499,41 @@ export function startMetricsServer(
     return Math.max(0, ((userDiff + sysDiff) / elapsedMicros) * 100);
   }
 
-  function refreshPromGauges(): void {
+  async function refreshPromGauges(): Promise<void> {
     const globalMetrics = metrics.getGlobalMetrics();
     activeSessionsGauge.set(globalMetrics.activeSessions);
     roomCountGauge.set(globalMetrics.roomCount);
     bytesForwardedGauge.set(Number(globalMetrics.totalBytesForwarded));
     workerDiedGauge.set(getWorkerDiedCount?.() ?? 0);
 
+    // Monitoring-redesign gap #5: per-worker CPU/RSS, best-effort -- a single
+    // worker's getResourceUsage() rejecting (e.g. mid-close) must not drop
+    // the whole scrape.
+    workerRuUtimeGauge.reset();
+    workerRuStimeGauge.reset();
+    workerRuMaxrssGauge.reset();
+    const workers = getWorkers?.() ?? [];
+    await Promise.all(
+      workers.map(async (worker, index) => {
+        try {
+          const ru = await worker.getResourceUsage();
+          const label = { worker: String(worker.pid ?? index) };
+          workerRuUtimeGauge.set(label, ru.ru_utime);
+          workerRuStimeGauge.set(label, ru.ru_stime);
+          workerRuMaxrssGauge.set(label, ru.ru_maxrss);
+        } catch (err) {
+          logger.warn({ err, workerPid: worker.pid }, 'getResourceUsage() failed for worker; skipping');
+        }
+      }),
+    );
+
     for (const gauge of Object.values(peerGauges)) {
       gauge.reset();
+    }
+    relayDownHintGauge.reset();
+    const gaugeNow = Date.now();
+    for (const [roomId] of relayDownHints) {
+      relayDownHintGauge.set({ roomId }, hasFreshRelayDownHint(roomId, gaugeNow) ? 1 : 0);
     }
     for (const peerId of statsWindow.peerIds()) {
       const current = statsWindow.current(peerId);
@@ -532,6 +634,43 @@ export function startMetricsServer(
     return { status: 204 };
   }
 
+  async function handleRelayDownHint(req: IncomingMessage, reqLog: Logger): Promise<{
+    status: number;
+    body?: unknown;
+  }> {
+    const read = await readCappedJsonBody(req);
+    if (!read.ok) {
+      return { status: read.status, body: { error: read.status === 413 ? 'payload_too_large' : 'bad_request' } };
+    }
+    const parsed = parseRelayDownHintBody(read.body);
+    if (!parsed) {
+      return { status: 400, body: { error: 'invalid_body' } };
+    }
+    const { roomId, peerId } = parsed;
+
+    const room = getRoom?.(roomId);
+    if (!room) {
+      reqLog.warn({ roomId, peerId }, 'relay-down-hint: unknown room (404)');
+      return { status: 404, body: { error: 'room_not_found' } };
+    }
+    if (!room.peers.has(peerId)) {
+      reqLog.warn({ roomId, peerId }, 'relay-down-hint: peer not admitted (403)');
+      return { status: 403, body: { error: 'peer_not_admitted' } };
+    }
+
+    const now = Date.now();
+    const last = lastRelayDownHintAt.get(peerId);
+    if (last !== undefined && now - last < RELAY_DOWN_HINT_MIN_INTERVAL_MS) {
+      // Rate-limited: silently no-op (not the caller's fault, don't error).
+      return { status: 204 };
+    }
+    lastRelayDownHintAt.set(peerId, now);
+
+    relayDownHints.set(roomId, { reportedAtMs: now });
+    reqLog.warn({ roomId, peerId }, 'relay-down-hint: client reported its primary relay down');
+    return { status: 204 };
+  }
+
   const server = createServer((req, res) => {
     // Capture request-arrival time for the /api/probe server-handling RTT.
     const startedAt = performance.now();
@@ -552,6 +691,21 @@ export function startMetricsServer(
         })
         .catch((err: unknown) => {
           reqLog.error({ err, url }, 'stats/report: handler error');
+          res.writeHead(500, JSON_HEADERS);
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        });
+      return;
+    }
+
+    // Route: POST /relay-down-hint — client-reported "primary relay down" hint.
+    if (req.method === 'POST' && url === '/relay-down-hint') {
+      handleRelayDownHint(req, reqLog)
+        .then(({ status, body }) => {
+          res.writeHead(status, JSON_HEADERS);
+          res.end(body === undefined ? undefined : JSON.stringify(body));
+        })
+        .catch((err: unknown) => {
+          reqLog.error({ err, url }, 'relay-down-hint: handler error');
           res.writeHead(500, JSON_HEADERS);
           res.end(JSON.stringify({ error: 'Internal server error' }));
         });
@@ -597,9 +751,8 @@ export function startMetricsServer(
           res.end(JSON.stringify({ error: 'Unauthorized' }));
           return;
         }
-        refreshPromGauges();
-        promRegistry
-          .metrics()
+        refreshPromGauges()
+          .then(() => promRegistry.metrics())
           .then((text) => {
             res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
             res.end(text);
@@ -648,7 +801,13 @@ export function startMetricsServer(
 
         reqLog.debug({ url, roomId }, 'relay metrics served');
         res.writeHead(200, JSON_HEADERS);
-        res.end(JSON.stringify(roomMetrics));
+        res.end(
+          JSON.stringify(
+            hasFreshRelayDownHint(roomId, Date.now())
+              ? { ...roomMetrics, clientReportedDeadRelayHint: true }
+              : roomMetrics,
+          ),
+        );
         return;
       }
 

@@ -40,6 +40,7 @@ import {
   type CoverageStateProvider,
   type LoadStateProvider,
 } from '../canary/coverage-server.js';
+import type { CanaryMetricsSetters } from '../canary/canary-metrics.js';
 import {
   startCanaryVerifyLoop,
   type CanaryForwardCaptureResult,
@@ -158,6 +159,8 @@ export async function startDaemon(overrides?: {
   mainKeypair?: Ed25519Keypair;
   config?: NetworkConfig;
   logger?: Logger;
+  /** Monitoring-redesign gap #4 (optional; default no-op -> byte-identical without it). */
+  canaryMetrics?: CanaryMetricsSetters;
 }): Promise<DaemonState> {
   const log = overrides?.logger ?? logger;
 
@@ -232,6 +235,7 @@ export async function startDaemon(overrides?: {
     consecutiveUnreachable: 0,
     relayStunLossBps: new Map(),
     relayMetricsUrls: new Map(),
+    relayPathSamples: new Map(),
     healthMonitorStop: null,
     canaryCellLoop: null,
     canaryVerifyLoop: null,
@@ -590,6 +594,10 @@ export async function startDaemon(overrides?: {
             );
           }),
         config: { k: verifyK, deltaBps: verifyDeltaBps, sendRate: verifyK },
+        // Monitoring-redesign gap #4 (optional; default no-op -> byte-identical without it).
+        onCoverageSample: overrides?.canaryMetrics?.setCoverage,
+        onQuorumSample: overrides?.canaryMetrics?.setQuorumMet,
+        onDivergencePromoted: overrides?.canaryMetrics?.incDivergencePromoted,
       },
     });
 

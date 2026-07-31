@@ -387,3 +387,73 @@ describe('REQ-RMS-022 (D1) — startCanaryVerifyLoop handle exposes the per-rela
     expect(accAfter).not.toBe(accBefore);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// Monitoring-redesign gap #4 — coverage/quorum/divergence-promoted hooks (optional,
+// no-op by default -> byte-identical to every test above that doesn't set them).
+// ─────────────────────────────────────────────────────────────────────────────────
+
+describe('CanaryVerifyDeps — onCoverageSample/onQuorumSample/onDivergencePromoted (monitoring-redesign gap #4)', () => {
+  it('onCoverageSample fires once per scope with the distinct-receiver count for that round', async () => {
+    const ctrs = [0, 1, 2, 3];
+    const dropped = new Set([2]);
+    const { deps } = makeDeps({ ctrs, dropped, stunLossBps: 0n });
+    const samples: Array<{ relayMinerId: string; distinctValidators: number }> = [];
+    deps.onCoverageSample = (relayMinerId, distinctValidators) => {
+      samples.push({ relayMinerId, distinctValidators });
+    };
+
+    await runCanaryVerifyRound(deps, undefined, 0);
+
+    // makeDeps' default capture returns SELF + PEER -> 2 distinct receivers for RELAY_MINER.
+    expect(samples).toEqual([{ relayMinerId: RELAY_MINER, distinctValidators: 2 }]);
+  });
+
+  it('onQuorumSample fires false while a cell is sub-quorum, then true once a second distinct attester corroborates', async () => {
+    const ctrs = [0, 1, 2, 3, 4, 5, 6, 7];
+    const dropped = new Set([5]);
+    const board = new InMemoryClaimBoard({ wCorr: 100 });
+    const submitted: DivergenceProof[] = [];
+    const a = makeDeps({ ctrs, dropped, stunLossBps: 0n, board, submitted, selfSessionKeypair: new Ed25519Keypair() });
+    const b = makeDeps({ ctrs, dropped, stunLossBps: 0n, board, submitted, selfSessionKeypair: new Ed25519Keypair() });
+    const quorumSamples: boolean[] = [];
+    const promotedCount = { n: 0 };
+    // Both loops' rounds run their own poll-corroborate + assemble/submit pass over the SHARED
+    // board -- either loop's round may be the one that observes the cell cross the >=2-distinct
+    // quorum, so both are listened on (mirrors how a real 2-daemon deployment would each report
+    // to its OWN instance's registry).
+    for (const loop of [a, b]) {
+      loop.deps.onQuorumSample = (_relayMinerId, met) => quorumSamples.push(met);
+      loop.deps.onDivergencePromoted = () => {
+        promotedCount.n += 1;
+      };
+    }
+
+    await runShared([a, b], 7);
+
+    expect(quorumSamples.some((met) => met === false)).toBe(true);
+    expect(quorumSamples.some((met) => met === true)).toBe(true);
+    // onDivergencePromoted fires exactly once per proof actually submitted across both loops.
+    expect(promotedCount.n).toBe(submitted.length);
+    expect(promotedCount.n).toBeGreaterThan(0);
+  });
+
+  it('onDivergencePromoted never fires for a self-only (fail-closed, sub-quorum) run', async () => {
+    const ctrs = [0, 1, 2, 3, 4, 5, 6, 7];
+    const dropped = new Set([5]);
+    const { deps, submitted } = makeDeps({ ctrs, dropped, stunLossBps: 0n });
+    let promotedCount = 0;
+    deps.onDivergencePromoted = () => {
+      promotedCount += 1;
+    };
+
+    let acc = undefined;
+    for (let r = 0; r < 7; r++) {
+      const res = await runCanaryVerifyRound(deps, acc, r);
+      acc = res.accumulator;
+    }
+
+    expect(submitted).toHaveLength(0);
+    expect(promotedCount).toBe(0);
+  });
+});

@@ -71,6 +71,15 @@ export interface StartBotSessionDeps {
    * to `dvconf_bot_join_phase_seconds`.
    */
   onJoinPhase?: (phase: string, ms: number) => void;
+  /**
+   * Monitoring-redesign gap #1: ffmpeg pipeline health counters, same
+   * decoupled-callback shape as `onJoinPhase` above. `index.ts` wires these
+   * to `dvconf_bot_ffmpeg_respawns_total`/`_stderr_lines_total`/
+   * `dvconf_bot_frame_drops_total`.
+   */
+  onFfmpegRespawn?: () => void;
+  onFfmpegStderrData?: () => void;
+  onFrameDrop?: () => void;
 }
 
 function wantsVideo(mediaMode: MediaMode): boolean {
@@ -85,7 +94,18 @@ export async function startBotSession(
   opts: BotSessionOptions,
   deps: StartBotSessionDeps,
 ): Promise<BotSession> {
-  const { client, signer, networkConfig, botConfig, logger, onJoinPhase, graphqlClient } = deps;
+  const {
+    client,
+    signer,
+    networkConfig,
+    botConfig,
+    logger,
+    onJoinPhase,
+    graphqlClient,
+    onFfmpegRespawn,
+    onFfmpegStderrData,
+    onFrameDrop,
+  } = deps;
 
   if (opts.roomMode === 'join' && (!opts.roomId || opts.roomId.trim() === '')) {
     throw new Error('startBotSession: roomId is required when roomMode is "join"');
@@ -151,6 +171,7 @@ export async function startBotSession(
     roomId,
     peerId: `bot-${id}`,
     roomPassword: botConfig.roomPassword,
+    logger,
   });
   logger.info({ module: 'bot-session', sessionId: id, relayUrl }, 'joining relay…');
   await timePhase('ws_connect', () => peer.connect());
@@ -165,13 +186,32 @@ export async function startBotSession(
       if (wantsVideo(opts.mediaMode)) {
         const dims = await probeVideoDimensions(mp4Path);
         const videoSource = new nonstandard.RTCVideoSource();
-        stopFns.push(startVideoSource({ mp4Path, dims, videoSource, logger }));
+        stopFns.push(
+          startVideoSource({
+            mp4Path,
+            dims,
+            videoSource,
+            logger,
+            onFrameDrop,
+            onStderrData: onFfmpegStderrData,
+            onRespawn: onFfmpegRespawn,
+          }),
+        );
         await peer.produceVideo(videoSource.createTrack());
       }
 
       if (wantsAudio(opts.mediaMode)) {
         const audioSource = new nonstandard.RTCAudioSource();
-        stopFns.push(startAudioSource({ mp4Path, audioSource, logger }));
+        stopFns.push(
+          startAudioSource({
+            mp4Path,
+            audioSource,
+            logger,
+            onFrameDrop,
+            onStderrData: onFfmpegStderrData,
+            onRespawn: onFfmpegRespawn,
+          }),
+        );
         await peer.produceAudio(audioSource.createTrack());
       }
     });
