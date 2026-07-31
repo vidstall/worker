@@ -48,3 +48,32 @@ describe('RelayClient', () => {
     await expect(client.ready).rejects.toThrow('boom');
   });
 });
+
+describe('RelayClient — close observability (bare, no network call)', () => {
+  it('registers a close handler that logs the given context via the injected logger', () => {
+    const ws = fakeWs();
+    const warn = vi.fn();
+    new RelayClient(ws, null, { roomId: 'room-1', peerId: 'bot-1', relayUrl: 'ws://relay:4000' }, { warn });
+
+    ws.emit('close');
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [ctx, msg] = warn.mock.calls[0]!;
+    expect(ctx).toEqual({ roomId: 'room-1', peerId: 'bot-1', relayUrl: 'ws://relay:4000' });
+    expect(msg).toMatch(/relay WS closed/i);
+  });
+
+  it('a close with no logger wired is a silent no-op (does not throw)', () => {
+    const ws = fakeWs();
+    new RelayClient(ws);
+    expect(() => ws.emit('close')).not.toThrow();
+  });
+
+  it('close triggers no send()/network call', () => {
+    const ws = fakeWs();
+    const warn = vi.fn();
+    new RelayClient(ws, null, { roomId: 'room-1' }, { warn });
+    ws.emit('close');
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+});

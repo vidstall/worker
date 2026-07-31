@@ -49,7 +49,7 @@ import {
 import { buildHealthSignals, type CpHealthDeps } from './health-signals.js';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
-import { createEventHandler } from './event-handler.js';
+import { createEventHandler, extractEventName } from './event-handler.js';
 import { startAttestedLoadPoller, type AttestedLoadPoller } from './attested-load-poller.js';
 import { startRoleVoting, registerRoleVoterMetrics } from './role-voter.js';
 import { startRevoteWatcher, makeMarkSubmitter, resolveScanIntervalEpochs } from './revote-watcher.js';
@@ -62,6 +62,15 @@ import {
   resolveMaxHeartbeatEpochs as resolveRoomHealthMaxHeartbeatEpochs,
 } from './room-health-sweep.js';
 import { LiveRoomHealthChainStateReader } from './room-health-chain-state-reader.js';
+import {
+  startRoomExpirySweep,
+  makeCloseExpiredRoomSubmitter,
+  recordRoomLifecycleTimestamp,
+  resolvePendingExpiryMs,
+  resolveReadyExpiryMs,
+  type RoomLifecycleTimestamps,
+} from './room-expiry-sweep.js';
+import { LiveRoomExpiryChainStateReader } from './room-expiry-chain-state-reader.js';
 import {
   startRelayHeartbeatWatcher,
   makePromoteSubmitter,
@@ -175,6 +184,8 @@ export interface CpShutdownDeps {
   stopRelayHeartbeatWatcher: () => void;
   /** (3) reactive — the room-health sweep (post-ejection relay/signaling reassignment). */
   stopRoomHealthSweep: () => void;
+  /** (3) reactive — the room-expiry sweep (auto-close stale PENDING/READY rooms). */
+  stopRoomExpirySweep: () => void;
   /** (3) reactive — the TURN issuer rotation loop. */
   stopTurnIssuer: () => void;
   /** (3) reactive — the F62 cap-token issuer epoch refresher. */
@@ -227,6 +238,7 @@ export function buildCpShutdownPlan(
       deps.stopRevoteWatcher();
       deps.stopRelayHeartbeatWatcher();
       deps.stopRoomHealthSweep();
+      deps.stopRoomExpirySweep();
       deps.stopTurnIssuer();
       deps.stopCapTokenIssuer();
       deps.stopTurnRpc?.();
@@ -446,6 +458,30 @@ async function main(): Promise<void> {
   const stopRoomHealthSweep = (): void => roomHealthSweep.stop();
   logger.info({ module: 'cp-daemon', roomHealthScanMs }, 'room health sweep started');
 
+  // Room expiry sweep — auto-closes rooms stuck PENDING (never assigned a
+  // relay/CP) past 15 minutes, or READY/ACTIVE (assigned but never manually
+  // closed by their creator) past 1 hour. The chain has no Clock; elapsed
+  // wall-clock time is judged entirely here from RoomCreated/RoomAssigned
+  // event timestamps (see room-expiry-sweep.ts's module doc). `roomTimestamps`
+  // is fed passively by `trackedHandler` below, off the same event stream the
+  // pollers already consume — declared here (ahead of its first read) so both
+  // the reader and the handler close over the same map instance.
+  const roomTimestamps = new Map<string, RoomLifecycleTimestamps>();
+  const roomExpiryReader = new LiveRoomExpiryChainStateReader(client, config, roomTimestamps, logger);
+  const roomExpiryScanMs = parseInt(process.env['ROOM_EXPIRY_SCAN_INTERVAL_MS'] ?? '60000', 10);
+  const roomExpirySweep = startRoomExpirySweep(
+    roomExpiryReader,
+    makeCloseExpiredRoomSubmitter(client, signer, config, cpCapId, logger),
+    logger,
+    {
+      pollIntervalMs: roomExpiryScanMs,
+      pendingExpiryMs: resolvePendingExpiryMs(process.env['ROOM_EXPIRY_PENDING_MS'], logger),
+      readyExpiryMs: resolveReadyExpiryMs(process.env['ROOM_EXPIRY_READY_MS'], logger),
+    },
+  );
+  const stopRoomExpirySweep = (): void => roomExpirySweep.stop();
+  logger.info({ module: 'cp-daemon', roomExpiryScanMs }, 'room expiry sweep started');
+
   // Bootstrap TURN issuer (S30.B Option A — ADR-0005 hybrid 24h+on-slash rotation)
   const turnRotationIntervalMs = parseInt(
     process.env['TURN_ROTATION_INTERVAL_MS'] ?? '86400000',
@@ -641,6 +677,7 @@ async function main(): Promise<void> {
   const trackedHandler = async (ev: SuiEvent): Promise<void> => {
     const ts = ev.timestampMs ? Number(ev.timestampMs) : 0;
     if (ts > newestEventTsMs) newestEventTsMs = ts;
+    recordRoomLifecycleTimestamp(ev, roomTimestamps, extractEventName);
     await handler(ev);
   };
 
@@ -822,6 +859,7 @@ async function main(): Promise<void> {
         stopRevoteWatcher,
         stopRelayHeartbeatWatcher,
         stopRoomHealthSweep,
+        stopRoomExpirySweep,
         stopTurnIssuer,
         stopCapTokenIssuer,
         stopTurnRpc: stopTurnRpc ? () => void stopTurnRpc() : undefined,

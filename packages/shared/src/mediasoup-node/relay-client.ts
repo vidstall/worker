@@ -12,6 +12,18 @@ export interface RelayMessage {
   [k: string]: unknown;
 }
 
+/** Minimal logger shape RelayClient needs — avoids a hard @dvconf/shared dep here. */
+export interface RelayClientLogger {
+  warn: (obj: Record<string, unknown>, msg: string) => void;
+}
+
+/** Observability-only context for the `ws.on('close', ...)` log line. */
+export interface RelayClientContext {
+  roomId?: string;
+  peerId?: string;
+  relayUrl?: string;
+}
+
 export interface WsLike {
   send: (data: string) => void;
   on: (event: string, handler: (...args: unknown[]) => void) => void;
@@ -35,7 +47,12 @@ export class RelayClient {
   private readonly onProducer: ((msg: RelayMessage) => void) | null;
   readonly ready: Promise<void>;
 
-  constructor(ws: WsLike, onProducer: ((msg: RelayMessage) => void) | null = null) {
+  constructor(
+    ws: WsLike,
+    onProducer: ((msg: RelayMessage) => void) | null = null,
+    context: RelayClientContext = {},
+    logger?: RelayClientLogger,
+  ) {
     this.ws = ws;
     this.onProducer = onProducer;
     this.ready = new Promise<void>((resolve, reject) => {
@@ -49,6 +66,12 @@ export class RelayClient {
         const err = args[0];
         reject(err instanceof Error ? err : new Error(String(err)));
       });
+    });
+    // Bare observability: a mid-session relay death was previously invisible
+    // to this process (bot has no standby/dual-relay awareness — no hint to
+    // send anywhere). This is a log line only, no network call.
+    this.ws.on('close', () => {
+      logger?.warn({ ...context }, 'RelayClient: relay WS closed');
     });
     this.ws.on('message', (...args: unknown[]) => {
       const data = args[0];

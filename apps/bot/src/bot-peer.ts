@@ -18,6 +18,7 @@ import {
   RelayClient,
   createWiredTransport,
   type WsLike,
+  type Logger,
 } from '@dvconf/shared';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 
@@ -26,6 +27,9 @@ export interface BotPeerOptions {
   roomId: string;
   peerId: string;
   roomPassword: string;
+  /** Threaded into RelayClient so a mid-session relay-WS close is observable
+   *  (bot has no standby/dual-relay path, so this is log-only — no hint sent). */
+  logger?: Logger;
 }
 
 /** Base64-encode a 32-byte ed25519 public key for the `join` message's
@@ -77,7 +81,12 @@ export class BotPeer {
   /** Join the room and set up the send transport. Does not produce yet. */
   async connect(): Promise<void> {
     const ws = new WebSocket(this.opts.relayUrl) as unknown as WsLike;
-    this.client = new RelayClient(ws);
+    this.client = new RelayClient(
+      ws,
+      null,
+      { roomId: this.opts.roomId, peerId: this.opts.peerId, relayUrl: this.opts.relayUrl },
+      this.opts.logger,
+    );
     await this.client.ready;
 
     this.client.send(buildJoinMessage(this.opts));

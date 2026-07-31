@@ -291,5 +291,7 @@ export type {
   WrtcNonstandard,
   RelayMessage,
   WsLike,
+  RelayClientLogger,
+  RelayClientContext,
   IceServerLike,
 } from './mediasoup-node/index.js';
