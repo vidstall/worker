@@ -82,18 +82,28 @@ async function main(): Promise<void> {
     promRegistry,
     'dvconf_bot_ffmpeg_respawns_total',
     'ffmpeg child-process respawns (unexpected exit) across all bot sessions',
-    [],
+    ['track'],
   );
   const ffmpegStderrLinesTotalCounter = createCounter(
     promRegistry,
     'dvconf_bot_ffmpeg_stderr_lines_total',
     'Cumulative ffmpeg stderr data events (count only, content never surfaced)',
-    [],
+    ['track'],
   );
   const frameDropsTotalCounter = createCounter(
     promRegistry,
     'dvconf_bot_frame_drops_total',
     'Video/audio frames dropped due to consumer backpressure',
+    ['track'],
+  );
+  // Audio-only: the pacing loop fed a silence frame because the queue was
+  // genuinely empty (ffmpeg itself behind schedule, not just a delayed
+  // consumer tick) -- distinct from frameDropsTotalCounter, which counts
+  // the OTHER failure mode (queue overflow, oldest chunk discarded).
+  const audioUnderrunsTotalCounter = createCounter(
+    promRegistry,
+    'dvconf_bot_audio_underruns_total',
+    'Silence frames fed in place of real audio because ffmpeg fell behind schedule',
     [],
   );
 
@@ -107,9 +117,10 @@ async function main(): Promise<void> {
       logger,
       graphqlClient,
       onJoinPhase: (phase, ms) => joinPhaseHistogram.observe({ phase }, ms / 1000),
-      onFfmpegRespawn: () => ffmpegRespawnsTotalCounter.inc(),
-      onFfmpegStderrData: () => ffmpegStderrLinesTotalCounter.inc(),
-      onFrameDrop: () => frameDropsTotalCounter.inc(),
+      onFfmpegRespawn: (track) => ffmpegRespawnsTotalCounter.inc({ track }),
+      onFfmpegStderrData: (track) => ffmpegStderrLinesTotalCounter.inc({ track }),
+      onFrameDrop: (track) => frameDropsTotalCounter.inc({ track }),
+      onAudioUnderrun: () => audioUnderrunsTotalCounter.inc(),
     }).catch((err: unknown) => {
       sessionErrorsTotalCounter.inc();
       throw err;

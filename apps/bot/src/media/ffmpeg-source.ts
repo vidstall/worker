@@ -67,16 +67,19 @@ export async function probeVideoDimensions(mp4Path: string): Promise<VideoDimens
   });
 }
 
+export type MediaTrack = 'audio' | 'video';
+
 interface RespawningProcessOpts {
   bin: string;
   args: string[];
   logger: Logger;
   label: string;
+  track: MediaTrack;
   onData: (chunk: Buffer) => void;
   /** Monitoring-redesign gap #1: count only, never log stderr content. */
-  onStderrData?: () => void;
+  onStderrData?: (track: MediaTrack) => void;
   /** Fires right before scheduling a respawn (unexpected exit). */
-  onRespawn?: () => void;
+  onRespawn?: (track: MediaTrack) => void;
 }
 
 /** Spawn a process piping stdout to `onData`; respawn (with backoff) on an
@@ -92,7 +95,7 @@ function spawnRespawning(opts: RespawningProcessOpts): () => void {
     proc.stdout.on('data', opts.onData);
     proc.stderr.on('data', () => {
       /* ffmpeg logs progress to stderr; not surfaced */
-      opts.onStderrData?.();
+      opts.onStderrData?.(opts.track);
     });
     proc.on('error', (err) => {
       opts.logger.warn({ module: 'ffmpeg-source', label: opts.label, err: String(err) }, `${opts.label} process error`);
@@ -103,7 +106,7 @@ function spawnRespawning(opts: RespawningProcessOpts): () => void {
         { module: 'ffmpeg-source', label: opts.label, code, signal },
         `${opts.label} exited unexpectedly (loop=${'-stream_loop -1'} should prevent this under normal operation) — respawning`,
       );
-      opts.onRespawn?.();
+      opts.onRespawn?.(opts.track);
       setTimeout(launch, RESPAWN_BACKOFF_MS);
     });
   };
@@ -113,6 +116,33 @@ function spawnRespawning(opts: RespawningProcessOpts): () => void {
     stopped = true;
     if (current !== null) current.kill('SIGTERM');
   };
+}
+
+export interface DueChunksResult {
+  due: number;
+  carryOut: number;
+}
+
+/** How many fixed-size chunks are "due" since the last tick, given elapsed
+ *  wall-clock time -- lets a delayed setInterval tick catch up (drain
+ *  several due chunks) instead of always draining exactly one, which is
+ *  what silently let the backlog grow until MAX_QUEUE dropped the oldest
+ *  chunk (the audible break this function exists to fix). `elapsedMs` is
+ *  clamped to `maxElapsedMs` (callers pass MAX_QUEUE * chunkMs -- never
+ *  claim more is "due" than the queue could ever hold) so a very long stall
+ *  (process suspended, laptop sleep) doesn't demand an unbounded catch-up
+ *  burst -- it just resumes from "now", same effective behavior as the old
+ *  cap-and-drop, but only for truly extreme gaps. */
+export function computeDueChunks(
+  elapsedMs: number,
+  chunkMs: number,
+  carryIn: number,
+  maxElapsedMs: number,
+): DueChunksResult {
+  const clamped = Math.min(elapsedMs, maxElapsedMs);
+  const total = carryIn + clamped / chunkMs;
+  const due = Math.floor(total);
+  return { due, carryOut: total - due };
 }
 
 /** Pull fixed-size frames out of a byte stream. Pure — testable without a
@@ -143,9 +173,9 @@ export interface StartVideoSourceOpts {
   videoSource: InstanceType<WrtcNonstandard['RTCVideoSource']>;
   logger: Logger;
   /** Monitoring-redesign gap #1: ffmpeg health counters, all optional. */
-  onFrameDrop?: () => void;
-  onStderrData?: () => void;
-  onRespawn?: () => void;
+  onFrameDrop?: (track: MediaTrack) => void;
+  onStderrData?: (track: MediaTrack) => void;
+  onRespawn?: (track: MediaTrack) => void;
 }
 
 /** Spawn the looping video-decode ffmpeg process and feed I420 frames into
@@ -163,7 +193,7 @@ export function startVideoSource(opts: StartVideoSourceOpts): () => void {
     queue.push(frame);
     if (queue.length > MAX_QUEUE) {
       queue.shift(); // drop oldest if consumer falls behind
-      opts.onFrameDrop?.();
+      opts.onFrameDrop?.('video');
     }
   });
 
@@ -181,16 +211,26 @@ export function startVideoSource(opts: StartVideoSourceOpts): () => void {
     ],
     logger: opts.logger,
     label: 'ffmpeg-video',
+    track: 'video',
     onData: (chunk) => frameBuffer.push(chunk),
     onStderrData: opts.onStderrData,
     onRespawn: opts.onRespawn,
   });
 
   const intervalMs = 1000 / fps;
+  let lastTickAt = Date.now();
+  let carry = 0;
   const timer = setInterval(() => {
-    const frame = queue.shift();
-    if (frame === undefined) return; // no frame ready yet; skip this tick
-    opts.videoSource.onFrame({ width, height, data: new Uint8Array(frame) });
+    const now = Date.now();
+    const elapsedMs = now - lastTickAt;
+    lastTickAt = now;
+    const { due, carryOut } = computeDueChunks(elapsedMs, intervalMs, carry, MAX_QUEUE * intervalMs);
+    carry = carryOut;
+    for (let i = 0; i < due; i++) {
+      const frame = queue.shift();
+      if (frame === undefined) break; // no frame ready yet -- last displayed frame simply holds
+      opts.videoSource.onFrame({ width, height, data: new Uint8Array(frame) });
+    }
   }, intervalMs);
 
   return () => {
@@ -211,9 +251,13 @@ export interface StartAudioSourceOpts {
   audioSource: InstanceType<WrtcNonstandard['RTCAudioSource']>;
   logger: Logger;
   /** Monitoring-redesign gap #1: ffmpeg health counters, all optional. */
-  onFrameDrop?: () => void;
-  onStderrData?: () => void;
-  onRespawn?: () => void;
+  onFrameDrop?: (track: MediaTrack) => void;
+  onStderrData?: (track: MediaTrack) => void;
+  onRespawn?: (track: MediaTrack) => void;
+  /** Fires when the queue is genuinely empty (ffmpeg itself behind
+   *  schedule, not just a delayed consumer tick) and a silence frame was
+   *  fed in place of real audio -- see startAudioSource's timer. */
+  onUnderrun?: (track: MediaTrack) => void;
 }
 
 /** Spawn the looping audio-decode ffmpeg process and feed 10ms PCM chunks
@@ -227,7 +271,7 @@ export function startAudioSource(opts: StartAudioSourceOpts): () => void {
     queue.push(chunk);
     if (queue.length > MAX_QUEUE) {
       queue.shift();
-      opts.onFrameDrop?.();
+      opts.onFrameDrop?.('audio');
     }
   });
 
@@ -245,28 +289,50 @@ export function startAudioSource(opts: StartAudioSourceOpts): () => void {
     ],
     logger: opts.logger,
     label: 'ffmpeg-audio',
+    track: 'audio',
     onData: (chunk) => frameBuffer.push(chunk),
     onStderrData: opts.onStderrData,
     onRespawn: opts.onRespawn,
   });
 
-  const timer = setInterval(() => {
-    const chunk = queue.shift();
-    if (chunk === undefined) return;
-    // chunk.buffer is Node's shared Buffer pool (8192 bytes), not a
-    // tightly-sized ArrayBuffer -- @roamhq/wrtc's native binding validates
-    // samples.buffer.byteLength against numberOfFrames*channelCount*2
-    // directly (ignoring byteOffset/length), so passing the pooled buffer
-    // as-is throws "Expected a .byteLength of 960, not 8192". slice() copies
-    // into a freshly-sized ArrayBuffer, decoupled from the pool.
-    const exact = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.length);
+  // chunk.buffer is Node's shared Buffer pool (8192 bytes), not a tightly-
+  // sized ArrayBuffer -- @roamhq/wrtc's native binding validates
+  // samples.buffer.byteLength against numberOfFrames*channelCount*2 directly
+  // (ignoring byteOffset/length), so passing the pooled buffer as-is throws
+  // "Expected a .byteLength of 960, not 8192". slice() copies into a
+  // freshly-sized ArrayBuffer, decoupled from the pool.
+  const emit = (samples: Int16Array): void => {
     opts.audioSource.onData({
-      samples: new Int16Array(exact),
+      samples,
       sampleRate: AUDIO_SAMPLE_RATE,
       bitsPerSample: 16,
       channelCount: AUDIO_CHANNELS,
       numberOfFrames: AUDIO_SAMPLES_PER_CHUNK,
     });
+  };
+
+  let lastTickAt = Date.now();
+  let carry = 0;
+  const timer = setInterval(() => {
+    const now = Date.now();
+    const elapsedMs = now - lastTickAt;
+    lastTickAt = now;
+    const { due, carryOut } = computeDueChunks(elapsedMs, AUDIO_CHUNK_MS, carry, MAX_QUEUE * AUDIO_CHUNK_MS);
+    carry = carryOut;
+    for (let i = 0; i < due; i++) {
+      const chunk = queue.shift();
+      if (chunk === undefined) {
+        // Genuine underrun (ffmpeg itself behind, not just a delayed
+        // timer): feed silence so the track keeps a continuous frame
+        // instead of a gap -- turns a discontinuity/pop into a brief,
+        // natural silence.
+        emit(new Int16Array(AUDIO_SAMPLES_PER_CHUNK));
+        opts.onUnderrun?.('audio');
+        continue;
+      }
+      const exact = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.length);
+      emit(new Int16Array(exact));
+    }
   }, AUDIO_CHUNK_MS);
 
   return () => {

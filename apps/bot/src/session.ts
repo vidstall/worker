@@ -25,7 +25,7 @@ import {
   JOIN_ROOM_POLL_OPTS,
 } from './chain.js';
 import { BotPeer } from './bot-peer.js';
-import { probeVideoDimensions, startVideoSource, startAudioSource } from './media/ffmpeg-source.js';
+import { probeVideoDimensions, startVideoSource, startAudioSource, type MediaTrack } from './media/ffmpeg-source.js';
 import type { BotConfig } from './config.js';
 
 export type RoomMode = 'create' | 'join';
@@ -77,9 +77,13 @@ export interface StartBotSessionDeps {
    * to `dvconf_bot_ffmpeg_respawns_total`/`_stderr_lines_total`/
    * `dvconf_bot_frame_drops_total`.
    */
-  onFfmpegRespawn?: () => void;
-  onFfmpegStderrData?: () => void;
-  onFrameDrop?: () => void;
+  onFfmpegRespawn?: (track: MediaTrack) => void;
+  onFfmpegStderrData?: (track: MediaTrack) => void;
+  onFrameDrop?: (track: MediaTrack) => void;
+  /** Fires when the audio pacing loop fed silence in place of a genuinely
+   *  missing chunk (ffmpeg itself behind schedule). `index.ts` wires this to
+   *  `dvconf_bot_audio_underruns_total`. */
+  onAudioUnderrun?: (track: MediaTrack) => void;
 }
 
 function wantsVideo(mediaMode: MediaMode): boolean {
@@ -105,6 +109,7 @@ export async function startBotSession(
     onFfmpegRespawn,
     onFfmpegStderrData,
     onFrameDrop,
+    onAudioUnderrun,
   } = deps;
 
   if (opts.roomMode === 'join' && (!opts.roomId || opts.roomId.trim() === '')) {
@@ -210,6 +215,7 @@ export async function startBotSession(
             onFrameDrop,
             onStderrData: onFfmpegStderrData,
             onRespawn: onFfmpegRespawn,
+            onUnderrun: onAudioUnderrun,
           }),
         );
         await peer.produceAudio(audioSource.createTrack());

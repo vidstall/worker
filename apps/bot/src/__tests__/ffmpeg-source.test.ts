@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { FrameBuffer } from '../media/ffmpeg-source.js';
+import { FrameBuffer, computeDueChunks } from '../media/ffmpeg-source.js';
 
 // ── Mocked child_process (monitoring-redesign gap #1 wiring tests) ─────────
 // FrameBuffer's own tests above stay 100% real (pure, no process). The
@@ -83,6 +83,29 @@ describe('FrameBuffer', () => {
   });
 });
 
+describe('computeDueChunks', () => {
+  it('one chunk-width elapsed -- due 1, no carry', () => {
+    expect(computeDueChunks(10, 10, 0, 1000)).toEqual({ due: 1, carryOut: 0 });
+  });
+
+  it('elapsed time beyond a single chunk-width catches up (due > 1)', () => {
+    expect(computeDueChunks(35, 10, 0, 1000)).toEqual({ due: 3, carryOut: 0.5 });
+  });
+
+  it('carry accumulates across calls until it produces an extra due chunk', () => {
+    const first = computeDueChunks(9, 10, 0, 1000); // 0.9 due -- none yet
+    expect(first).toEqual({ due: 0, carryOut: 0.9 });
+    const second = computeDueChunks(9, 10, first.carryOut, 1000); // 0.9 + 0.9 = 1.8
+    expect(second).toEqual({ due: 1, carryOut: expect.closeTo(0.8, 10) });
+  });
+
+  it('clamps a very long stall so catch-up never exceeds the queue cap', () => {
+    const maxElapsedMs = 1000; // e.g. MAX_QUEUE(100) * chunkMs(10)
+    const result = computeDueChunks(60_000, 10, 0, maxElapsedMs); // process suspended 60s
+    expect(result.due).toBe(maxElapsedMs / 10);
+  });
+});
+
 describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
   beforeEach(() => {
     lastSpawned = null;
@@ -109,6 +132,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
     lastSpawned!.stdout.emit('data', Buffer.alloc(frameSize * framesToPush));
 
     expect(onFrameDrop).toHaveBeenCalledTimes(5);
+    expect(onFrameDrop).toHaveBeenCalledWith('video');
     stop();
   });
 
@@ -128,6 +152,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
     lastSpawned!.stdout.emit('data', Buffer.alloc(bytesPerChunk * chunksToPush));
 
     expect(onFrameDrop).toHaveBeenCalledTimes(3);
+    expect(onFrameDrop).toHaveBeenCalledWith('audio');
     stop();
   });
 
@@ -145,6 +170,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
     lastSpawned!.stderr.emit('data', Buffer.from('frame=  2 fps=30.0\n'));
 
     expect(onStderrData).toHaveBeenCalledTimes(2);
+    expect(onStderrData).toHaveBeenCalledWith('audio');
     stop();
   });
 
@@ -161,6 +187,31 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
     lastSpawned!.emit('close', 1, null);
 
     expect(onRespawn).toHaveBeenCalledTimes(1);
+    expect(onRespawn).toHaveBeenCalledWith('audio');
+    stop();
+  });
+
+  it('startAudioSource: feeds silence and fires onUnderrun when the queue is genuinely empty on tick', async () => {
+    const { startAudioSource } = await import('../media/ffmpeg-source.js');
+    const onUnderrun = vi.fn();
+    const onData = vi.fn();
+    const audioSource = { onData } as never;
+    const stop = startAudioSource({
+      mp4Path: '/tmp/fake.mp4',
+      audioSource,
+      logger: fakeLogger,
+      onUnderrun,
+    });
+
+    // No data ever pushed into the queue -- the very next tick must find it
+    // empty and feed silence instead of skipping the call outright.
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onUnderrun).toHaveBeenCalledWith('audio');
+    expect(onData).toHaveBeenCalledTimes(1);
+    const samples = onData.mock.calls[0]?.[0]?.samples as Int16Array;
+    expect(samples).toHaveLength(480);
+    expect(Array.from(samples).every((s) => s === 0)).toBe(true);
     stop();
   });
 });
