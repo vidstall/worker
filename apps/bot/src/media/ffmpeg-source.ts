@@ -118,31 +118,31 @@ function spawnRespawning(opts: RespawningProcessOpts): () => void {
   };
 }
 
-export interface DueChunksResult {
-  due: number;
-  carryOut: number;
-}
-
-/** How many fixed-size chunks are "due" since the last tick, given elapsed
- *  wall-clock time -- lets a delayed setInterval tick catch up (drain
- *  several due chunks) instead of always draining exactly one, which is
- *  what silently let the backlog grow until MAX_QUEUE dropped the oldest
- *  chunk (the audible break this function exists to fix). `elapsedMs` is
- *  clamped to `maxElapsedMs` (callers pass MAX_QUEUE * chunkMs -- never
- *  claim more is "due" than the queue could ever hold) so a very long stall
- *  (process suspended, laptop sleep) doesn't demand an unbounded catch-up
- *  burst -- it just resumes from "now", same effective behavior as the old
- *  cap-and-drop, but only for truly extreme gaps. */
-export function computeDueChunks(
-  elapsedMs: number,
+/** How many chunks SHOULD have been emitted by now, given a shared media
+ *  start time and this track's fixed chunk duration -- comparing that
+ *  target against how many have actually been emitted so far. Ties every
+ *  tick's decision to the same absolute clock (mediaStartedAt) rather than
+ *  each loop's own incrementally-tracked last-tick time, so two tracks
+ *  sharing one mediaStartedAt can never independently drift from each
+ *  other -- both always converge toward the same real elapsed time. Also
+ *  lets a delayed setInterval tick catch up (drain several due chunks)
+ *  instead of always draining exactly one, which is what silently let the
+ *  backlog grow until MAX_QUEUE dropped the oldest chunk (the audible break
+ *  this function originally existed to fix). Clamped to `maxCatchUpChunks`
+ *  (callers pass MAX_QUEUE -- never claim more is "due" than the queue
+ *  could ever hold) so a very long stall (process suspended, laptop sleep)
+ *  doesn't demand an unbounded catch-up burst -- it just resumes from
+ *  "now". */
+export function computeDueCount(
+  nowMs: number,
+  mediaStartedAtMs: number,
   chunkMs: number,
-  carryIn: number,
-  maxElapsedMs: number,
-): DueChunksResult {
-  const clamped = Math.min(elapsedMs, maxElapsedMs);
-  const total = carryIn + clamped / chunkMs;
-  const due = Math.floor(total);
-  return { due, carryOut: total - due };
+  alreadyEmitted: number,
+  maxCatchUpChunks: number,
+): number {
+  const target = Math.floor((nowMs - mediaStartedAtMs) / chunkMs);
+  const due = target - alreadyEmitted;
+  return Math.max(0, Math.min(due, maxCatchUpChunks));
 }
 
 /** Pull fixed-size frames out of a byte stream. Pure — testable without a
@@ -172,10 +172,15 @@ export interface StartVideoSourceOpts {
   dims: VideoDimensions;
   videoSource: InstanceType<WrtcNonstandard['RTCVideoSource']>;
   logger: Logger;
+  /** Same absolute clock passed to startAudioSource -- see computeDueCount. */
+  mediaStartedAt: number;
   /** Monitoring-redesign gap #1: ffmpeg health counters, all optional. */
   onFrameDrop?: (track: MediaTrack) => void;
   onStderrData?: (track: MediaTrack) => void;
   onRespawn?: (track: MediaTrack) => void;
+  /** Fires when the queue is genuinely empty and the last frame was
+   *  re-emitted in place of a fresh one -- see startVideoSource's timer. */
+  onUnderrun?: (track: MediaTrack) => void;
 }
 
 /** Spawn the looping video-decode ffmpeg process and feed I420 frames into
@@ -218,18 +223,27 @@ export function startVideoSource(opts: StartVideoSourceOpts): () => void {
   });
 
   const intervalMs = 1000 / fps;
-  let lastTickAt = Date.now();
-  let carry = 0;
+  let emittedCount = 0;
+  let lastFrame: Buffer | null = null;
   const timer = setInterval(() => {
-    const now = Date.now();
-    const elapsedMs = now - lastTickAt;
-    lastTickAt = now;
-    const { due, carryOut } = computeDueChunks(elapsedMs, intervalMs, carry, MAX_QUEUE * intervalMs);
-    carry = carryOut;
+    const due = computeDueCount(Date.now(), opts.mediaStartedAt, intervalMs, emittedCount, MAX_QUEUE);
     for (let i = 0; i < due; i++) {
       const frame = queue.shift();
-      if (frame === undefined) break; // no frame ready yet -- last displayed frame simply holds
+      if (frame === undefined) {
+        // Genuine underrun (decoder itself behind, not just a delayed
+        // timer): re-emit the last drawn frame so this track keeps
+        // advancing in lockstep with the shared clock, symmetric with
+        // audio's silence-fill -- otherwise every video underrun would
+        // let audio's timeline (which always advances) drift ahead.
+        if (lastFrame === null) break; // nothing decoded yet -- nothing to repeat
+        opts.videoSource.onFrame({ width, height, data: new Uint8Array(lastFrame) });
+        opts.onUnderrun?.('video');
+        emittedCount++;
+        continue;
+      }
+      lastFrame = frame;
       opts.videoSource.onFrame({ width, height, data: new Uint8Array(frame) });
+      emittedCount++;
     }
   }, intervalMs);
 
@@ -250,6 +264,8 @@ export interface StartAudioSourceOpts {
   mp4Path: string;
   audioSource: InstanceType<WrtcNonstandard['RTCAudioSource']>;
   logger: Logger;
+  /** Same absolute clock passed to startVideoSource -- see computeDueCount. */
+  mediaStartedAt: number;
   /** Monitoring-redesign gap #1: ffmpeg health counters, all optional. */
   onFrameDrop?: (track: MediaTrack) => void;
   onStderrData?: (track: MediaTrack) => void;
@@ -311,27 +327,37 @@ export function startAudioSource(opts: StartAudioSourceOpts): () => void {
     });
   };
 
-  let lastTickAt = Date.now();
-  let carry = 0;
+  let emittedCount = 0;
+  let hasEmittedReal = false;
   const timer = setInterval(() => {
-    const now = Date.now();
-    const elapsedMs = now - lastTickAt;
-    lastTickAt = now;
-    const { due, carryOut } = computeDueChunks(elapsedMs, AUDIO_CHUNK_MS, carry, MAX_QUEUE * AUDIO_CHUNK_MS);
-    carry = carryOut;
+    const due = computeDueCount(Date.now(), opts.mediaStartedAt, AUDIO_CHUNK_MS, emittedCount, MAX_QUEUE);
     for (let i = 0; i < due; i++) {
       const chunk = queue.shift();
       if (chunk === undefined) {
+        // Symmetric with startVideoSource's `lastFrame === null` gate: before
+        // this track's OWN ffmpeg has ever delivered a real chunk, don't fake
+        // progress by padding silence -- video and audio's ffmpeg processes
+        // are spawned at different real wall-clock moments (video's starts
+        // right after probeVideoDimensions; audio's not until after
+        // peer.produceVideo's WebRTC renegotiation completes), so silently
+        // racing emittedCount ahead here during that gap would let audio's
+        // clock get artificially pre-advanced relative to video's, baking in
+        // a permanent A/V skew before either track has actually started
+        // playing real content.
+        if (!hasEmittedReal) break;
         // Genuine underrun (ffmpeg itself behind, not just a delayed
         // timer): feed silence so the track keeps a continuous frame
         // instead of a gap -- turns a discontinuity/pop into a brief,
         // natural silence.
         emit(new Int16Array(AUDIO_SAMPLES_PER_CHUNK));
         opts.onUnderrun?.('audio');
+        emittedCount++;
         continue;
       }
+      hasEmittedReal = true;
       const exact = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.length);
       emit(new Int16Array(exact));
+      emittedCount++;
     }
   }, AUDIO_CHUNK_MS);
 

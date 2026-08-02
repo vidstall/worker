@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { FrameBuffer, computeDueChunks } from '../media/ffmpeg-source.js';
+import { FrameBuffer, computeDueCount } from '../media/ffmpeg-source.js';
 
 // ── Mocked child_process (monitoring-redesign gap #1 wiring tests) ─────────
 // FrameBuffer's own tests above stay 100% real (pure, no process). The
@@ -83,26 +83,37 @@ describe('FrameBuffer', () => {
   });
 });
 
-describe('computeDueChunks', () => {
-  it('one chunk-width elapsed -- due 1, no carry', () => {
-    expect(computeDueChunks(10, 10, 0, 1000)).toEqual({ due: 1, carryOut: 0 });
+describe('computeDueCount', () => {
+  it('one chunk-width elapsed with nothing emitted yet -- due 1', () => {
+    expect(computeDueCount(10, 0, 10, 0, 1000)).toBe(1);
   });
 
   it('elapsed time beyond a single chunk-width catches up (due > 1)', () => {
-    expect(computeDueChunks(35, 10, 0, 1000)).toEqual({ due: 3, carryOut: 0.5 });
+    expect(computeDueCount(35, 0, 10, 0, 1000)).toBe(3);
   });
 
-  it('carry accumulates across calls until it produces an extra due chunk', () => {
-    const first = computeDueChunks(9, 10, 0, 1000); // 0.9 due -- none yet
-    expect(first).toEqual({ due: 0, carryOut: 0.9 });
-    const second = computeDueChunks(9, 10, first.carryOut, 1000); // 0.9 + 0.9 = 1.8
-    expect(second).toEqual({ due: 1, carryOut: expect.closeTo(0.8, 10) });
+  it('already-emitted count is subtracted from the absolute target', () => {
+    // 35ms / 10ms chunks -> target 3; 2 already emitted -> only 1 due now.
+    expect(computeDueCount(35, 0, 10, 2, 1000)).toBe(1);
+  });
+
+  it('never goes negative when alreadyEmitted is ahead of the target (an early tick)', () => {
+    expect(computeDueCount(35, 0, 10, 10, 1000)).toBe(0);
   });
 
   it('clamps a very long stall so catch-up never exceeds the queue cap', () => {
-    const maxElapsedMs = 1000; // e.g. MAX_QUEUE(100) * chunkMs(10)
-    const result = computeDueChunks(60_000, 10, 0, maxElapsedMs); // process suspended 60s
-    expect(result.due).toBe(maxElapsedMs / 10);
+    const maxCatchUpChunks = 100; // e.g. MAX_QUEUE
+    const result = computeDueCount(60_000, 0, 10, 0, maxCatchUpChunks); // process suspended 60s
+    expect(result).toBe(maxCatchUpChunks);
+  });
+
+  it('two tracks sharing one mediaStartedAt converge on the same target regardless of chunk size', () => {
+    // audio: 10ms chunks: video: 33.33ms chunks (30fps) -- both measured from
+    // the same absolute start, 100ms elapsed.
+    const audioDue = computeDueCount(100, 0, 10, 0, 1000);
+    const videoDue = computeDueCount(100, 0, 1000 / 30, 0, 1000);
+    expect(audioDue).toBe(10);
+    expect(videoDue).toBe(3); // floor(100 / 33.33)
   });
 });
 
@@ -110,6 +121,10 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
   beforeEach(() => {
     lastSpawned = null;
     vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('startVideoSource: onFrameDrop fires once the consumer queue exceeds its cap', async () => {
@@ -121,6 +136,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
       dims: { width: 2, height: 2, fps: 30 },
       videoSource,
       logger: fakeLogger,
+      mediaStartedAt: Date.now(),
       onFrameDrop,
     });
     const frameSize = Math.floor(2 * 2 * 1.5); // 6
@@ -144,6 +160,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
       mp4Path: '/tmp/fake.mp4',
       audioSource,
       logger: fakeLogger,
+      mediaStartedAt: Date.now(),
       onFrameDrop,
     });
     const bytesPerChunk = 960;
@@ -164,6 +181,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
       mp4Path: '/tmp/fake.mp4',
       audioSource,
       logger: fakeLogger,
+      mediaStartedAt: Date.now(),
       onStderrData,
     });
     lastSpawned!.stderr.emit('data', Buffer.from('frame=  1 fps=0.0\n'));
@@ -182,6 +200,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
       mp4Path: '/tmp/fake.mp4',
       audioSource,
       logger: fakeLogger,
+      mediaStartedAt: Date.now(),
       onRespawn,
     });
     lastSpawned!.emit('close', 1, null);
@@ -191,7 +210,7 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
     stop();
   });
 
-  it('startAudioSource: feeds silence and fires onUnderrun when the queue is genuinely empty on tick', async () => {
+  it('startAudioSource: does not fire onUnderrun before any real chunk has ever arrived', async () => {
     const { startAudioSource } = await import('../media/ffmpeg-source.js');
     const onUnderrun = vi.fn();
     const onData = vi.fn();
@@ -200,18 +219,102 @@ describe('ffmpeg health counters (monitoring-redesign gap #1)', () => {
       mp4Path: '/tmp/fake.mp4',
       audioSource,
       logger: fakeLogger,
+      mediaStartedAt: Date.now(),
       onUnderrun,
     });
 
-    // No data ever pushed into the queue -- the very next tick must find it
-    // empty and feed silence instead of skipping the call outright.
+    // No data ever pushed into the queue -- nothing decoded yet, so this
+    // must NOT fake progress with silence (that would let audio's clock
+    // race ahead of video's during ffmpeg startup, see startAudioSource).
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onUnderrun).not.toHaveBeenCalled();
+    expect(onData).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('startAudioSource: feeds silence and fires onUnderrun on a genuine underrun once real audio has started', async () => {
+    const { startAudioSource } = await import('../media/ffmpeg-source.js');
+    const onUnderrun = vi.fn();
+    const onData = vi.fn();
+    const audioSource = { onData } as never;
+    const stop = startAudioSource({
+      mp4Path: '/tmp/fake.mp4',
+      audioSource,
+      logger: fakeLogger,
+      mediaStartedAt: Date.now(),
+      onUnderrun,
+    });
+
+    // First tick: exactly one real chunk queued -- consumes it, no underrun.
+    lastSpawned!.stdout.emit('data', Buffer.alloc(960));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onUnderrun).not.toHaveBeenCalled();
+    expect(onData).toHaveBeenCalledTimes(1);
+
+    // Second tick: queue now empty, but real audio has already started --
+    // must feed silence instead of skipping the call outright.
     await vi.advanceTimersByTimeAsync(10);
 
     expect(onUnderrun).toHaveBeenCalledWith('audio');
-    expect(onData).toHaveBeenCalledTimes(1);
-    const samples = onData.mock.calls[0]?.[0]?.samples as Int16Array;
+    expect(onData).toHaveBeenCalledTimes(2);
+    const samples = onData.mock.calls[1]?.[0]?.samples as Int16Array;
     expect(samples).toHaveLength(480);
     expect(Array.from(samples).every((s) => s === 0)).toBe(true);
+    stop();
+  });
+
+  it('startVideoSource: repeats the last frame and fires onUnderrun when the queue is empty on tick', async () => {
+    const { startVideoSource } = await import('../media/ffmpeg-source.js');
+    const onUnderrun = vi.fn();
+    const onFrame = vi.fn();
+    const videoSource = { onFrame } as never;
+    const dims = { width: 2, height: 2, fps: 25 }; // intervalMs = 40, a clean integer
+    const frameSize = Math.floor(dims.width * dims.height * 1.5); // 6
+    const stop = startVideoSource({
+      mp4Path: '/tmp/fake.mp4',
+      dims,
+      videoSource,
+      logger: fakeLogger,
+      mediaStartedAt: Date.now(),
+      onUnderrun,
+    });
+
+    // First tick: exactly one frame is queued -- draws it, no underrun yet.
+    lastSpawned!.stdout.emit('data', Buffer.alloc(frameSize, 7));
+    await vi.advanceTimersByTimeAsync(40);
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onUnderrun).not.toHaveBeenCalled();
+    const firstFrameData = onFrame.mock.calls[0]?.[0]?.data;
+
+    // Second tick: queue is now empty -- must repeat the last frame instead
+    // of holding silently, and report the underrun.
+    await vi.advanceTimersByTimeAsync(40);
+    expect(onFrame).toHaveBeenCalledTimes(2);
+    expect(onUnderrun).toHaveBeenCalledWith('video');
+    expect(onFrame.mock.calls[1]?.[0]?.data).toEqual(firstFrameData);
+    stop();
+  });
+
+  it('startVideoSource: does not fire onUnderrun before any frame has ever been drawn', async () => {
+    const { startVideoSource } = await import('../media/ffmpeg-source.js');
+    const onUnderrun = vi.fn();
+    const onFrame = vi.fn();
+    const videoSource = { onFrame } as never;
+    const stop = startVideoSource({
+      mp4Path: '/tmp/fake.mp4',
+      dims: { width: 2, height: 2, fps: 30 },
+      videoSource,
+      logger: fakeLogger,
+      mediaStartedAt: Date.now(),
+      onUnderrun,
+    });
+
+    // Queue empty from the very start -- nothing decoded yet, nothing to repeat.
+    await vi.advanceTimersByTimeAsync(1000 / 30);
+
+    expect(onFrame).not.toHaveBeenCalled();
+    expect(onUnderrun).not.toHaveBeenCalled();
     stop();
   });
 });

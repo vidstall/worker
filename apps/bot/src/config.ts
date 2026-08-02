@@ -9,11 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import 'dotenv/config';
 
-// Baked into the Docker image (apps/bot/assets/001.mp4, COPY'd by the
+// Baked into the Docker image (apps/bot/assets/002.mp4, COPY'd by the
 // Dockerfile) so a session works out of the box without the operator having
 // to supply MP4_PATH -- it's still overridable per-session via POST /bots'
 // `mp4Path`, or globally via the MP4_PATH env var for local dev.
-const DEFAULT_MP4_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', '001.mp4');
+const DEFAULT_MP4_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', '002.mp4');
 
 export interface BotConfig {
   /** Path to the MP4 file the bot loops as its published video/audio (session

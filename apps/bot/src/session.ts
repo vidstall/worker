@@ -80,10 +80,11 @@ export interface StartBotSessionDeps {
   onFfmpegRespawn?: (track: MediaTrack) => void;
   onFfmpegStderrData?: (track: MediaTrack) => void;
   onFrameDrop?: (track: MediaTrack) => void;
-  /** Fires when the audio pacing loop fed silence in place of a genuinely
-   *  missing chunk (ffmpeg itself behind schedule). `index.ts` wires this to
-   *  `dvconf_bot_audio_underruns_total`. */
-  onAudioUnderrun?: (track: MediaTrack) => void;
+  /** Fires when a pacing loop fed a placeholder (silence for audio, a
+   *  repeated frame for video) in place of a genuinely missing chunk
+   *  (ffmpeg itself behind schedule, not just a delayed timer tick).
+   *  `index.ts` wires this to `dvconf_bot_underruns_total{track}`. */
+  onUnderrun?: (track: MediaTrack) => void;
 }
 
 function wantsVideo(mediaMode: MediaMode): boolean {
@@ -109,7 +110,7 @@ export async function startBotSession(
     onFfmpegRespawn,
     onFfmpegStderrData,
     onFrameDrop,
-    onAudioUnderrun,
+    onUnderrun,
   } = deps;
 
   if (opts.roomMode === 'join' && (!opts.roomId || opts.roomId.trim() === '')) {
@@ -187,6 +188,10 @@ export async function startBotSession(
   if (wantsVideo(opts.mediaMode) || wantsAudio(opts.mediaMode)) {
     await timePhase('media_start', async () => {
       const nonstandard = await loadWrtcNonstandard();
+      // Shared across both tracks so their independent pacing loops target
+      // the same absolute timeline instead of drifting apart -- see
+      // computeDueCount in ffmpeg-source.ts.
+      const mediaStartedAt = Date.now();
 
       if (wantsVideo(opts.mediaMode)) {
         const dims = await probeVideoDimensions(mp4Path);
@@ -197,9 +202,11 @@ export async function startBotSession(
             dims,
             videoSource,
             logger,
+            mediaStartedAt,
             onFrameDrop,
             onStderrData: onFfmpegStderrData,
             onRespawn: onFfmpegRespawn,
+            onUnderrun,
           }),
         );
         await peer.produceVideo(videoSource.createTrack());
@@ -212,10 +219,11 @@ export async function startBotSession(
             mp4Path,
             audioSource,
             logger,
+            mediaStartedAt,
             onFrameDrop,
             onStderrData: onFfmpegStderrData,
             onRespawn: onFfmpegRespawn,
-            onUnderrun: onAudioUnderrun,
+            onUnderrun,
           }),
         );
         await peer.produceAudio(audioSource.createTrack());

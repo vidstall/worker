@@ -96,15 +96,16 @@ async function main(): Promise<void> {
     'Video/audio frames dropped due to consumer backpressure',
     ['track'],
   );
-  // Audio-only: the pacing loop fed a silence frame because the queue was
-  // genuinely empty (ffmpeg itself behind schedule, not just a delayed
-  // consumer tick) -- distinct from frameDropsTotalCounter, which counts
-  // the OTHER failure mode (queue overflow, oldest chunk discarded).
-  const audioUnderrunsTotalCounter = createCounter(
+  // The pacing loop fed a placeholder (silence for audio, a repeated frame
+  // for video) because the queue was genuinely empty (ffmpeg itself behind
+  // schedule, not just a delayed consumer tick) -- distinct from
+  // frameDropsTotalCounter, which counts the OTHER failure mode (queue
+  // overflow, oldest chunk discarded).
+  const underrunsTotalCounter = createCounter(
     promRegistry,
-    'dvconf_bot_audio_underruns_total',
-    'Silence frames fed in place of real audio because ffmpeg fell behind schedule',
-    [],
+    'dvconf_bot_underruns_total',
+    'Placeholder frames (silence/repeated-frame) fed in place of real media because ffmpeg fell behind schedule',
+    ['track'],
   );
 
   const startSession = (opts: BotSessionOptions): Promise<BotSession> => {
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
       onFfmpegRespawn: (track) => ffmpegRespawnsTotalCounter.inc({ track }),
       onFfmpegStderrData: (track) => ffmpegStderrLinesTotalCounter.inc({ track }),
       onFrameDrop: (track) => frameDropsTotalCounter.inc({ track }),
-      onAudioUnderrun: () => audioUnderrunsTotalCounter.inc(),
+      onUnderrun: (track) => underrunsTotalCounter.inc({ track }),
     }).catch((err: unknown) => {
       sessionErrorsTotalCounter.inc();
       throw err;
