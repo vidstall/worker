@@ -13,7 +13,7 @@ import { createLogger } from '@dvconf/shared';
 import { MetricsTracker } from '../metrics.js';
 import { startMetricsServer, type GetRoomFn } from '../metrics-server.js';
 import type { RoomState, PeerState } from '../room-handler.js';
-import type { PeerQualitySample } from '../stats-window.js';
+import type { PeerQualitySample, PeerQualityAggregates } from '../stats-window.js';
 
 const logger = createLogger('test:stats-report');
 
@@ -35,6 +35,31 @@ function sample(overrides: Partial<PeerQualitySample> = {}): PeerQualitySample {
     connectionSetupMs: 300,
     iceSuccess: true,
     reconnectMs: 0,
+    avSyncDriftMs: 0,
+    ...overrides,
+  };
+}
+
+function aggregates(overrides: Partial<PeerQualityAggregates> = {}): PeerQualityAggregates {
+  const stat = { avg: 1, min: 1, max: 1 };
+  return {
+    latencyMs: stat,
+    packetLoss: stat,
+    jitterMs: stat,
+    bitrateUpKbps: stat,
+    bitrateDownKbps: stat,
+    resolutionWidth: stat,
+    resolutionHeight: stat,
+    framerate: stat,
+    packetReorderingRate: stat,
+    encodeLatencyMs: stat,
+    decodeLatencyMs: stat,
+    freezeCount: stat,
+    pauseCount: stat,
+    connectionSetupMs: stat,
+    iceSuccess: stat,
+    reconnectMs: stat,
+    avSyncDriftMs: stat,
     ...overrides,
   };
 }
@@ -198,6 +223,76 @@ describe('POST /stats/report + GET /metrics/prom + GET /metrics/summary', () => 
     const session = tracker.getSessionMetrics('room-1', 'peer-a');
     expect(session?.packetsLost).toBe(7);
     expect(session?.jitter).toBe(11);
+  });
+
+  // ── POST /stats/report with `aggregates` ────────────────────────────────
+
+  it('accepts a report WITH a full aggregates object -> 204, and the aggregate gauges populate', async () => {
+    const rooms = new Map<string, RoomState>([['room-1', fakeRoom('room-1', ['peer-a'])]]);
+    start((roomId) => rooms.get(roomId));
+
+    const res = await fetch(`http://127.0.0.1:${port}/stats/report`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'room-1',
+        peerId: 'peer-a',
+        sample: sample(),
+        aggregates: aggregates({ latencyMs: { avg: 40, min: 20, max: 90 } }),
+      }),
+    });
+    expect(res.status).toBe(204);
+
+    const text = await (await fetch(`http://127.0.0.1:${port}/metrics/prom`)).text();
+    expect(text).toMatch(/dvconf_relay_peer_latency_ms_avg\{roomId="room-1",peerId="peer-a".*\} 40/);
+    expect(text).toMatch(/dvconf_relay_peer_latency_ms_min\{roomId="room-1",peerId="peer-a".*\} 20/);
+    expect(text).toMatch(/dvconf_relay_peer_latency_ms_max\{roomId="room-1",peerId="peer-a".*\} 90/);
+  });
+
+  it('accepts a report WITHOUT aggregates -> 204, unchanged (no aggregate gauges for that peer)', async () => {
+    const rooms = new Map<string, RoomState>([['room-1', fakeRoom('room-1', ['peer-a'])]]);
+    start((roomId) => rooms.get(roomId));
+
+    const res = await fetch(`http://127.0.0.1:${port}/stats/report`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roomId: 'room-1', peerId: 'peer-a', sample: sample() }),
+    });
+    expect(res.status).toBe(204);
+
+    const text = await (await fetch(`http://127.0.0.1:${port}/metrics/prom`)).text();
+    expect(text).not.toMatch(/dvconf_relay_peer_latency_ms_avg\{roomId="room-1",peerId="peer-a"/);
+  });
+
+  it('a report with an aggregates object MISSING a required field -> 400', async () => {
+    const rooms = new Map<string, RoomState>([['room-1', fakeRoom('room-1', ['peer-a'])]]);
+    start((roomId) => rooms.get(roomId));
+
+    const incomplete = aggregates() as unknown as Record<string, unknown>;
+    delete incomplete['latencyMs'];
+    const res = await fetch(`http://127.0.0.1:${port}/stats/report`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roomId: 'room-1', peerId: 'peer-a', sample: sample(), aggregates: incomplete }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('a report with an aggregates field entry missing avg/min/max -> 400', async () => {
+    const rooms = new Map<string, RoomState>([['room-1', fakeRoom('room-1', ['peer-a'])]]);
+    start((roomId) => rooms.get(roomId));
+
+    const res = await fetch(`http://127.0.0.1:${port}/stats/report`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'room-1',
+        peerId: 'peer-a',
+        sample: sample(),
+        aggregates: { ...aggregates(), latencyMs: { avg: 1, min: 1 } },
+      }),
+    });
+    expect(res.status).toBe(400);
   });
 
   // ── GET /metrics/prom ────────────────────────────────────────────────────

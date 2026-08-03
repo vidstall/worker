@@ -202,19 +202,30 @@ interface AddressTransactionsQueryResult {
   } | null;
 }
 
-// Paginates FORWARD from the beginning of the address's history (first/after),
-// not backward from the most recent transactions (last/before) -- a
-// registration tx is typically the FIRST thing an address ever does, so
-// scanning from genesis finds it in one page, whereas scanning from "most
-// recent N" can miss it forever once enough later transactions (heartbeats,
-// etc.) have accumulated. Replaces `client.queryTransactionBlocks(...)`,
-// which is deprecated JSON-RPC on devnet's public fullnode (confirmed via
-// direct curl: same "JSON-RPC on public fullnodes has been deprecated"
-// error as every other event-shaped read fixed in this file).
+// Paginates BACKWARD from the most recent transaction (last/before). This
+// repo's operator wallet pool is long-lived and REUSED across many
+// `scenario apply`/`destroy` cycles and contract redeploys (each producing
+// a fresh MinerStore/StakePosition/ControlPlaneCap under whatever package
+// was active at the time) -- confirmed live on devnet: a wallet used by
+// this repo had already accumulated 250+ transactions, its GENESIS-era
+// objects typed under a now-abandoned package, with the CURRENT package's
+// registration only ~200 transactions back from the tip. A forward-from-
+// genesis scan (the original approach here) would have to page through
+// that entire stale history before ever reaching the current registration
+// -- easily exceeding any reasonable maxPages and returning null even
+// though the object genuinely exists, which is exactly the self-heal
+// failure this function exists to prevent. Scanning backward finds a
+// RECENT registration (the only kind self-heal ever cares about -- an
+// account re-registering under the CURRENT package) in a handful of pages
+// regardless of how much older history the wallet carries. Replaces
+// `client.queryTransactionBlocks(...)`, which is deprecated JSON-RPC on
+// devnet's public fullnode (confirmed via direct curl: same "JSON-RPC on
+// public fullnodes has been deprecated" error as every other event-shaped
+// read fixed in this file).
 const ADDRESS_TRANSACTIONS_QUERY = `
-  query AddressTransactions($address: SuiAddress!, $after: String) {
+  query AddressTransactions($address: SuiAddress!, $before: String) {
     address(address: $address) {
-      transactions(filter: { sentAddress: $address }, first: 50, after: $after) {
+      transactions(filter: { sentAddress: $address }, last: 50, before: $before) {
         nodes {
           digest
           effects {
@@ -238,12 +249,13 @@ const ADDRESS_TRANSACTIONS_QUERY = `
 `;
 
 /**
- * Find the first-created on-chain object of type `objectType` among the
- * objects an `address` has created across its ENTIRE transaction history,
- * scanning forward from genesis. Used to recover a wallet's own MinerCap /
- * StakePosition / ValidatorCap object IDs after a partial registration
- * attempt (self-heal), replacing `client.queryTransactionBlocks(...)` --
- * see this file's own docstring and ADDRESS_TRANSACTIONS_QUERY's comment.
+ * Find the most-recently-created on-chain object of type `objectType` among
+ * the objects an `address` has created, scanning backward from its newest
+ * transaction. Used to recover a wallet's own MinerCap / StakePosition /
+ * ValidatorCap object IDs after a partial registration attempt (self-heal),
+ * replacing `client.queryTransactionBlocks(...)` -- see this file's own
+ * docstring and ADDRESS_TRANSACTIONS_QUERY's comment on why backward (not
+ * forward-from-genesis) is the correct direction for a reused wallet pool.
  * Returns null if no matching object is found within `maxPages` pages.
  */
 export async function findCreatedObjectByType(
@@ -252,17 +264,17 @@ export async function findCreatedObjectByType(
   objectType: string,
   maxPages = 20,
 ): Promise<string | null> {
-  let after: string | null = null;
-  let hasNextPage = true;
+  let before: string | null = null;
+  let hasPreviousPage = true;
   let pages = 0;
 
-  while (hasNextPage && pages < maxPages) {
+  while (hasPreviousPage && pages < maxPages) {
     const result: GraphQLQueryResult<AddressTransactionsQueryResult> = await client.query<
       AddressTransactionsQueryResult,
-      { address: string; after: string | null }
+      { address: string; before: string | null }
     >({
       query: ADDRESS_TRANSACTIONS_QUERY,
-      variables: { address, after },
+      variables: { address, before },
     });
 
     if (result.errors && result.errors.length > 0) {
@@ -276,7 +288,11 @@ export async function findCreatedObjectByType(
       return null;
     }
 
-    for (const tx of txs.nodes) {
+    // Newest-first within this page too -- `last: 50` returns the page in
+    // chronological (oldest-to-newest-within-page) order, so walk it in
+    // reverse to find the MOST RECENT matching creation first, not the
+    // oldest one in this batch of 50.
+    for (const tx of [...txs.nodes].reverse()) {
       const changes = tx.effects?.objectChanges.nodes ?? [];
       for (const change of changes) {
         if (!change.idCreated) continue;
@@ -287,8 +303,8 @@ export async function findCreatedObjectByType(
       }
     }
 
-    hasNextPage = txs.pageInfo.hasNextPage;
-    after = txs.pageInfo.endCursor;
+    hasPreviousPage = txs.pageInfo.hasPreviousPage;
+    before = txs.pageInfo.startCursor;
     pages++;
   }
 

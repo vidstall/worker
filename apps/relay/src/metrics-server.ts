@@ -10,6 +10,7 @@
  *   GET  /metrics/prom     — Prometheus text-format scrape (call-quality feature)
  *   GET  /metrics/summary  — JSON aggregation over live peer quality samples
  *   POST /stats/report     — client-reported per-peer quality sample ingestion
+ *   POST /logs/report      — client-reported frontend log batch ingestion
  *   POST /relay-down-hint  — client-reported "my primary relay just died" hint
  *   GET  /api/probe        — standby-liveness channel (RO-020)
  *   GET  /healthz          — heartbeat channel (RO-020 / NG-8)
@@ -39,7 +40,7 @@ import {
 import { registerFailoverMetrics } from './failover-metrics.js';
 import { registerRtcQualityMetrics } from './rtc-quality-metrics.js';
 import type { MetricsTracker } from './metrics.js';
-import { PeerStatsWindow, type PeerQualitySample } from './stats-window.js';
+import { PeerStatsWindow, type PeerQualitySample, type PeerQualityAggregates } from './stats-window.js';
 import type { RoomState } from './room-handler.js';
 
 /**
@@ -198,6 +199,12 @@ interface StatsReportBody {
   roomId: string;
   peerId: string;
   sample: PeerQualitySample;
+  /**
+   * Client-computed cumulative avg/min/max per field since the peer joined
+   * this room (RoomPage.tsx's aggregator ref) -- OPTIONAL: absent for any
+   * client (e.g. the bot's stats-reporter.ts) that doesn't maintain one.
+   */
+  aggregates?: PeerQualityAggregates;
 }
 
 /** Resolves the live room state a peer must be admitted into. Injected by index.ts. */
@@ -210,6 +217,7 @@ export type GetRoomFn = (roomId: string) => RoomState | undefined;
  */
 function readCappedJsonBody(
   req: IncomingMessage,
+  maxBodyBytes: number = STATS_REPORT_MAX_BODY_BYTES,
 ): Promise<{ ok: true; body: unknown } | { ok: false; status: 413 | 400 }> {
   return new Promise((resolve) => {
     let received = 0;
@@ -219,7 +227,7 @@ function readCappedJsonBody(
     req.on('data', (chunk: Buffer) => {
       if (settled) return;
       received += chunk.length;
-      if (received > STATS_REPORT_MAX_BODY_BYTES) {
+      if (received > maxBodyBytes) {
         settled = true;
         // Don't destroy() the socket — that resets the connection before the
         // 413 response can be written. Just stop retaining chunks; subsequent
@@ -270,7 +278,65 @@ const REQUIRED_SAMPLE_FIELDS: ReadonlyArray<keyof PeerQualitySample> = [
   'connectionSetupMs',
   'iceSuccess',
   'reconnectMs',
+  'avSyncDriftMs',
 ];
+
+// ── POST /logs/report — client-reported frontend log batch ingestion ──
+//
+// Same admission gate as /stats/report (peerId must be a currently-admitted
+// member of roomId) — no separate auth mechanism. The entire "shipping"
+// mechanism is `console.log`-ing each accepted entry as one structured JSON
+// line: every worker container's stdout/stderr is already tailed to Loki via
+// Docker's `loki` logging driver (see run_container.yml), so this needs no
+// new infra, secrets, or Loki-side changes. Body capped larger than
+// /stats/report's since this carries a batch of entries, not one sample;
+// entry count is separately capped to bound worst-case payload size.
+
+const LOGS_REPORT_MAX_BODY_BYTES = 8192;
+const LOGS_REPORT_MAX_ENTRIES = 20;
+const LOGS_REPORT_MIN_INTERVAL_MS = 2000;
+
+interface ClientLogEntry {
+  level: string;
+  module: string;
+  message: string;
+  context?: unknown;
+  timestamp: string;
+}
+
+interface LogsReportBody {
+  roomId: string;
+  peerId: string;
+  entries: ClientLogEntry[];
+}
+
+/** Structural validator for a single frontend log entry. Pure — no I/O. */
+function parseClientLogEntry(entry: unknown): ClientLogEntry | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+  const e = entry as Record<string, unknown>;
+  if (typeof e['level'] !== 'string' || e['level'] === '') return null;
+  if (typeof e['module'] !== 'string' || e['module'] === '') return null;
+  if (typeof e['message'] !== 'string') return null;
+  if (typeof e['timestamp'] !== 'string' || e['timestamp'] === '') return null;
+  return { level: e['level'], module: e['module'], message: e['message'], context: e['context'], timestamp: e['timestamp'] };
+}
+
+/** Structural validator for the POST /logs/report body. Pure — no I/O. */
+function parseLogsReportBody(body: unknown): LogsReportBody | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const b = body as Record<string, unknown>;
+  if (typeof b['roomId'] !== 'string' || b['roomId'] === '') return null;
+  if (typeof b['peerId'] !== 'string' || b['peerId'] === '') return null;
+  const rawEntries = b['entries'];
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0) return null;
+  const entries: ClientLogEntry[] = [];
+  for (const rawEntry of rawEntries.slice(0, LOGS_REPORT_MAX_ENTRIES)) {
+    const parsed = parseClientLogEntry(rawEntry);
+    if (!parsed) return null;
+    entries.push(parsed);
+  }
+  return { roomId: b['roomId'], peerId: b['peerId'], entries };
+}
 
 // ── POST /relay-down-hint — client-reported "primary relay just died" hint ──
 //
@@ -301,6 +367,36 @@ function parseRelayDownHintBody(body: unknown): RelayDownHintBody | null {
   return { roomId: b['roomId'], peerId: b['peerId'] };
 }
 
+/**
+ * Structural validator for an OPTIONAL `aggregates` body field: when present,
+ * requires `{avg, min, max}` (all finite numbers) for every one of the
+ * REQUIRED_SAMPLE_FIELDS (iceSuccess included -- as a 0/1-valued field for
+ * aggregation purposes, not a boolean here). Returns `null` on ANY
+ * malformed field (rejects the whole body, same strictness as `sample`);
+ * the field itself being entirely ABSENT from the body is handled by the
+ * caller, not here.
+ */
+function parseAggregates(aggregates: unknown): PeerQualityAggregates | null {
+  if (typeof aggregates !== 'object' || aggregates === null) return null;
+  const a = aggregates as Record<string, unknown>;
+  const out = {} as Record<string, { avg: number; min: number; max: number }>;
+  for (const field of REQUIRED_SAMPLE_FIELDS) {
+    const entry = a[field];
+    if (typeof entry !== 'object' || entry === null) return null;
+    const e = entry as Record<string, unknown>;
+    const { avg, min, max } = e;
+    if (
+      typeof avg !== 'number' || !Number.isFinite(avg) ||
+      typeof min !== 'number' || !Number.isFinite(min) ||
+      typeof max !== 'number' || !Number.isFinite(max)
+    ) {
+      return null;
+    }
+    out[field] = { avg, min, max };
+  }
+  return out as unknown as PeerQualityAggregates;
+}
+
 /** Structural validator for the POST /stats/report body. Pure — no I/O. */
 function parseStatsReportBody(body: unknown): StatsReportBody | null {
   if (typeof body !== 'object' || body === null) return null;
@@ -318,7 +414,20 @@ function parseStatsReportBody(body: unknown): StatsReportBody | null {
       return null;
     }
   }
-  return { roomId: b['roomId'], peerId: b['peerId'], sample: s as unknown as PeerQualitySample };
+
+  let aggregates: PeerQualityAggregates | undefined;
+  if (b['aggregates'] !== undefined) {
+    const parsed = parseAggregates(b['aggregates']);
+    if (!parsed) return null;
+    aggregates = parsed;
+  }
+
+  return {
+    roomId: b['roomId'],
+    peerId: b['peerId'],
+    sample: s as unknown as PeerQualitySample,
+    ...(aggregates ? { aggregates } : {}),
+  };
 }
 
 /** Per-field Prometheus gauges for the `/metrics/prom` peer-quality export. */
@@ -339,35 +448,88 @@ interface PeerQualityGauges {
   connectionSetupMs: Gauge<'roomId' | 'peerId'>;
   iceSuccess: Gauge<'roomId' | 'peerId'>;
   reconnectMs: Gauge<'roomId' | 'peerId'>;
+  avSyncDriftMs: Gauge<'roomId' | 'peerId'>;
 }
+
+/**
+ * Base Prometheus metric name + help text per `PeerQualitySample` field —
+ * the single source of truth both the current-value gauges below AND the
+ * cumulative avg/min/max gauges (`buildPeerQualityAggregateGauges`) are
+ * generated from, so the two stay in sync without hand-duplicating 17
+ * name/help pairs three times over.
+ */
+const PEER_QUALITY_METRIC_INFO: Record<keyof PeerQualitySample, { name: string; help: string }> = {
+  latencyMs: { name: 'dvconf_relay_peer_latency_ms', help: 'Client-reported RTT/latency, ms' },
+  packetLoss: { name: 'dvconf_relay_peer_packet_loss', help: 'Client-reported packet loss' },
+  jitterMs: { name: 'dvconf_relay_peer_jitter_ms', help: 'Client-reported jitter, ms' },
+  bitrateUpKbps: { name: 'dvconf_relay_peer_bitrate_up_kbps', help: 'Client-reported uplink bitrate, kbps' },
+  bitrateDownKbps: {
+    name: 'dvconf_relay_peer_bitrate_down_kbps',
+    help: 'Client-reported downlink bitrate, kbps',
+  },
+  resolutionWidth: { name: 'dvconf_relay_peer_resolution_width', help: 'Client-reported video width, px' },
+  resolutionHeight: {
+    name: 'dvconf_relay_peer_resolution_height',
+    help: 'Client-reported video height, px',
+  },
+  framerate: { name: 'dvconf_relay_peer_framerate', help: 'Client-reported framerate, fps' },
+  packetReorderingRate: {
+    name: 'dvconf_relay_peer_packet_reordering_rate',
+    help: 'Client-reported APPROXIMATE packet reordering rate',
+  },
+  encodeLatencyMs: { name: 'dvconf_relay_peer_encode_latency_ms', help: 'Client-reported encode latency, ms' },
+  decodeLatencyMs: { name: 'dvconf_relay_peer_decode_latency_ms', help: 'Client-reported decode latency, ms' },
+  freezeCount: { name: 'dvconf_relay_peer_freeze_count', help: 'Client-reported cumulative freeze count' },
+  pauseCount: { name: 'dvconf_relay_peer_pause_count', help: 'Client-reported cumulative pause count' },
+  connectionSetupMs: {
+    name: 'dvconf_relay_peer_connection_setup_ms',
+    help: 'Client-reported connection-setup time, ms',
+  },
+  iceSuccess: {
+    name: 'dvconf_relay_peer_ice_success',
+    help: 'Client-reported ICE success (1) / failure (0)',
+  },
+  reconnectMs: { name: 'dvconf_relay_peer_reconnect_ms', help: 'Client-reported reconnect time, ms' },
+  avSyncDriftMs: {
+    name: 'dvconf_relay_peer_av_sync_drift_ms',
+    help: "Client-reported audio-vs-video sync offset, ms (audio playout timestamp minus video's; positive = audio ahead)",
+  },
+};
 
 function buildPeerQualityGauges(registry: Registry): PeerQualityGauges {
   const mk = (name: string, help: string): Gauge<'roomId' | 'peerId'> =>
     new Gauge({ name, help, labelNames: ['roomId', 'peerId'], registers: [registry] });
-  return {
-    latencyMs: mk('dvconf_relay_peer_latency_ms', 'Client-reported RTT/latency, ms'),
-    packetLoss: mk('dvconf_relay_peer_packet_loss', 'Client-reported packet loss'),
-    jitterMs: mk('dvconf_relay_peer_jitter_ms', 'Client-reported jitter, ms'),
-    bitrateUpKbps: mk('dvconf_relay_peer_bitrate_up_kbps', 'Client-reported uplink bitrate, kbps'),
-    bitrateDownKbps: mk('dvconf_relay_peer_bitrate_down_kbps', 'Client-reported downlink bitrate, kbps'),
-    resolutionWidth: mk('dvconf_relay_peer_resolution_width', 'Client-reported video width, px'),
-    resolutionHeight: mk('dvconf_relay_peer_resolution_height', 'Client-reported video height, px'),
-    framerate: mk('dvconf_relay_peer_framerate', 'Client-reported framerate, fps'),
-    packetReorderingRate: mk(
-      'dvconf_relay_peer_packet_reordering_rate',
-      'Client-reported APPROXIMATE packet reordering rate',
-    ),
-    encodeLatencyMs: mk('dvconf_relay_peer_encode_latency_ms', 'Client-reported encode latency, ms'),
-    decodeLatencyMs: mk('dvconf_relay_peer_decode_latency_ms', 'Client-reported decode latency, ms'),
-    freezeCount: mk('dvconf_relay_peer_freeze_count', 'Client-reported cumulative freeze count'),
-    pauseCount: mk('dvconf_relay_peer_pause_count', 'Client-reported cumulative pause count'),
-    connectionSetupMs: mk(
-      'dvconf_relay_peer_connection_setup_ms',
-      'Client-reported connection-setup time, ms',
-    ),
-    iceSuccess: mk('dvconf_relay_peer_ice_success', 'Client-reported ICE success (1) / failure (0)'),
-    reconnectMs: mk('dvconf_relay_peer_reconnect_ms', 'Client-reported reconnect time, ms'),
-  };
+  const gauges = {} as PeerQualityGauges;
+  for (const field of Object.keys(PEER_QUALITY_METRIC_INFO) as Array<keyof PeerQualitySample>) {
+    const { name, help } = PEER_QUALITY_METRIC_INFO[field];
+    gauges[field] = mk(name, help);
+  }
+  return gauges;
+}
+
+/**
+ * Client-computed cumulative avg/min/max per field (RoomPage.tsx's
+ * aggregator ref, since the peer joined the room) — one NEW, separately
+ * named gauge per field per stat (e.g. `dvconf_relay_peer_latency_ms_avg`),
+ * NOT a label variant of the existing current-value gauges above, so no
+ * existing dashboard query needs to change.
+ */
+function buildPeerQualityAggregateGauges(
+  registry: Registry,
+): Record<'avg' | 'min' | 'max', PeerQualityGauges> {
+  const mk = (name: string, help: string): Gauge<'roomId' | 'peerId'> =>
+    new Gauge({ name, help, labelNames: ['roomId', 'peerId'], registers: [registry] });
+  const stats = ['avg', 'min', 'max'] as const;
+  const result = {} as Record<'avg' | 'min' | 'max', PeerQualityGauges>;
+  for (const stat of stats) {
+    const gauges = {} as PeerQualityGauges;
+    for (const field of Object.keys(PEER_QUALITY_METRIC_INFO) as Array<keyof PeerQualitySample>) {
+      const { name, help } = PEER_QUALITY_METRIC_INFO[field];
+      gauges[field] = mk(`${name}_${stat}`, `${help} (cumulative ${stat} since room join)`);
+    }
+    result[stat] = gauges;
+  }
+  return result;
 }
 
 /**
@@ -418,6 +580,7 @@ export function startMetricsServer(
   registerFailoverMetrics(promRegistry);
   registerRtcQualityMetrics(promRegistry);
   const peerGauges = buildPeerQualityGauges(promRegistry);
+  const peerAggregateGauges = buildPeerQualityAggregateGauges(promRegistry);
   const workerDiedGauge = new Gauge({
     name: 'dvconf_relay_worker_died_total',
     help: 'Cumulative count of mediasoup Worker died events (F61 health signal, DOH-014)',
@@ -463,6 +626,9 @@ export function startMetricsServer(
 
   // `/stats/report` rate limit: last-accepted-report wall-clock ts per peerId.
   const lastReportAt = new Map<string, number>();
+
+  // `/logs/report` rate limit: separate map, same pattern as `/stats/report`.
+  const lastLogsReportAt = new Map<string, number>();
 
   // `/relay-down-hint` state: fresh-hint-per-room store + its own (separate)
   // per-peerId rate limit map.
@@ -530,6 +696,11 @@ export function startMetricsServer(
     for (const gauge of Object.values(peerGauges)) {
       gauge.reset();
     }
+    for (const gauges of Object.values(peerAggregateGauges)) {
+      for (const gauge of Object.values(gauges)) {
+        gauge.reset();
+      }
+    }
     relayDownHintGauge.reset();
     const gaugeNow = Date.now();
     for (const [roomId] of relayDownHints) {
@@ -555,6 +726,19 @@ export function startMetricsServer(
       peerGauges.connectionSetupMs.set(labels, current.connectionSetupMs);
       peerGauges.iceSuccess.set(labels, current.iceSuccess ? 1 : 0);
       peerGauges.reconnectMs.set(labels, current.reconnectMs);
+      peerGauges.avSyncDriftMs.set(labels, current.avSyncDriftMs);
+
+      // Cumulative-since-join avg/min/max (RoomPage.tsx's aggregator) --
+      // absent for peers that never sent an `aggregates` body (e.g. the bot).
+      const aggregates = statsWindow.currentAggregates(peerId);
+      if (aggregates) {
+        for (const field of Object.keys(PEER_QUALITY_METRIC_INFO) as Array<keyof PeerQualitySample>) {
+          const { avg, min, max } = aggregates[field];
+          peerAggregateGauges.avg[field].set(labels, avg);
+          peerAggregateGauges.min[field].set(labels, min);
+          peerAggregateGauges.max[field].set(labels, max);
+        }
+      }
     }
   }
 
@@ -593,7 +777,7 @@ export function startMetricsServer(
     if (!parsed) {
       return { status: 400, body: { error: 'invalid_body' } };
     }
-    const { roomId, peerId, sample } = parsed;
+    const { roomId, peerId, sample, aggregates } = parsed;
 
     const room = getRoom?.(roomId);
     if (!room) {
@@ -613,7 +797,7 @@ export function startMetricsServer(
     }
     lastReportAt.set(peerId, now);
 
-    statsWindow.push(roomId, peerId, sample, now);
+    statsWindow.push(roomId, peerId, sample, now, aggregates);
     metrics.updateQuality(roomId, peerId, sample.packetLoss, sample.jitterMs, {
       latencyMs: sample.latencyMs,
       bitrateUpKbps: sample.bitrateUpKbps,
@@ -629,7 +813,50 @@ export function startMetricsServer(
       connectionSetupMs: sample.connectionSetupMs,
       iceSuccess: sample.iceSuccess,
       reconnectMs: sample.reconnectMs,
+      avSyncDriftMs: sample.avSyncDriftMs,
     });
+
+    return { status: 204 };
+  }
+
+  async function handleLogsReport(req: IncomingMessage, reqLog: Logger): Promise<{
+    status: number;
+    body?: unknown;
+  }> {
+    const read = await readCappedJsonBody(req, LOGS_REPORT_MAX_BODY_BYTES);
+    if (!read.ok) {
+      return { status: read.status, body: { error: read.status === 413 ? 'payload_too_large' : 'bad_request' } };
+    }
+    const parsed = parseLogsReportBody(read.body);
+    if (!parsed) {
+      return { status: 400, body: { error: 'invalid_body' } };
+    }
+    const { roomId, peerId, entries } = parsed;
+
+    const room = getRoom?.(roomId);
+    if (!room) {
+      reqLog.warn({ roomId, peerId }, 'logs/report: unknown room (404)');
+      return { status: 404, body: { error: 'room_not_found' } };
+    }
+    if (!room.peers.has(peerId)) {
+      reqLog.warn({ roomId, peerId }, 'logs/report: peer not admitted (403)');
+      return { status: 403, body: { error: 'peer_not_admitted' } };
+    }
+
+    const now = Date.now();
+    const last = lastLogsReportAt.get(peerId);
+    if (last !== undefined && now - last < LOGS_REPORT_MIN_INTERVAL_MS) {
+      // Rate-limited: silently no-op (not the caller's fault, don't error).
+      return { status: 204 };
+    }
+    lastLogsReportAt.set(peerId, now);
+
+    // The entire shipping mechanism: one structured JSON line per entry on
+    // this process's own stdout, already tailed to Loki by Docker's `loki`
+    // logging driver — no separate transport/secret needed.
+    for (const entry of entries) {
+      console.log(JSON.stringify({ source: 'frontend', roomId, peerId, ...entry }));
+    }
 
     return { status: 204 };
   }
@@ -691,6 +918,21 @@ export function startMetricsServer(
         })
         .catch((err: unknown) => {
           reqLog.error({ err, url }, 'stats/report: handler error');
+          res.writeHead(500, JSON_HEADERS);
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        });
+      return;
+    }
+
+    // Route: POST /logs/report — client-reported frontend log batch ingestion.
+    if (req.method === 'POST' && url === '/logs/report') {
+      handleLogsReport(req, reqLog)
+        .then(({ status, body }) => {
+          res.writeHead(status, JSON_HEADERS);
+          res.end(body === undefined ? undefined : JSON.stringify(body));
+        })
+        .catch((err: unknown) => {
+          reqLog.error({ err, url }, 'logs/report: handler error');
           res.writeHead(500, JSON_HEADERS);
           res.end(JSON.stringify({ error: 'Internal server error' }));
         });

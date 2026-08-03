@@ -8,6 +8,7 @@ import {
   getGlobalStatsWindow,
   resetGlobalStatsWindowForTests,
   type PeerQualitySample,
+  type PeerQualityAggregates,
 } from '../stats-window.js';
 
 function sample(overrides: Partial<PeerQualitySample> = {}): PeerQualitySample {
@@ -28,6 +29,31 @@ function sample(overrides: Partial<PeerQualitySample> = {}): PeerQualitySample {
     connectionSetupMs: 200,
     iceSuccess: true,
     reconnectMs: 0,
+    avSyncDriftMs: 0,
+    ...overrides,
+  };
+}
+
+function aggregates(overrides: Partial<PeerQualityAggregates> = {}): PeerQualityAggregates {
+  const stat = { avg: 1, min: 1, max: 1 };
+  return {
+    latencyMs: stat,
+    packetLoss: stat,
+    jitterMs: stat,
+    bitrateUpKbps: stat,
+    bitrateDownKbps: stat,
+    resolutionWidth: stat,
+    resolutionHeight: stat,
+    framerate: stat,
+    packetReorderingRate: stat,
+    encodeLatencyMs: stat,
+    decodeLatencyMs: stat,
+    freezeCount: stat,
+    pauseCount: stat,
+    connectionSetupMs: stat,
+    iceSuccess: stat,
+    reconnectMs: stat,
+    avSyncDriftMs: stat,
     ...overrides,
   };
 }
@@ -93,6 +119,31 @@ describe('PeerStatsWindow', () => {
     window.push('room-1', 'peer-a', sample(), 1000);
     window.push('room-1', 'peer-a', sample(), 2000);
     expect(window.current('peer-a')!.lastUpdatedAt).toBe(2000);
+  });
+
+  // ── currentAggregates() ──────────────────────────────────────────────────
+
+  it('currentAggregates() is undefined before any aggregates are pushed', () => {
+    window.push('room-1', 'peer-a', sample());
+    expect(window.currentAggregates('peer-a')).toBeUndefined();
+  });
+
+  it('currentAggregates() returns the latest pushed aggregates (latest-wins)', () => {
+    window.push('room-1', 'peer-a', sample(), 1000, aggregates({ latencyMs: { avg: 10, min: 5, max: 20 } }));
+    window.push('room-1', 'peer-a', sample(), 2000, aggregates({ latencyMs: { avg: 12, min: 5, max: 25 } }));
+    expect(window.currentAggregates('peer-a')!.latencyMs).toEqual({ avg: 12, min: 5, max: 25 });
+  });
+
+  it('a push with no aggregates leaves a previously-pushed aggregate untouched', () => {
+    window.push('room-1', 'peer-a', sample(), 1000, aggregates({ latencyMs: { avg: 10, min: 5, max: 20 } }));
+    window.push('room-1', 'peer-a', sample(), 2000);
+    expect(window.currentAggregates('peer-a')!.latencyMs).toEqual({ avg: 10, min: 5, max: 20 });
+  });
+
+  it('clear() drops a peer\'s aggregates too', () => {
+    window.push('room-1', 'peer-a', sample(), 1000, aggregates());
+    window.clear('peer-a');
+    expect(window.currentAggregates('peer-a')).toBeUndefined();
   });
 });
 

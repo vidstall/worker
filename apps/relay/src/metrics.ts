@@ -29,6 +29,7 @@ export interface SessionQualityExtra {
   connectionSetupMs?: number;
   iceSuccess?: boolean;
   reconnectMs?: number;
+  avSyncDriftMs?: number;
 }
 
 export interface SessionMetrics extends SessionQualityExtra {

@@ -32,6 +32,14 @@ export interface PeerQualitySample {
   connectionSetupMs: number;
   iceSuccess: boolean;
   reconnectMs: number;
+  /**
+   * Client-computed audio-vs-video sync offset, ms (see useConnectionStats.ts's
+   * avSyncDriftMs doc). Positive => audio playing out ahead of video. 0 is
+   * overloaded ("no drift" AND "browser doesn't support estimatedPlayoutTimestamp
+   * yet" AND "no video track"), same tradeoff the other 0-defaulted fields
+   * above already accept -- see RoomPage.tsx's POST-boundary comment.
+   */
+  avSyncDriftMs: number;
 }
 
 interface WindowedSample {
@@ -40,21 +48,38 @@ interface WindowedSample {
   ts: number;
 }
 
+/**
+ * Client-computed cumulative avg/min/max per field, since the peer joined the
+ * room (see useConnectionStats.ts / RoomPage.tsx's aggregator ref) -- NOT the
+ * relay's own SMOOTHED_FIELDS moving average below, which is a separate,
+ * short (~5-sample) server-side smoothing mechanism. Optional: older/bot
+ * clients that never send an `aggregates` body simply never populate this.
+ */
+export type PeerQualityAggregates = Record<keyof PeerQualitySample, { avg: number; min: number; max: number }>;
+
 /** Fields smoothed via a short moving average across the retained window. */
 const SMOOTHED_FIELDS = [
   'latencyMs',
   'jitterMs',
   'encodeLatencyMs',
   'decodeLatencyMs',
+  'avSyncDriftMs',
 ] as const satisfies ReadonlyArray<keyof PeerQualitySample>;
 
 const MAX_SAMPLES_PER_PEER = 5;
 
 export class PeerStatsWindow {
   private windows = new Map<string, WindowedSample[]>();
+  private aggregates = new Map<string, PeerQualityAggregates>();
 
   /** Push a new sample for `peerId`, evicting the oldest once the window is full. */
-  push(roomId: string, peerId: string, sample: PeerQualitySample, now: number = Date.now()): void {
+  push(
+    roomId: string,
+    peerId: string,
+    sample: PeerQualitySample,
+    now: number = Date.now(),
+    aggregates?: PeerQualityAggregates,
+  ): void {
     let buf = this.windows.get(peerId);
     if (!buf) {
       buf = [];
@@ -64,6 +89,17 @@ export class PeerStatsWindow {
     if (buf.length > MAX_SAMPLES_PER_PEER) {
       buf.shift();
     }
+    if (aggregates) {
+      this.aggregates.set(peerId, aggregates);
+    }
+  }
+
+  /**
+   * The latest client-reported cumulative avg/min/max for `peerId`, or
+   * `undefined` if this peer has never sent an `aggregates` body.
+   */
+  currentAggregates(peerId: string): PeerQualityAggregates | undefined {
+    return this.aggregates.get(peerId);
   }
 
   /**
@@ -95,6 +131,7 @@ export class PeerStatsWindow {
   /** Drop a peer's window entirely (e.g. on disconnect). */
   clear(peerId: string): void {
     this.windows.delete(peerId);
+    this.aggregates.delete(peerId);
   }
 }
 

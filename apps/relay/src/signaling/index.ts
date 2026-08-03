@@ -228,7 +228,7 @@ export function createSignalingServer(
                   clockRate && outbound.jitter !== undefined
                     ? (outbound.jitter / clockRate) * 1000
                     : undefined;
-                recordRtcQuality(roomId, peerId, 'down', {
+                recordRtcQuality(roomId, peerId, 'down', consumer.kind, {
                   jitterMs,
                   packetLossRatio: outbound.fractionLost,
                   bitrateKbps: outbound.bitrate !== undefined ? outbound.bitrate / 1000 : undefined,
@@ -249,7 +249,7 @@ export function createSignalingServer(
                 const clockRate = producer.rtpParameters.codecs[0]?.clockRate;
                 const jitterMs =
                   clockRate && inbound.jitter !== undefined ? (inbound.jitter / clockRate) * 1000 : undefined;
-                recordRtcQuality(roomId, peerId, 'up', {
+                recordRtcQuality(roomId, peerId, 'up', producer.kind, {
                   jitterMs,
                   packetLossRatio: inbound.fractionLost,
                   bitrateKbps: inbound.bitrate !== undefined ? inbound.bitrate / 1000 : undefined,

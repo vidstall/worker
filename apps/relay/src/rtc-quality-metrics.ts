@@ -15,6 +15,7 @@ import { createGauge, type Registry } from '@dvconf/shared';
 import type { Gauge } from 'prom-client';
 
 export type RtcDirection = 'up' | 'down';
+export type RtcMediaKind = 'audio' | 'video';
 
 export interface RtcQualitySample {
   jitterMs?: number;
@@ -23,11 +24,13 @@ export interface RtcQualitySample {
   rttMs?: number;
 }
 
+type Labels = 'roomId' | 'peerId' | 'direction' | 'kind';
+
 interface State {
-  jitter: Gauge<'roomId' | 'peerId' | 'direction'>;
-  packetLoss: Gauge<'roomId' | 'peerId' | 'direction'>;
-  bitrate: Gauge<'roomId' | 'peerId' | 'direction'>;
-  rtt: Gauge<'roomId' | 'peerId' | 'direction'>;
+  jitter: Gauge<Labels>;
+  packetLoss: Gauge<Labels>;
+  bitrate: Gauge<Labels>;
+  rtt: Gauge<Labels>;
 }
 
 let state: State | null = null;
@@ -39,38 +42,49 @@ export function registerRtcQualityMetrics(registry: Registry): void {
       registry,
       'dvconf_rtc_jitter_ms',
       'RTP jitter observed server-side by mediasoup, converted from RTP timestamp units via the stream codec clockRate',
-      ['roomId', 'peerId', 'direction'],
+      ['roomId', 'peerId', 'direction', 'kind'],
     ),
     packetLoss: createGauge(
       registry,
       'dvconf_rtc_packet_loss_ratio',
       'RTP fractionLost observed server-side by mediasoup (0..1)',
-      ['roomId', 'peerId', 'direction'],
+      ['roomId', 'peerId', 'direction', 'kind'],
     ),
     bitrate: createGauge(
       registry,
       'dvconf_rtc_bitrate_kbps',
       'RTP stream bitrate observed server-side by mediasoup, kbps',
-      ['roomId', 'peerId', 'direction'],
+      ['roomId', 'peerId', 'direction', 'kind'],
     ),
     rtt: createGauge(
       registry,
       'dvconf_rtc_rtt_ms',
       'RTP stream round-trip time observed server-side by mediasoup (undefined on most consumer/producer stats -- only set when present)',
-      ['roomId', 'peerId', 'direction'],
+      ['roomId', 'peerId', 'direction', 'kind'],
     ),
   };
 }
 
-/** direction: 'down' = relay->peer (Consumer), 'up' = peer->relay (Producer). */
+/**
+ * direction: 'down' = relay->peer (Consumer), 'up' = peer->relay (Producer).
+ * kind: 'audio' | 'video' -- a peer has ONE Consumer/Producer per media kind
+ * sharing the same (roomId, peerId, direction) triple, so `kind` MUST be part
+ * of the gauge's label set. It previously wasn't: audio and video samples for
+ * the same peer/direction landed on the exact same labelset and each `.set()`
+ * silently clobbered the other (last-polled-in-the-loop wins), making the
+ * old dvconf_rtc_* numbers neither a true per-kind reading nor a real
+ * average of both -- just whichever kind's getStats() happened to resolve
+ * last that tick.
+ */
 export function recordRtcQuality(
   roomId: string,
   peerId: string,
   direction: RtcDirection,
+  kind: RtcMediaKind,
   sample: RtcQualitySample,
 ): void {
   if (!state) return;
-  const labels = { roomId, peerId, direction };
+  const labels = { roomId, peerId, direction, kind };
   if (sample.jitterMs !== undefined) state.jitter.set(labels, sample.jitterMs);
   if (sample.packetLossRatio !== undefined) state.packetLoss.set(labels, sample.packetLossRatio);
   if (sample.bitrateKbps !== undefined) state.bitrate.set(labels, sample.bitrateKbps);

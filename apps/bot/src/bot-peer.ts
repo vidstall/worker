@@ -21,6 +21,7 @@ import {
   type Logger,
 } from '@dvconf/shared';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { startStatsReporter } from './stats-reporter.js';
 
 export interface BotPeerOptions {
   relayUrl: string;
@@ -73,6 +74,7 @@ export class BotPeer {
   private sendTransport: msTypes.Transport | null = null;
   private videoProducer: msTypes.Producer | null = null;
   private audioProducer: msTypes.Producer | null = null;
+  private stopStatsReporter: (() => void) | null = null;
 
   constructor(opts: BotPeerOptions) {
     this.opts = opts;
@@ -104,6 +106,22 @@ export class BotPeer {
     });
 
     this.sendTransport = await createWiredTransport(this.device, this.client, 'send');
+
+    // Self-report client-side connection-quality stats to the relay's
+    // /stats/report side channel, same as a real browser client does
+    // (RoomPage.tsx) -- otherwise the relay only ever sees the bot's
+    // SERVER-observed dvconf_rtc_* metrics, never the client-reported
+    // dvconf_relay_peer_* ones cli/observer/metrics_user.py::
+    // collect_user_sample() reads, and user/<peerId>.json is never written
+    // for a bot session. Send-only transport, so this reports upload-side
+    // stats only (no recv transport to poll) -- matches RoomPage.tsx's own
+    // `primary = download ?? upload` fallback for a peer with no download.
+    this.stopStatsReporter = startStatsReporter(this.sendTransport, {
+      relayUrl: this.opts.relayUrl,
+      roomId: this.opts.roomId,
+      peerId: this.opts.peerId,
+      logger: this.opts.logger,
+    });
   }
 
   async produceVideo(track: MediaStreamTrack): Promise<msTypes.Producer> {
@@ -123,6 +141,7 @@ export class BotPeer {
   }
 
   close(): void {
+    if (this.stopStatsReporter !== null) this.stopStatsReporter();
     if (this.videoProducer !== null) this.videoProducer.close();
     if (this.audioProducer !== null) this.audioProducer.close();
     if (this.sendTransport !== null) this.sendTransport.close();
