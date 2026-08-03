@@ -11,6 +11,7 @@ import type { IncomingMessage } from 'node:http';
 import { WebSocket } from 'ws';
 import type { Logger } from '@dvconf/shared';
 import type { MetricsTracker } from '../metrics.js';
+import type { PeerStatsWindow } from '../stats-window.js';
 import { removePeer } from '../room-handler.js';
 import {
   isValidInterRelayToken,
@@ -49,6 +50,14 @@ export async function handleDisconnect(
   metrics: MetricsTracker,
   interRelay: InterRelayContext | undefined,
   logger: Logger,
+  /**
+   * Call-quality feature: the SAME `PeerStatsWindow` instance passed to
+   * `startMetricsServer` (index.ts) — cleared here so a disconnected peer's
+   * client-reported stats stop showing up in every future scrape/scenario
+   * snapshot instead of lingering until the relay process restarts. Optional
+   * ⇒ every pre-existing ≤5-arg call site/test is unaffected (no-op cleanup).
+   */
+  statsWindow?: PeerStatsWindow,
 ): Promise<void> {
   const mapping = state.wsToRoom.get(ws);
   if (!mapping) return;
@@ -59,6 +68,7 @@ export async function handleDisconnect(
   if (room) {
     await removePeer(room, peerId, logger);
     metrics.clearSession(roomId, peerId);
+    statsWindow?.clear(peerId);
 
     // Clean up empty rooms
     if (room.peers.size === 0) {

@@ -551,6 +551,13 @@ function buildPeerQualityAggregateGauges(
  *                         `dvconf_relay_worker_ru_{utime,stime}_ms` /
  *                         `_ru_maxrss_kb` gauges via `Worker.getResourceUsage()`.
  *                         Omitted ⇒ those gauges are simply absent (no worker rows).
+ * @param statsWindow    - Optional shared `PeerStatsWindow` -- pass the SAME
+ *                         instance given to `createSignalingServer` so a peer's
+ *                         cached stats get cleared via `statsWindow.clear(peerId)`
+ *                         on disconnect (see lifecycle-handler.ts), instead of
+ *                         lingering in Prometheus forever. Omitted ⇒ a fresh,
+ *                         private instance (today's behavior) -- keeps existing
+ *                         tests that spin up multiple isolated servers unaffected.
  * @returns The HTTP server instance (for graceful shutdown).
  */
 export function startMetricsServer(
@@ -560,6 +567,7 @@ export function startMetricsServer(
   getRoom?: GetRoomFn,
   getWorkerDiedCount?: () => number,
   getWorkers?: () => msTypes.Worker[],
+  statsWindow: PeerStatsWindow = new PeerStatsWindow(),
 ): Server {
   const port = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
 
@@ -567,9 +575,8 @@ export function startMetricsServer(
   // server lifetime. Empty string = token unset = OPEN (backward-compat).
   const metricsAuthToken = process.env['METRICS_AUTH_TOKEN'] ?? '';
 
-  // Call-quality feature: one stats window + prom registry per server instance
-  // (NOT a module singleton) so tests that spin up multiple servers stay isolated.
-  const statsWindow = new PeerStatsWindow();
+  // Call-quality feature: one prom registry per server instance (NOT a module
+  // singleton) so tests that spin up multiple servers stay isolated.
   const promRegistry = createMetricsRegistry('relay');
   // Academic-eval blockchain-overhead metrics -- see cp-daemon/src/index.ts's
   // identical call for why this is enough to instrument every
@@ -908,6 +915,22 @@ export function startMetricsServer(
     // id on the /metrics + /api/probe legs) so the relay's request logs correlate to
     // the validator cycle and the on-chain proof — this is the demo-path continuity.
     const reqLog = traceChild(logger, readTraceId(req.headers));
+
+    // CORS preflight: browsers issue an OPTIONS request before any cross-origin
+    // POST with Content-Type: application/json (all three client-facing routes
+    // below) and refuse to send the real request unless this responds with
+    // Access-Control-Allow-Methods/Headers. A Node-side caller (e.g. the bot's
+    // stats-reporter.ts) is never subject to this, which is why server-side
+    // reporting always worked while a real browser's never got past preflight.
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      });
+      res.end();
+      return;
+    }
 
     // Route: POST /stats/report — client-reported per-peer quality sample.
     if (req.method === 'POST' && url === '/stats/report') {

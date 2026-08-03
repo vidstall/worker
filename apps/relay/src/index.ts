@@ -38,6 +38,7 @@ import { startHeartbeat } from './heartbeat.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
 import { createSignalingServer, type TurnContext, type InterRelayContext } from './signaling/index.js';
 import { MetricsTracker } from './metrics.js';
+import { PeerStatsWindow } from './stats-window.js';
 import { startMetricsServer, type ProbeState } from './metrics-server.js';
 import { closeRelayProbe, ensureRelayProbe, type RoomState } from './room-handler.js';
 import { startHealthMonitor } from './health-monitor-wiring.js';
@@ -125,6 +126,10 @@ if (isMainModule) {
 
     // Step 3: Create metrics tracker
     const metrics = new MetricsTracker();
+    // Call-quality feature: shared with BOTH createSignalingServer (clears a
+    // peer's cached stats on disconnect) and startMetricsServer (reads them
+    // for /metrics/prom) -- one instance per process, mirroring `metrics` above.
+    const statsWindow = new PeerStatsWindow();
 
     // Step 4: Start WebSocket signaling server.
     // S30.C: build optional TurnContext when ENABLE_TURN_DELIVERY=1 +
@@ -667,6 +672,7 @@ if (isMainModule) {
         // REQ-RMS-028 (L1.3-b): SHARE the per-peer socket map so the server's
         // tagged-peer attach + the primary's per-peer send use ONE map.
         interRelaySockets,
+        statsWindow,
       );
     // REQ-RMS-027 (L1.3-b): late-bind the fan so onLocalProducer can reach it.
     signalingRef.fanLocalProducer = fanLocalProducer;
@@ -724,6 +730,7 @@ if (isMainModule) {
       (roomId) => signalingRef.getRoom?.(roomId),
       () => manager.getWorkerDiedCount(),
       () => manager.workers,
+      statsWindow,
     );
 
     // F1 (REQ-RO-010/011): honest probe-liveness flip. Polls getStats() on the

@@ -175,6 +175,15 @@ describe('POST /logs/report', () => {
     expect(res.status).toBe(400);
   });
 
+  it('OPTIONS /logs/report -> 204 with CORS preflight headers', async () => {
+    start();
+    const res = await fetch(`http://127.0.0.1:${port}/logs/report`, { method: 'OPTIONS' });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res.headers.get('access-control-allow-methods')).toMatch(/POST/);
+    expect(res.headers.get('access-control-allow-headers')).toMatch(/Content-Type/);
+  });
+
   it('rate-limits reports faster than ~1/2s from the same peer (204 no-op, not an error)', async () => {
     const rooms = new Map<string, RoomState>([['room-1', fakeRoom('room-1', ['peer-a'])]]);
     start((roomId) => rooms.get(roomId));

@@ -65,6 +65,15 @@ describe('POST /relay-down-hint', () => {
       body: JSON.stringify({ roomId, peerId }),
     });
 
+  it('OPTIONS /relay-down-hint -> 204 with CORS preflight headers', async () => {
+    start();
+    const res = await fetch(`http://127.0.0.1:${port}/relay-down-hint`, { method: 'OPTIONS' });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res.headers.get('access-control-allow-methods')).toMatch(/POST/);
+    expect(res.headers.get('access-control-allow-headers')).toMatch(/Content-Type/);
+  });
+
   it('a hint from an admitted peer -> 204', async () => {
     const rooms = new Map<string, RoomState>([['0xdeadbeef', fakeRoom('0xdeadbeef', ['peer-a'])]]);
     start((roomId) => rooms.get(roomId));

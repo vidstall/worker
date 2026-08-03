@@ -295,6 +295,17 @@ describe('POST /stats/report + GET /metrics/prom + GET /metrics/summary', () => 
     expect(res.status).toBe(400);
   });
 
+  // ── CORS preflight ───────────────────────────────────────────────────────
+
+  it('OPTIONS /stats/report -> 204 with CORS preflight headers', async () => {
+    start();
+    const res = await fetch(`http://127.0.0.1:${port}/stats/report`, { method: 'OPTIONS' });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res.headers.get('access-control-allow-methods')).toMatch(/POST/);
+    expect(res.headers.get('access-control-allow-headers')).toMatch(/Content-Type/);
+  });
+
   // ── GET /metrics/prom ────────────────────────────────────────────────────
 
   it('GET /metrics/prom returns Prometheus content-type + expected gauge names', async () => {

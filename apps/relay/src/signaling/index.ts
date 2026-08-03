@@ -22,6 +22,7 @@ import type { types as msTypes } from 'mediasoup';
 import type { Logger } from '@dvconf/shared';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import type { MetricsTracker } from '../metrics.js';
+import type { PeerStatsWindow } from '../stats-window.js';
 import type { RoomState } from '../room-handler.js';
 import { INTER_RELAY_SUBPROTOCOL } from '@dvconf/inter-relay-client';
 import type { InterRelaySocketMap } from '../inter-relay-socket-map.js';
@@ -81,6 +82,13 @@ export function createSignalingServer(
    * internal map (every existing ≤5-arg call site + test is unchanged).
    */
   providedSockets?: InterRelaySocketMap,
+  /**
+   * Call-quality feature: shared with `startMetricsServer` (index.ts) so a
+   * peer's cached quality stats are cleared on disconnect (handleDisconnect
+   * below) instead of lingering in Prometheus forever. Optional ⇒ every
+   * existing ≤6-arg call site + test is unchanged (no-op cleanup).
+   */
+  statsWindow?: PeerStatsWindow,
 ): {
   wss: WebSocketServer;
   getRoomCount: () => number;
@@ -343,7 +351,7 @@ export function createSignalingServer(
       }
 
       case 'leave': {
-        await handleDisconnect(state, ws, metrics, interRelay, logger);
+        await handleDisconnect(state, ws, metrics, interRelay, logger, statsWindow);
         break;
       }
 
