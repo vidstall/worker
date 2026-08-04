@@ -43,7 +43,7 @@ export const ROOM_STATUS_ACTIVE = 2;
 export const ROOM_STATUS_CLOSED = 3;
 
 export const DEFAULT_PENDING_EXPIRY_MS = 15 * 60 * 1000; // 15 min
-export const DEFAULT_READY_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+export const DEFAULT_READY_EXPIRY_MS = 12 * 60 * 60 * 1000; // 12 hours
 export const DEFAULT_POLL_INTERVAL_MS = 60_000; // 1 min — coarser than room-health-sweep's default since expiry timing is itself minute-granularity
 
 /** Env resolver for ROOM_EXPIRY_PENDING_MS: positive integer, fall back + warn on malformed input. */
