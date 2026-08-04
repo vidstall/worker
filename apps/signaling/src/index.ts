@@ -23,6 +23,7 @@ import {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  createRegistrationGauge,
   createCounter,
   createGauge,
   registerTxMetrics,
@@ -692,6 +693,11 @@ if (isMainModule) {
       ['service'],
     );
     let lastSessionsRouted = getSessionsRouted();
+    // Replaces the old SSH-grepped `docker logs | grep 'operator address|
+    // node_id=|bootstrap failed'` status check (cli/infra/inventory.py's
+    // registry_status()) with a real Prometheus series -- see
+    // packages/shared/src/metrics-prom.ts's createRegistrationGauge doc.
+    const registrationGauge = createRegistrationGauge(promRegistry);
     const promMetrics = await startPromMetricsServer({
       port: Number(process.env['SIGNALING_METRICS_PORT'] ?? 8083),
       service: 'signaling',
@@ -712,6 +718,9 @@ if (isMainModule) {
 
     // Step 1: Auto-register on-chain
     const { minerCapId } = await ensureRegistered(client, signer, config, endpointUrl, region, logger, graphqlClient);
+    // ensureRegistered() throws/exits on failure, so reaching this line
+    // always means registered=true.
+    registrationGauge.setRegistered(true);
 
     // Step 1.5: Wire LIVE cap-token admission (W-P3, REQ-ADW-002) — real
     // capability_events poller + cached-epoch refresher feeding an AuthHook that

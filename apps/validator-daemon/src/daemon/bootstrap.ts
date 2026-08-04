@@ -22,7 +22,7 @@ import {
   createLogger,
   readCapMinerId,
 } from '@dvconf/shared';
-import type { NetworkConfig, Logger } from '@dvconf/shared';
+import type { NetworkConfig, Logger, RegistrationGauge } from '@dvconf/shared';
 import { HealthMonitor, makeChainReporter, readCooldownMs, type ThresholdEnv } from '@dvconf/health-monitor';
 import { buildHealthSignals, type ValidatorHealthDeps } from '../health-signals.js';
 import { ensureRegistered } from '../auto-register.js';
@@ -161,6 +161,8 @@ export async function startDaemon(overrides?: {
   logger?: Logger;
   /** Monitoring-redesign gap #4 (optional; default no-op -> byte-identical without it). */
   canaryMetrics?: CanaryMetricsSetters;
+  /** Set once ensureRegistered() resolves (optional; omitted in tests that don't wire metrics). */
+  registrationGauge?: RegistrationGauge;
 }): Promise<DaemonState> {
   const log = overrides?.logger ?? logger;
 
@@ -175,6 +177,9 @@ export async function startDaemon(overrides?: {
 
   // Auto-register if needed
   const { validatorCapId } = await ensureRegistered(client, mainKeypair, config, log, graphqlClient);
+  // ensureRegistered() exits the process on failure (see its doc comment),
+  // so reaching this line always means registered=true.
+  overrides?.registrationGauge?.setRegistered(true);
 
   // Generate session wallet -- fresh Ed25519Keypair, NOT derived from main wallet
   const { keypair: sessionKeypair, address: sessionAddress } = generateSessionKeypair();

@@ -95,6 +95,7 @@ export {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  createRegistrationGauge,
   createDurationHistogram,
   createCounter,
   createGauge,
@@ -105,6 +106,7 @@ export type {
   PromMetricsServerOptions,
   PromMetricsServerHandle,
   ConcurrencyGauge,
+  RegistrationGauge,
   PushGatewayMetric,
 } from './metrics-prom.js';
 

@@ -31,6 +31,7 @@ import {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  createRegistrationGauge,
   createGauge,
   registerTxMetrics,
   registerEventPollerMetrics,
@@ -225,6 +226,11 @@ async function main(): Promise<void> {
     // already computes those values (see startDaemon's onCoverageSample/onQuorumSample/
     // onDivergencePromoted deps).
     const canaryMetrics = registerCanaryMetrics(promRegistry);
+    // Replaces the old SSH-grepped `docker logs | grep 'operator address|
+    // node_id=|bootstrap failed'` status check (cli/infra/inventory.py's
+    // registry_status()) with a real Prometheus series -- see
+    // packages/shared/src/metrics-prom.ts's createRegistrationGauge doc.
+    const registrationGauge = createRegistrationGauge(promRegistry);
 
     promMetrics = await startPromMetricsServer({
       port: Number(process.env['VALIDATOR_METRICS_PORT'] ?? 8103),
@@ -235,7 +241,7 @@ async function main(): Promise<void> {
     });
     logger.info({ port: promMetrics.port }, 'prom metrics listening');
 
-    state = await startDaemon({ client, config, canaryMetrics });
+    state = await startDaemon({ client, config, canaryMetrics, registrationGauge });
 
     concurrencyGaugeInterval = setInterval(() => {
       concurrencyGauge.setActiveSessions(state?.activeRooms.size ?? 0);

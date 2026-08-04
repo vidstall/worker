@@ -32,6 +32,7 @@ import {
   readTraceId,
   traceChild,
   createMetricsRegistry,
+  createRegistrationGauge,
   registerTxMetrics,
   registerEventPollerMetrics,
   registerRoleAssignmentMetrics,
@@ -578,6 +579,15 @@ export function startMetricsServer(
   // Call-quality feature: one prom registry per server instance (NOT a module
   // singleton) so tests that spin up multiple servers stay isolated.
   const promRegistry = createMetricsRegistry('relay');
+  // startMetricsServer() is only ever reached after index.ts's earlier
+  // ensureRegistered() call resolves (it throws/exits the process on
+  // failure -- see auto-register.ts), so registered=true unconditionally
+  // here. Replaces the old SSH-grepped `docker logs | grep 'operator
+  // address|node_id=|bootstrap failed'` status check
+  // (cli/infra/inventory.py's registry_status()) with a real Prometheus
+  // series -- see packages/shared/src/metrics-prom.ts's
+  // createRegistrationGauge doc.
+  createRegistrationGauge(promRegistry).setRegistered(true);
   // Academic-eval blockchain-overhead metrics -- see cp-daemon/src/index.ts's
   // identical call for why this is enough to instrument every
   // executeWithRetry() in this process (auto-register, heartbeat, ...).

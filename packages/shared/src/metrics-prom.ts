@@ -114,6 +114,36 @@ export function createConcurrencyGauge(registry: Registry, service: string): Con
   };
 }
 
+export type RegistrationGauge = {
+  /** Record this service instance's current on-chain registration state. */
+  setRegistered: (registered: boolean) => void;
+};
+
+/**
+ * `dvconf_registered` 0/1 gauge -- replaces the old SSH-grepped
+ * `docker logs | grep 'operator address|node_id=|bootstrap failed'` status
+ * check (cli/infra/inventory.py's `registry_status()`) with a real
+ * Prometheus series, so `vidctl scenario run`'s telemetry snapshot can read
+ * registration state through the observation system instead of SSH. No
+ * `service` label needed -- each app already has its own Prometheus `job`
+ * name (see IaC/ansible/roles/docker_service/templates/prometheus.yml.j2),
+ * which disambiguates across relay/signaling/cp-daemon/validator-daemon.
+ * Call `setRegistered(true)` once `ensureRegistered()` resolves;
+ * `setRegistered(false)` on a non-fatal registration failure path if one
+ * exists, so the gauge stays an explicit 0/1 rather than an absent series
+ * (Prometheus reads "absent" as no data, not as 0).
+ */
+export function createRegistrationGauge(registry: Registry): RegistrationGauge {
+  const gauge = new Gauge({
+    name: 'dvconf_registered',
+    help: 'Whether this service instance is currently registered on-chain (1) or not (0)',
+    registers: [registry],
+  });
+  return {
+    setRegistered: (registered: boolean) => gauge.set(registered ? 1 : 0),
+  };
+}
+
 /**
  * Returns the raw `prom-client` `Gauge` for any metric name/label set other
  * than `dvconf_active_sessions` (which `createConcurrencyGauge` above

@@ -9,6 +9,7 @@ import {
   createMetricsRegistry,
   startPromMetricsServer,
   createConcurrencyGauge,
+  createRegistrationGauge,
   type PromMetricsServerHandle,
 } from '../metrics-prom.js';
 
@@ -120,5 +121,23 @@ describe('createConcurrencyGauge', () => {
     gauge.setActiveSessions(7);
     const body = await registry.metrics();
     expect(body).toMatch(/dvconf_active_sessions\{service="svc-g"\} 7/);
+  });
+});
+
+describe('createRegistrationGauge', () => {
+  it('exposes dvconf_registered as 1 once setRegistered(true) is called', async () => {
+    const registry = createMetricsRegistry('svc-h');
+    const gauge = createRegistrationGauge(registry);
+    gauge.setRegistered(true);
+    const body = await registry.metrics();
+    expect(body).toMatch(/dvconf_registered\{service="svc-h"\} 1/);
+  });
+
+  it('exposes dvconf_registered as 0 when setRegistered(false) is called', async () => {
+    const registry = createMetricsRegistry('svc-i');
+    const gauge = createRegistrationGauge(registry);
+    gauge.setRegistered(false);
+    const body = await registry.metrics();
+    expect(body).toMatch(/dvconf_registered\{service="svc-i"\} 0/);
   });
 });
