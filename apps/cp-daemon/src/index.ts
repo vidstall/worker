@@ -25,6 +25,7 @@ import {
   registerTxMetrics,
   registerEventPollerMetrics,
   registerRoleAssignmentMetrics,
+  createRegistrationGauge,
   EventPoller,
   queryHistoricalEvents,
   readIsPaused,
@@ -342,6 +343,11 @@ async function main(): Promise<void> {
   registerEventPollerMetrics(cpPromRegistry, 'cp-daemon');
   registerRoleVoterMetrics(cpPromRegistry);
   registerRoleAssignmentMetrics(cpPromRegistry, 'cp-daemon');
+  // Replaces the old SSH-grepped `docker logs | grep 'operator address|
+  // node_id=|bootstrap failed'` status check (cli/infra/inventory.py's
+  // registry_status()) with a real Prometheus series -- see
+  // packages/shared/src/metrics-prom.ts's createRegistrationGauge doc.
+  const registrationGauge = createRegistrationGauge(cpPromRegistry);
   const promMetrics = await startPromMetricsServer({
     port: Number(process.env['CP_METRICS_PORT'] ?? 8092),
     service: 'cp-daemon',
@@ -353,6 +359,9 @@ async function main(): Promise<void> {
 
   // Auto-register if CP_CAP_ID not in env
   const { cpCapId } = await ensureRegistered(client, signer, config, logger, graphqlClient);
+  // ensureRegistered() throws/exits on failure, so reaching this line always
+  // means registered=true.
+  registrationGauge.setRegistered(true);
 
   // Start heartbeat loop
   const heartbeatIntervalMs = parseInt(process.env['HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
@@ -707,7 +716,28 @@ async function main(): Promise<void> {
   // DATA_DIR (mirrors ChainEventListener's own default), NOT process.cwd(),
   // so a container recreate (redeploy) doesn't force a full event-history
   // replay from genesis.
-  const cursorDir = (name: string): string => join(process.env['DATA_DIR'] ?? '.', '.cursors', name);
+  //
+  // Namespaced by originalPackageId: a GraphQL events cursor is an OPAQUE
+  // pagination token scoped to the exact `filter: { type }` query it was
+  // issued for (see events.ts's EVENTS_QUERY / originalPackageId doc). A
+  // fresh `sui client publish` (not `upgrade` -- a brand-new package, not an
+  // in-place upgrade of the same one) changes originalPackageId, so any
+  // cursor persisted under the OLD package is meaningless for the NEW
+  // package's event stream -- confirmed live: after a republish, cp-daemon
+  // kept the stale cursor (DATA_DIR is a host-mounted volume that survives
+  // container recreation), the room_manager_events/economic_layer_events
+  // pollers silently never advanced past it, and RoomCreated/EscrowCreated
+  // were never observed even though get_active_room_ids (a direct devInspect,
+  // not event-sourced) correctly saw the room -- rooms stayed pending
+  // forever with zero pairing proposals from any CP. Scoping the cursor
+  // path by package keeps the intended "redeploy doesn't replay everything"
+  // behavior for ordinary redeploys of the SAME package, while a republish
+  // naturally starts every poller from a fresh (missing) cursor file --
+  // EventPoller.loadCursor() then defaults to null, i.e. a correct replay
+  // from genesis for the new package.
+  const cursorPkg = config.originalPackageId ?? config.packageId;
+  const cursorDir = (name: string): string =>
+    join(process.env['DATA_DIR'] ?? '.', '.cursors', cursorPkg, name);
 
   const relayPoller = new EventPoller({
     client: graphqlClient,
