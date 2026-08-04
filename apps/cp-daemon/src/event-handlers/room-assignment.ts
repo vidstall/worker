@@ -105,14 +105,21 @@ export function handleEscrowCreated(
   const validators = validatorState ? Array.from(validatorState.values()) : [];
   const rankedValidators = timedCanonicalSort(validators, targetRegion, weights);
 
-  // Select top validators. The on-chain ballot floor is required_validators(expected) =
-  // max(DEFAULT_MIN_VALIDATORS_PER_ROOM, expected/PVR_VALIDATOR_RATIO) (ADR-0006 BFT n>=3f+1); for the
-  // room sizes handled here that floor is DEFAULT_MIN_VALIDATORS_PER_ROOM = 4. The prior Math.min(3, ...)
-  // cap emitted only 3, so submit_pairing_proposal aborted E_INVALID_BALLOT (509) for any real room.
-  // Emit at least the floor (4), capped at availability.
-  const MIN_VALIDATORS_PER_ROOM = 4; // mirrors contracts constants.move DEFAULT_MIN_VALIDATORS_PER_ROOM (ADR-0006)
+  // The on-chain ballot floor is required_validators(expected) =
+  // min(max(DEFAULT_MIN_VALIDATORS_PER_ROOM, floor(expected/PVR_VALIDATOR_RATIO)), PVR_MAX_VALIDATORS_PER_ROOM)
+  // (pairing_score.move) -- i.e. it's ALWAYS clamped into [4, 5], never higher, regardless of room
+  // size. `RoomCreated` carries no `expected_participants` field, so this daemon has no cheap way to
+  // compute the real per-room value off-chain -- but since the on-chain requirement can never exceed
+  // the hard cap (5), submitting the cap unconditionally is always >= whatever the room actually
+  // needs. A prior floor of 4 undercounted for any room with expected_participants > 12 (25 in this
+  // scenario needs 5), so submit_pairing_proposal deterministically aborted E_INVALID_BALLOT (509)
+  // for every CP, on every room of that size, forever (confirmed live: zero of 18 CPs ever got a
+  // proposal to land). Capped at availability -- a pool with < PVR_MAX_VALIDATORS_PER_ROOM active
+  // validators submits fewer and may still abort if the room's real requirement also exceeds
+  // availability, but that's a genuine capacity shortfall, not this bug.
+  const PVR_MAX_VALIDATORS_PER_ROOM = 5; // mirrors contracts constants.move PVR_MAX_VALIDATORS_PER_ROOM
   const topValidatorIds = rankedValidators
-    .slice(0, Math.max(1, Math.min(rankedValidators.length, MIN_VALIDATORS_PER_ROOM)))
+    .slice(0, Math.max(1, Math.min(rankedValidators.length, PVR_MAX_VALIDATORS_PER_ROOM)))
     .map(v => v.minerId);
 
   // ── REQ-RMS-002/005/016/018/019 — capacity-aware placement ──────────────
