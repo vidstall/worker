@@ -54,6 +54,10 @@ function devInspectResult(bytes: Uint8Array): unknown {
 // Object ids must be full 32-byte hex — `tx.getData()` validates them when we
 // snapshot the built Transaction to read its moveCall targets.
 const PKG = '0x' + '01'.repeat(32);
+// Package split (see services/contract-role-voting): a distinct package
+// address from PKG, so tests actually verify role_voting targets use this
+// field instead of silently passing were it left equal to PKG.
+const ROLE_VOTING_PKG = '0x' + '02'.repeat(32);
 const ID = (n: string): string => '0x' + n.padStart(64, '0');
 
 function makeConfig(): NetworkConfig {
@@ -69,6 +73,7 @@ function makeConfig(): NetworkConfig {
     roomManagerId: ID('07'),
     signalingRegistryId: ID('5a'),
     roleVoteBoxId: ID('b0'),
+    roleVotingPackageId: ROLE_VOTING_PKG,
     livenessVoteBoxId: ID('b1'),
   };
 }
@@ -127,7 +132,7 @@ describe('SuiChainStateReader', () => {
     } as never;
     const reader = new SuiChainStateReader(client, config, logger);
     expect(await reader.getMaxIdleEpochs()).toBe(30n);
-    expect(capturedTargets).toContain(`${PKG}::role_voting::max_idle_epochs`);
+    expect(capturedTargets).toContain(`${ROLE_VOTING_PKG}::role_voting::max_idle_epochs`);
   });
 
   it('getRevoteCooldownEpochs devInspects role_voting::revote_cooldown_epochs → u64 bigint', async () => {
@@ -140,7 +145,7 @@ describe('SuiChainStateReader', () => {
     } as never;
     const reader = new SuiChainStateReader(client, config, logger);
     expect(await reader.getRevoteCooldownEpochs()).toBe(14n);
-    expect(capturedTargets).toContain(`${PKG}::role_voting::revote_cooldown_epochs`);
+    expect(capturedTargets).toContain(`${ROLE_VOTING_PKG}::role_voting::revote_cooldown_epochs`);
   });
 
   it('getRoleCounts maps the 4 active_count u64s to {relay,validator,cp,signaling}', async () => {

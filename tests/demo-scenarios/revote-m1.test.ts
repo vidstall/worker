@@ -164,6 +164,13 @@ function buildConfig(publishOutput: { objectChanges?: ObjChange[] }): NetworkCon
     roomManagerId: byType('::RoomManager'),
     signalingRegistryId: byType('::SignalingRegistry'),
     roleVoteBoxId: byType('::RoleVoteBox'),
+    // TODO(package split, services/contract-role-voting): publish-output.json
+    // is produced by an external demo-setup harness (outside this repo's
+    // vidctl tooling) that still assumes a single published package. Until
+    // that harness is updated to publish + merge dvconf_role_voting's own
+    // `published` entry, this falls back to `pkg` -- WRONG once that harness
+    // catches up, since role_voting no longer lives in the same package.
+    roleVotingPackageId: pkg,
     livenessVoteBoxId: byType('::LivenessVoteBox'),
   };
 }
@@ -244,7 +251,7 @@ type MarkFn = 'mark_revote_eligible_idle' | 'mark_revote_eligible_composition_sh
 async function markTx(fn: MarkFn, minerId: string): Promise<TxStatusLike> {
   const tx = new Transaction();
   tx.moveCall({
-    target: `${config.packageId}::role_voting::${fn}`,
+    target: `${config.roleVotingPackageId}::role_voting::${fn}`,
     arguments: [
       tx.object(config.networkRegistryId),
       tx.object(config.roleVoteBoxId),

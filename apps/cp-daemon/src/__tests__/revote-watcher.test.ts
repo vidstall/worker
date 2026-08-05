@@ -33,6 +33,7 @@ function mockConfig(): NetworkConfig {
     roomManagerId: '0xroom',
     signalingRegistryId: '0xsig',
     roleVoteBoxId: '0xvotebox',
+    roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
   };
 }
@@ -239,7 +240,7 @@ describe('makeMarkSubmitter', () => {
     const submit = makeMarkSubmitter({} as any, {} as any, mockConfig(), mockLogger());
     await submit('0xminer', MarkReason.Idle, 'trace-1');
 
-    expect(captured.target).toBe('0xpkg::role_voting::mark_revote_eligible_idle');
+    expect(captured.target).toBe('0xrolevotingpkg::role_voting::mark_revote_eligible_idle');
     expect(captured.arguments).toHaveLength(8);
     expect(captured.arguments[0]).toEqual({ kind: 'object', x: '0xreg' });      // net_reg
     expect(captured.arguments[1]).toEqual({ kind: 'object', x: '0xvotebox' });  // vote_box
@@ -259,7 +260,7 @@ describe('makeMarkSubmitter', () => {
     });
     const submit = makeMarkSubmitter({} as any, {} as any, mockConfig(), mockLogger());
     await submit('0xm', MarkReason.CompositionShift, 't');
-    expect(target).toBe('0xpkg::role_voting::mark_revote_eligible_composition_shift');
+    expect(target).toBe('0xrolevotingpkg::role_voting::mark_revote_eligible_composition_shift');
   });
 
   it('throws for MinerRequest (operator-driven, not watcher-submittable) without submitting', async () => {

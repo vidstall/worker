@@ -257,7 +257,7 @@ export class SuiChainStateReader implements ChainStateReader {
   /** `RoleVoteBox.max_idle_epochs` (governance-tunable, default 30). */
   async getMaxIdleEpochs(): Promise<bigint> {
     const value = await this.readU64(
-      `${this.config.packageId}::role_voting::max_idle_epochs`,
+      `${this.config.roleVotingPackageId}::role_voting::max_idle_epochs`,
       this.config.roleVoteBoxId,
     );
     this.logger.debug({ module: MODULE, method: 'getMaxIdleEpochs', value: value.toString() }, 'read max_idle_epochs');
@@ -267,7 +267,7 @@ export class SuiChainStateReader implements ChainStateReader {
   /** `RoleVoteBox.revote_cooldown_epochs` (governance-tunable, default 14). */
   async getRevoteCooldownEpochs(): Promise<bigint> {
     const value = await this.readU64(
-      `${this.config.packageId}::role_voting::revote_cooldown_epochs`,
+      `${this.config.roleVotingPackageId}::role_voting::revote_cooldown_epochs`,
       this.config.roleVoteBoxId,
     );
     this.logger.debug(

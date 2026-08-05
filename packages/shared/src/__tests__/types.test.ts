@@ -292,6 +292,7 @@ describe('Chain types compile correctly', () => {
       roomManagerId: '0x7',
       signalingRegistryId: '0x8',
       roleVoteBoxId: '0x9',
+      roleVotingPackageId: '0xrolevotingpkg',
       livenessVoteBoxId: '0xlivenessbox',
     };
     expect(config.packageId).toBe('0xpkg');

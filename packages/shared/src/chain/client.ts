@@ -100,6 +100,17 @@ export function loadNetworkConfig(): NetworkConfig {
     // originalPackageId because liveness_voting was added in a later
     // upgrade than the package's first-ever publish.
     livenessVotingOriginPackageId: process.env['LIVENESS_VOTING_ORIGIN_PACKAGE_ID'] || undefined,
+    // See NetworkConfig.roomHealthAlertsOriginPackageId -- same rationale, for the
+    // room_health_alerts module.
+    roomHealthAlertsOriginPackageId: process.env['ROOM_HEALTH_ALERTS_ORIGIN_PACKAGE_ID'] || undefined,
+    // Package split (see services/contract-role-voting): vidctl publishes
+    // dvconf_role_voting as its own package and writes its id to
+    // runtime/contract/<env>.env under the CONTRACT_B_ prefix (see
+    // cli/contract/package.py's CONTRACT_B.env_prefix) -- that raw key name
+    // passes straight through to this container's env (see
+    // IaC/ansible/roles/docker_service/tasks/run_container.yml's
+    // xaisen_contract_values combine()), no VITE_-style rename layer here.
+    roleVotingPackageId: required('CONTRACT_B_PACKAGE_ID'),
     networkRegistryId: required('NETWORK_REGISTRY_ID'),
     minerStoreId: required('MINER_STORE_ID'),
     cpRegistryId: required('CP_REGISTRY_ID'),
@@ -110,5 +121,8 @@ export function loadNetworkConfig(): NetworkConfig {
     signalingRegistryId: required('SIGNALING_REGISTRY_ID'),
     roleVoteBoxId: required('ROLE_VOTE_BOX_ID'),
     livenessVoteBoxId: required('LIVENESS_VOTE_BOX_ID'),
+    // Optional: unset on any deployment that hasn't published/initialized
+    // room_health_alerts.move yet (see NetworkConfig.roomHealthAlertBoxId).
+    roomHealthAlertBoxId: process.env['ROOM_HEALTH_ALERT_BOX_ID'] || undefined,
   };
 }

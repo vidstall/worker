@@ -78,6 +78,7 @@ import {
   resolveMaxHeartbeatEpochs,
 } from './relay-heartbeat-watcher.js';
 import { LiveRelayChainStateReader } from './relay-chain-state-reader.js';
+import { startWorkerConfirmedDeadListener } from './worker-confirmed-dead-listener.js';
 import { startTurnIssuer } from './turn-issuer.js';
 import { startTurnRpc } from './turn-rpc.js';
 import {
@@ -183,6 +184,8 @@ export interface CpShutdownDeps {
   stopRevoteWatcher: () => void;
   /** (3) reactive — the RO-009 relay-heartbeat (Layer C) watcher. */
   stopRelayHeartbeatWatcher: () => void;
+  /** (3) reactive — the WorkerConfirmedDead listener (room_health_alerts fast-failover path). */
+  stopWorkerConfirmedDeadListener: () => void;
   /** (3) reactive — the room-health sweep (post-ejection relay/signaling reassignment). */
   stopRoomHealthSweep: () => void;
   /** (3) reactive — the room-expiry sweep (auto-close stale PENDING/READY rooms). */
@@ -238,6 +241,7 @@ export function buildCpShutdownPlan(
       deps.stopRoleVoting();
       deps.stopRevoteWatcher();
       deps.stopRelayHeartbeatWatcher();
+      deps.stopWorkerConfirmedDeadListener();
       deps.stopRoomHealthSweep();
       deps.stopRoomExpirySweep();
       deps.stopTurnIssuer();
@@ -438,6 +442,20 @@ async function main(): Promise<void> {
     { module: 'cp-daemon', relayHeartbeatScanMs },
     'relay heartbeat watcher started (Layer C)',
   );
+
+  // Fast, room-scoped alternative failover path (see room_health_alerts.move):
+  // reacts to WorkerConfirmedDead (client-alert + room-health-validator quorum,
+  // enforced off the chain's epoch clock) rather than relay-heartbeat-watcher's
+  // epoch-gated staleness check above. No-ops if roomHealthAlertBoxId is unset.
+  const workerConfirmedDeadListener = startWorkerConfirmedDeadListener({
+    client: graphqlClient,
+    suiClient: client,
+    config,
+    signer,
+    logger,
+  });
+  const stopWorkerConfirmedDeadListener = (): void => workerConfirmedDeadListener.stop();
+  logger.info({ module: 'cp-daemon' }, 'WorkerConfirmedDead listener started');
 
   // Room health sweep — closes the gap where a validator-quorum liveness
   // ejection (registration::execute_ejection) removes a relay/signaling node
@@ -806,9 +824,13 @@ async function main(): Promise<void> {
 
   const roleVotingPoller = new EventPoller({
     client: graphqlClient,
-    packageId: config.originalPackageId ?? config.packageId,
-    // Same LOC-budget split -- role_voting.move's events are defined in the
-    // companion role_voting_events module (`use dvconf::role_voting_events`).
+    // Package split (see services/contract-role-voting): role_voting_events
+    // is now defined in the SEPARATE dvconf_role_voting package -- NOT an
+    // "original package" of dvconf_contracts (that's for a module added in a
+    // later upgrade of the SAME package; this is a different package
+    // entirely, with its own address and no packageId fallback that would
+    // ever be correct).
+    packageId: config.roleVotingPackageId,
     module: 'role_voting_events',
     pollingIntervalMs: pollIntervalMs,
     cursorPath: cursorDir('role_voting.json'),
@@ -888,6 +910,7 @@ async function main(): Promise<void> {
         stopRoleVoting,
         stopRevoteWatcher,
         stopRelayHeartbeatWatcher,
+        stopWorkerConfirmedDeadListener,
         stopRoomHealthSweep,
         stopRoomExpirySweep,
         stopTurnIssuer,

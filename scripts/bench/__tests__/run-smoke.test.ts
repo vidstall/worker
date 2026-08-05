@@ -210,6 +210,7 @@ function fakeIds(): BenchIds {
     roomManagerId: '0xroom',
     signalingRegistryId: '0xsig',
     roleVoteBoxId: '0xrolebox',
+    roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
   };
 }

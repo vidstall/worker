@@ -41,6 +41,12 @@ const WORKSPACE_ROOT = resolve(HERE, '..', '..', '..', '..', '..', '..');
 // dvconf-contracts as a sibling under a flat workspace root; the monorepo has
 // since nested both packages under services/).
 const CONTRACTS_DIR = resolve(process.env['DVCONF_CONTRACTS_DIR'] ?? join(WORKSPACE_ROOT, 'contract'));
+// Package split (see services/contract-role-voting): role_voting now
+// publishes as its own package, which depends on CONTRACTS_DIR above via a
+// local Move.toml dependency -- must be published AFTER it.
+const CONTRACT_ROLE_VOTING_DIR = resolve(
+  process.env['DVCONF_CONTRACT_ROLE_VOTING_DIR'] ?? join(WORKSPACE_ROOT, 'contract-role-voting'),
+);
 
 export interface LocalnetHandle {
   client: SuiClient;
@@ -231,13 +237,13 @@ async function setupSuiClient(alias: string): Promise<void> {
 }
 
 /** Delete stale Pub.*.toml +, by default, Move.lock (chain-id mismatch after regenesis). */
-function cleanStalePublishState(): void {
-  for (const entry of readdirSync(CONTRACTS_DIR)) {
+function cleanStalePublishState(dir: string = CONTRACTS_DIR): void {
+  for (const entry of readdirSync(dir)) {
     if (entry.startsWith('Pub.') && entry.endsWith('.toml')) {
-      unlinkSync(join(CONTRACTS_DIR, entry));
+      unlinkSync(join(dir, entry));
     }
   }
-  const moveLock = join(CONTRACTS_DIR, 'Move.lock');
+  const moveLock = join(dir, 'Move.lock');
   // A pinned evaluation snapshot has no stale published-id state and must keep
   // its dependency lock. This opt-in is intentionally process-local; existing
   // integration callers retain the historical delete-and-resolve behaviour.
@@ -249,7 +255,6 @@ interface PublishOutput {
   adminCapId: string;
   networkRegistryId: string;
   minerStoreId: string;
-  roleVoteBoxId: string;
   livenessVoteBoxId: string;
 }
 
@@ -272,7 +277,6 @@ async function publishPackage(): Promise<PublishOutput> {
   let adminCapId: string | null = null;
   let networkRegistryId: string | null = null;
   let minerStoreId: string | null = null;
-  let roleVoteBoxId: string | null = null;
   let livenessVoteBoxId: string | null = null;
 
   for (const change of parsed.objectChanges ?? []) {
@@ -287,7 +291,6 @@ async function publishPackage(): Promise<PublishOutput> {
     if (isShared(change.owner)) {
       if (objType.includes('::network_registry::NetworkRegistry')) networkRegistryId = objId;
       else if (objType.includes('::miner_store::MinerStore')) minerStoreId = objId;
-      else if (objType.includes('::role_voting::RoleVoteBox')) roleVoteBoxId = objId; // auto-created by role_voting::init
       else if (objType.includes('::liveness_voting::LivenessVoteBox')) livenessVoteBoxId = objId;
     } else if (isAddressOwned(change.owner)) {
       if (objType.includes('::network_registry::AdminCap')) adminCapId = objId;
@@ -298,9 +301,52 @@ async function publishPackage(): Promise<PublishOutput> {
   if (adminCapId === null) throw new Error('publishPackage: AdminCap not in objectChanges');
   if (networkRegistryId === null) throw new Error('publishPackage: NetworkRegistry not in objectChanges');
   if (minerStoreId === null) throw new Error('publishPackage: MinerStore not in objectChanges');
-  if (roleVoteBoxId === null) throw new Error('publishPackage: RoleVoteBox not in objectChanges');
   if (livenessVoteBoxId === null) throw new Error('publishPackage: LivenessVoteBox not in objectChanges');
-  return { packageId, adminCapId, networkRegistryId, minerStoreId, roleVoteBoxId, livenessVoteBoxId };
+  return { packageId, adminCapId, networkRegistryId, minerStoreId, livenessVoteBoxId };
+}
+
+interface RoleVotingPublishOutput {
+  packageId: string;
+  roleVoteBoxId: string;
+}
+
+/**
+ * Package split (see services/contract-role-voting): publish dvconf_role_voting
+ * AFTER package A -- its Move.toml resolves package A's on-chain address via a
+ * local dependency, which only exists once A's Move.lock records a real publish
+ * for this build-env.
+ */
+async function publishRoleVotingPackage(): Promise<RoleVotingPublishOutput> {
+  cleanStalePublishState(CONTRACT_ROLE_VOTING_DIR);
+  const result = await runCli(
+    'sui',
+    ['client', 'test-publish', '--gas-budget', '1000000000', '--build-env', 'local', '--json'],
+    { cwd: CONTRACT_ROLE_VOTING_DIR, timeoutMs: 240_000 },
+  );
+  if (result.code !== 0) {
+    throw new Error(`sui test-publish (role-voting) exited ${result.code}\nSTDERR: ${result.stderr.slice(0, 1500)}`);
+  }
+  const jsonStart = result.stdout.indexOf('{');
+  if (jsonStart < 0) throw new Error(`sui test-publish (role-voting) produced no JSON: ${result.stdout.slice(0, 300)}`);
+  const parsed = JSON.parse(result.stdout.slice(jsonStart)) as { objectChanges?: SuiObjectChange[] };
+
+  let packageId: string | null = null;
+  let roleVoteBoxId: string | null = null;
+  for (const change of parsed.objectChanges ?? []) {
+    if (change.type === 'published') {
+      if (typeof change.packageId === 'string') packageId = change.packageId;
+      continue;
+    }
+    if (change.type !== 'created') continue;
+    const objType = change.objectType ?? '';
+    const objId = change.objectId;
+    if (typeof objId !== 'string') continue;
+    if (isShared(change.owner) && objType.includes('::role_voting::RoleVoteBox')) roleVoteBoxId = objId;
+  }
+
+  if (packageId === null) throw new Error('publishRoleVotingPackage: PACKAGE_ID not in objectChanges');
+  if (roleVoteBoxId === null) throw new Error('publishRoleVotingPackage: RoleVoteBox not in objectChanges');
+  return { packageId, roleVoteBoxId };
 }
 
 /** Pluck the lone shared object from a `<module>::create` result. */
@@ -387,6 +433,10 @@ export async function bootLocalnet(
     await setupSuiClient(alias);
 
     const publishOut = await publishPackage();
+    // Package split: dvconf_role_voting publishes AFTER package A (see
+    // publishRoleVotingPackage's doc) -- its Move.toml resolves A's address
+    // via the local dependency + A's freshly-written Move.lock above.
+    const roleVotingOut = await publishRoleVotingPackage();
     const deployer = await loadActiveSigner();
     const client = new SuiClient({ url: SUI_RPC_URL });
 
@@ -400,9 +450,10 @@ export async function bootLocalnet(
     const config: NetworkConfig = {
       rpcUrl: SUI_RPC_URL,
       packageId: publishOut.packageId,
+      roleVotingPackageId: roleVotingOut.packageId,
       networkRegistryId: publishOut.networkRegistryId,
       minerStoreId: publishOut.minerStoreId,
-      roleVoteBoxId: publishOut.roleVoteBoxId,
+      roleVoteBoxId: roleVotingOut.roleVoteBoxId,
       livenessVoteBoxId: publishOut.livenessVoteBoxId,
       cpRegistryId: registries.cpRegistryId,
       relayRegistryId: registries.relayRegistryId,

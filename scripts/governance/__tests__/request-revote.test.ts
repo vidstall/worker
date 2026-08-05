@@ -30,6 +30,7 @@ function mockConfig(): NetworkConfig {
     roomManagerId: '0xroom',
     signalingRegistryId: '0xsig',
     roleVoteBoxId: '0xvotebox',
+    roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
   } as NetworkConfig;
 }
@@ -57,7 +58,7 @@ describe('buildRequestRevoteTx', () => {
     } as any;
     buildRequestRevoteTx(tx, mockConfig(), '0xminercap');
 
-    expect(calls[0].target).toBe('0xpkg::role_voting::mark_revote_eligible_miner_request');
+    expect(calls[0].target).toBe('0xrolevotingpkg::role_voting::mark_revote_eligible_miner_request');
     expect(calls[0].arguments).toEqual([
       { kind: 'object', x: '0xreg' }, // net_reg: &NetworkRegistry
       { kind: 'object', x: '0xvotebox' }, // vote_box: &mut RoleVoteBox
@@ -87,7 +88,7 @@ describe('submitRequestRevote', () => {
     await submitRequestRevote({} as any, {} as any, mockConfig(), '0xcap', mockLogger());
 
     expect(captured!.label).toBe('request-revote');
-    expect(captured!.calls[0].target).toBe('0xpkg::role_voting::mark_revote_eligible_miner_request');
+    expect(captured!.calls[0].target).toBe('0xrolevotingpkg::role_voting::mark_revote_eligible_miner_request');
     expect(captured!.calls[0].arguments[3]).toEqual({ kind: 'object', x: '0xcap' }); // cap
   });
 

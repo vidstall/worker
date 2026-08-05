@@ -12,6 +12,8 @@ import type { EventPoller } from '@dvconf/shared';
 import type { NetworkConfig } from '@dvconf/shared';
 import type { CanaryCellLoopHandle } from '../canary/cell.js';
 import type { LivenessSweepHandle } from '../liveness-sweep.js';
+import type { RoomHealthVoteWatcherHandle } from '../room-health-vote-watcher.js';
+import type { RoomHealthExpirySweepHandle } from '../room-health-expiry-sweep.js';
 import type { CanaryVerifyLoopHandle } from '../canary/verify-loop.js';
 import type { StartCanaryClaimsResult } from '../canary/claims-server.js';
 import type { LiveConsumerRuntime } from '../canary/live-consumer-runtime.js';
@@ -65,6 +67,8 @@ export interface DaemonState {
   escrowPoller: EventPoller | null;
   roomPoller: EventPoller | null;
   livenessSweep: LivenessSweepHandle | null;
+  roomHealthVoteWatcher: RoomHealthVoteWatcherHandle | null;
+  roomHealthExpirySweep: RoomHealthExpirySweepHandle | null;
   escrowMap: Map<string, string>;
   activeRooms: Map<string, ActiveRoom>;
   /** Stop function returned by startHeartbeat (F40). */

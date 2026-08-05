@@ -241,7 +241,7 @@ export async function castRoleVoteFromCp(
     cp.kp,
     (tx) => {
       tx.moveCall({
-        target: `${config.packageId}::role_voting::cast_role_vote`,
+        target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.roleVoteBoxId),

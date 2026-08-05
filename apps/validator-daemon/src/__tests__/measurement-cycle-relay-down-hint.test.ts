@@ -76,6 +76,8 @@ function makeState(overrides: Partial<DaemonState> = {}): DaemonState {
     escrowPoller: null,
     roomPoller: null,
     livenessSweep: null,
+    roomHealthVoteWatcher: null,
+    roomHealthExpirySweep: null,
     escrowMap: new Map(),
     activeRooms: new Map(),
     heartbeatStop: null,

@@ -31,6 +31,7 @@ function mockConfig(): NetworkConfig {
     minerStoreId: '0xstore', cpRegistryId: '0xcp', relayRegistryId: '0xrelay',
     validatorRegistryId: '0xval', userRegistryId: '0xuser', roomManagerId: '0xroom',
     signalingRegistryId: '0xsig', roleVoteBoxId: '0xvotebox',
+    roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
   };
 }
@@ -116,7 +117,7 @@ describe('startRoleVoting re-vote pass (RV-010)', () => {
     await vi.waitFor(() => expect(mockExecuteWithRetry).toHaveBeenCalled());
     stop();
 
-    expect(capturedTarget).toBe('0xpkg::role_voting::cast_role_vote');
+    expect(capturedTarget).toBe('0xrolevotingpkg::role_voting::cast_role_vote');
     expect(capturedRole).toBe(MinerRole.Validator);
     clearRevoteCandidate('0xrv-poll');
   });
@@ -182,7 +183,7 @@ describe('startRoleVoting on-chain reconciliation', () => {
     await vi.waitFor(() => expect(mockExecuteWithRetry).toHaveBeenCalled());
     stop();
 
-    expect(capturedTarget).toBe('0xpkg::role_voting::cast_role_vote');
+    expect(capturedTarget).toBe('0xrolevotingpkg::role_voting::cast_role_vote');
     expect(capturedMinerIdArg?.toLowerCase()).toBe(MINER_ID.toLowerCase());
   });
 

@@ -68,6 +68,7 @@ export async function submitProposal(
   signalingMinerId: string,
   submittedScore: bigint,
   logger: Logger,
+  healthValidatorMinerIds: string[],
 ): Promise<boolean> {
   // PAIR-03: Skip rooms already voted on
   if (votedRooms.has(roomId)) {
@@ -82,6 +83,7 @@ export async function submitProposal(
       // Build vector<ID> arguments
       const relayVec = tx.pure.vector('id', relayMinerIds);
       const validatorVec = tx.pure.vector('id', validatorMinerIds);
+      const healthValidatorVec = tx.pure.vector('id', healthValidatorMinerIds);
 
       tx.moveCall({
         // submit_pairing_proposal is DEFINED in the room_manager_pairing satellite
@@ -103,6 +105,7 @@ export async function submitProposal(
           validatorVec,                               // validator_ids: vector<ID>
           tx.pure.id(signalingMinerId),              // signaling_id: ID
           tx.pure.u64(Number(submittedScore)),          // submitted_score: u64
+          healthValidatorVec,                          // health_validator_ids: vector<ID>
         ],
       });
     },

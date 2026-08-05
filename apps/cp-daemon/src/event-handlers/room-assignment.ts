@@ -122,6 +122,22 @@ export function handleEscrowCreated(
     .slice(0, Math.max(1, Math.min(rankedValidators.length, PVR_MAX_VALIDATORS_PER_ROOM)))
     .map(v => v.minerId);
 
+  // Room health-monitor validators (see room_health_alerts.move): exactly 3, a designated
+  // subset of this proposal's own validator_ids ballot -- the same rankedValidators list
+  // already computed above, reused rather than re-scored. submit_pairing_proposal aborts
+  // E_INVALID_BALLOT if this isn't length 3 and a subset of topValidatorIds, so this room
+  // needs at least 3 candidate validators to be assignable at all.
+  const healthValidatorMinerIds = rankedValidators.slice(0, 3).map(v => v.minerId);
+  if (healthValidatorMinerIds.length < 3) {
+    logger.warn(
+      { roomId: e.room_id, validatorCount: healthValidatorMinerIds.length },
+      'Fewer than 3 validators available — deferring assignment (cannot satisfy room_health_validators floor)',
+    );
+    pendingRooms.set(e.room_id, roomData);
+    pendingEscrows?.set(e.room_id, e);
+    return;
+  }
+
   // ── REQ-RMS-002/005/016/018/019 — capacity-aware placement ──────────────
   // Applied AFTER canonicalSort (consensus order preserved) and BEFORE the ballot
   // slice. Narrows the consensus-sorted set by CANARY-ATTESTED capacity; the PVR
@@ -284,6 +300,7 @@ export function handleEscrowCreated(
         signalingMinerId,
         submittedScore,
         logger,
+        healthValidatorMinerIds,
       ).then((success) => {
         if (success) {
           logger.info(

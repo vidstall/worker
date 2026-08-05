@@ -64,7 +64,9 @@ export async function waitForRoleAssignment(
       // Check assigned_roles in RoleVoteBox via devInspect
       const tx = new Transaction();
       tx.moveCall({
-        target: `${config.packageId}::role_voting::get_assigned_role`,
+        // Package split (see services/contract-role-voting): role_voting
+        // now lives in its own package, not config.packageId.
+        target: `${config.roleVotingPackageId}::role_voting::get_assigned_role`,
         arguments: [
           tx.object(config.roleVoteBoxId),
           tx.pure.id(minerId),
@@ -120,6 +122,19 @@ export async function applyVotedRole(
     client,
     signer,
     (tx: Transaction) => {
+      // Package split (see services/contract-role-voting): role_voting's
+      // consume_assignment is public(package) inside dvconf_role_voting and
+      // can no longer be called inline from registration::apply_voted_role
+      // (a different package, package A). Chain two moveCalls in the same
+      // PTB instead -- still one atomic Sui transaction, same all-or-nothing
+      // guarantee as the single call this replaces.
+      const [newRole] = tx.moveCall({
+        target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+        arguments: [
+          tx.object(config.roleVoteBoxId),
+          tx.object(minerCapId),
+        ],
+      });
       tx.moveCall({
         target: `${config.packageId}::registration::apply_voted_role`,
         // F47 Phase 1.5 (REQ-RV-005): arg order MUST match the Move param order in
@@ -129,7 +144,7 @@ export async function applyVotedRole(
         arguments: [
           tx.object(config.networkRegistryId),    // registry
           tx.object(config.minerStoreId),         // store
-          tx.object(config.roleVoteBoxId),        // vote_box
+          newRole,                                // new_role (was: vote_box)
           tx.object(config.signalingRegistryId),  // signaling_reg
           tx.object(config.relayRegistryId),      // relay_reg
           tx.object(config.validatorRegistryId),  // validator_reg

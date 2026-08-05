@@ -32,6 +32,7 @@ function mockConfig(): NetworkConfig {
     roomManagerId: '0xroom',
     signalingRegistryId: '0xsig',
     roleVoteBoxId: '0xvotebox',
+    roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
   } as NetworkConfig;
 }
@@ -209,7 +210,7 @@ describe('makeGovernanceSubmitter', () => {
     const calls = getCalls();
 
     expect(calls[0].target).toBe('0xpkg::cp_quorum_sig::new_quorum_sig');
-    expect(calls[1].target).toBe('0xpkg::role_voting::update_revote_cooldown_epochs');
+    expect(calls[1].target).toBe('0xrolevotingpkg::role_voting::update_revote_cooldown_epochs');
     expect(calls[1].arguments).toHaveLength(9);
     expect(calls[1].arguments[0]).toEqual({ kind: 'object', x: '0xreg' }); // net_reg
     expect(calls[1].arguments[1]).toEqual({ kind: 'object', x: '0xvotebox' }); // vote_box
@@ -230,7 +231,7 @@ describe('makeGovernanceSubmitter', () => {
 
     // Distinct values + full arg lock so a swap confined to the MAX_IDLE path cannot escape.
     expect(calls[0].target).toBe('0xpkg::cp_quorum_sig::new_quorum_sig');
-    expect(calls[1].target).toBe('0xpkg::role_voting::update_max_idle_epochs');
+    expect(calls[1].target).toBe('0xrolevotingpkg::role_voting::update_max_idle_epochs');
     expect(calls[1].arguments).toHaveLength(9);
     expect(calls[1].arguments[0]).toEqual({ kind: 'object', x: '0xreg' }); // net_reg
     expect(calls[1].arguments[1]).toEqual({ kind: 'object', x: '0xvotebox' }); // vote_box

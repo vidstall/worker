@@ -233,6 +233,8 @@ export async function startDaemon(overrides?: {
     escrowPoller: null,
     roomPoller: null,
     livenessSweep: null,
+    roomHealthVoteWatcher: null,
+    roomHealthExpirySweep: null,
     escrowMap,
     activeRooms,
     heartbeatStop: null,

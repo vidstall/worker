@@ -214,7 +214,13 @@ export function makeGovernanceSubmitter(
           ],
         });
         tx.moveCall({
-          target: `${config.packageId}::role_voting::${fn}`,
+          // Package split (see services/contract-role-voting): role_voting
+          // now lives in its own package, not config.packageId. qsArg above
+          // is still built via package A's cp_quorum_sig::new_quorum_sig --
+          // dvconf_role_voting depends on dvconf_contracts and imports its
+          // QuorumSig type, so passing that PTB result across the package
+          // boundary here works the same as any other chained PTB argument.
+          target: `${config.roleVotingPackageId}::role_voting::${fn}`,
           arguments: [
             tx.object(config.networkRegistryId), // net_reg: &NetworkRegistry
             tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox

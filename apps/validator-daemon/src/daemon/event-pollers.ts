@@ -13,6 +13,8 @@ import { EventPoller, economicLayerModuleName, readCapMinerId } from '@dvconf/sh
 import type { Logger } from '@dvconf/shared';
 import type { EscrowCreated, RoomCreated, RoomClosed, RoomAssigned } from '@dvconf/shared';
 import { startLivenessSweep } from '../liveness-sweep.js';
+import { startRoomHealthVoteWatcher } from '../room-health-vote-watcher.js';
+import { startRoomHealthExpirySweep } from '../room-health-expiry-sweep.js';
 import { handleRoomClosed } from './measurement-cycle.js';
 import type { DaemonState } from './state.js';
 
@@ -201,5 +203,29 @@ export async function startEventPollers(
     });
   } catch (err) {
     log.error({ err }, 'liveness sweep failed to start (daemon continues)');
+  }
+
+  // Room-scoped fast dead-worker detection (client alerts + room health-validator quorum) --
+  // see room_health_alerts.move's module doc. No-ops if roomHealthAlertBoxId is unset.
+  try {
+    const healthOwnMinerId = (await readCapMinerId(client, validatorCapId, log)) ?? validatorMinerId;
+    state.roomHealthVoteWatcher = startRoomHealthVoteWatcher({
+      client,
+      graphqlClient,
+      config,
+      signer: mainKeypair,
+      minerCapId: validatorCapId,
+      ownMinerId: healthOwnMinerId,
+      logger: log.child({ component: 'room-health-vote-watcher' }),
+    });
+    state.roomHealthExpirySweep = startRoomHealthExpirySweep({
+      client,
+      graphqlClient,
+      config,
+      signer: mainKeypair,
+      logger: log.child({ component: 'room-health-expiry-sweep' }),
+    });
+  } catch (err) {
+    log.error({ err }, 'room health watcher/sweep failed to start (daemon continues)');
   }
 }

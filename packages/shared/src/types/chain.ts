@@ -39,6 +39,23 @@ export interface NetworkConfig {
    * original publish (no prior upgrade history to diverge from).
    */
   livenessVotingOriginPackageId?: string;
+  /**
+   * The package ID that first introduced the `room_health_alerts` module. Same rationale as
+   * `livenessVotingOriginPackageId` -- its events (`WorkerDownReported`, `WorkerConfirmedDead`)
+   * are pinned to whichever upgrade first defined them, not the package-wide original.
+   */
+  roomHealthAlertsOriginPackageId?: string;
+  /**
+   * Package split (see services/contract-role-voting): `role_voting` and its
+   * revote/governance/events satellites now live in their OWN published
+   * package, `dvconf_role_voting`, not `packageId`. Every `role_voting::`
+   * moveCall/event-filter target must use this instead of `packageId` --
+   * unlike `livenessVotingOriginPackageId`/`roomHealthAlertsOriginPackageId`
+   * (which track a module added in a LATER upgrade of the SAME package),
+   * this is a genuinely different package with its own address, so there is
+   * no `packageId` fallback that would ever be correct.
+   */
+  roleVotingPackageId: string;
   networkRegistryId: string;
   minerStoreId: string;
   cpRegistryId: string;
@@ -49,6 +66,13 @@ export interface NetworkConfig {
   signalingRegistryId: string;
   roleVoteBoxId: string;
   livenessVoteBoxId: string;
+  /**
+   * Shared RoomHealthAlertBox object ID (room_health_alerts.move). Optional: unset on any
+   * deployment that hasn't published/initialized this module yet -- callers that need it
+   * (report_worker_down, cast_health_vote, the WorkerConfirmedDead listener) skip/warn rather
+   * than hard-fail when it's missing.
+   */
+  roomHealthAlertBoxId?: string;
 }
 
 /** Result of a successful transaction execution. */

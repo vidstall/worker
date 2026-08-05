@@ -48,7 +48,9 @@ const MODULE = 'miner-request-revote';
  */
 export function buildRequestRevoteTx(tx: Transaction, config: NetworkConfig, minerCapId: string): void {
   tx.moveCall({
-    target: `${config.packageId}::role_voting::mark_revote_eligible_miner_request`,
+    // Package split (see services/contract-role-voting): role_voting now
+    // lives in its own package, not config.packageId.
+    target: `${config.roleVotingPackageId}::role_voting::mark_revote_eligible_miner_request`,
     arguments: [
       tx.object(config.networkRegistryId), // net_reg: &NetworkRegistry
       tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox
