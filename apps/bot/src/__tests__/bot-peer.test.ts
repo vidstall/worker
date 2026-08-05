@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { buildJoinMessage, generatePeerPubkeyB64 } from '../bot-peer.js';
+import {
+  buildJoinMessage,
+  generatePeerPubkeyB64,
+  shouldConsume,
+  type NewProducerNotification,
+} from '../bot-peer.js';
 
 describe('generatePeerPubkeyB64', () => {
   it('produces a base64 string decoding to exactly 32 bytes', () => {
@@ -38,5 +43,33 @@ describe('buildJoinMessage', () => {
     const msg = buildJoinMessage(opts);
     expect(msg.signature).toBe('unverified');
     expect(msg.nonce).toBe(1);
+  });
+});
+
+describe('shouldConsume', () => {
+  const notification = (overrides: Partial<NewProducerNotification> = {}): NewProducerNotification => ({
+    type: 'newProducer',
+    peerId: 'peer-other',
+    producerId: 'producer-1',
+    kind: 'video',
+    ...overrides,
+  });
+
+  it('consumes a producer from a different peer not seen before', () => {
+    expect(shouldConsume(notification(), 'peer-self', new Set())).toBe(true);
+  });
+
+  it('never consumes its own producer (self peerId)', () => {
+    expect(shouldConsume(notification({ peerId: 'peer-self' }), 'peer-self', new Set())).toBe(false);
+  });
+
+  it('never consumes the same producerId twice (roster + live-push race guard)', () => {
+    const already = new Set(['producer-1']);
+    expect(shouldConsume(notification(), 'peer-self', already)).toBe(false);
+  });
+
+  it('does consume a different producerId from the same already-seen peer', () => {
+    const already = new Set(['producer-1']);
+    expect(shouldConsume(notification({ producerId: 'producer-2' }), 'peer-self', already)).toBe(true);
   });
 });

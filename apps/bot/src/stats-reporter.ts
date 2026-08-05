@@ -113,6 +113,41 @@ export function extractRawSample(report: RTCStatsReport): RawExtract {
   };
 }
 
+/** Combine a send-transport extract and a recv-transport extract into one
+ *  sample -- send and recv are separate RTCPeerConnections in mediasoup's
+ *  architecture (BotPeer now has both, see bot-peer.ts), so a single
+ *  transport's getStats() report never contains both outbound-rtp AND
+ *  inbound-rtp entries; each side's extractRawSample() call only ever
+ *  populates its own half of RawExtract, the other half staying at its
+ *  zero/null default. Fields are disjoint by construction (outbound-only:
+ *  bytesSent/totalEncodeTime/framesEncoded/rtt; inbound-only: everything
+ *  else) so picking whichever side actually measured each field is safe --
+ *  no ambiguity between "measured zero" and "not applicable" to resolve.
+ *  `timestampMs` takes the recv side's value: the jitter/decode-latency
+ *  deltas this sample ultimately feeds are anchored to the receive-side
+ *  clock. Pure -- unit-tested directly. */
+export function mergeRawExtract(send: RawExtract, recv: RawExtract): RawExtract {
+  return {
+    rtt: send.rtt,
+    packetLoss: recv.packetLoss,
+    jitter: recv.jitter,
+    bytesSent: send.bytesSent,
+    bytesReceived: recv.bytesReceived,
+    resolutionWidth: recv.resolutionWidth,
+    resolutionHeight: recv.resolutionHeight,
+    framerate: recv.framerate,
+    totalEncodeTime: send.totalEncodeTime,
+    framesEncoded: send.framesEncoded,
+    totalDecodeTime: recv.totalDecodeTime,
+    framesDecoded: recv.framesDecoded,
+    freezeCount: recv.freezeCount,
+    pauseCount: recv.pauseCount,
+    jitterBufferDelay: recv.jitterBufferDelay,
+    jitterBufferEmittedCount: recv.jitterBufferEmittedCount,
+    timestampMs: recv.timestampMs || send.timestampMs,
+  };
+}
+
 interface CumulativeSample {
   timestampMs: number;
   bytesSent: number;
@@ -234,10 +269,12 @@ export function buildReportSample(
     connectionSetupMs: lifecycle.connectionSetupMs ?? 0,
     iceSuccess: (lifecycle.iceSuccessRate ?? 0) > 0,
     reconnectMs: lifecycle.reconnectionTimeMs ?? 0,
-    // Always 0: the bot is send-only (BotPeer never creates a recv transport,
-    // see bot-peer.ts's class doc), so it has no inbound-rtp audio/video
-    // stats to derive a sync offset from -- unlike a real browser client
-    // (RoomPage.tsx), which computes this from its download transport.
+    // Always 0: not yet computed. BotPeer does now have inbound audio/video
+    // stats to work with (see bot-peer.ts's recv transport), but deriving a
+    // real audio-vs-video presentation-timing offset from them is a
+    // separate piece of work, deliberately out of scope for the change that
+    // added consuming (see stats-reporter's dual-transport merge above) --
+    // not a structural limitation like it used to be.
     avSyncDriftMs: 0,
   };
 }
@@ -269,14 +306,31 @@ export interface StatsTransportLike {
   on(event: 'connectionstatechange', listener: (state: string) => void): unknown;
 }
 
-/** Start polling `transport.getStats()` every POLL_INTERVAL_MS and POSTing
- *  the derived sample to the relay's /stats/report side channel --
- *  fire-and-forget, same as RoomPage.tsx's REQ-MCS-VIZ reporting effect.
- *  Failures (network, relay down, room already closed) are logged and
- *  otherwise ignored -- reporting quality metrics must never be able to
- *  disrupt the bot's actual media session. Returns a stop() that clears
- *  the interval; BotPeer.close() calls this. */
-export function startStatsReporter(transport: StatsTransportLike, opts: StatsReporterOptions): () => void {
+/** The two transports a bot session can report from -- `recv` is optional
+ *  only for backward-compatible/test callers; BotPeer always supplies both
+ *  now that it consumes other peers (see bot-peer.ts). */
+export interface StatsReporterTransports {
+  send: StatsTransportLike;
+  recv?: StatsTransportLike | null;
+}
+
+/** Start polling both transports' `getStats()` every POLL_INTERVAL_MS,
+ *  merging them into one sample (see mergeRawExtract's doc -- send and recv
+ *  are separate RTCPeerConnections in mediasoup's architecture, so this is
+ *  NOT two independent reports; a second independent POST per tick would
+ *  overwrite the relay's per-field gauges with an incomplete report each
+ *  time), and POSTing the merged sample to the relay's /stats/report side
+ *  channel -- fire-and-forget, same as RoomPage.tsx's REQ-MCS-VIZ reporting
+ *  effect. Failures (network, relay down, room already closed) are logged
+ *  and otherwise ignored -- reporting quality metrics must never be able to
+ *  disrupt the bot's actual media session. Connection-lifecycle bookkeeping
+ *  (setup time / ICE success rate / reconnect time) is wired to the send
+ *  transport only -- both transports typically establish at nearly the same
+ *  time in practice, and splitting lifecycle tracking across two transports
+ *  isn't needed for the receiver-side quality fields (jitter etc.) this
+ *  dual-transport support exists for. Returns a stop() that clears the
+ *  interval; BotPeer.close() calls this. */
+export function startStatsReporter(transports: StatsReporterTransports, opts: StatsReporterOptions): () => void {
   const base = relayHttpOrigin(opts.relayUrl);
   const createdAt = Date.now();
   let setupMs: number | null = null;
@@ -300,19 +354,30 @@ export function startStatsReporter(transport: StatsTransportLike, opts: StatsRep
       if (disconnectedAt === null) disconnectedAt = Date.now();
     }
   };
-  transport.on('connectionstatechange', onStateChange);
+  transports.send.on('connectionstatechange', onStateChange);
 
   const tick = async (): Promise<void> => {
-    if (transport.connectionState === 'closed') return;
-    let report: RTCStatsReport;
+    if (transports.send.connectionState === 'closed') return;
+    let sendReport: RTCStatsReport;
     try {
-      report = await transport.getStats();
+      sendReport = await transports.send.getStats();
     } catch (err) {
       opts.logger?.warn({ module: 'bot-stats-reporter', err }, 'getStats() failed');
       return;
     }
+    const sendRaw = extractRawSample(sendReport);
 
-    const raw = extractRawSample(report);
+    let raw = sendRaw;
+    const recv = transports.recv;
+    if (recv && recv.connectionState !== 'closed') {
+      try {
+        const recvReport = await recv.getStats();
+        raw = mergeRawExtract(sendRaw, extractRawSample(recvReport));
+      } catch (err) {
+        opts.logger?.warn({ module: 'bot-stats-reporter', err }, 'recv getStats() failed');
+      }
+    }
+
     const delta = computeDeltaStats(raw, prev, POLL_INTERVAL_MS);
     prev = {
       timestampMs: raw.timestampMs,

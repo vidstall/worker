@@ -5,6 +5,7 @@ import {
   buildReportSample,
   relayHttpOrigin,
   startStatsReporter,
+  mergeRawExtract,
   type StatsTransportLike,
 } from '../stats-reporter.js';
 
@@ -44,6 +45,45 @@ describe('extractRawSample', () => {
     expect(raw.packetLoss).toBe(0);
     expect(raw.resolutionWidth).toBeNull();
     expect(raw.framerate).toBeNull();
+  });
+});
+
+describe('mergeRawExtract', () => {
+  it('takes outbound fields from the send extract and inbound fields from the recv extract', () => {
+    const send = extractRawSample(
+      report([
+        { type: 'candidate-pair', nominated: true, currentRoundTripTime: 0.02 },
+        { type: 'outbound-rtp', kind: 'video', bytesSent: 9000, totalEncodeTime: 1, framesEncoded: 100 },
+      ]),
+    );
+    const recv = extractRawSample(
+      report([
+        { type: 'inbound-rtp', kind: 'video', bytesReceived: 4500, packetsLost: 5, packetsReceived: 95, jitter: 0.012 },
+      ]),
+    );
+    const merged = mergeRawExtract(send, recv);
+    expect(merged.rtt).toBe(20);
+    expect(merged.bytesSent).toBe(9000);
+    expect(merged.bytesReceived).toBe(4500);
+    expect(merged.jitter).toBe(12);
+    expect(merged.packetLoss).toBe(5);
+  });
+
+  it('a send-only bot (no recv activity) merges to the same jitter=0 it always reported', () => {
+    const send = extractRawSample(report([{ type: 'outbound-rtp', kind: 'video', bytesSent: 1000 }]));
+    const recv = extractRawSample(report([]));
+    const merged = mergeRawExtract(send, recv);
+    expect(merged.jitter).toBe(0);
+    expect(merged.bytesSent).toBe(1000);
+  });
+
+  it('prefers the recv side timestamp, falling back to send when recv has none', () => {
+    const send = extractRawSample(report([{ type: 'outbound-rtp', kind: 'video', bytesSent: 1, timestamp: 111 }]));
+    const recvWithTs = extractRawSample(report([{ type: 'inbound-rtp', kind: 'video', timestamp: 222 }]));
+    expect(mergeRawExtract(send, recvWithTs).timestampMs).toBe(222);
+
+    const recvNoTs = extractRawSample(report([]));
+    expect(mergeRawExtract(send, recvNoTs).timestampMs).toBe(111);
   });
 });
 
@@ -164,7 +204,7 @@ describe('startStatsReporter', () => {
     vi.stubGlobal('fetch', fetchMock);
     const transport = makeTransport();
 
-    const stop = startStatsReporter(transport, {
+    const stop = startStatsReporter({ send: transport }, {
       relayUrl: 'wss://relay.example.com',
       roomId: '0xroom',
       peerId: 'bot-1',
@@ -186,7 +226,7 @@ describe('startStatsReporter', () => {
     vi.stubGlobal('fetch', fetchMock);
     const transport = makeTransport();
 
-    const stop = startStatsReporter(transport, {
+    const stop = startStatsReporter({ send: transport }, {
       relayUrl: 'ws://localhost:4000',
       roomId: '0xroom',
       peerId: 'bot-1',
@@ -203,7 +243,7 @@ describe('startStatsReporter', () => {
     vi.stubGlobal('fetch', fetchMock);
     const transport = makeTransport('closed');
 
-    const stop = startStatsReporter(transport, {
+    const stop = startStatsReporter({ send: transport }, {
       relayUrl: 'ws://localhost:4000',
       roomId: '0xroom',
       peerId: 'bot-1',
@@ -211,5 +251,51 @@ describe('startStatsReporter', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     stop();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('merges recv-transport jitter into the POSTed sample when a recv transport is supplied', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const sendTransport = makeTransport();
+    const recvTransport: StatsTransportLike = {
+      connectionState: 'connected',
+      getStats: vi
+        .fn()
+        .mockResolvedValue(report([{ type: 'inbound-rtp', kind: 'video', jitter: 0.02, timestamp: 500 }])),
+      on: () => undefined,
+    };
+
+    const stop = startStatsReporter(
+      { send: sendTransport, recv: recvTransport },
+      { relayUrl: 'wss://relay.example.com', roomId: '0xroom', peerId: 'bot-1' },
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    stop();
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { sample: Record<string, number> };
+    expect(body.sample['jitterMs']).toBe(20);
+  });
+
+  it('falls back to send-only stats when recv getStats() fails', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const sendTransport = makeTransport();
+    const recvTransport: StatsTransportLike = {
+      connectionState: 'connected',
+      getStats: vi.fn().mockRejectedValue(new Error('recv getStats boom')),
+      on: () => undefined,
+    };
+
+    const stop = startStatsReporter(
+      { send: sendTransport, recv: recvTransport },
+      { relayUrl: 'wss://relay.example.com', roomId: '0xroom', peerId: 'bot-1' },
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    stop();
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { sample: Record<string, number> };
+    expect(body.sample['jitterMs']).toBe(0);
   });
 });
