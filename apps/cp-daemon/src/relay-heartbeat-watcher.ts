@@ -103,6 +103,13 @@ export interface RelayChainStateReader {
    * Equivalent to RevoteWatcher's getActiveMiners() scope-query.
    */
   getActiveRoomIds(): Promise<string[]>;
+
+  /**
+   * All currently-active (registered) relay miner ids — the candidate pool for standby
+   * replacement (relay_replacement.move). Optional: back-compat for fakes/tests that only
+   * exercise the primary-promotion path and never inject a `candidateSelector`.
+   */
+  getActiveRelayIds?(): Promise<string[]>;
 }
 
 // ── PromoteSubmitter (CONTRACTS C3) ──────────────────────────────────────────
@@ -119,6 +126,31 @@ export type PromoteSubmitter = (
   newPrimary: string,
   traceId: string,
 ) => Promise<void>;
+
+/**
+ * Submits a single `propose_relay_replacement` PTB (relay_replacement.move) — this CP's vote
+ * for `candidateRelayId` to replace a dead STANDBY (`deadRelayId`, never index 0/primary — that
+ * stays `PromoteSubmitter`'s job). Injected so the watcher logic stays chain-free; may finalize
+ * the swap immediately (if this vote reaches CP-quorum) or simply record a vote.
+ */
+export type ReplacementSubmitter = (
+  roomId: string,
+  deadRelayId: string,
+  candidateRelayId: string,
+  traceId: string,
+) => Promise<void>;
+
+/**
+ * Picks a fresh candidate to vote in for a dead standby, excluding every relay already
+ * assigned to the room (primary + all standbys). Returns null if no eligible candidate exists
+ * (e.g. capacity-gated out, or the whole registered pool is already assigned). Injected so the
+ * watcher stays chain-free — the live wiring composes this from `selectReplacementCandidate`
+ * (admission-capacity.ts) over a fresh capacity read.
+ */
+export type ReplacementCandidateSelector = (
+  roomId: string,
+  assignedRelayIds: string[],
+) => Promise<string | null>;
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
@@ -157,12 +189,20 @@ export class RelayHeartbeatWatcher {
    * primary later dies can still fire). Field name kept to avoid external-reference churn.
    */
   private readonly promotedRooms = new Set<string>();
+  /**
+   * De-dup for standby replacement votes: keys `${roomId}::${deadRelayId}`. Separate namespace
+   * from `promotedRooms` — a room can have an in-flight primary promotion AND a standby
+   * replacement vote outstanding at the same time, they never collide.
+   */
+  private readonly proposedReplacements = new Set<string>();
 
   constructor(
     private readonly reader: RelayChainStateReader,
     private readonly submitter: PromoteSubmitter,
     private readonly logger: Logger,
     options: RelayHeartbeatWatcherOptions = {},
+    private readonly replacementSubmitter?: ReplacementSubmitter,
+    private readonly candidateSelector?: ReplacementCandidateSelector,
   ) {
     this.maxHeartbeatEpochs = options.maxHeartbeatEpochs ?? DEFAULT_MAX_HEARTBEAT_EPOCHS;
     // C2: honor a custom pollIntervalMs so the watcher can detect within the
@@ -211,12 +251,19 @@ export class RelayHeartbeatWatcher {
    *   1. Read current epoch.
    *   2. Read assigned_relays; [0]=primary. De-dup relay ids (promote_relay leaves the
    *      promoted relay in its old slot, so the vector can carry a duplicate).
-   *   3. If the primary's heartbeat gap > maxHeartbeatEpochs, pick the FRESHEST live
-   *      standby (smallest gap, tie-break = earliest slot) excluding the current primary,
-   *      and submit a promote PTB — de-duped per (roomId, oldPrimary).
-   *   4. If the primary is stale but ALL standbys are also stale → log warn, skip.
+   *   3. STANDBY check (if a `replacementSubmitter`/`candidateSelector` pair was injected):
+   *      for every assigned relay OTHER than the primary whose heartbeat gap exceeds
+   *      maxHeartbeatEpochs and hasn't already had a replacement proposed this watcher
+   *      lifetime, pick a candidate and submit `propose_relay_replacement` — de-duped per
+   *      (roomId, deadRelayId), independent of the primary check below (a standby can die
+   *      while the primary stays healthy, or vice versa).
+   *   4. PRIMARY check: if the primary's heartbeat gap > maxHeartbeatEpochs, pick the
+   *      FRESHEST live standby (smallest gap, tie-break = earliest slot) excluding the
+   *      current primary, and submit a promote PTB — de-duped per (roomId, oldPrimary).
+   *   5. If the primary is stale but ALL standbys are also stale → log warn, skip.
    *
-   * Returns the list of rooms that received a new promotion this scan.
+   * Returns the list of rooms that received a new promotion this scan (standby
+   * replacements are reported via the injected submitter's own logging, not this array).
    */
   async scanOnce(): Promise<RelayPromotion[]> {
     const traceId = randomUUID();
@@ -238,9 +285,72 @@ export class RelayHeartbeatWatcher {
     for (const roomId of roomIds) {
       const assignedRaw = await this.reader.getAssignedRelays(roomId);
       if (assignedRaw.length < 2) {
-        continue; // single-relay or unassigned room — nothing to promote
+        continue; // single-relay or unassigned room — nothing to promote/replace
       }
       const primaryId = assignedRaw[0]!;
+
+      // REQ-RMS-024 — duplicate-aware id set: promote_relay REPLACES slot 0 but leaves
+      // the promoted relay in its old slot ([A,B,C] -> [C,B,C], room_manager.move:886-888).
+      const uniqueRelays = [...new Set(assignedRaw)];
+
+      const heartbeats = await this.reader.getRelayLastHeartbeats(roomId);
+      const hbMap = new Map(heartbeats.map((h) => [h.relayId, h.lastHeartbeat]));
+      const gapOf = (id: string): bigint => {
+        const hb = hbMap.get(id) ?? 0n;
+        return epoch > hb ? epoch - hb : 0n;
+      };
+
+      // ── Standby staleness (relay_replacement.move) — independent of the primary check
+      // below: a standby can be dead while the primary stays healthy. Separate dedup
+      // namespace so it never interferes with primary-promotion dedup. ──
+      if (this.replacementSubmitter && this.candidateSelector) {
+        for (const standbyId of uniqueRelays) {
+          if (standbyId === primaryId) continue;
+          if (gapOf(standbyId) <= this.maxHeartbeatEpochs) continue;
+
+          const replacementKey = `${roomId}::${standbyId}`;
+          if (this.proposedReplacements.has(replacementKey)) continue;
+
+          const candidateId = await this.candidateSelector(roomId, uniqueRelays);
+          if (!candidateId) {
+            this.logger.warn(
+              { module: MODULE, context: { roomId, deadRelayId: standbyId } },
+              'Relay heartbeat watcher: standby stale but no replacement candidate available',
+            );
+            continue;
+          }
+
+          const replacementTraceId = randomUUID();
+          this.logger.info(
+            {
+              trace_id: replacementTraceId,
+              module: MODULE,
+              action: 'replacement_submit',
+              context: { roomId, deadRelayId: standbyId, candidateRelayId: candidateId, gap: gapOf(standbyId).toString() },
+            },
+            'Relay heartbeat watcher: submitting propose_relay_replacement PTB',
+          );
+
+          try {
+            await this.replacementSubmitter(roomId, standbyId, candidateId, replacementTraceId);
+            this.proposedReplacements.add(replacementKey);
+            this.logger.info(
+              {
+                trace_id: replacementTraceId,
+                module: MODULE,
+                action: 'replacement_submitted',
+                context: { roomId, deadRelayId: standbyId, candidateRelayId: candidateId },
+              },
+              'Relay heartbeat watcher: propose_relay_replacement PTB submitted',
+            );
+          } catch (err) {
+            this.logger.warn(
+              { trace_id: replacementTraceId, module: MODULE, context: { roomId, err } },
+              'Relay heartbeat watcher: propose_relay_replacement PTB failed',
+            );
+          }
+        }
+      }
 
       // REQ-RMS-024 — dedup is per-(roomId, oldPrimary): a SECOND failover (the new
       // primary later dies) must fire; only re-promoting away from the SAME dead primary
@@ -253,17 +363,6 @@ export class RelayHeartbeatWatcher {
         );
         continue;
       }
-
-      // REQ-RMS-024 — duplicate-aware id set: promote_relay REPLACES slot 0 but leaves
-      // the promoted relay in its old slot ([A,B,C] -> [C,B,C], room_manager.move:886-888).
-      const uniqueRelays = [...new Set(assignedRaw)];
-
-      const heartbeats = await this.reader.getRelayLastHeartbeats(roomId);
-      const hbMap = new Map(heartbeats.map((h) => [h.relayId, h.lastHeartbeat]));
-      const gapOf = (id: string): bigint => {
-        const hb = hbMap.get(id) ?? 0n;
-        return epoch > hb ? epoch - hb : 0n;
-      };
 
       if (gapOf(primaryId) <= this.maxHeartbeatEpochs) {
         continue; // primary fresh — no promotion needed
@@ -345,8 +444,10 @@ export function startRelayHeartbeatWatcher(
   submitter: PromoteSubmitter,
   logger: Logger,
   options: RelayHeartbeatWatcherOptions = {},
+  replacementSubmitter?: ReplacementSubmitter,
+  candidateSelector?: ReplacementCandidateSelector,
 ): RelayHeartbeatWatcher {
-  const watcher = new RelayHeartbeatWatcher(reader, submitter, logger, options);
+  const watcher = new RelayHeartbeatWatcher(reader, submitter, logger, options, replacementSubmitter, candidateSelector);
   watcher.start();
   return watcher;
 }
@@ -366,6 +467,32 @@ import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { executeWithRetry, type NetworkConfig } from '@dvconf/shared';
+import { selectReplacementCandidate, type RelayCapacity } from './admission-capacity.js';
+
+/**
+ * Build a real {@link ReplacementCandidateSelector} from a reader exposing
+ * `getActiveRelayIds()`. Candidate pool = every currently-active relay minus whatever's
+ * already assigned to the room; no live capacity/RTT feed is wired at this call site
+ * (a vote-in decision, unlike bootstrap placement), so every candidate is treated as
+ * uniformly eligible -- `selectReplacementCandidate`'s capacity/health gates still apply
+ * defensively (e.g. a canary-flagged relay is skipped) if the reader is later extended to
+ * populate those fields.
+ */
+export function makeLiveReplacementCandidateSelector(
+  reader: Pick<RelayChainStateReader, 'getActiveRelayIds'>,
+): ReplacementCandidateSelector {
+  return async (_roomId, assignedRelayIds) => {
+    const activeIds = (await reader.getActiveRelayIds?.()) ?? [];
+    const capacities: RelayCapacity[] = activeIds.map((minerId) => ({
+      minerId,
+      attestedLoadPaths: 0,
+      cWorker: Number.POSITIVE_INFINITY,
+      rtt: 0n,
+    }));
+    const chosen = selectReplacementCandidate(capacities, assignedRelayIds, 0);
+    return chosen?.minerId ?? null;
+  };
+}
 
 export function makePromoteSubmitter(
   client: SuiClient,
@@ -402,6 +529,64 @@ export function makePromoteSubmitter(
         context: { roomId, oldPrimary, newPrimary },
       },
       'Relay heartbeat watcher: promote_relay confirmed on-chain',
+    );
+  };
+}
+
+/**
+ * Build a real {@link ReplacementSubmitter} that signs + submits
+ * `propose_relay_replacement` PTBs (relay_replacement.move) via `executeWithRetry`.
+ * CP-cap-gated: requires this daemon's own registered `cpCapId`. `submittedScore` is a
+ * fixed placeholder (this vote only decides WHO replaces the dead standby, not room
+ * scoring) — mirrors the fixed score used by other post-bootstrap CP-quorum votes.
+ */
+export function makeReplacementSubmitter(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  cpCapId: string,
+  logger: Logger,
+): ReplacementSubmitter {
+  return async (roomId, deadRelayId, candidateRelayId, traceId) => {
+    const alertBoxId = config.roomHealthAlertBoxId;
+    if (!alertBoxId) {
+      logger.warn(
+        { trace_id: traceId, module: MODULE, context: { roomId } },
+        'Relay heartbeat watcher: roomHealthAlertBoxId not configured — cannot submit propose_relay_replacement',
+      );
+      return;
+    }
+    await executeWithRetry(
+      client,
+      signer,
+      (tx: Transaction) => {
+        tx.moveCall({
+          target: `${config.packageId}::room_manager_relay_replacement::propose_relay_replacement`,
+          arguments: [
+            tx.object(config.networkRegistryId),  // net_reg: &NetworkRegistry
+            tx.object(config.roomManagerId),      // manager: &mut RoomManager
+            tx.object(config.cpRegistryId),       // cp_reg: &mut ControlPlaneRegistry
+            tx.object(config.relayRegistryId),    // relay_reg: &mut RelayRegistry
+            tx.object(alertBoxId),                // alert_box: &mut RoomHealthAlertBox
+            tx.object(cpCapId),                   // cap: &ControlPlaneCap
+            tx.pure.id(roomId),                   // room_id: ID
+            tx.pure.id(deadRelayId),               // dead_relay_id: ID
+            tx.pure.id(candidateRelayId),          // candidate_relay_id: ID
+            tx.pure.u64(0),                        // submitted_score: u64 (placeholder, not room-scoring)
+          ],
+        });
+      },
+      'propose-relay-replacement',
+      logger,
+    );
+    logger.info(
+      {
+        trace_id: traceId,
+        module: MODULE,
+        action: 'replacement_confirmed',
+        context: { roomId, deadRelayId, candidateRelayId },
+      },
+      'Relay heartbeat watcher: propose_relay_replacement confirmed on-chain',
     );
   };
 }

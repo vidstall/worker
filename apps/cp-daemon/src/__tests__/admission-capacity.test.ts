@@ -2,10 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   estimateRoomLoad,
   selectPlacementRelay,
+  selectStandbyRelay,
+  selectReplacementCandidate,
   poolHealthGate,
   poolSize,
   excludeFlaggedRelays,
   selectTopRelays,
+  MAX_RESERVATIONS_PER_RELAY,
   type RoomClass,
   type RelayCapacity,
   type PlacementCandidate,
@@ -78,6 +81,86 @@ describe('REQ-RMS-002 selectPlacementRelay — i* = argmin (l_i + L_r)/C_worker 
     ];
     const r = selectPlacementRelay(set, 60);
     expect(r?.minerId).toBe('NO-FEED');
+  });
+});
+
+describe('Pre-warm standby — selectStandbyRelay (excludes the chosen primary, reuses selectPlacementRelay gates)', () => {
+  const cWorker = 300;
+  it('excludes the chosen primary from standby candidacy even if it would otherwise win', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n }, // best ratio, but excluded
+      { minerId: 'STANDBY', attestedLoadPaths: 100, cWorker, rtt: 80n },
+    ];
+    const r = selectStandbyRelay(relays, 60, 'PRIMARY');
+    expect(r?.minerId).toBe('STANDBY');
+  });
+
+  it('returns null when no other relay can absorb the load', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n },
+      { minerId: 'FULL', attestedLoadPaths: 295, cWorker, rtt: 80n },
+    ];
+    expect(selectStandbyRelay(relays, 60, 'PRIMARY')).toBeNull();
+  });
+
+  it('skips a relay already at its on-chain reservation ceiling (would double-book it)', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n },
+      { minerId: 'OVER-RESERVED', attestedLoadPaths: 50, cWorker, rtt: 5n, reservationLoad: MAX_RESERVATIONS_PER_RELAY },
+      { minerId: 'AVAILABLE', attestedLoadPaths: 100, cWorker, rtt: 80n, reservationLoad: 1 },
+    ];
+    const r = selectStandbyRelay(relays, 60, 'PRIMARY');
+    expect(r?.minerId).toBe('AVAILABLE');
+  });
+
+  it('back-compat: reservationLoad absent stays eligible', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n },
+      { minerId: 'NO-RESERVATION-FEED', attestedLoadPaths: 50, cWorker, rtt: 5n },
+    ];
+    const r = selectStandbyRelay(relays, 60, 'PRIMARY');
+    expect(r?.minerId).toBe('NO-RESERVATION-FEED');
+  });
+});
+
+describe('Mid-call standby-swap — selectReplacementCandidate (excludes EVERY assigned relay, reuses selectPlacementRelay gates)', () => {
+  const cWorker = 300;
+  it('excludes every currently-assigned relay (primary + all standbys), not just one', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n }, // best ratio, but assigned
+      { minerId: 'STANDBY_OK', attestedLoadPaths: 5, cWorker, rtt: 2n }, // also assigned
+      { minerId: 'FRESH_CANDIDATE', attestedLoadPaths: 100, cWorker, rtt: 80n },
+    ];
+    const r = selectReplacementCandidate(relays, ['PRIMARY', 'STANDBY_OK'], 60);
+    expect(r?.minerId).toBe('FRESH_CANDIDATE');
+  });
+
+  it('returns null when every non-assigned relay is over capacity', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n },
+      { minerId: 'STANDBY_OK', attestedLoadPaths: 5, cWorker, rtt: 2n },
+      { minerId: 'FULL', attestedLoadPaths: 295, cWorker, rtt: 80n },
+    ];
+    expect(selectReplacementCandidate(relays, ['PRIMARY', 'STANDBY_OK'], 60)).toBeNull();
+  });
+
+  it('returns null when the entire pool is already assigned (nothing left to pick)', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n },
+      { minerId: 'STANDBY_A', attestedLoadPaths: 5, cWorker, rtt: 2n },
+      { minerId: 'STANDBY_B', attestedLoadPaths: 5, cWorker, rtt: 3n },
+    ];
+    expect(selectReplacementCandidate(relays, ['PRIMARY', 'STANDBY_A', 'STANDBY_B'], 60)).toBeNull();
+  });
+
+  it('skips a candidate already at its on-chain reservation ceiling', () => {
+    const relays: RelayCapacity[] = [
+      { minerId: 'PRIMARY', attestedLoadPaths: 0, cWorker, rtt: 1n },
+      { minerId: 'OVER-RESERVED', attestedLoadPaths: 50, cWorker, rtt: 5n, reservationLoad: MAX_RESERVATIONS_PER_RELAY },
+      { minerId: 'AVAILABLE', attestedLoadPaths: 100, cWorker, rtt: 80n, reservationLoad: 1 },
+    ];
+    const r = selectReplacementCandidate(relays, ['PRIMARY'], 60);
+    expect(r?.minerId).toBe('AVAILABLE');
   });
 });
 

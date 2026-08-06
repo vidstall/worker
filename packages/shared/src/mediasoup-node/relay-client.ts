@@ -52,6 +52,7 @@ export class RelayClient {
     onProducer: ((msg: RelayMessage) => void) | null = null,
     context: RelayClientContext = {},
     logger?: RelayClientLogger,
+    onClose?: () => void,
   ) {
     this.ws = ws;
     this.onProducer = onProducer;
@@ -67,11 +68,12 @@ export class RelayClient {
         reject(err instanceof Error ? err : new Error(String(err)));
       });
     });
-    // Bare observability: a mid-session relay death was previously invisible
-    // to this process (bot has no standby/dual-relay awareness — no hint to
-    // send anywhere). This is a log line only, no network call.
+    // Bare observability (log line) plus an optional caller hook (`onClose`)
+    // so a standby-aware caller (apps/bot's BotPeer) can react to a mid-session
+    // relay death instead of it being silently invisible.
     this.ws.on('close', () => {
       logger?.warn({ ...context }, 'RelayClient: relay WS closed');
+      onClose?.();
     });
     this.ws.on('message', (...args: unknown[]) => {
       const data = args[0];

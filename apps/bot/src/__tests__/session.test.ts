@@ -4,14 +4,22 @@ const registerUserMock = vi.fn();
 const createRoomMock = vi.fn();
 const createEscrowMock = vi.fn();
 const resolveRoomRelayUrlMock = vi.fn();
+const getStandbyRelayUrlMock = vi.fn();
 
 vi.mock('../chain.js', () => ({
   registerUser: registerUserMock,
   createRoom: createRoomMock,
   createEscrow: createEscrowMock,
   resolveRoomRelayUrl: resolveRoomRelayUrlMock,
+  getStandbyRelayUrl: getStandbyRelayUrlMock,
   CREATE_ROOM_POLL_OPTS: { timeoutMs: 30_000, pollIntervalMs: 2_000 },
   JOIN_ROOM_POLL_OPTS: { timeoutMs: 10_000, pollIntervalMs: 1_000 },
+}));
+
+const flapGateCheckMock = vi.fn();
+vi.mock('../standby-flap-gate.js', () => ({
+  createStandbyFlapGate: vi.fn().mockImplementation(() => ({ check: flapGateCheckMock })),
+  wsToProbeUrl: vi.fn((url: string) => url.replace(/^ws/, 'http')),
 }));
 
 const connectMock = vi.fn();
@@ -27,6 +35,12 @@ vi.mock('../bot-peer.js', () => ({
     close: closeMock,
   })),
 }));
+
+// Imported AFTER the mock so this is the same mock constructor `startBotSession`
+// uses internally — lets tests inspect each construction's opts (e.g. to grab
+// onRelayClosed and simulate a WS close, or assert the standby peer's relayUrl).
+const { BotPeer } = await import('../bot-peer.js');
+const botPeerMock = vi.mocked(BotPeer);
 
 const probeVideoDimensionsMock = vi.fn();
 const startVideoSourceMock = vi.fn();
@@ -76,6 +90,9 @@ describe('startBotSession', () => {
     createRoomMock.mockReset();
     createEscrowMock.mockReset().mockResolvedValue(undefined);
     resolveRoomRelayUrlMock.mockReset();
+    getStandbyRelayUrlMock.mockReset();
+    flapGateCheckMock.mockReset().mockResolvedValue(true);
+    botPeerMock.mockClear();
     connectMock.mockReset().mockResolvedValue(undefined);
     produceVideoMock.mockReset().mockResolvedValue(undefined);
     produceAudioMock.mockReset().mockResolvedValue(undefined);
@@ -209,5 +226,88 @@ describe('startBotSession', () => {
     await startBotSession({ roomMode: 'create', mediaMode: 'camera', mp4Path: '/custom.mp4' }, baseDeps());
 
     expect(probeVideoDimensionsMock).toHaveBeenCalledWith('/custom.mp4');
+  });
+});
+
+describe('startBotSession — standby cutover on relay death', () => {
+  beforeEach(() => {
+    registerUserMock.mockReset().mockResolvedValue(undefined);
+    createRoomMock.mockReset();
+    createEscrowMock.mockReset().mockResolvedValue(undefined);
+    resolveRoomRelayUrlMock.mockReset().mockResolvedValue('wss://primary.example:4000');
+    getStandbyRelayUrlMock.mockReset();
+    flapGateCheckMock.mockReset().mockResolvedValue(true);
+    botPeerMock.mockClear();
+    connectMock.mockReset().mockResolvedValue(undefined);
+    produceVideoMock.mockReset().mockResolvedValue(undefined);
+    produceAudioMock.mockReset().mockResolvedValue(undefined);
+    closeMock.mockReset();
+    probeVideoDimensionsMock.mockReset().mockResolvedValue({ width: 640, height: 480, fps: 30 });
+    startVideoSourceMock.mockReset().mockReturnValue(vi.fn());
+    startAudioSourceMock.mockReset().mockReturnValue(vi.fn());
+    loadWrtcNonstandardMock.mockReset().mockResolvedValue({
+      RTCVideoSource: vi.fn().mockImplementation(() => ({ createTrack: vi.fn(() => 'video-track') })),
+      RTCAudioSource: vi.fn().mockImplementation(() => ({ createTrack: vi.fn(() => 'audio-track') })),
+    });
+  });
+
+  it('cuts over to the standby relay when the primary dies and the standby is healthy', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlMock.mockResolvedValueOnce('wss://standby.example:4000');
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'camera' }, baseDeps());
+    expect(session.isDegraded()).toBe(false);
+    expect(botPeerMock).toHaveBeenCalledTimes(1);
+
+    // Simulate the primary relay's WS closing.
+    const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+    onRelayClosed();
+
+    await vi.waitFor(() => expect(botPeerMock).toHaveBeenCalledTimes(2));
+    expect(botPeerMock.mock.calls[1]![0].relayUrl).toBe('wss://standby.example:4000');
+    await vi.waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1)); // old peer torn down
+    expect(produceVideoMock).toHaveBeenCalledTimes(2); // once at startup, once post-cutover
+    expect(session.isDegraded()).toBe(false);
+  });
+
+  it('marks the session degraded (no second BotPeer) when no standby is assigned', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlMock.mockResolvedValueOnce(null);
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'listen' }, baseDeps());
+    const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+    onRelayClosed();
+
+    await vi.waitFor(() => expect(session.isDegraded()).toBe(true));
+    expect(botPeerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the session degraded (no cutover) when the standby flap-gate reports unhealthy', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlMock.mockResolvedValueOnce('wss://standby.example:4000');
+    flapGateCheckMock.mockResolvedValueOnce(false);
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'listen' }, baseDeps());
+    const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+    onRelayClosed();
+
+    await vi.waitFor(() => expect(session.isDegraded()).toBe(true));
+    expect(botPeerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a user-initiated stop() does not trigger a bogus cutover when its own WS close fires afterward', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'listen' }, baseDeps());
+    session.stop();
+
+    // Simulate the ws's own 'close' event firing as a RESULT of stop()'s peer.close().
+    const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+    onRelayClosed();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(getStandbyRelayUrlMock).not.toHaveBeenCalled();
+    expect(botPeerMock).toHaveBeenCalledTimes(1);
+    expect(session.isDegraded()).toBe(false);
   });
 });

@@ -77,6 +77,15 @@ function baseTxContext() {
   };
 }
 
+/** room_health_validators floor (room_health_alerts.move) needs >= 3 to reach placement logic at all. */
+function threeValidators(): Map<string, NodeCandidate> {
+  return new Map<string, NodeCandidate>([
+    ['val-1', candidate('val-1', 1_000_000_000n)],
+    ['val-2', candidate('val-2', 1_000_000_000n)],
+    ['val-3', candidate('val-3', 1_000_000_000n)],
+  ]);
+}
+
 describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
   const originalEnv = process.env;
 
@@ -92,25 +101,28 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
 
   it('submits the original ballot when the chosen relay probes alive', async () => {
     const spy = vi.spyOn(roomAssignment, 'submitProposal').mockResolvedValue(true);
-    mockProbeCandidates.mockResolvedValue(new Set(['cool']));
+    // 3 relays now actively serve (1 primary + 2 pre-warmed standby, MIN_RELAY=3) — all alive.
+    mockProbeCandidates.mockResolvedValue(new Set(['cool', 'peerA', 'hot']));
 
     const logger = mockLogger();
     const relayState = new Map<string, NodeCandidate>([
       ['hot', candidate('hot', 5_000_000_000n)],
       ['cool', candidate('cool', 1_000_000_000n)],
+      ['peerA', candidate('peerA', 500_000_000n)],
     ]);
     const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
-      ['hot', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }],
-      ['cool', { attestedLoadPaths: 10, heartbeatFreshEpochs: 1 }],
+      ['hot', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }], // over ceiling -- ballot padding only
+      ['cool', { attestedLoadPaths: 10, heartbeatFreshEpochs: 1 }], // best ratio -- chosen
+      ['peerA', { attestedLoadPaths: 20, heartbeatFreshEpochs: 1 }], // eligible peer, fills the 3rd slot
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
 
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), undefined, attested);
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
 
     await vi.waitFor(() => expect(spy).toHaveBeenCalled());
-    expect(mockProbeCandidates).toHaveBeenCalledWith(expect.anything(), expect.anything(), ['cool'], logger);
+    expect(mockProbeCandidates).toHaveBeenCalledWith(expect.anything(), expect.anything(), ['cool', 'peerA', 'hot'], logger);
     const args = spy.mock.calls[0]!;
     expect((args[5] as string[])[0]).toBe('cool');
     spy.mockRestore();
@@ -118,25 +130,31 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
 
   it('retries against the remaining pool when the chosen relay probes dead, and submits the replacement', async () => {
     const spy = vi.spyOn(roomAssignment, 'submitProposal').mockResolvedValue(true);
-    // 'cool' (chosen first) probes dead; 'warm' has headroom and becomes the retry's chosen relay.
+    // 'cool' (chosen) + 'peerA'/'peerB' (eligible, fill the initial 3-slot active set) all probe
+    // dead; 'warm' has headroom but was pushed past the MIN_RELAY=3 slice on the first pass, so
+    // it's untouched by the dead first-round probe and becomes the retry's chosen relay.
     mockProbeCandidates.mockResolvedValue(new Set());
 
     const logger = mockLogger();
     const relayState = new Map<string, NodeCandidate>([
       ['hot', candidate('hot', 5_000_000_000n)],
       ['cool', candidate('cool', 1_000_000_000n)],
-      ['warm', candidate('warm', 2_000_000_000n)],
+      ['peerA', candidate('peerA', 500_000_000n)],
+      ['peerB', candidate('peerB', 400_000_000n)],
+      ['warm', candidate('warm', 300_000_000n)],
     ]);
     const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
       ['hot', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }],
       ['cool', { attestedLoadPaths: 10, heartbeatFreshEpochs: 1 }],
+      ['peerA', { attestedLoadPaths: 20, heartbeatFreshEpochs: 1 }],
+      ['peerB', { attestedLoadPaths: 25, heartbeatFreshEpochs: 1 }],
       ['warm', { attestedLoadPaths: 50, heartbeatFreshEpochs: 1 }],
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
 
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), undefined, attested);
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
 
     await vi.waitFor(() => expect(spy).toHaveBeenCalled());
     const args = spy.mock.calls[0]!;
@@ -149,21 +167,24 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
     mockProbeCandidates.mockResolvedValue(new Set());
 
     const logger = mockLogger();
-    // Only hot+cool: cool probes dead, hot has no capacity headroom -- the
-    // retry's selectPlacementRelay finds nothing and the room is re-queued.
+    // Exactly 3 relays (the full pool == the active set): cool (chosen) + peerA (eligible) +
+    // hot (over-capacity padding). Every one probes dead and there's nothing left outside the
+    // active set for the retry's selectPlacementRelay to find — genuinely nothing survives.
     const relayState = new Map<string, NodeCandidate>([
       ['hot', candidate('hot', 5_000_000_000n)],
       ['cool', candidate('cool', 1_000_000_000n)],
+      ['peerA', candidate('peerA', 500_000_000n)],
     ]);
     const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
       ['hot', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }],
       ['cool', { attestedLoadPaths: 10, heartbeatFreshEpochs: 1 }],
+      ['peerA', { attestedLoadPaths: 20, heartbeatFreshEpochs: 1 }],
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
 
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), undefined, attested);
+    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
 
     await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room1' }),

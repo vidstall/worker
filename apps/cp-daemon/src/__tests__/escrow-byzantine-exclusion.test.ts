@@ -40,12 +40,20 @@ const fakeTxContext = {
   client: {} as never, signer: {} as never, config: {} as never, cpCapId: 'cap',
 } as unknown as Parameters<typeof handleEvent>[6]; // index 6 = txContext (NOT [5]=weights)
 
+/** room_health_validators floor (room_health_alerts.move) needs >= 3 to reach placement logic at all. */
+const threeValidators = new Map<string, NodeCandidate>([
+  ['val-1', node('val-1')], ['val-2', node('val-2')], ['val-3', node('val-3')],
+]);
+
 describe('REQ-RMS-015 — EscrowCreated proposes WITHOUT the canary-flagged relay', () => {
   beforeEach(() => { submitProposalSpy.mockClear(); votedRooms.clear(); });
 
-  it('the flagged relay is NEVER in the topRelayIds passed to submitProposal', () => {
+  it('the flagged relay is NEVER in the topRelayIds passed to submitProposal', async () => {
+    // R3 added: after excluding R-byz, the ballot needs >= MIN_RELAY (3) surviving
+    // relays (1 primary + 2 pre-warmed standby) or submit_pairing_proposal's on-chain
+    // floor can't be satisfied and the arm defers instead of proposing at all.
     const relayState = new Map<string, NodeCandidate>([
-      ['R1', node('R1')], ['R-byz', node('R-byz')], ['R2', node('R2')],
+      ['R1', node('R1')], ['R-byz', node('R-byz')], ['R2', node('R2')], ['R3', node('R3')],
     ]);
     const signalingState = new Map([['S1', { minerId: 'S1', load: 0n } as never]]);
     const pendingRooms = new Map<string, never>();
@@ -55,7 +63,7 @@ describe('REQ-RMS-015 — EscrowCreated proposes WITHOUT the canary-flagged rela
     // flag that marks R-byz; txContext present => the arm calls submitProposal.
     handleEvent(
       { type: '0xpkg::room_manager::RoomCreated', parsedJson: { room_id: 'room1', creator: 'c', relay_mode: 0 } } as never,
-      relayState, signalingState as never, pendingRooms as never, logger, undefined, undefined, pendingEscrows as never, undefined,
+      relayState, signalingState as never, pendingRooms as never, logger, undefined, undefined, pendingEscrows as never, threeValidators,
     );
     const isFlagged = (id: string): boolean => id === 'R-byz';
     handleEvent(
@@ -64,17 +72,18 @@ describe('REQ-RMS-015 — EscrowCreated proposes WITHOUT the canary-flagged rela
       undefined,               // [5] weights (default)
       fakeTxContext,           // [6] txContext present => the EscrowCreated arm calls submitProposal
       pendingEscrows as never, // [7] pendingEscrows
-      undefined,               // [8] validatorState
+      threeValidators,         // [8] validatorState
       undefined,               // [9] attestedLoad  (M1 param, unused here)
       undefined,               // [10] currentEpoch (M1 param, unused here)
       isFlagged,               // [11] byzantineFlag (M3) => excludes R-byz from the proposed set
     );
 
     // submitProposal(client, signer, config, cpCapId, roomId, topRelayIds, ...) —
-    // the 6th positional arg (index 5) is the proposed relay-id set.
-    expect(submitProposalSpy).toHaveBeenCalledTimes(1);
+    // the 6th positional arg (index 5) is the proposed relay-id set. Placement now round-trips
+    // through an awaited getRelayReservationLoad devInspect read before submitProposal fires.
+    await vi.waitFor(() => expect(submitProposalSpy).toHaveBeenCalledTimes(1));
     const proposedRelayIds = submitProposalSpy.mock.calls[0]![5] as string[];
     expect(proposedRelayIds).not.toContain('R-byz'); // REAL proposed set, observed
-    expect(proposedRelayIds).toEqual(['R1', 'R2']);
+    expect(proposedRelayIds.sort()).toEqual(['R1', 'R2', 'R3']);
   });
 });

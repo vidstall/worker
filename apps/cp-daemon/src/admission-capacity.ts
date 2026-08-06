@@ -54,7 +54,17 @@ export interface RelayCapacity {
   heartbeatFreshEpochs?: number;
   /** Canary success-rate over last N audits acceptable (for pool-health, REQ-RMS-018). */
   canaryHealthy?: boolean;
+  /**
+   * Pre-warm standby reservation: on-chain reserved_primary_count + reserved_standby_count
+   * (relay_registry.move). Optional -- absent when the reservation read wasn't wired (same
+   * back-compat convention as canaryHealthy). Never used to affect the PVR consensus score,
+   * only to skip an over-reserved candidate at placement time.
+   */
+  reservationLoad?: number;
 }
+
+/** Mirrors relay_registry.move's MAX_RESERVATIONS_PER_RELAY (pre-warm standby ceiling). */
+export const MAX_RESERVATIONS_PER_RELAY = 8;
 
 /** Staleness threshold — mirrors scoring.ts PVR_HEARTBEAT_STALE (kept in epochs). */
 export const HEARTBEAT_STALE_EPOCHS = 7;
@@ -70,6 +80,9 @@ export function selectPlacementRelay(relays: RelayCapacity[], roomLoad: number):
     // QC-1 (REQ-RMS-018): never place onto a PROVEN canary-unhealthy relay. Strict
     // `=== false` only — field-absent (undefined) / no-feed (true) stay eligible (back-compat).
     if (r.canaryHealthy === false) continue;
+    // Pre-warm standby: skip a relay already at its on-chain reservation ceiling (would
+    // double-book it as both primary/standby elsewhere). Field-absent stays eligible.
+    if (r.reservationLoad !== undefined && r.reservationLoad >= MAX_RESERVATIONS_PER_RELAY) continue;
     const projected = r.attestedLoadPaths + roomLoad;
     if (projected > r.cWorker) continue;        // capacity ceiling
     const ratio = projected / r.cWorker;
@@ -82,6 +95,38 @@ export function selectPlacementRelay(relays: RelayCapacity[], roomLoad: number):
     }
   }
   return best;
+}
+
+/**
+ * Pre-warm standby — select a standby candidate DISTINCT from the chosen primary, able to
+ * absorb roomLoad under its OWN cWorker ceiling independently (a standby is provisioned as if
+ * it will become primary, not as a fractional/shared reservation), reusing the exact same
+ * capacity/health/reservation gates as `selectPlacementRelay`. Pure function, no chain I/O.
+ */
+export function selectStandbyRelay(
+  relays: RelayCapacity[],
+  roomLoad: number,
+  excludeMinerId: string,
+): RelayCapacity | null {
+  return selectPlacementRelay(relays.filter((r) => r.minerId !== excludeMinerId), roomLoad);
+}
+
+/**
+ * Mid-call relay-slot replacement (relay_replacement.move) — select a candidate to vote in for
+ * a dead relay, EXCLUDING every relay already assigned to the room (primary + all standbys),
+ * not just the one that died. Reuses the exact same capacity/health/reservation gates as
+ * `selectPlacementRelay`/`selectStandbyRelay`. Pure function, no chain I/O.
+ */
+export function selectReplacementCandidate(
+  allRelays: RelayCapacity[],
+  assignedRelayIds: string[],
+  roomLoad: number,
+): RelayCapacity | null {
+  const assigned = new Set(assignedRelayIds);
+  return selectPlacementRelay(
+    allRelays.filter((r) => !assigned.has(r.minerId)),
+    roomLoad,
+  );
 }
 
 /**
@@ -117,8 +162,9 @@ export function poolHealthGate(pool: RelayCapacity[], kR: number): boolean {
   return healthy >= kR;
 }
 
-/** Minimum relays per room — mirrors on-chain constants::default_min_relays_per_room() = 2. */
-export const MIN_RELAY = 2;
+/** Minimum relays per room — mirrors on-chain constants::default_min_relays_per_room() = 3
+ * (1 primary + 2 pre-warmed standby). */
+export const MIN_RELAY = 3;
 
 /**
  * REQ-RMS-013 — M = ceil(sum L_r / C_relay) * (1 + redundancy) + byzantine_margin, clamped >= MIN_RELAY.

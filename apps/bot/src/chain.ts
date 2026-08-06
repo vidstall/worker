@@ -57,6 +57,8 @@ const RelayNodeInfoBcs = bcs.struct('RelayNodeInfo', {
   last_heartbeat: bcs.u64(),
   region: bcs.vector(bcs.u8()),
   endpoint_url: bcs.vector(bcs.u8()),
+  reserved_primary_count: bcs.u64(),
+  reserved_standby_count: bcs.u64(),
 });
 
 interface DevInspectLike {
@@ -237,37 +239,121 @@ export async function getAssignedRelayIds(
   }
 }
 
-/** Reads `relay_registry::get_active_relays` and decodes the full list. */
+/**
+ * Reads `relay_registry::get_active_relays` and decodes the full list.
+ * NEVER throws — the public devnet fullnode has been observed to intermittently
+ * return a truncated/undecodable devInspect payload (a transient RPC-layer
+ * hiccup, not a schema mismatch), which used to surface as an uncaught
+ * `RangeError: Offset is outside the bounds of the DataView` straight out of
+ * bcs's reader and crash the whole bot session. Treat any network OR decode
+ * failure as "no active relays this attempt" (mirrors getAssignedRelayIds's
+ * tolerant behavior) so the caller's poll/retry loop gets another chance
+ * instead of the session dying outright.
+ */
 export async function getActiveRelays(
   client: SuiClient,
   config: NetworkConfig,
   logger: Logger,
 ): Promise<Array<{ minerId: string; endpointUrl: string }>> {
-  const tx = new Transaction();
-  tx.moveCall({
-    target: `${config.packageId}::relay_registry::get_active_relays`,
-    arguments: [tx.object(config.relayRegistryId)],
-  });
-  const r = (await client.devInspectTransactionBlock({
-    transactionBlock: tx,
-    sender: ZERO_ADDRESS,
-  })) as DevInspectLike;
-  if (r.error) {
-    throw new Error(`devInspect relay_registry::get_active_relays failed: ${r.error}`);
-  }
-  const bytes = r.results?.[0]?.returnValues?.[0]?.[0];
-  if (bytes === undefined) {
-    logger.debug({ module: 'bot-chain' }, 'get_active_relays returned no values');
+  try {
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${config.packageId}::relay_registry::get_active_relays`,
+      arguments: [tx.object(config.relayRegistryId)],
+    });
+    const r = (await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: ZERO_ADDRESS,
+    })) as DevInspectLike;
+    if (r.error) {
+      logger.debug({ module: 'bot-chain', err: r.error }, 'get_active_relays errored — treating as empty');
+      return [];
+    }
+    const bytes = r.results?.[0]?.returnValues?.[0]?.[0];
+    if (bytes === undefined) {
+      logger.debug({ module: 'bot-chain' }, 'get_active_relays returned no values');
+      return [];
+    }
+    const decoded = bcs.vector(RelayNodeInfoBcs).parse(Uint8Array.from(bytes)) as Array<{
+      miner_id: string;
+      endpoint_url: number[];
+    }>;
+    return decoded.map((r2) => ({
+      minerId: normalizeSuiAddress(r2.miner_id),
+      endpointUrl: decodeUtf8(r2.endpoint_url),
+    }));
+  } catch (err) {
+    logger.debug({ module: 'bot-chain', err }, 'get_active_relays read/decode failed — treating as empty');
     return [];
   }
-  const decoded = bcs.vector(RelayNodeInfoBcs).parse(Uint8Array.from(bytes)) as Array<{
-    miner_id: string;
-    endpoint_url: number[];
-  }>;
-  return decoded.map((r2) => ({
-    minerId: normalizeSuiAddress(r2.miner_id),
-    endpointUrl: decodeUtf8(r2.endpoint_url),
-  }));
+}
+
+/**
+ * Reads a SINGLE relay's `endpoint_url` directly (`relay_registry::borrow_info`
+ * chained into `info_endpoint_url` in one PTB), instead of scanning the whole
+ * active-relay set and filtering client-side. Used by `resolveRoomRelayUrl`
+ * once cp-daemon has already assigned this exact relay to the room — at that
+ * point we trust cp-daemon's own on-chain read of the registry and just need
+ * the endpoint, not a second independent "is it active" opinion. This sidesteps
+ * a specific failure mode seen against the public devnet fullnode where
+ * `get_active_relays()`'s full-registry scan (`active_set` + a `nodes` table
+ * walk) returned an empty list for 30+ consecutive seconds for a relay that
+ * had registered and been heartbeating for several minutes already, while a
+ * plain devInspect of this narrower per-id lookup did not exhibit the same lag.
+ * NEVER throws — any network/decode failure or `E_NOT_REGISTERED` abort (miner
+ * not yet visible in `nodes`) resolves `null` so the caller can retry.
+ */
+export async function getRelayEndpoint(
+  client: SuiClient,
+  config: NetworkConfig,
+  minerId: string,
+  logger: Logger,
+): Promise<string | null> {
+  try {
+    const tx = new Transaction();
+    const info = tx.moveCall({
+      target: `${config.packageId}::relay_registry::borrow_info`,
+      arguments: [tx.object(config.relayRegistryId), tx.pure.id(minerId)],
+    });
+    tx.moveCall({
+      target: `${config.packageId}::relay_registry::info_endpoint_url`,
+      arguments: [info],
+    });
+    const r = (await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: ZERO_ADDRESS,
+    })) as DevInspectLike;
+    if (r.error) {
+      logger.debug({ module: 'bot-chain', minerId, err: r.error }, 'get_relay_endpoint errored — treating as not-found');
+      return null;
+    }
+    const bytes = r.results?.[1]?.returnValues?.[0]?.[0];
+    if (bytes === undefined) return null;
+    const urlBytes = bcs.vector(bcs.u8()).parse(Uint8Array.from(bytes)) as number[];
+    return decodeUtf8(urlBytes);
+  } catch (err) {
+    logger.debug({ module: 'bot-chain', minerId, err }, 'get_relay_endpoint read/decode failed — treating as not-found');
+    return null;
+  }
+}
+
+/**
+ * Resolve the room's STANDBY relay's (`assigned_relays[1]`) endpoint_url, or
+ * null if no standby is assigned yet (or its endpoint isn't resolvable).
+ * Single-shot, no polling — used at relay-death time by session.ts's
+ * handleRelayDeath to attempt an immediate standby cutover; if the standby
+ * isn't ready at that exact moment, the caller fails fast rather than retrying.
+ */
+export async function getStandbyRelayUrl(
+  client: SuiClient,
+  config: NetworkConfig,
+  roomId: string,
+  logger: Logger,
+): Promise<string | null> {
+  const assignedIds = await getAssignedRelayIds(client, config, roomId, logger);
+  const standbyId = assignedIds[1];
+  if (!standbyId) return null;
+  return getRelayEndpoint(client, config, standbyId, logger);
 }
 
 export interface ResolveRelayEndpointOpts {
@@ -283,10 +369,11 @@ export const JOIN_ROOM_POLL_OPTS: ResolveRelayEndpointOpts = { timeoutMs: 10_000
 /**
  * Poll `get_room_assignment` until `assigned_relays` is non-empty (cp-daemon's
  * `RoomCreated` listener sets this asynchronously after room creation), then
- * cross-reference `assigned_relays[0]` against `get_active_relays()`'s
- * `miner_id` to resolve the real `wss://...` endpoint. Throws a clear error
- * if the room never gets assigned within `opts.timeoutMs` (cp-daemon might
- * not be running) or the assigned relay isn't found in the active-relay set.
+ * resolve `assigned_relays[0]`'s `endpoint_url` via `getRelayEndpoint` (a
+ * targeted per-id lookup, not a full active-set scan). Throws a clear error if
+ * the room never gets assigned within `opts.timeoutMs` (cp-daemon might not be
+ * running) or the assigned relay's endpoint never resolves within a second,
+ * independent `opts.timeoutMs` budget.
  */
 export async function resolveRoomRelayUrl(
   client: SuiClient,
@@ -311,17 +398,36 @@ export async function resolveRoomRelayUrl(
   }
 
   const primaryRelayId = assignedIds[0]!;
-  const activeRelays = await getActiveRelays(client, config, logger);
-  const match = activeRelays.find((r) => r.minerId === primaryRelayId);
-  if (!match) {
-    throw new Error(
-      `resolveRoomRelayUrl: room ${roomId}'s assigned relay ${primaryRelayId} was not found in ` +
-        `relay_registry::get_active_relays() (${activeRelays.length} active relays)`,
+
+  // Retry the per-relay endpoint lookup on its OWN fresh deadline (not the
+  // remainder of the assignment wait above). Uses getRelayEndpoint's targeted
+  // borrow_info/info_endpoint_url PTB rather than get_active_relays' full
+  // active-set scan — the latter was observed to return an empty list for
+  // 30+ consecutive seconds against the public devnet fullnode for a relay
+  // that had already been registered and heartbeating for minutes, while this
+  // narrower per-id lookup does not exhibit the same lag. Sharing one deadline
+  // with the assignment wait also meant a slow-but-normal assignment (which
+  // can itself eat most of the budget) left too little runway here.
+  const endpointDeadline = Date.now() + opts.timeoutMs;
+  for (;;) {
+    const endpointUrl = await getRelayEndpoint(client, config, primaryRelayId, logger);
+    if (endpointUrl) {
+      logger.info(
+        { module: 'bot-chain', roomId, relayId: primaryRelayId, relayUrl: endpointUrl },
+        'resolved room relay endpoint',
+      );
+      return endpointUrl;
+    }
+    logger.warn(
+      { module: 'bot-chain', roomId, relayId: primaryRelayId },
+      'assigned relay endpoint not (yet) resolvable via relay_registry::borrow_info — retrying',
     );
+    if (Date.now() >= endpointDeadline) {
+      throw new Error(
+        `resolveRoomRelayUrl: room ${roomId}'s assigned relay ${primaryRelayId} has no resolvable ` +
+          `endpoint_url in relay_registry after ${opts.timeoutMs}ms`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, opts.pollIntervalMs));
   }
-  logger.info(
-    { module: 'bot-chain', roomId, relayId: primaryRelayId, relayUrl: match.endpointUrl },
-    'resolved room relay endpoint',
-  );
-  return match.endpointUrl;
 }

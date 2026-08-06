@@ -82,9 +82,12 @@ export interface BotPeerOptions {
   roomId: string;
   peerId: string;
   roomPassword: string;
-  /** Threaded into RelayClient so a mid-session relay-WS close is observable
-   *  (bot has no standby/dual-relay path, so this is log-only — no hint sent). */
+  /** Threaded into RelayClient so a mid-session relay-WS close is observable. */
   logger?: Logger;
+  /** Threaded into RelayClient's onClose — fires once when this peer's relay
+   *  WS closes (expected or not). session.ts uses this to attempt a standby
+   *  cutover; a caller that doesn't care can omit it (log-only, as before). */
+  onRelayClosed?: () => void;
 }
 
 /** Base64-encode a 32-byte ed25519 public key for the `join` message's
@@ -166,6 +169,7 @@ export class BotPeer {
       (msg) => this.onNewProducer(msg as unknown as NewProducerNotification),
       { roomId: this.opts.roomId, peerId: this.opts.peerId, relayUrl: this.opts.relayUrl },
       this.opts.logger,
+      this.opts.onRelayClosed,
     );
     await this.client.ready;
 

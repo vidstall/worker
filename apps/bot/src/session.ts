@@ -14,17 +14,19 @@ import { randomUUID } from 'node:crypto';
 import type { SuiClient } from '@mysten/sui/client';
 import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import type { NetworkConfig, Logger } from '@dvconf/shared';
+import type { NetworkConfig, Logger, WrtcNonstandard } from '@dvconf/shared';
 import { loadWrtcNonstandard } from '@dvconf/shared';
 import {
   registerUser,
   createRoom,
   createEscrow,
   resolveRoomRelayUrl,
+  getStandbyRelayUrl,
   CREATE_ROOM_POLL_OPTS,
   JOIN_ROOM_POLL_OPTS,
 } from './chain.js';
 import { BotPeer } from './bot-peer.js';
+import { createStandbyFlapGate, wsToProbeUrl } from './standby-flap-gate.js';
 import { probeVideoDimensions, startVideoSource, startAudioSource, type MediaTrack } from './media/ffmpeg-source.js';
 import type { BotConfig } from './config.js';
 
@@ -47,6 +49,10 @@ export interface BotSession {
   joinUrl: string;
   startedAt: number;
   stop(): void;
+  /** True once a relay death couldn't be recovered (no standby assigned, or
+   *  the standby was also unhealthy/unreachable) — the session keeps running
+   *  in whatever last-known-good state it had, but media has stopped flowing. */
+  isDegraded(): boolean;
 }
 
 export interface StartBotSessionDeps {
@@ -172,18 +178,109 @@ export async function startBotSession(
 
   const joinUrl = `${botConfig.clientUrl}/rooms/${roomId}?pw=${botConfig.roomPassword}`;
 
-  const peer = new BotPeer({
+  // Hoisted above peer construction so handleRelayDeath's closure (wired into
+  // the very first BotPeer below) can read it — a user-initiated stop() sets
+  // this BEFORE closing the peer, so its own resulting WS close can never
+  // trigger a bogus cutover attempt (see handleRelayDeath's first check).
+  let stopped = false;
+  // Guards against overlapping cutover attempts (defensive — in practice only
+  // one relay is ever "current" at a time, so at most one onRelayClosed fires).
+  let cutoverInFlight = false;
+  // True once a relay death couldn't be recovered (no standby, or the standby
+  // was also unhealthy) — surfaced via BotSession.isDegraded()/GET /bots.
+  let degraded = false;
+
+  /**
+   * Fired when the currently-active relay's WS closes (expected — the relay
+   * died) — attempt an immediate cutover to the room's standby, mirroring the
+   * browser client's fix for the same problem (services/client's useRelay.ts).
+   * Re-resolves assigned_relays fresh from chain each call, so a SECOND death
+   * (of the now-active former-standby) naturally picks up whatever the
+   * on-chain CP-quorum replacement-voting has since voted in. Fails fast (no
+   * retry loop) when there's no standby or it's unhealthy — this is a test
+   * harness, a clear degraded signal is more useful than retrying forever.
+   */
+  const handleRelayDeath = async (): Promise<void> => {
+    if (stopped || cutoverInFlight) return;
+    cutoverInFlight = true;
+    try {
+      logger.warn(
+        { module: 'bot-session', sessionId: id, roomId },
+        'primary relay WS closed — attempting standby cutover',
+      );
+      const standbyUrl = await getStandbyRelayUrl(client, networkConfig, roomId, logger);
+      if (!standbyUrl) {
+        logger.error(
+          { module: 'bot-session', sessionId: id, roomId },
+          'relay died and no standby is assigned — bot session degraded',
+        );
+        degraded = true;
+        return;
+      }
+      const gate = createStandbyFlapGate({ probeUrl: `${wsToProbeUrl(standbyUrl)}/api/probe` });
+      if (!(await gate.check())) {
+        logger.error(
+          { module: 'bot-session', sessionId: id, roomId, standbyUrl },
+          'standby relay reported unhealthy — bot session degraded',
+        );
+        degraded = true;
+        return;
+      }
+      const newPeer = new BotPeer({
+        relayUrl: standbyUrl,
+        roomId,
+        peerId: `bot-${id}`,
+        roomPassword: botConfig.roomPassword,
+        logger,
+        onRelayClosed: () => {
+          void handleRelayDeath();
+        },
+      });
+      await newPeer.connect();
+      if (videoSource) await newPeer.produceVideo(videoSource.createTrack());
+      if (audioSource) await newPeer.produceAudio(audioSource.createTrack());
+      // The OLD peer's ws already closed itself (that's why we're here) — this
+      // just tears down its transports/stats-reporter. A WS 'close' event
+      // fires exactly once per socket, so this does NOT re-trigger onRelayClosed.
+      peer.close();
+      peer = newPeer;
+      degraded = false;
+      logger.info(
+        { module: 'bot-session', sessionId: id, roomId, standbyUrl },
+        'bot session cut over to standby relay',
+      );
+    } catch (err) {
+      logger.error(
+        { module: 'bot-session', sessionId: id, roomId, err },
+        'standby cutover failed — bot session degraded',
+      );
+      degraded = true;
+    } finally {
+      cutoverInFlight = false;
+    }
+  };
+
+  let peer = new BotPeer({
     relayUrl,
     roomId,
     peerId: `bot-${id}`,
     roomPassword: botConfig.roomPassword,
     logger,
+    onRelayClosed: () => {
+      void handleRelayDeath();
+    },
   });
   logger.info({ module: 'bot-session', sessionId: id, relayUrl }, 'joining relay…');
   await timePhase('ws_connect', () => peer.connect());
   logger.info({ module: 'bot-session', sessionId: id, mediaMode: opts.mediaMode }, 'joined relay, starting media…');
 
   const stopFns: Array<() => void> = [];
+  // Lifted out of the media_start block below so handleRelayDeath can mint
+  // fresh tracks (.createTrack()) from the SAME still-running ffmpeg pacing
+  // loop on cutover, instead of restarting ffmpeg — mirrors the browser fix's
+  // reuse of localStreamRef.current instead of re-acquiring getUserMedia.
+  let videoSource: InstanceType<WrtcNonstandard['RTCVideoSource']> | null = null;
+  let audioSource: InstanceType<WrtcNonstandard['RTCAudioSource']> | null = null;
 
   if (wantsVideo(opts.mediaMode) || wantsAudio(opts.mediaMode)) {
     await timePhase('media_start', async () => {
@@ -195,7 +292,7 @@ export async function startBotSession(
 
       if (wantsVideo(opts.mediaMode)) {
         const dims = await probeVideoDimensions(mp4Path);
-        const videoSource = new nonstandard.RTCVideoSource();
+        videoSource = new nonstandard.RTCVideoSource();
         stopFns.push(
           startVideoSource({
             mp4Path,
@@ -213,7 +310,7 @@ export async function startBotSession(
       }
 
       if (wantsAudio(opts.mediaMode)) {
-        const audioSource = new nonstandard.RTCAudioSource();
+        audioSource = new nonstandard.RTCAudioSource();
         stopFns.push(
           startAudioSource({
             mp4Path,
@@ -236,7 +333,6 @@ export async function startBotSession(
     `bot session live — join at: ${joinUrl}`,
   );
 
-  let stopped = false;
   const stop = (): void => {
     if (stopped) return;
     stopped = true;
@@ -250,6 +346,7 @@ export async function startBotSession(
     roomId,
     mediaMode: opts.mediaMode,
     joinUrl,
+    isDegraded: () => degraded,
     startedAt: Date.now(),
     stop,
   };

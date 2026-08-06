@@ -44,6 +44,9 @@ export interface BotSummary {
   mediaMode: MediaMode;
   joinUrl: string;
   uptimeMs: number;
+  /** 'degraded' once a relay death couldn't be recovered (no standby, or the
+   *  standby was also unhealthy) — see BotSession.isDegraded(). */
+  status: 'active' | 'degraded';
 }
 
 export function toBotSummary(session: BotSession, alias: string, now: number = Date.now()): BotSummary {
@@ -54,6 +57,7 @@ export function toBotSummary(session: BotSession, alias: string, now: number = D
     mediaMode: session.mediaMode,
     joinUrl: session.joinUrl,
     uptimeMs: now - session.startedAt,
+    status: session.isDegraded() ? 'degraded' : 'active',
   };
 }
 

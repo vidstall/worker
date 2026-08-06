@@ -9,8 +9,16 @@ vi.mock('@dvconf/shared', () => ({
 }));
 
 // Import after the mock so chain.ts picks up the mocked module.
-const { registerAndCreateRoom, registerUser, createRoom, getAssignedRelayIds, getActiveRelays, resolveRoomRelayUrl } =
-  await import('../chain.js');
+const {
+  registerAndCreateRoom,
+  registerUser,
+  createRoom,
+  getAssignedRelayIds,
+  getActiveRelays,
+  getRelayEndpoint,
+  getStandbyRelayUrl,
+  resolveRoomRelayUrl,
+} = await import('../chain.js');
 
 function fakeLogger(): {
   info: ReturnType<typeof vi.fn>;
@@ -170,6 +178,8 @@ function encodeRelayNodeInfo(minerId: string, endpointUrl: string): number[] {
     ...encodeU64(0), // last_heartbeat
     ...encodeByteVector([]), // region
     ...encodeByteVector(url), // endpoint_url
+    ...encodeU64(0), // reserved_primary_count
+    ...encodeU64(0), // reserved_standby_count
   ];
 }
 
@@ -234,21 +244,92 @@ describe('getActiveRelays', () => {
     expect(relays[0]?.endpointUrl).toBe('wss://relay-a.example');
   });
 
-  it('throws a clear error when devInspect errors', async () => {
+  it('resolves to an empty list (never throws) when devInspect errors', async () => {
     const client = makeClient(() => ({ error: 'boom' }));
-    await expect(getActiveRelays(client as never, fakeConfig, fakeLogger() as never)).rejects.toThrow(/boom/);
+    const relays = await getActiveRelays(client as never, fakeConfig, fakeLogger() as never);
+    expect(relays).toEqual([]);
+  });
+
+  it('resolves to an empty list (never throws) when devInspect throws', async () => {
+    const client = { devInspectTransactionBlock: vi.fn(async () => { throw new Error('network blip'); }) };
+    const relays = await getActiveRelays(client as never, fakeConfig, fakeLogger() as never);
+    expect(relays).toEqual([]);
+  });
+});
+
+describe('getRelayEndpoint', () => {
+  it('resolves the endpoint_url from the chained borrow_info/info_endpoint_url PTB', async () => {
+    const urlBytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://relay-a.example')));
+    const client = makeClient(() => ({
+      results: [{ returnValues: [] }, { returnValues: [[urlBytes, 'vector<u8>']] }],
+    }));
+    const url = await getRelayEndpoint(client as never, fakeConfig, RELAY_ID, fakeLogger() as never);
+    expect(url).toBe('wss://relay-a.example');
+  });
+
+  it('resolves null (never throws) when devInspect errors (e.g. E_NOT_REGISTERED)', async () => {
+    const client = makeClient(() => ({ error: 'MoveAbort ... 501 ...' }));
+    const url = await getRelayEndpoint(client as never, fakeConfig, RELAY_ID, fakeLogger() as never);
+    expect(url).toBeNull();
+  });
+
+  it('resolves null (never throws) when devInspect throws', async () => {
+    const client = { devInspectTransactionBlock: vi.fn(async () => { throw new Error('network blip'); }) };
+    const url = await getRelayEndpoint(client as never, fakeConfig, RELAY_ID, fakeLogger() as never);
+    expect(url).toBeNull();
+  });
+});
+
+describe('getStandbyRelayUrl', () => {
+  it('resolves assigned_relays[1]\'s endpoint when a standby is assigned', async () => {
+    const assignBytes = encodeIdVector([RELAY_ID, OTHER_RELAY_ID]);
+    const urlBytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://standby.example')));
+    let call = 0;
+    const client = makeClient(() => {
+      call += 1;
+      if (call === 1) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
+      return { results: [{ returnValues: [] }, { returnValues: [[urlBytes, 'vector<u8>']] }] };
+    });
+    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(url).toBe('wss://standby.example');
+  });
+
+  it('resolves null when only a primary is assigned (no standby yet)', async () => {
+    const assignBytes = encodeIdVector([RELAY_ID]);
+    const client = makeClient(() => ({ results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] }));
+    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(url).toBeNull();
+  });
+
+  it('resolves null when the room is entirely unassigned', async () => {
+    const emptyBytes = encodeIdVector([]);
+    const client = makeClient(() => ({ results: [{ returnValues: [[emptyBytes, 'vector<u8>']] }] }));
+    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(url).toBeNull();
+  });
+
+  it('resolves null (tolerant) when the standby id is assigned but its endpoint lookup fails', async () => {
+    const assignBytes = encodeIdVector([RELAY_ID, OTHER_RELAY_ID]);
+    let call = 0;
+    const client = makeClient(() => {
+      call += 1;
+      if (call === 1) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
+      return { error: 'MoveAbort ... 501 ...' };
+    });
+    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(url).toBeNull();
   });
 });
 
 describe('resolveRoomRelayUrl', () => {
   it('resolves immediately when the room is already assigned', async () => {
     const assignBytes = encodeIdVector([RELAY_ID]);
-    const relayBytes = encodeRelayNodeInfoVector([encodeRelayNodeInfo(RELAY_ID, 'wss://relay-a.example')]);
+    const urlBytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://relay-a.example')));
     let call = 0;
     const client = makeClient(() => {
       call += 1;
       if (call === 1) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
-      return { results: [{ returnValues: [[relayBytes, 'vector<u8>']] }] };
+      return { results: [{ returnValues: [] }, { returnValues: [[urlBytes, 'vector<u8>']] }] };
     });
     const url = await resolveRoomRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never, {
       timeoutMs: 5_000,
@@ -260,9 +341,9 @@ describe('resolveRoomRelayUrl', () => {
   it('polls until assigned_relays becomes non-empty, then resolves', async () => {
     const emptyBytes = encodeIdVector([]);
     const assignBytes = encodeIdVector([RELAY_ID]);
-    const relayBytes = encodeRelayNodeInfoVector([encodeRelayNodeInfo(RELAY_ID, 'wss://relay-a.example')]);
+    const urlBytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://relay-a.example')));
     let assignmentCalls = 0;
-    // Sequence: assignment empty twice (still polling), then non-empty, then the relay list.
+    // Sequence: assignment empty twice (still polling), then non-empty, then the endpoint lookup.
     let n = 0;
     const client = {
       devInspectTransactionBlock: vi.fn(async () => {
@@ -270,7 +351,7 @@ describe('resolveRoomRelayUrl', () => {
         if (n <= 2) return { results: [{ returnValues: [[emptyBytes, 'vector<u8>']] }] };
         if (n === 3) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
         assignmentCalls += 1;
-        return { results: [{ returnValues: [[relayBytes, 'vector<u8>']] }] };
+        return { results: [{ returnValues: [] }, { returnValues: [[urlBytes, 'vector<u8>']] }] };
       }),
     };
 
@@ -280,6 +361,31 @@ describe('resolveRoomRelayUrl', () => {
     });
     expect(url).toBe('wss://relay-a.example');
     expect(assignmentCalls).toBeGreaterThan(0);
+  });
+
+  it('gives the endpoint lookup its OWN fresh deadline — a slow assignment does not shrink its retry budget', async () => {
+    const assignBytes = encodeIdVector([RELAY_ID]);
+    const urlBytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://relay-a.example')));
+    let call = 0;
+    const client = {
+      devInspectTransactionBlock: vi.fn(async () => {
+        call += 1;
+        if (call === 1) {
+          // Assignment resolves only after eating most of a 60ms budget.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
+        }
+        // Endpoint lookup briefly unresolvable, then present — needs its own
+        // runway beyond the ~10ms left in a shared-deadline design to succeed.
+        if (call <= 3) return { error: 'not found yet' };
+        return { results: [{ returnValues: [] }, { returnValues: [[urlBytes, 'vector<u8>']] }] };
+      }),
+    };
+    const url = await resolveRoomRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never, {
+      timeoutMs: 60,
+      pollIntervalMs: 10,
+    });
+    expect(url).toBe('wss://relay-a.example');
   });
 
   it('throws a clear timeout error when never assigned', async () => {
@@ -293,20 +399,41 @@ describe('resolveRoomRelayUrl', () => {
     ).rejects.toThrow(/not assigned a relay/);
   });
 
-  it('throws a clear error when the assigned relay is missing from the active-relay set', async () => {
+  it('throws a clear error when the assigned relay never resolves an endpoint', async () => {
     const assignBytes = encodeIdVector([OTHER_RELAY_ID]);
-    const relayBytes = encodeRelayNodeInfoVector([encodeRelayNodeInfo(RELAY_ID, 'wss://relay-a.example')]);
     let call = 0;
     const client = makeClient(() => {
       call += 1;
       if (call === 1) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
-      return { results: [{ returnValues: [[relayBytes, 'vector<u8>']] }] };
+      return { error: 'MoveAbort ... 501 ...' }; // E_NOT_REGISTERED — never resolves
     });
+    // Retries the endpoint lookup until its own deadline too now (never a
+    // single shot), so keep this test's budget small — it's asserting the
+    // eventual-timeout error, not the retry behavior itself.
     await expect(
       resolveRoomRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never, {
-        timeoutMs: 5_000,
+        timeoutMs: 50,
         pollIntervalMs: 10,
       }),
-    ).rejects.toThrow(/was not found in relay_registry/);
+    ).rejects.toThrow(/has no resolvable endpoint_url/);
+  });
+
+  it('retries the endpoint lookup after a transient empty/error read, then resolves', async () => {
+    const assignBytes = encodeIdVector([RELAY_ID]);
+    const urlBytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://relay-a.example')));
+    let call = 0;
+    const client = {
+      devInspectTransactionBlock: vi.fn(async () => {
+        call += 1;
+        if (call === 1) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
+        if (call === 2) return { error: 'transient' }; // getRelayEndpoint swallows this -> null
+        return { results: [{ returnValues: [] }, { returnValues: [[urlBytes, 'vector<u8>']] }] };
+      }),
+    };
+    const url = await resolveRoomRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never, {
+      timeoutMs: 5_000,
+      pollIntervalMs: 10,
+    });
+    expect(url).toBe('wss://relay-a.example');
   });
 });

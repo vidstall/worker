@@ -395,6 +395,105 @@ describe('RelayHeartbeatWatcher — N>=3 failover (REQ-RMS-024)', () => {
   });
 });
 
+// ── Tests: standby-staleness -> propose_relay_replacement (relay_replacement.move) ──
+
+describe('RelayHeartbeatWatcher — standby-staleness detection (relay_replacement.move vote-in)', () => {
+  function makeReplacementSubmitter() {
+    return vi.fn().mockResolvedValue(undefined);
+  }
+  function makeCandidateSelector(candidateId: string | null) {
+    return vi.fn().mockResolvedValue(candidateId);
+  }
+
+  it('a stale standby (primary fresh) triggers propose_relay_replacement, not promote_relay', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 99n /*fresh primary*/, '0xB': 90n /*stale standby*/, '0xC': 99n /*fresh standby*/ },
+    }]});
+    const logger = mockLogger();
+    const promoteSubmitter = makeSubmitter();
+    const replacementSubmitter = makeReplacementSubmitter();
+    const candidateSelector = makeCandidateSelector('0xNEW');
+    const watcher = new RelayHeartbeatWatcher(
+      reader, promoteSubmitter, logger, { maxHeartbeatEpochs: 3n }, replacementSubmitter, candidateSelector,
+    );
+    await watcher.scanOnce();
+
+    expect(replacementSubmitter).toHaveBeenCalledTimes(1);
+    expect(replacementSubmitter).toHaveBeenCalledWith('0xroom1', '0xB', '0xNEW', expect.any(String));
+    expect(promoteSubmitter).not.toHaveBeenCalled(); // primary is fresh — no promotion
+  });
+
+  it('never targets index 0 (primary) even if it happens to be stale — that stays promote_relay-only', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB', '0xC'],
+      heartbeats: { '0xA': 90n /*stale primary*/, '0xB': 99n, '0xC': 99n },
+    }]});
+    const logger = mockLogger();
+    const replacementSubmitter = makeReplacementSubmitter();
+    const candidateSelector = makeCandidateSelector('0xNEW');
+    const watcher = new RelayHeartbeatWatcher(
+      reader, makeSubmitter(), logger, { maxHeartbeatEpochs: 3n }, replacementSubmitter, candidateSelector,
+    );
+    await watcher.scanOnce();
+
+    expect(replacementSubmitter).not.toHaveBeenCalled(); // only the primary is stale, not a standby
+  });
+
+  it('is a no-op (skipped, logged) when the candidate selector finds nothing', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB'],
+      heartbeats: { '0xA': 99n, '0xB': 90n },
+    }]});
+    const logger = mockLogger();
+    const replacementSubmitter = makeReplacementSubmitter();
+    const candidateSelector = makeCandidateSelector(null);
+    const watcher = new RelayHeartbeatWatcher(
+      reader, makeSubmitter(), logger, { maxHeartbeatEpochs: 3n }, replacementSubmitter, candidateSelector,
+    );
+    await watcher.scanOnce();
+
+    expect(replacementSubmitter).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ context: expect.objectContaining({ roomId: '0xroom1', deadRelayId: '0xB' }) }),
+      expect.stringContaining('no replacement candidate available'),
+    );
+  });
+
+  it('de-dup: a 2nd scanOnce for the SAME (room, deadRelay) does not re-submit', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB'],
+      heartbeats: { '0xA': 99n, '0xB': 90n },
+    }]});
+    const logger = mockLogger();
+    const replacementSubmitter = makeReplacementSubmitter();
+    const candidateSelector = makeCandidateSelector('0xNEW');
+    const watcher = new RelayHeartbeatWatcher(
+      reader, makeSubmitter(), logger, { maxHeartbeatEpochs: 3n }, replacementSubmitter, candidateSelector,
+    );
+    await watcher.scanOnce();
+    await watcher.scanOnce();
+
+    expect(replacementSubmitter).toHaveBeenCalledTimes(1);
+  });
+
+  it('is inactive (never called) when the watcher is constructed WITHOUT a replacementSubmitter/candidateSelector — back-compat', async () => {
+    const reader = makeReader({ epoch: 100n, rooms: [{
+      roomId: '0xroom1',
+      assignedRelays: ['0xA', '0xB'],
+      heartbeats: { '0xA': 99n, '0xB': 90n },
+    }]});
+    const logger = mockLogger();
+    const watcher = new RelayHeartbeatWatcher(reader, makeSubmitter(), logger, { maxHeartbeatEpochs: 3n });
+    // No throw, no crash, scanOnce completes fine without the optional deps.
+    await expect(watcher.scanOnce()).resolves.toEqual([]);
+  });
+});
+
 // ── Tests: resolveMaxHeartbeatEpochs — Move-constant floor (REQ-RMS-024) ──────
 
 describe('resolveMaxHeartbeatEpochs (REQ-RMS-024 — Move-constant floor)', () => {

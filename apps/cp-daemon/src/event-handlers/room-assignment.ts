@@ -24,6 +24,7 @@ import {
 import { timedCanonicalSort } from '../latency-probe.js';
 import { submitProposal, pickSignalingNode, votedRooms } from '../room-assignment.js';
 import { probeCandidates } from '../relay-liveness-probe.js';
+import { getRelayReservationLoad } from '../relay-reservation-reader.js';
 import type { EventHandlerCtx } from '../event-handler.js';
 
 export function handleEscrowCreated(
@@ -160,22 +161,42 @@ export function handleEscrowCreated(
   // When NO canary feed map is wired (attestedLoad === undefined), the canary layer is inactive: fall
   // back to relay self-report for load AND treat the pool as health-eligible (legacy pre-canary path).
   const feedActive = attestedLoad !== undefined;
-  const capacities: RelayCapacity[] = rankedRelays.map((r) => {
-    const attested = attestedLoad?.get(r.minerId);
-    const node = relayState.get(r.minerId)!;
-    // Heartbeat freshness fallback (no feed): clamp self-reported age to the stale ceiling.
-    const selfFreshEpochs = Math.min(Number(node.heartbeatAge), Number(PVR_HEARTBEAT_STALE));
-    return {
-      minerId: r.minerId,
-      attestedLoadPaths: attested?.attestedLoadPaths ?? Number(node.load), // fall back to self-report ONLY if no canary feed
-      cWorker,
-      rtt: node.rtt,
-      heartbeatFreshEpochs: attested ? attested.heartbeatFreshEpochs : selfFreshEpochs,
-      // present in the feed => audited/healthy this round. With NO feed wired, the canary gate is
-      // inactive and the pool is treated as self-report-healthy (preserves pre-canary behavior).
-      canaryHealthy: feedActive ? attested !== undefined : true,
-    };
-  });
+
+  // Pre-warm standby: on-chain reservation counts must land in `capacities` BEFORE
+  // selectPlacementRelay/buildBallotForChosen run, so an over-reserved relay is skipped for
+  // either slot 0 (primary) or slot 1 (standby). This is the only reason this handler's
+  // placement/submit tail moves into an async IIFE (fire-and-forget, matching the existing
+  // RMS_RELAY_HEALTH_PROBE branch below) -- reservation reads are devInspect round-trips.
+  void (async () => {
+    const candidateIds = rankedRelays.map((r) => r.minerId);
+    let reservationLoad = new Map<string, number>();
+    if (txContext) {
+      try {
+        reservationLoad = await getRelayReservationLoad(txContext.client, txContext.config, candidateIds, logger);
+      } catch (err) {
+        // Fail-open (matches the attestedLoad/canary feed convention above): a reservation-read
+        // hiccup shouldn't crash the whole placement arm — just treat every relay as unreserved.
+        logger.warn({ roomId: e.room_id, err }, 'getRelayReservationLoad failed — proceeding without reservation gating');
+      }
+    }
+
+    const capacities: RelayCapacity[] = rankedRelays.map((r) => {
+      const attested = attestedLoad?.get(r.minerId);
+      const node = relayState.get(r.minerId)!;
+      // Heartbeat freshness fallback (no feed): clamp self-reported age to the stale ceiling.
+      const selfFreshEpochs = Math.min(Number(node.heartbeatAge), Number(PVR_HEARTBEAT_STALE));
+      return {
+        minerId: r.minerId,
+        attestedLoadPaths: attested?.attestedLoadPaths ?? Number(node.load), // fall back to self-report ONLY if no canary feed
+        cWorker,
+        rtt: node.rtt,
+        heartbeatFreshEpochs: attested ? attested.heartbeatFreshEpochs : selfFreshEpochs,
+        // present in the feed => audited/healthy this round. With NO feed wired, the canary gate is
+        // inactive and the pool is treated as self-report-healthy (preserves pre-canary behavior).
+        canaryHealthy: feedActive ? attested !== undefined : true,
+        reservationLoad: reservationLoad.get(r.minerId),
+      };
+    });
 
   // REQ-RMS-022 (static-mesh-hardening D1) — tri-state placement-capacity basis, asserted by
   // the live run: legacy-self-report = no feed wired (flag OFF) | attested = wired + at least
@@ -197,9 +218,12 @@ export function handleEscrowCreated(
   // (including M1's defer when roomLoad > cWorker). The LOCAL >=3-active demo sets RMS_KR_MIN=3 to force a
   // room to span >=3 ACTIVE relays; when forced, kR also rises with capacity demand (ceil(L_r/C_worker)).
   // Capacity-driven auto-spill WITHOUT the floor = deferred REQ-RMS-023 (runtime growth), out of scope here.
-  // The recorded vector floor stays >= MIN_RELAY (2) per submit_pairing_proposal's on-chain assert.
+  // The recorded vector floor stays >= MIN_RELAY (3) per submit_pairing_proposal's on-chain assert --
+  // clamped here (not just documented) so a misconfigured/stale RMS_KR_MIN in (1, MIN_RELAY) can't submit
+  // a short ballot: that combination previously produced a kR-relay ballot below the on-chain floor,
+  // which submit_pairing_proposal deterministically rejects (E_INVALID_BALLOT) on every retry forever.
   const krMin = parseInt(process.env['RMS_KR_MIN'] ?? '1', 10);
-  const kR = krMin > 1 ? Math.max(krMin, Math.ceil(roomLoad / cWorker)) : 1;
+  const kR = krMin > 1 ? Math.max(krMin, MIN_RELAY, Math.ceil(roomLoad / cWorker)) : 1;
   if (!poolHealthGate(capacities, kR)) {
     logger.warn({ roomId: e.room_id, healthyNeeded: kR }, 'Pool health below K_r — deferring admission (graceful degrade, no migration)');
     pendingRooms.set(e.room_id, roomData);
@@ -256,7 +280,7 @@ export function handleEscrowCreated(
       pendingEscrows?.set(e.room_id, e);
       return;
     }
-    topRelayIds = activeRelays.map((r) => r.minerId); // length kR (>= MIN_RELAY since kR>=3 here)
+    topRelayIds = activeRelays.map((r) => r.minerId); // length kR, now clamped >= MIN_RELAY above
   }
 
   // Compute individual node scores for submittedScore
@@ -326,11 +350,11 @@ export function handleEscrowCreated(
 
     // Opt-in liveness gate (default OFF -- byte-identical to the path above
     // when unset, same "STRICT env-gate" convention as RMS_KR_MIN above).
-    // Only `activeServingIds` (index 0 for kR<=1, all of topRelayIds for
-    // kR>1) actually serve traffic -- ballot padding beyond that never
-    // reaches a bot, so it's never probed.
+    // `activeServingIds` covers index 0 (primary) AND indices 1-2 (both
+    // pre-warmed standbys) for kR<=1, or all of topRelayIds for kR>1 -- ballot
+    // padding beyond that never reaches a bot, so it's never probed.
     if (process.env['RMS_RELAY_HEALTH_PROBE'] === '1') {
-      const activeServingIds = kR <= 1 ? [topRelayIds[0]!] : topRelayIds;
+      const activeServingIds = kR <= 1 ? topRelayIds.slice(0, 3) : topRelayIds;
       void (async () => {
         const alive = await probeCandidates(txContext.client, txContext.config, activeServingIds, logger);
         if (activeServingIds.every((id) => alive.has(id))) {
@@ -370,4 +394,5 @@ export function handleEscrowCreated(
   } else {
     logger.warn({ roomId: e.room_id }, 'No TX context — pairing proposal skipped (test mode)');
   }
+  })();
 }

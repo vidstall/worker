@@ -222,6 +222,11 @@ if (isMainModule) {
     // T-B: this relay's tree position per room, derived on RoomAssigned (RMS_TREE_ACTIVE).
     // Read by the tree-active dial (resolveTreeParentDial → tree PARENT) and, later, fanToTreeNeighbors.
     const roomTreePosition = new Map<string, TreePosition>();
+    // Mid-call standby-swap (relay_replacement.move): the last-known assigned_relays vector
+    // per room, recorded on RoomAssigned and kept current on RelaySlotReplaced (dead id swapped
+    // for new id) — needed so a RelaySlotReplaced handler can resolve the primary's endpoint the
+    // same way RoomAssigned does, without an extra chain read.
+    const roomAssignedRelays = new Map<string, string[]>();
     /**
      * REQ-RMS-028 (L1.3-b, Bridge A) — the per-peer inter-relay socket map, OWNED
      * here and SHARED into createSignalingServer (its tagged-peer attach writes
@@ -662,6 +667,7 @@ if (isMainModule) {
       getRoom,
       registerReverseMinted,
       reannounceLocalProducersUp,
+      prewarmRoom,
     } =
       createSignalingServer(
         manager,
@@ -887,6 +893,22 @@ if (isMainModule) {
     // GraphQL introspection against a real create_room tx.
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
     const myMinerId = signer.toSuiAddress();
+
+    // Pre-warm standby: rooms this relay currently holds the standby role for
+    // (populated below), periodically re-confirmed so a room that missed its
+    // one-time pairing-time pre-warm (e.g. a transient failure) self-heals.
+    // ensureRoomPrewarmed (via prewarmRoom) is idempotent — a safe no-op once
+    // the room already exists.
+    const standbyPrewarmRooms = new Map<string, 'sfu' | 'mcu'>();
+    const standbyRewarmIntervalMs = parseInt(process.env['STANDBY_REWARM_INTERVAL_MS'] ?? '30000', 10);
+    setInterval(() => {
+      for (const [roomId, mode] of standbyPrewarmRooms) {
+        void prewarmRoom(roomId, mode).catch((err) => {
+          logger.warn({ err, roomId }, 'Standby re-warm sweep: pre-warm failed');
+        });
+      }
+    }, standbyRewarmIntervalMs);
+
     const roomPoller = new EventPoller({
       client: graphqlClient,
       packageId: config.originalPackageId ?? config.packageId,
@@ -905,6 +927,9 @@ if (isMainModule) {
         const relayIds = data['relay_ids'] as string[] | undefined;
         const relayMode = data['relay_mode'] as number | undefined;
         const roomId = data['room_id'] as string | undefined;
+        if (relayIds && roomId) {
+          roomAssignedRelays.set(roomId, relayIds);
+        }
         if (relayIds && relayIds.includes(myMinerId)) {
           // G1: determine this relay's role for the room (primary = relay_ids[0],
           // standby = [1..]; reads .length, never hardcodes 2). Drives the
@@ -963,6 +988,7 @@ if (isMainModule) {
             // it mints+connects the primary pipe, pipes the producer, and announces
             // the PIPED consumer id over the accepted standby socket. No work here
             // beyond recording the role.
+            if (roomId) standbyPrewarmRooms.delete(roomId); // no longer standby — stop the re-warm sweep for it
             logger.info({ roomId, relayMode, role }, 'G1: relay is PRIMARY for room');
           } else {
             // STANDBY: resolve the primary's WS endpoint so the inter-relay link
@@ -990,6 +1016,21 @@ if (isMainModule) {
                 ? 'G3.2b: relay is STANDBY for room — opened live inter-relay link to primary'
                 : 'G1: relay is STANDBY for room — primary endpoint not yet resolvable from cache (chain not yet observed); retries on next assignment',
             );
+
+            // Pre-warm standby: create this room's Router (and open the warm
+            // pipe, onStandbyRoomReady) NOW instead of waiting for the first
+            // real peer join, so failover promotion is a fast reconnect, not
+            // a cold start. Fire-and-forget (roomId is already known-good at
+            // this point); failures are logged, not fatal to the poller.
+            // Tracked in standbyPrewarmRooms so the periodic sweep above
+            // self-heals a missed one-time warm-up.
+            if (roomId) {
+              const prewarmMode: 'sfu' | 'mcu' = relayMode === 1 ? 'mcu' : 'sfu';
+              standbyPrewarmRooms.set(roomId, prewarmMode);
+              void prewarmRoom(roomId, prewarmMode).catch((err) => {
+                logger.error({ err, roomId }, 'Standby pre-warm: Router pre-creation failed');
+              });
+            }
           }
 
           if (relayMode === 1) {
@@ -1003,6 +1044,67 @@ if (isMainModule) {
               'SFU room assigned — individual stream forwarding',
             );
           }
+        }
+      } else if (eventName === 'RelayPromoted') {
+        // Pre-warm standby correctness gap: this relay's local role
+        // (interRelayContext.role) was set ONCE at pairing time by the
+        // RoomAssigned branch above and never updated again. promote_relay /
+        // promote_relay_after_ejection / promote_relay_via_health_alert all
+        // emit RelayPromoted (same room_manager_events module this poller
+        // already watches) instead of RoomAssigned, so without this branch a
+        // promoted standby's Router exists (pre-warmed, good) but its
+        // producer/consumer role wiring stays stale. If THIS relay is the
+        // new_primary, flip role in memory immediately — no re-pairing
+        // needed, the Router was already created by the pre-warm above.
+        const data = event.parsedJson as Record<string, unknown>;
+        const roomId = data['room_id'] as string | undefined;
+        const newPrimary = data['new_primary'] as string | undefined;
+        if (roomId && newPrimary === myMinerId) {
+          interRelayContext.role = 'primary';
+          probeLiveness.role = 'primary';
+          standbyPrewarmRooms.delete(roomId); // no longer standby — stop the re-warm sweep for it
+          logger.info({ roomId, newPrimary }, 'RelayPromoted: this relay is now PRIMARY for room (role flipped in memory)');
+        }
+      } else if (eventName === 'RelaySlotReplaced') {
+        // Mid-call standby-swap (relay_replacement.move) — CP-quorum voted a fresh candidate
+        // in for a dead STANDBY (never index 0/primary, that's RelayPromoted's event above).
+        // Two relays care about this event, mutually exclusive:
+        //   - new_relay_id === myMinerId: this relay just became a standby for the room --
+        //     treat exactly like the RoomAssigned standby branch (pre-warm + open the inter-
+        //     relay link to the primary), reusing the same resolvePrimaryEndpoint/prewarmRoom.
+        //   - dead_relay_id === myMinerId: this relay was EJECTED from the room -- stop its
+        //     re-warm sweep (it no longer serves this room at all).
+        const data = event.parsedJson as Record<string, unknown>;
+        const roomId = data['room_id'] as string | undefined;
+        const deadRelayId = data['dead_relay_id'] as string | undefined;
+        const newRelayId = data['new_relay_id'] as string | undefined;
+        if (!roomId) {
+          // no-op: malformed event
+        } else if (newRelayId === myMinerId) {
+          const priorRelayIds = roomAssignedRelays.get(roomId) ?? [];
+          const updatedRelayIds = priorRelayIds.map((id) => (id === deadRelayId ? newRelayId : id));
+          roomAssignedRelays.set(roomId, updatedRelayIds);
+
+          interRelayContext.role = 'standby';
+          probeLiveness.role = 'standby';
+
+          const primaryUrl = resolvePrimaryEndpoint(relayEndpointCache, updatedRelayIds);
+          standbyLink.primaryUrl = primaryUrl;
+          if (primaryUrl !== null) standbyLinkManager.connectTo(primaryUrl);
+          logger.info(
+            { roomId, deadRelayId, newRelayId, primaryUrl, resolved: primaryUrl !== null },
+            'RelaySlotReplaced: this relay is the newly voted-in STANDBY for room',
+          );
+
+          // Pre-warm — same fire-and-forget contract as the RoomAssigned standby branch.
+          const prewarmMode: 'sfu' | 'mcu' = 'sfu'; // relay_mode isn't carried on this event; sfu is the pre-warm default (mcu re-warms via the periodic sweep once the room's real mode is observed)
+          standbyPrewarmRooms.set(roomId, prewarmMode);
+          void prewarmRoom(roomId, prewarmMode).catch((err) => {
+            logger.error({ err, roomId }, 'RelaySlotReplaced: standby pre-warm failed');
+          });
+        } else if (deadRelayId === myMinerId) {
+          standbyPrewarmRooms.delete(roomId); // ejected from this room — stop the re-warm sweep
+          logger.info({ roomId, deadRelayId }, 'RelaySlotReplaced: this relay was ejected from room (dead standby replaced)');
         }
       }
     });

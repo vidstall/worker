@@ -67,6 +67,7 @@ function fakeSession(overrides: Partial<BotSession> = {}): BotSession {
     joinUrl: 'http://localhost:5173/rooms/0xroom?pw=123',
     startedAt: Date.now() - 1000,
     stop: vi.fn(),
+    isDegraded: vi.fn().mockReturnValue(false),
     ...overrides,
   };
 }
@@ -119,7 +120,14 @@ describe('toBotSummary', () => {
       mediaMode: 'both',
       joinUrl: session.joinUrl,
       uptimeMs: 500,
+      status: 'active',
     });
+  });
+
+  it('reports status "degraded" when the session reports isDegraded() === true', () => {
+    const session = fakeSession({ startedAt: 1000, isDegraded: vi.fn().mockReturnValue(true) });
+    const summary = toBotSummary(session, 'brave-otter', 1500);
+    expect(summary.status).toBe('degraded');
   });
 });
 

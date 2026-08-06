@@ -38,6 +38,7 @@ import {
   type InterRelayContext,
 } from './state.js';
 import { handleJoin } from './join-handler.js';
+import { ensureRoomPrewarmed } from '../room-prewarm.js';
 import { handleE2eeKeyBundle } from './e2ee-handler.js';
 import {
   handleCreateTransport,
@@ -130,6 +131,14 @@ export function createSignalingServer(
    * outbound-link flap). No-op on a primary / when the room is unknown.
    */
   reannounceLocalProducersUp: (roomId: string) => void;
+  /**
+   * Pre-warm standby — get-or-create a room's mediasoup Router (and open the
+   * standby warm pipe) ahead of any real peer join. Called by the wiring
+   * layer (index.ts) from the `RoomAssigned` poller's `role === 'standby'`
+   * branch, and by its periodic re-warm sweep. Idempotent: a no-op if the
+   * room already exists (created here, or by a real join racing it).
+   */
+  prewarmRoom: (roomId: string, roomMode: 'sfu' | 'mcu') => Promise<void>;
 } {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
@@ -412,5 +421,8 @@ export function createSignalingServer(
         state, roomId, minted, originRelayId, interRelay, logger, producerPeerId, originProducerId, inboundHopTtl,
       ),
     reannounceLocalProducersUp: (roomId: string) => reannounceLocalProducersUpImpl(state, roomId, interRelay, logger),
+    prewarmRoom: async (roomId: string, roomMode: 'sfu' | 'mcu') => {
+      await ensureRoomPrewarmed(state, manager, roomId, roomMode, config, interRelay, logger);
+    },
   };
 }

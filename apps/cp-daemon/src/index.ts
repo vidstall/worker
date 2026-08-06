@@ -75,6 +75,8 @@ import { LiveRoomExpiryChainStateReader } from './room-expiry-chain-state-reader
 import {
   startRelayHeartbeatWatcher,
   makePromoteSubmitter,
+  makeReplacementSubmitter,
+  makeLiveReplacementCandidateSelector,
   resolveMaxHeartbeatEpochs,
 } from './relay-heartbeat-watcher.js';
 import { LiveRelayChainStateReader } from './relay-chain-state-reader.js';
@@ -436,6 +438,10 @@ async function main(): Promise<void> {
       // floor: a value below it would fire promote_relay PTBs the chain aborts (E_RELAY_NOT_STALE).
       maxHeartbeatEpochs: resolveMaxHeartbeatEpochs(process.env['RELAY_MAX_HEARTBEAT_EPOCHS'], logger),
     },
+    // Standby-death vote-in (relay_replacement.move) — same watcher, same cadence, a
+    // separate dedup namespace from the primary-promotion path above.
+    makeReplacementSubmitter(client, signer, config, cpCapId, logger),
+    makeLiveReplacementCandidateSelector(relayReader),
   );
   const stopRelayHeartbeatWatcher = (): void => relayHeartbeatWatcher.stop();
   logger.info(
@@ -452,6 +458,7 @@ async function main(): Promise<void> {
     suiClient: client,
     config,
     signer,
+    cpCapId,
     logger,
   });
   const stopWorkerConfirmedDeadListener = (): void => workerConfirmedDeadListener.stop();

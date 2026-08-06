@@ -29,6 +29,8 @@ const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
   last_heartbeat: bcs.u64(),
   region: bcs.vector(bcs.u8()),
   endpoint_url: bcs.vector(bcs.u8()),
+  reserved_primary_count: bcs.u64(),
+  reserved_standby_count: bcs.u64(),
 });
 
 const CPNodeInfoSchema = bcs.struct('CPNodeInfo', {
@@ -169,8 +171,8 @@ describe('SuiChainStateReader', () => {
 
   it('getActiveMiners decodes a 2-entry vector<RelayNodeInfo> → 2 MinerHeartbeat (role=Relay)', async () => {
     const relays = [
-      { operator: ADDR_OP, miner_id: ADDR_A, stake_amount: '1000', reputation: '10', registered_at: '1', last_heartbeat: '42', region: [1], endpoint_url: [2] },
-      { operator: ADDR_OP, miner_id: ADDR_B, stake_amount: '2000', reputation: '20', registered_at: '2', last_heartbeat: '99', region: [3], endpoint_url: [4] },
+      { operator: ADDR_OP, miner_id: ADDR_A, stake_amount: '1000', reputation: '10', registered_at: '1', last_heartbeat: '42', region: [1], endpoint_url: [2], reserved_primary_count: '0', reserved_standby_count: '0' },
+      { operator: ADDR_OP, miner_id: ADDR_B, stake_amount: '2000', reputation: '20', registered_at: '2', last_heartbeat: '99', region: [3], endpoint_url: [4], reserved_primary_count: '0', reserved_standby_count: '0' },
     ];
     const relayBytes = bcs.vector(RelayNodeInfoSchema).serialize(relays).toBytes();
     const empty = bcs.vector(RelayNodeInfoSchema).serialize([]).toBytes();

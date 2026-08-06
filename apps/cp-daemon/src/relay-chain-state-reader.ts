@@ -49,6 +49,8 @@ const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
   last_heartbeat: bcs.u64(),
   region: bcs.vector(bcs.u8()),
   endpoint_url: bcs.vector(bcs.u8()),
+  reserved_primary_count: bcs.u64(),
+  reserved_standby_count: bcs.u64(),
 });
 
 /** `vector<ID>` decodes to an array of 0x-addresses. */
@@ -157,6 +159,16 @@ export class LiveRelayChainStateReader implements RelayChainStateReader {
       'read active room ids',
     );
     return normalized;
+  }
+
+  /**
+   * All currently-active (registered) relay miner ids — the candidate pool for
+   * `selectReplacementCandidate` (relay_replacement.move's mid-call standby-swap vote).
+   * Reads relay_registry::get_active_relays.
+   */
+  async getActiveRelayIds(): Promise<string[]> {
+    const activeRelays = await this.readActiveRelays();
+    return activeRelays.map((r) => normalizeSuiAddress(r.miner_id));
   }
 
   // ── private helpers ────────────────────────────────────────────────────

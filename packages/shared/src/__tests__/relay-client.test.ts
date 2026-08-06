@@ -76,4 +76,22 @@ describe('RelayClient — close observability (bare, no network call)', () => {
     ws.emit('close');
     expect(ws.send).not.toHaveBeenCalled();
   });
+
+  it('invokes the optional onClose callback in addition to the log line', () => {
+    const ws = fakeWs();
+    const warn = vi.fn();
+    const onClose = vi.fn();
+    new RelayClient(ws, null, { roomId: 'room-1' }, { warn }, onClose);
+
+    ws.emit('close');
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('omitting onClose is a silent no-op (does not throw)', () => {
+    const ws = fakeWs();
+    new RelayClient(ws, null, {}, undefined, undefined);
+    expect(() => ws.emit('close')).not.toThrow();
+  });
 });

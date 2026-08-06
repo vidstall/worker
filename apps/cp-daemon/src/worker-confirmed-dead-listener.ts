@@ -11,6 +11,13 @@
  * off-chain, then submitting one follow-up TX via `executeWithRetry`. Only relay
  * targets are actionable today -- cp/signaling targets have no "promote a
  * standby" concept in this codebase yet, so they're logged, not acted on.
+ *
+ * Relay-target branch (REQ-RMS-024): if the confirmed-dead target is assigned_relays[0]
+ * (the primary), this drives `promote_relay_via_health_alert` as before (unchanged). If
+ * it's found elsewhere in assigned_relays[1..] (a standby), this instead drives
+ * `propose_relay_replacement` (relay_replacement.move) with a FRESH candidate picked via
+ * `selectReplacementCandidate` -- promote_relay_via_health_alert only swaps slot 0 and
+ * would silently no-op / misapply for a standby target.
  */
 import { join } from 'node:path';
 import type { SuiClient } from '@mysten/sui/client';
@@ -26,6 +33,7 @@ import {
   type Logger,
 } from '@dvconf/shared';
 import { LiveRelayChainStateReader } from './relay-chain-state-reader.js';
+import { makeLiveReplacementCandidateSelector } from './relay-heartbeat-watcher.js';
 
 const MODULE = 'worker-confirmed-dead-listener';
 
@@ -47,6 +55,8 @@ export interface WorkerConfirmedDeadListenerOptions {
   suiClient: SuiClient;
   config: NetworkConfig;
   signer: Ed25519Keypair;
+  /** Required to submit `propose_relay_replacement` for a confirmed-dead STANDBY target. */
+  cpCapId?: string;
   logger?: Logger;
   pollIntervalMs?: number;
 }
@@ -93,6 +103,51 @@ async function submitPromoteViaHealthAlert(
 }
 
 /**
+ * Submit `propose_relay_replacement` for `roomId`, voting `candidateRelayId` in for the
+ * confirmed-dead STANDBY `deadRelayId` (never index 0/primary -- that's
+ * `submitPromoteViaHealthAlert`'s job). `submittedScore` is a fixed placeholder (this vote
+ * only decides WHO replaces the dead standby, not room scoring). Returns true on genuine
+ * on-chain success (which may just be recording this CP's vote, not necessarily finalizing
+ * the swap -- quorum may need other CPs' votes too).
+ */
+async function submitReplacementViaHealthAlert(
+  client: SuiClient,
+  signer: Ed25519Keypair,
+  config: NetworkConfig,
+  alertBoxId: string,
+  cpCapId: string,
+  roomId: string,
+  deadRelayId: string,
+  candidateRelayId: string,
+  logger: Logger,
+): Promise<boolean> {
+  const result = await executeWithRetry(
+    client,
+    signer,
+    (tx: Transaction) => {
+      tx.moveCall({
+        target: `${config.packageId}::room_manager_relay_replacement::propose_relay_replacement`,
+        arguments: [
+          tx.object(config.networkRegistryId),   // net_reg: &NetworkRegistry
+          tx.object(config.roomManagerId),       // manager: &mut RoomManager
+          tx.object(config.cpRegistryId),        // cp_reg: &mut ControlPlaneRegistry
+          tx.object(config.relayRegistryId),     // relay_reg: &mut RelayRegistry
+          tx.object(alertBoxId),                 // alert_box: &mut RoomHealthAlertBox
+          tx.object(cpCapId),                    // cap: &ControlPlaneCap
+          tx.pure.id(roomId),                    // room_id: ID
+          tx.pure.id(deadRelayId),               // dead_relay_id: ID
+          tx.pure.id(candidateRelayId),           // candidate_relay_id: ID
+          tx.pure.u64(0),                         // submitted_score: u64 (placeholder)
+        ],
+      });
+    },
+    'propose-relay-replacement-via-health-alert',
+    logger,
+  );
+  return result !== null;
+}
+
+/**
  * Start the `WorkerConfirmedDead` listener. No-ops (does not throw) if
  * `config.roomHealthAlertBoxId` is unset -- this feature is additive, and a
  * deployment that hasn't published/initialized room_health_alerts.move yet
@@ -103,7 +158,7 @@ export function startWorkerConfirmedDeadListener(
   opts: WorkerConfirmedDeadListenerOptions,
 ): WorkerConfirmedDeadListenerHandle {
   const {
-    client, suiClient, config, signer,
+    client, suiClient, config, signer, cpCapId,
     logger = createLogger(MODULE),
     pollIntervalMs = 30_000,
   } = opts;
@@ -115,6 +170,7 @@ export function startWorkerConfirmedDeadListener(
   const alertBoxId = config.roomHealthAlertBoxId;
 
   const relayReader = new LiveRelayChainStateReader(suiClient, config, logger.child({ module: MODULE }));
+  const candidateSelector = makeLiveReplacementCandidateSelector(relayReader);
   let running = true;
 
   const poller = new EventPoller({
@@ -157,24 +213,58 @@ export function startWorkerConfirmedDeadListener(
     }
 
     const assigned = await relayReader.getAssignedRelays(roomId);
-    const newPrimary = assigned
-      .map((id) => normalizeSuiAddress(id))
-      .find((id) => id !== normalizeSuiAddress(targetMinerId));
-    if (!newPrimary) {
+    const normalizedTarget = normalizeSuiAddress(targetMinerId);
+    const isPrimary = assigned.length > 0 && normalizeSuiAddress(assigned[0]!) === normalizedTarget;
+
+    if (isPrimary) {
+      const newPrimary = assigned
+        .map((id) => normalizeSuiAddress(id))
+        .find((id) => id !== normalizedTarget);
+      if (!newPrimary) {
+        logger.warn(
+          { module: MODULE, roomId, targetMinerId, assigned },
+          'WorkerConfirmedDead: no healthy standby relay found in assigned_relays — cannot promote',
+        );
+        return;
+      }
+
+      const ok = await submitPromoteViaHealthAlert(
+        suiClient, signer, config, alertBoxId, roomId, newPrimary, logger,
+      );
+      if (ok) {
+        logger.info({ module: MODULE, roomId, targetMinerId, newPrimary }, 'promote_relay_via_health_alert succeeded');
+      } else {
+        logger.warn({ module: MODULE, roomId, targetMinerId, newPrimary }, 'promote_relay_via_health_alert failed');
+      }
+      return;
+    }
+
+    // Standby target (found elsewhere in assigned_relays[1..], or already gone) — vote in a
+    // FRESH candidate via propose_relay_replacement, not promote_relay_via_health_alert
+    // (which only ever swaps slot 0).
+    if (!cpCapId) {
+      logger.warn(
+        { module: MODULE, roomId, targetMinerId },
+        'WorkerConfirmedDead for a standby target but no cpCapId configured — cannot vote a replacement',
+      );
+      return;
+    }
+    const candidateId = await candidateSelector(roomId, assigned);
+    if (!candidateId) {
       logger.warn(
         { module: MODULE, roomId, targetMinerId, assigned },
-        'WorkerConfirmedDead: no healthy standby relay found in assigned_relays — cannot promote',
+        'WorkerConfirmedDead: no replacement candidate available for dead standby',
       );
       return;
     }
 
-    const ok = await submitPromoteViaHealthAlert(
-      suiClient, signer, config, alertBoxId, roomId, newPrimary, logger,
+    const ok = await submitReplacementViaHealthAlert(
+      suiClient, signer, config, alertBoxId, cpCapId, roomId, targetMinerId, candidateId, logger,
     );
     if (ok) {
-      logger.info({ module: MODULE, roomId, targetMinerId, newPrimary }, 'promote_relay_via_health_alert succeeded');
+      logger.info({ module: MODULE, roomId, targetMinerId, candidateId }, 'propose_relay_replacement (via health alert) succeeded');
     } else {
-      logger.warn({ module: MODULE, roomId, targetMinerId, newPrimary }, 'promote_relay_via_health_alert failed');
+      logger.warn({ module: MODULE, roomId, targetMinerId, candidateId }, 'propose_relay_replacement (via health alert) failed');
     }
   });
 

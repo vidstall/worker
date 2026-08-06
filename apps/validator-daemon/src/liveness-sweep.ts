@@ -120,6 +120,8 @@ const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
   last_heartbeat: bcs.u64(),
   region: bcs.vector(bcs.u8()),
   endpoint_url: bcs.vector(bcs.u8()),
+  reserved_primary_count: bcs.u64(),
+  reserved_standby_count: bcs.u64(),
 });
 
 // signaling_registry.move:28-36

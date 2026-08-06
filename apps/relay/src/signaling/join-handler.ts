@@ -11,11 +11,10 @@ import type { Logger } from '@dvconf/shared';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import type { MetricsTracker } from '../metrics.js';
 import type { RoomState, PeerState } from '../room-handler.js';
-import { McuPipeline } from '../mcu-pipeline.js';
 import type { JoinMessage } from './messages.js';
 import { sendJson, deriveRoomMode, hashRoomPassword, validateSessionPubkey } from './helpers.js';
 import type { SignalingServerState, SignalingConfig, InterRelayContext } from './state.js';
-import { attachAudioLevelObserver } from './media-handler.js';
+import { createRoomCoreLocked } from '../room-prewarm.js';
 
 /**
  * W5 M2 P1.0 (REQ-MCS-012): is this room currently locked out for too many
@@ -145,55 +144,17 @@ export async function handleJoin(
     }
 
     // ── Admission passed (or legacy path). Get-or-create the room. ──
+    // Shares createRoomCore with the proactive pre-warm path (room-prewarm.ts)
+    // so a standby relay's Router/warm-pipe wiring is identical whether it was
+    // created here (first real join) or ahead of time by the RoomAssigned
+    // poller. Lock-free variant: this function already holds
+    // state.roomCreationLocks for roomId across this whole admission section.
     const existing = state.rooms.get(roomId);
     if (existing) {
       room = existing;
     } else {
       const roomMode = msg.mode ?? config.relayMode;
-      const worker = manager.getNextWorker();
-      const router = await manager.createRouter(worker);
-      room = {
-        roomId,
-        router,
-        mode: roomMode,
-        peers: new Map(),
-      };
-
-      // Initialize MCU pipeline for MCU rooms. W5 M2 P7 (REQ-MCS-015): pass the
-      // host-set per-room E2EE flag (the SAME `roomConfigs` flag P6 reads above —
-      // set by the first joiner above, immutable after create) so the pipeline
-      // STRUCTURALLY refuses to mix if this room is E2EE. Belt-and-braces:
-      // `deriveRoomMode` already forces `e2ee:false` under MCU at the wire, so
-      // `e2ee:true && roomMode==='mcu'` should never co-occur — this guard makes
-      // that impossible to violate silently (defense-in-depth, D-M2-6). NOTE: in
-      // M2 an MCU room is opened only by an explicit non-E2EE host (or the P7
-      // client opt-out-of-E2EE), so this is normally `false`.
-      if (roomMode === 'mcu') {
-        const roomE2ee = state.roomConfigs.get(roomId)?.e2ee ?? false;
-        room.mcuPipeline = new McuPipeline(router, logger, roomE2ee);
-        logger.info({ roomId, e2ee: roomE2ee }, 'MCU pipeline initialized for room');
-      }
-
-      state.rooms.set(roomId, room);
-      logger.info({ roomId, mode: roomMode }, 'Room created');
-
-      // W5 M1 P5 (REQ-MCS-003): attach one AudioLevelObserver per router.
-      // maxEntries:1 → only the dominant speaker. On `volumes` the relay maps
-      // the dominant producerId → peerId and BROADCASTS `activeSpeaker` to all
-      // room peers (it only REPORTS — the client reacts with setConsumerLayers,
-      // CONTRACTS.md C0/C2.4). Best-effort: a creation failure must not break
-      // room setup, so the observer stays optional and every use is guarded.
-      await attachAudioLevelObserver(room, config, logger);
-
-      // G3.2b: on the first peer join for a room this relay is STANDBY for,
-      // hand the room's router to the wiring layer so it builds the
-      // RoomTopology + opens the paused warm pipe (StandbyWarmPipeCoordinator
-      // .ensure) — running M1's ensureWarmPipe in the LIVE signaling path.
-      // Fired once per room (inside the creation block); the primary never
-      // warm-pipes to itself.
-      if (interRelay?.role === 'standby') {
-        interRelay.onStandbyRoomReady?.(roomId, room.router);
-      }
+      room = await createRoomCoreLocked(state, manager, roomId, roomMode, config, interRelay, logger);
     }
   } finally {
     release();
