@@ -64,7 +64,7 @@ export async function waitForRoleAssignment(
       // Check assigned_roles in RoleVoteBox via devInspect
       const tx = new Transaction();
       tx.moveCall({
-        // Package split (see services/contract-role-voting): role_voting
+        // Package split (see services/contract/role-voting): role_voting
         // now lives in its own package, not config.packageId.
         target: `${config.roleVotingPackageId}::role_voting::get_assigned_role`,
         arguments: [
@@ -122,7 +122,7 @@ export async function applyVotedRole(
     client,
     signer,
     (tx: Transaction) => {
-      // Package split (see services/contract-role-voting): role_voting's
+      // Package split (see services/contract/role-voting): role_voting's
       // consume_assignment is public(package) inside dvconf_role_voting and
       // can no longer be called inline from registration::apply_voted_role
       // (a different package, package A). Chain two moveCalls in the same

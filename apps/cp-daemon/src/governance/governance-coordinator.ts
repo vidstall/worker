@@ -214,7 +214,7 @@ export function makeGovernanceSubmitter(
           ],
         });
         tx.moveCall({
-          // Package split (see services/contract-role-voting): role_voting
+          // Package split (see services/contract/role-voting): role_voting
           // now lives in its own package, not config.packageId. qsArg above
           // is still built via package A's cp_quorum_sig::new_quorum_sig --
           // dvconf_role_voting depends on dvconf_contracts and imports its

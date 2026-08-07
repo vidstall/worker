@@ -270,7 +270,7 @@ export function makeMarkSubmitter(
       signer,
       (tx: Transaction) => {
         tx.moveCall({
-          // Package split (see services/contract-role-voting): role_voting
+          // Package split (see services/contract/role-voting): role_voting
           // now lives in its own package, not config.packageId.
           target: `${config.roleVotingPackageId}::role_voting::${fn}`,
           arguments: [

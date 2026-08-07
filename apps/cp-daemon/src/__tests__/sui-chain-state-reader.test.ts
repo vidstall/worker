@@ -56,7 +56,7 @@ function devInspectResult(bytes: Uint8Array): unknown {
 // Object ids must be full 32-byte hex — `tx.getData()` validates them when we
 // snapshot the built Transaction to read its moveCall targets.
 const PKG = '0x' + '01'.repeat(32);
-// Package split (see services/contract-role-voting): a distinct package
+// Package split (see services/contract/role-voting): a distinct package
 // address from PKG, so tests actually verify role_voting targets use this
 // field instead of silently passing were it left equal to PKG.
 const ROLE_VOTING_PKG = '0x' + '02'.repeat(32);

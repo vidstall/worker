@@ -103,7 +103,7 @@ export function loadNetworkConfig(): NetworkConfig {
     // See NetworkConfig.roomHealthAlertsOriginPackageId -- same rationale, for the
     // room_health_alerts module.
     roomHealthAlertsOriginPackageId: process.env['ROOM_HEALTH_ALERTS_ORIGIN_PACKAGE_ID'] || undefined,
-    // Package split (see services/contract-role-voting): vidctl publishes
+    // Package split (see services/contract/role-voting): vidctl publishes
     // dvconf_role_voting as its own package and writes its id to
     // runtime/contract/<env>.env under the CONTRACT_B_ prefix (see
     // cli/contract/package.py's CONTRACT_B.env_prefix) -- that raw key name

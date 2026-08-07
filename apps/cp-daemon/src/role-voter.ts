@@ -250,7 +250,7 @@ async function castVote(
       // `registration::apply_voted_role`, not here. This call matches the deployed
       // 10-arg entry; no stake arg to add.
       tx.moveCall({
-        // Package split (see services/contract-role-voting): role_voting
+        // Package split (see services/contract/role-voting): role_voting
         // now lives in its own package, not config.packageId.
         target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
         arguments: [

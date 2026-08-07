@@ -35,17 +35,17 @@ const __filename = fileURLToPath(import.meta.url);
 const HERE = resolve(__filename, '..');
 const WORKSPACE_ROOT = resolve(HERE, '..', '..', '..', '..', '..', '..');
 // Evaluation harnesses may point this fixture at an isolated, pinned contracts
-// snapshot. The default is contract/ under services/ (WORKSPACE_ROOT, per the 6
-// levels-up walk above, already resolves to services/, not the repo root) --
-// this checkout's current layout (the module was originally named
-// dvconf-contracts as a sibling under a flat workspace root; the monorepo has
-// since nested both packages under services/).
-const CONTRACTS_DIR = resolve(process.env['DVCONF_CONTRACTS_DIR'] ?? join(WORKSPACE_ROOT, 'contract'));
-// Package split (see services/contract-role-voting): role_voting now
+// snapshot. The default is contract/core/ under services/ (WORKSPACE_ROOT, per
+// the 6 levels-up walk above, already resolves to services/, not the repo
+// root) -- both Move packages now nest under services/contract/ as
+// core/ and role-voting/ subfolders instead of living at the submodule root
+// / as a sibling top-level directory.
+const CONTRACTS_DIR = resolve(process.env['DVCONF_CONTRACTS_DIR'] ?? join(WORKSPACE_ROOT, 'contract', 'core'));
+// Package split (see services/contract/role-voting): role_voting now
 // publishes as its own package, which depends on CONTRACTS_DIR above via a
 // local Move.toml dependency -- must be published AFTER it.
 const CONTRACT_ROLE_VOTING_DIR = resolve(
-  process.env['DVCONF_CONTRACT_ROLE_VOTING_DIR'] ?? join(WORKSPACE_ROOT, 'contract-role-voting'),
+  process.env['DVCONF_CONTRACT_ROLE_VOTING_DIR'] ?? join(WORKSPACE_ROOT, 'contract', 'role-voting'),
 );
 
 export interface LocalnetHandle {
@@ -311,7 +311,7 @@ interface RoleVotingPublishOutput {
 }
 
 /**
- * Package split (see services/contract-role-voting): publish dvconf_role_voting
+ * Package split (see services/contract/role-voting): publish dvconf_role_voting
  * AFTER package A -- its Move.toml resolves package A's on-chain address via a
  * local dependency, which only exists once A's Move.lock records a real publish
  * for this build-env.

@@ -831,7 +831,7 @@ async function main(): Promise<void> {
 
   const roleVotingPoller = new EventPoller({
     client: graphqlClient,
-    // Package split (see services/contract-role-voting): role_voting_events
+    // Package split (see services/contract/role-voting): role_voting_events
     // is now defined in the SEPARATE dvconf_role_voting package -- NOT an
     // "original package" of dvconf_contracts (that's for a module added in a
     // later upgrade of the SAME package; this is a different package

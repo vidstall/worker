@@ -164,7 +164,7 @@ function buildConfig(publishOutput: { objectChanges?: ObjChange[] }): NetworkCon
     roomManagerId: byType('::RoomManager'),
     signalingRegistryId: byType('::SignalingRegistry'),
     roleVoteBoxId: byType('::RoleVoteBox'),
-    // TODO(package split, services/contract-role-voting): publish-output.json
+    // TODO(package split, services/contract/role-voting): publish-output.json
     // is produced by an external demo-setup harness (outside this repo's
     // vidctl tooling) that still assumes a single published package. Until
     // that harness is updated to publish + merge dvconf_role_voting's own

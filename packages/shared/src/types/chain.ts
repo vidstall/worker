@@ -46,7 +46,7 @@ export interface NetworkConfig {
    */
   roomHealthAlertsOriginPackageId?: string;
   /**
-   * Package split (see services/contract-role-voting): `role_voting` and its
+   * Package split (see services/contract/role-voting): `role_voting` and its
    * revote/governance/events satellites now live in their OWN published
    * package, `dvconf_role_voting`, not `packageId`. Every `role_voting::`
    * moveCall/event-filter target must use this instead of `packageId` --
