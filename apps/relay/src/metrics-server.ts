@@ -24,7 +24,7 @@ import { createServer, type Server } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { IncomingMessage } from 'node:http';
-import { Gauge } from 'prom-client';
+import { Gauge, Counter } from 'prom-client';
 import type { types as msTypes } from 'mediasoup';
 import {
   type Logger,
@@ -657,6 +657,22 @@ export function startMetricsServer(
     labelNames: ['roomId'],
     registers: [promRegistry],
   });
+  // Liveness-experiment support (academic-eval "Fault Tolerance" dashboard,
+  // vidctl utils worker stop/start): a bare (unlabeled) cumulative counter +
+  // last-seen gauge so an external correlator (cli/observer/worker_liveness.py)
+  // can compute "seconds from kill to first client noticing" and "how many
+  // clients have noticed so far" for THIS relay instance, without needing
+  // per-room cardinality (Prometheus already scopes by job/instance).
+  const relayDownHintTotalCounter = new Counter({
+    name: 'dvconf_relay_down_hint_total',
+    help: 'Cumulative client-reported relay-down hints received by this relay instance',
+    registers: [promRegistry],
+  });
+  const relayDownHintLastAtGauge = new Gauge({
+    name: 'dvconf_relay_down_hint_last_at_seconds',
+    help: 'Unix timestamp (seconds) of the most recent client-reported relay-down hint',
+    registers: [promRegistry],
+  });
 
   /** True iff roomId has a hint recorded within the last RELAY_DOWN_HINT_TTL_MS. */
   function hasFreshRelayDownHint(roomId: string, now: number): boolean {
@@ -911,6 +927,8 @@ export function startMetricsServer(
     lastRelayDownHintAt.set(peerId, now);
 
     relayDownHints.set(roomId, { reportedAtMs: now });
+    relayDownHintTotalCounter.inc();
+    relayDownHintLastAtGauge.set(now / 1000);
     reqLog.warn({ roomId, peerId }, 'relay-down-hint: client reported its primary relay down');
     return { status: 204 };
   }

@@ -46,6 +46,7 @@ import {
 } from '@dvconf/chain-event-listener';
 import { closeValidatorProbe } from './latency-probe.js';
 import { registerCanaryMetrics } from './canary/canary-metrics.js';
+import { registerWorkerDownVoteMetrics } from './worker-down-vote-metrics.js';
 import {
   startDaemon,
   buildValidatorShutdownPlan,
@@ -226,6 +227,9 @@ async function main(): Promise<void> {
     // already computes those values (see startDaemon's onCoverageSample/onQuorumSample/
     // onDivergencePromoted deps).
     const canaryMetrics = registerCanaryMetrics(promRegistry);
+    // Liveness-experiment support: dvconf_worker_down_vote_total, incremented from
+    // room-health-vote-watcher.ts and liveness-sweep.ts on each successful vote.
+    registerWorkerDownVoteMetrics(promRegistry);
     // Replaces the old SSH-grepped `docker logs | grep 'operator address|
     // node_id=|bootstrap failed'` status check (cli/infra/inventory.py's
     // registry_status()) with a real Prometheus series -- see

@@ -56,6 +56,7 @@ import {
   type NetworkConfig,
   type Logger,
 } from '@dvconf/shared';
+import { recordWorkerDownVote } from './worker-down-vote-metrics.js';
 
 const MOD = 'liveness-sweep';
 
@@ -541,6 +542,7 @@ export function startLivenessSweep(opts: LivenessSweepOptions): LivenessSweepHan
         const ok = await castLivenessVote(client, signer, config, minerCapId, candidate.minerId, logger);
         if (ok) {
           votedFor.add(candidate.minerId);
+          recordWorkerDownVote(candidate.minerId);
         } else {
           logger.warn({ targetMinerId: candidate.minerId }, 'liveness-sweep: cast_liveness_vote failed');
         }

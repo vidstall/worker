@@ -173,4 +173,20 @@ describe('POST /relay-down-hint', () => {
     const text = await (await fetch(`http://127.0.0.1:${port}/metrics/prom`)).text();
     expect(text).toMatch(/dvconf_relay_down_hint_active\{roomId="0xdeadbeef".*\} 1/);
   });
+
+  it('GET /metrics/prom exposes a cumulative hint counter and last-seen gauge (liveness-experiment support)', async () => {
+    const rooms = new Map<string, RoomState>([['0xdeadbeef', fakeRoom('0xdeadbeef', ['peer-a', 'peer-b'])]]);
+    start((roomId) => rooms.get(roomId));
+    tracker.trackBytes('0xdeadbeef', 'peer-a', 0);
+
+    const before = Date.now();
+    await post(port, '0xdeadbeef', 'peer-a');
+    await post(port, '0xdeadbeef', 'peer-b'); // different peer, not rate-limited against peer-a
+
+    const text = await (await fetch(`http://127.0.0.1:${port}/metrics/prom`)).text();
+    expect(text).toMatch(/dvconf_relay_down_hint_total\{.*\} 2/);
+    const lastAtMatch = text.match(/dvconf_relay_down_hint_last_at_seconds\{.*\} (\d+(\.\d+)?)/);
+    expect(lastAtMatch).not.toBeNull();
+    expect(Number(lastAtMatch?.[1])).toBeGreaterThanOrEqual(before / 1000);
+  });
 });
