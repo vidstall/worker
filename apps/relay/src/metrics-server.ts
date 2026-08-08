@@ -657,12 +657,12 @@ export function startMetricsServer(
     labelNames: ['roomId'],
     registers: [promRegistry],
   });
-  // Liveness-experiment support (academic-eval "Fault Tolerance" dashboard,
-  // vidctl utils worker stop/start): a bare (unlabeled) cumulative counter +
-  // last-seen gauge so an external correlator (cli/observer/worker_liveness.py)
-  // can compute "seconds from kill to first client noticing" and "how many
-  // clients have noticed so far" for THIS relay instance, without needing
-  // per-room cardinality (Prometheus already scopes by job/instance).
+  // Vestigial: a bare (unlabeled) cumulative counter + last-seen gauge for
+  // THIS relay instance's client-reported down-hints, without per-room
+  // cardinality. The browser now pushes its relay-down-hint directly to
+  // Pushgateway instead (see services/client/client/src/lib/relay-down-hint.ts),
+  // so nothing currently calls `POST /relay-down-hint` -- left in place
+  // rather than removed since it's a working, harmless endpoint.
   const relayDownHintTotalCounter = new Counter({
     name: 'dvconf_relay_down_hint_total',
     help: 'Cumulative client-reported relay-down hints received by this relay instance',

@@ -37,7 +37,6 @@ import {
   type NetworkConfig,
   type Logger,
 } from '@dvconf/shared';
-import { recordWorkerDownVote } from './worker-down-vote-metrics.js';
 
 const MOD = 'room-health-vote-watcher';
 
@@ -329,7 +328,6 @@ export function startRoomHealthVoteWatcher(opts: RoomHealthVoteWatcherOptions): 
     const ok = await castHealthVote(client, signer, config, alertBoxId, minerCapId, roomId, targetMinerId, logger);
     if (ok) {
       votedFor.add(dedupKey);
-      recordWorkerDownVote(targetMinerId);
       logger.info({ module: MOD, roomId, targetMinerId }, 'cast_health_vote succeeded');
     } else {
       logger.warn({ module: MOD, roomId, targetMinerId }, 'cast_health_vote failed');
