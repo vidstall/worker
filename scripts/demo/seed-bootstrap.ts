@@ -38,8 +38,9 @@
  *
  * Structured logging only (shared pino Logger). No console.log.
  *
- * SCOPE (Phase 5.4): seeds the 1 CP + 1 relay + 1 validator + 1 signaling base
- * daemons. The `--profile scaled` replicas (Phase 5.5) are NOT seeded here.
+ * SCOPE (Phase 5.4): seeds the 1 CP + 1 relay + 1 validator base
+ * daemons (the standalone signaling node type was removed from the contract).
+ * The `--profile scaled` replicas (Phase 5.5) are NOT seeded here.
  */
 
 import { writeFileSync } from 'node:fs';
@@ -66,7 +67,7 @@ const MODULE = 'seed-bootstrap';
  * Stake tiers (MIST). CP gets 1.0 SUI (>= the dynamic CP threshold for the FIRST
  * CP = base 0.5 SUI; mirrors cp-daemon/auto-register.ts CP_STAKE). Each voted
  * miner gets 0.3 SUI: role User at register, then clears every apply-side
- * minimum_for_role guard — relay 0.25 / validator 0.1 / signaling 0.05 SUI
+ * minimum_for_role guard — relay 0.25 / validator 0.1 SUI
  * (constants.move:28-30 DEFAULT_*_THRESHOLD).
  */
 const CP_STAKE_MIST = 1_000_000_000n;
@@ -101,7 +102,7 @@ export interface SeededKey {
   minerId: string;
 }
 
-type DaemonRole = 'cp' | 'relay' | 'relay-standby' | 'validator' | 'validator-2' | 'signaling';
+type DaemonRole = 'cp' | 'relay' | 'relay-standby' | 'validator' | 'validator-2';
 
 /**
  * Faucet-fund an address then settle for gas-coin indexing. FAUCET_URL is env-
@@ -271,10 +272,12 @@ export async function bootstrapCp(client: SuiClient, config: NetworkConfig, logg
  * guard is skipped on this INITIAL vote -> writes assigned_roles[minerId] = role.
  *
  * Arg order verified against:
- *   - role_voting.move:197-208 cast_role_vote(net_reg, vote_box, miner_store, cp_reg,
- *     relay_reg, validator_reg, signaling_reg, cap, miner_id, role) [ctx implicit]
- *   - revote-localnet-helpers.ts:285-297 castRoleVoteFromCp (identical order)
- *   NOTE: cp_reg comes BEFORE relay/validator/signaling regs (DIFFERS from mark_*).
+ *   - role_voting.move:145-156 cast_role_vote(net_reg, vote_box, miner_store, cp_reg,
+ *     _relay_reg, _validator_reg, cap, miner_id, role) [ctx implicit] -- relay/validator
+ *     regs are ABI-preserved but unread (the standalone signaling node type's registry
+ *     param was dropped entirely, not just left vestigial).
+ *   - revote-localnet-helpers.ts castRoleVoteFromCp (identical order)
+ *   NOTE: cp_reg comes BEFORE relay/validator regs (DIFFERS from mark_*).
  */
 async function castRoleVoteFromCp(
   client: SuiClient,
@@ -297,7 +300,6 @@ async function castRoleVoteFromCp(
           tx.object(config.cpRegistryId), // cp_reg: &ControlPlaneRegistry
           tx.object(config.relayRegistryId), // relay_reg: &RelayRegistry
           tx.object(config.validatorRegistryId), // validator_reg: &ValidatorRegistry
-          tx.object(config.signalingRegistryId), // signaling_reg: &SignalingRegistry
           tx.object(cp.cpCapId), // cap: &ControlPlaneCap
           tx.pure.id(minerId), // miner_id: ID
           tx.pure.u8(role), // role: u8
@@ -314,11 +316,19 @@ async function castRoleVoteFromCp(
  * flips MinerCap + profile + stake to the voted role. Stake guard requires
  * amount(stake) >= minimum_for_role(new_role) — our 0.3 SUI clears all three.
  *
+ * Package split (see services/contract/role-voting): role_voting's
+ * consume_assignment is public(package) inside dvconf_role_voting and can no
+ * longer be called inline from registration::apply_voted_role (a different
+ * package). Chain two moveCalls in the same PTB instead -- still one atomic Sui
+ * transaction, same all-or-nothing guarantee as the single call this replaces.
+ *
  * Arg order verified against:
- *   - registration.move:141-151 apply_voted_role(registry, store, vote_box,
- *     signaling_reg, relay_reg, validator_reg, cp_reg, cap, stake) [ctx implicit]
- *   - revote-localnet-helpers.ts:329-340 applyVotedRoleAs AND
- *     packages/shared/src/chain/role-assignment.ts:87-97 applyVotedRole (identical order)
+ *   - role_voting.move consume_voted_assignment(vote_box, cap): u8
+ *   - registration.move apply_voted_role(registry, store, new_role, relay_reg,
+ *     validator_reg, cp_reg, cap, stake) [ctx implicit] -- new_role comes from
+ *     consume_voted_assignment's return, not a vote_box object (signaling_reg
+ *     dropped with the standalone signaling node type's removal)
+ *   - packages/shared/src/chain/role-assignment.ts applyVotedRole (identical order)
  */
 async function applyVotedRoleAs(
   client: SuiClient,
@@ -332,13 +342,19 @@ async function applyVotedRoleAs(
     client,
     minerKp,
     (tx) => {
+      const [newRole] = tx.moveCall({
+        target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+        arguments: [
+          tx.object(config.roleVoteBoxId),
+          tx.object(minerCapId),
+        ],
+      });
       tx.moveCall({
         target: `${config.packageId}::registration::apply_voted_role`,
         arguments: [
           tx.object(config.networkRegistryId), // registry: &NetworkRegistry
           tx.object(config.minerStoreId), // store: &mut MinerStore
-          tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox
-          tx.object(config.signalingRegistryId), // signaling_reg: &mut SignalingRegistry
+          newRole, // new_role: u8 (was: vote_box)
           tx.object(config.relayRegistryId), // relay_reg: &mut RelayRegistry
           tx.object(config.validatorRegistryId), // validator_reg: &mut ValidatorRegistry
           tx.object(config.cpRegistryId), // cp_reg: &mut ControlPlaneRegistry
@@ -359,9 +375,6 @@ async function applyVotedRoleAs(
  *               stake, region, endpoint_url)  == relay/auto-register.ts:232-239
  *   - validator validator_registry.move:91-96 register_validator(net_reg, registry,
  *               cap, stake)                    == validator-daemon/auto-register.ts:138-143
- *   - signaling signaling_registry.move:92-99  register_signaling(net_reg, registry,
- *               cap, stake, endpoint_url, region) == signaling/auto-register.ts:231-238
- *               (endpoint_url BEFORE region — opposite of relay's region/endpoint order)
  */
 async function enrollInRegistry(
   client: SuiClient,
@@ -415,27 +428,6 @@ async function enrollInRegistry(
       'register_validator',
       logger,
     );
-  } else if (role === 'signaling') {
-    const endpoint = Array.from(new TextEncoder().encode('ws://signaling-daemon:8080'));
-    await execOrThrow(
-      client,
-      minerKp,
-      (tx) => {
-        tx.moveCall({
-          target: `${config.packageId}::signaling_registry::register_signaling`,
-          arguments: [
-            tx.object(config.networkRegistryId), // net_reg: &NetworkRegistry
-            tx.object(config.signalingRegistryId), // registry: &mut SignalingRegistry
-            tx.object(minerCapId), // cap: &MinerCap
-            tx.object(stakeId), // stake: &StakePosition
-            tx.pure.vector('u8', endpoint), // endpoint_url: vector<u8>
-            tx.pure.vector('u8', REGION), // region: vector<u8>
-          ],
-        });
-      },
-      'register_signaling',
-      logger,
-    );
   } else if (role === 'relay-standby') {
     // relay-standby IS a relay on-chain — votes as Relay, enrolls via relay_registry::register_relay.
     // Uses a DISTINCT endpoint (ws://relay-standby:4002, matching the compose service + WS_PORT 4002)
@@ -474,8 +466,6 @@ function roleCodeFor(role: DaemonRole): number {
     case 'validator':
     case 'validator-2': // validator-2 IS a validator on-chain — same role code as validator
       return MinerRole.Validator; // 1
-    case 'signaling':
-      return MinerRole.Signaling; // 4
     default:
       throw new Error(`roleCodeFor: ${role} is not a CP-voted role`);
   }
@@ -483,7 +473,7 @@ function roleCodeFor(role: DaemonRole): number {
 
 /**
  * Full CP-voted lifecycle for ONE miner against the bootstrapped CP, generalised by
- * `role` (called 4x — relay, relay-standby, validator, signaling):
+ * `role` (called for relay, relay-standby, validator, validator-2):
  *   1. register the miner with 0.3 SUI (role User -> MinerCap)
  *   2. CP casts cast_role_vote(miner_id, roleCode) -> assigned_roles[miner_id] = role
  *   3. miner applies apply_voted_role -> flips MinerCap+profile+stake to the role
@@ -540,7 +530,7 @@ async function main(): Promise<void> {
   const cp = await bootstrapCp(client, config, logger);
   const cpKey: SeededKey = { secretKey: cp.kp.getSecretKey(), capId: cp.cpCapId, stakeId: cp.stakeId, minerId: cp.minerId };
 
-  // 2. relay / validator / signaling / relay-standby via the generalised CP-voted lifecycle.
+  // 2. relay / validator / relay-standby via the generalised CP-voted lifecycle.
   const relay = await voteAndApplyMiner(client, cp, 'relay', config, logger);
   const validator = await voteAndApplyMiner(client, cp, 'validator', config, logger);
   // A 2nd DISTINCT validator (own funded keypair -> own miner_id). On-chain it is a
@@ -548,8 +538,7 @@ async function main(): Promise<void> {
   // the only thing that differs. Gives the canary VecSet >=2 distinct attesters so
   // CanaryDivergenceSlashed can form on ONE host (spec §0.2 co-homing, REQ-CMD-1).
   const validator2 = await voteAndApplyMiner(client, cp, 'validator-2', config, logger);
-  const signaling = await voteAndApplyMiner(client, cp, 'signaling', config, logger);
-  // 3. relay-standby: 5th funded keypair — a second relay enrolled at ws://relay-standby:4002
+  // 3. relay-standby: 4th funded keypair — a second relay enrolled at ws://relay-standby:4002
   //    (REQ-RO-021 Phase 5.3 bench; matches the relay-standby service in the relay-overlap compose override).
   const relayStandby = await voteAndApplyMiner(client, cp, 'relay-standby', config, logger);
 
@@ -559,13 +548,12 @@ async function main(): Promise<void> {
     'relay-standby': relayStandby,
     validator,
     'validator-2': validator2,
-    signaling,
   });
   writeFileSync(KEYS_OUTPUT_PATH, `${JSON.stringify(keys, null, 2)}\n`, 'utf8');
 
   logger.info(
     { module: MODULE, action: 'done', context: { keysOut: KEYS_OUTPUT_PATH, roles: Object.keys(keys) } },
-    'seed-bootstrap complete — keys written, 6 daemons registered',
+    'seed-bootstrap complete — keys written, 5 daemons registered',
   );
 }
 

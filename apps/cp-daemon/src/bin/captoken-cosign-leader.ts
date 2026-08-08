@@ -37,7 +37,7 @@
  *
  * CLI args:
  *   --room-id 0x..   (default: random 32-byte address)
- *   --role <n>       (default: 4 = signaling)
+ *   --role <n>       (default: 2 = relay)
  */
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -197,7 +197,7 @@ async function main(): Promise<void> {
   // ── Parse CLI args ──────────────────────────────────────────────────────
   const argv = process.argv.slice(2);
   let roomId: string | undefined;
-  let role = 4;
+  let role = 2;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--room-id' && argv[i + 1]) {
       roomId = argv[++i];

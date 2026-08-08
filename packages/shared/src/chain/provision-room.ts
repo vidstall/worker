@@ -1,9 +1,11 @@
 /**
  * provision-room — committed, non-test lifecycle for register_user → create_room →
- * assign_relay_and_signaling. EXTRACTED from validator-daemon's __tests__ canary-localnet-helpers.ts
+ * assign_relay. EXTRACTED from validator-daemon's __tests__ canary-localnet-helpers.ts
  * so BOTH that test helper AND scripts/demo/provision-room.ts import ONE source (no drift).
  * fundAddress is INJECTED (the sole test-fixture coupling) so this module stays test-free.
- * Move sigs verbatim: user_registry.move:63, room_manager.move:247, room_manager.move:644.
+ * Move sigs verbatim: user_registry.move:63, room_manager.move:247,
+ * room_manager/pairing.move assign_relay (renamed from assign_relay_and_signaling — the
+ * standalone signaling node type was removed from the contract; no signaling_id param).
  */
 import type { SuiClient } from '@mysten/sui/client';
 import type { SuiGraphQLClient } from '@mysten/sui/graphql';
@@ -126,19 +128,19 @@ export async function createRoomWithRelay(
 
   await signAndAssert(client, deployer, (tx) => {
     tx.moveCall({
-      // assign_relay_and_signaling is defined in the room_manager_pairing
-      // satellite module (pairing.move), not room_manager itself.
-      target: `${config.packageId}::room_manager_pairing::assign_relay_and_signaling`,
+      // assign_relay is defined in the room_manager_pairing satellite module
+      // (pairing.move), not room_manager itself. Renamed from
+      // assign_relay_and_signaling; no signaling_id param anymore.
+      target: `${config.packageId}::room_manager_pairing::assign_relay`,
       arguments: [
         tx.object(config.networkRegistryId),
         tx.object(config.roomManagerId),
         tx.object(adminCapId),
         tx.pure.id(roomId),
         tx.pure.id(relayMinerId),
-        tx.pure.id(relayMinerId), // signaling_id placeholder
       ],
     });
-  }, 'assign_relay_and_signaling', logger);
+  }, 'assign_relay', logger);
 
   logger.info({ module: MODULE, action: 'create_room_with_relay', context: { roomId, relayMinerId } }, 'room created + relay assigned');
   return roomId;

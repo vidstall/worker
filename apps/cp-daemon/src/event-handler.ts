@@ -1,9 +1,10 @@
 /**
- * Event handler for CP daemon — processes relay/room/CP/signaling/voting events from Sui chain.
+ * Event handler for CP daemon — processes relay/room/CP/voting events from Sui chain.
  *
- * Maintains in-memory relay, validator, and signaling state maps populated from events.
- * On RoomCreated + EscrowCreated, runs scoring and submits pairing proposal via
- * submit_pairing_proposal (PAIR-01).
+ * Maintains in-memory relay and validator state maps populated from events. On
+ * RoomCreated + EscrowCreated, runs scoring and submits pairing proposal via
+ * submit_pairing_proposal (PAIR-01, relay-only -- the standalone signaling
+ * node type was removed from the contract).
  *
  * Tracks votedRooms to prevent duplicate proposals (PAIR-03).
  * Handles RoomAssigned events to clear voted rooms (PAIR-03).
@@ -31,10 +32,7 @@ import {
   type ScoringWeights,
 } from './scoring.js';
 import { type AttestedLoad } from './coverage-load-reader.js';
-import {
-  votedRooms,
-  type SignalingCandidate,
-} from './room-assignment.js';
+import { votedRooms } from './room-assignment.js';
 import { clearRevoteCandidate } from './role-voter.js';
 import type { TurnIssuer } from './turn-issuer.js';
 import type { CapTokenIssuer } from './cap-token/index.js';
@@ -49,8 +47,6 @@ import {
 import { handleEscrowCreated } from './event-handlers/room-assignment.js';
 import {
   handleValidatorRegistered,
-  handleSignalingRegistered,
-  handleSignalingLoadUpdated,
   handleRoomCreated,
   handleRoomAssigned,
   handleCapabilityIssued,
@@ -106,7 +102,6 @@ export interface EventHandlerTxContext {
  */
 export interface EventHandlerCtx {
   relayState: Map<string, NodeCandidate>;
-  signalingState: Map<string, SignalingCandidate>;
   pendingRooms: Map<string, RoomCreated>;
   logger: Logger;
   weights: ScoringWeights;
@@ -164,7 +159,7 @@ export function dispatchCapToken(
 }
 
 /**
- * Handle a single Sui event, updating relay/validator/signaling state and scoring as needed.
+ * Handle a single Sui event, updating relay/validator state and scoring as needed.
  *
  * Room assignment is deferred until EscrowCreated is received. Flow:
  *   RoomCreated -> store in pendingRooms
@@ -173,7 +168,6 @@ export function dispatchCapToken(
 export function handleEvent(
   event: SuiEvent,
   relayState: Map<string, NodeCandidate>,
-  signalingState: Map<string, SignalingCandidate>,
   pendingRooms: Map<string, RoomCreated>,
   logger: Logger,
   weights: ScoringWeights = DEFAULT_WEIGHTS,
@@ -190,7 +184,6 @@ export function handleEvent(
 
   const ctx: EventHandlerCtx = {
     relayState,
-    signalingState,
     pendingRooms,
     logger,
     weights,
@@ -202,7 +195,7 @@ export function handleEvent(
     byzantineFlag,
     redispatch: (ev: SuiEvent) =>
       handleEvent(
-        ev, relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+        ev, relayState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
         attestedLoad, currentEpoch, byzantineFlag,
       ),
   };
@@ -234,14 +227,6 @@ export function handleEvent(
 
     case 'ValidatorRegistered':
       handleValidatorRegistered(event, data, ctx);
-      break;
-
-    case 'SignalingRegistered':
-      handleSignalingRegistered(event, data, ctx);
-      break;
-
-    case 'SignalingLoadUpdated':
-      handleSignalingLoadUpdated(event, data, ctx);
       break;
 
     case 'RoomCreated':
@@ -336,7 +321,7 @@ export function handleEvent(
 }
 
 /**
- * Create an event handler function bound to its own relay, validator, and signaling state maps.
+ * Create an event handler function bound to its own relay and validator state maps.
  *
  * Returns the handler and state maps for testing/inspection.
  */
@@ -361,21 +346,19 @@ export function createEventHandler(
 ): {
   handler: (event: SuiEvent) => Promise<void>;
   relayState: Map<string, NodeCandidate>;
-  signalingState: Map<string, SignalingCandidate>;
   validatorState: Map<string, NodeCandidate>;
   pendingRooms: Map<string, RoomCreated>;
   pendingEscrows: Map<string, EscrowCreated>;
   retryPendingAssignments: () => void;
 } {
   const relayState = new Map<string, NodeCandidate>();
-  const signalingState = new Map<string, SignalingCandidate>();
   const validatorState = new Map<string, NodeCandidate>();
   const pendingRooms = new Map<string, RoomCreated>();
   const pendingEscrows = new Map<string, EscrowCreated>();
 
   const handler = async (event: SuiEvent): Promise<void> => {
     handleEvent(
-      event, relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+      event, relayState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
       capacityCtx?.attestedLoad, capacityCtx?.currentEpoch?.(), capacityCtx?.byzantineFlag?.(),
     );
   };
@@ -405,11 +388,11 @@ export function createEventHandler(
           type: `${txContext?.config.packageId}::economic_layer::EscrowCreated`,
           parsedJson: escrowEvent as unknown as Record<string, unknown>,
         } as unknown as SuiEvent,
-        relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
+        relayState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState,
         capacityCtx?.attestedLoad, capacityCtx?.currentEpoch?.(), capacityCtx?.byzantineFlag?.(),
       );
     }
   };
 
-  return { handler, relayState, signalingState, validatorState, pendingRooms, pendingEscrows, retryPendingAssignments };
+  return { handler, relayState, validatorState, pendingRooms, pendingEscrows, retryPendingAssignments };
 }

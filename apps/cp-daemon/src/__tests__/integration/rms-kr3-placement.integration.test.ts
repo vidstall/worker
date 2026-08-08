@@ -11,8 +11,8 @@
  *   1. Boot the localnet fixture (bootLocalnet) + publish.
  *   2. Bootstrap 1 CP, register 3 relays (voteAndApplyRelay x3 — the fixture's
  *      relay-registration helper, looped with distinct funded keypairs), register 4
- *      validators + 1 signaling node (the on-chain ballot's liveness requirements),
- *      and register a USER + create a PENDING room.
+ *      validators (the on-chain ballot's liveness requirements), and register a
+ *      USER + create a PENDING room.
  *   3. Set process.env.RMS_KR_MIN = '3' (restored in afterEach so it can't leak), then
  *      drive a synthesized `EscrowCreated` for that room through the PRODUCTION
  *      `handleEvent` with a real txContext (CP signer + cpCapId). The K_r>1 branch
@@ -33,7 +33,7 @@
  * FLOORS at `DEFAULT_MIN_VALIDATORS_PER_ROOM = 4` (constants.move) — so the ballot
  * needs >= 4 validators. The production `handleEvent` emits at most 3 validators
  * (`rankedValidators.slice(0, Math.max(1, Math.min(3, len)))`), so the on-chain submit
- * reverts with E_INVALID_BALLOT *before* it ever checks the relay/signaling liveness or
+ * reverts with E_INVALID_BALLOT *before* it ever checks the relay liveness or
  * emits `RoomAssigned`. The 4 validators are pre-registered here so the ONLY remaining
  * gap to a green run is lifting the handler's `Math.min(3, …)` validator cap to the
  * contract floor (a one-line follow-up, out of scope for the K_r placement task). Until
@@ -49,7 +49,6 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { createLogger, MinerRole, type Logger, type NetworkConfig, type EscrowCreated } from '@dvconf/shared';
 import { handleEvent, DEFAULT_WEIGHTS } from '../../event-handler.js';
 import { PVR_DEFAULT_HISTORY, type NodeCandidate } from '../../scoring.js';
-import type { SignalingCandidate } from '../../room-assignment.js';
 import { bootLocalnet, fundAddress, type LocalnetHandle } from './localnet-fixture.js';
 import {
   bootstrapCp,
@@ -167,7 +166,6 @@ describe('RMS-live K_r=3 ACTIVE-relay placement (REQ-RMS-021)', () => {
   let cp: BootstrapCpResult;
   let relayIds: string[];
   let validatorIds: string[];
-  let signalingId: string;
   let roomId: string;
   let userKp: Ed25519Keypair;
   const logger: Logger = createLogger('rms-kr3-placement-e2e');
@@ -210,28 +208,6 @@ describe('RMS-live K_r=3 ACTIVE-relay placement (REQ-RMS-021)', () => {
       );
       validatorIds.push(id);
     }
-
-    // 1 signaling node — the ballot's signaling_id must resolve to a registered node.
-    signalingId = await registerRoleNode(
-      handle,
-      cp,
-      MinerRole.Signaling,
-      (tx, capId, stakeId) => {
-        tx.moveCall({
-          target: `${handle.config.packageId}::signaling_registry::register_signaling`,
-          arguments: [
-            tx.object(handle.config.networkRegistryId), // net_reg: &NetworkRegistry
-            tx.object(handle.config.signalingRegistryId), // registry: &mut SignalingRegistry
-            tx.object(capId), // cap: &MinerCap (role Signaling)
-            tx.object(stakeId), // stake: &StakePosition
-            tx.pure.vector('u8', [1, 2, 3, 4]), // endpoint_url
-            tx.pure.vector('u8', [1, 2, 3, 4]), // region
-          ],
-        });
-      },
-      'register_signaling',
-      logger,
-    );
 
     // A registered USER creates a PENDING room (NOT admin-assigned, so status stays PENDING
     // for submit_pairing_proposal). expected_participants=2 -> required_validators floors to 4.
@@ -278,7 +254,6 @@ describe('RMS-live K_r=3 ACTIVE-relay placement (REQ-RMS-021)', () => {
     // In-memory cp state mirroring the on-chain registrations.
     const relayState = new Map<string, NodeCandidate>(relayIds.map((id) => [id, healthyRelay(id)]));
     const validatorState = new Map<string, NodeCandidate>(validatorIds.map((id) => [id, healthyRelay(id)]));
-    const signalingState = new Map<string, SignalingCandidate>([[signalingId, { minerId: signalingId, load: 0n, region: '' }]]);
     const pendingRooms = new Map([[roomId, { room_id: roomId, creator: userKp.getPublicKey().toSuiAddress(), relay_mode: 0, room_class_hint: 0 }]]);
     const pendingEscrows = new Map<string, EscrowCreated>();
 
@@ -300,7 +275,6 @@ describe('RMS-live K_r=3 ACTIVE-relay placement (REQ-RMS-021)', () => {
     handleEvent(
       escrow,
       relayState,
-      signalingState,
       pendingRooms,
       logger,
       DEFAULT_WEIGHTS,

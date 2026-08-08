@@ -228,10 +228,9 @@ export async function resolveRelayWsPort(
 
 /**
  * Decode a BCS `vector<ID>` (ULEB128 length prefix, then length * 32 id bytes) to normalized
- * addresses. `room_manager::get_room_assignment` returns `(vector<ID> assigned_relays, Option<ID>
- * signaling)` — the FIRST value is the full assigned-relay vector (NOT an Option — the stale
- * load-test pattern read it wrong), whose [0] is the room's CURRENT primary. Stops early on a
- * truncated trailing id.
+ * addresses. `room_manager::get_room_assignment` returns `vector<ID> assigned_relays` (was a
+ * tuple with a signaling `Option<ID>` before the standalone signaling node type's removal from
+ * the contract) — its [0] is the room's CURRENT primary. Stops early on a truncated trailing id.
  */
 export function parseVecId(bytes: number[]): string[] {
   let i = 0;

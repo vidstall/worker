@@ -10,7 +10,7 @@
  *
  *     register_user → create_room → create_escrow
  *
- * NOT through the AdminCap `assign_relay_and_signaling` path (sibling
+ * NOT through the AdminCap `assign_relay` path (sibling
  * provision-room.ts / shared `createRoomWithRelay`) — that BYPASSES the CP vote and
  * is the WRONG path for this demo. We therefore deliberately do NOT import
  * `createRoomWithRelay`; we reuse only the generic `signAndAssert` building block.

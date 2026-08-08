@@ -661,6 +661,7 @@ if (isMainModule) {
     const {
       wss,
       getRoomCount,
+      getRoomParticipantCounts,
       setAccepting,
       closeRooms,
       fanLocalProducer,
@@ -737,6 +738,7 @@ if (isMainModule) {
       () => manager.getWorkerDiedCount(),
       () => manager.workers,
       statsWindow,
+      () => getRoomParticipantCounts(),
     );
 
     // F1 (REQ-RO-010/011): honest probe-liveness flip. Polls getStats() on the

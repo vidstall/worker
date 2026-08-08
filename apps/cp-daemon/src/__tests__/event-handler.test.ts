@@ -4,7 +4,6 @@ import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import type { NetworkConfig, RoomCreated } from '@dvconf/shared';
 import { handleEvent, createEventHandler, DEFAULT_WEIGHTS } from '../event-handler.js';
 import type { NodeCandidate } from '../scoring.js';
-import type { SignalingCandidate } from '../room-assignment.js';
 import * as roomAssignment from '../room-assignment.js';
 import { PVR_DEFAULT_HISTORY } from '../scoring.js';
 import { getRevoteCandidates, clearRevoteCandidate } from '../role-voter.js';
@@ -36,11 +35,6 @@ function makeSuiEvent(eventName: string, parsedJson: Record<string, unknown>): S
     bcs: '',
     timestampMs: '1000',
   } as SuiEvent;
-}
-
-/** Create an empty signaling state map for handleEvent calls. */
-function emptySignalingState(): Map<string, SignalingCandidate> {
-  return new Map<string, SignalingCandidate>();
 }
 
 /** Create an empty pending rooms map for handleEvent calls. */
@@ -76,7 +70,7 @@ describe('handleEvent', () => {
       endpoint_url: [119, 115], // "ws" as bytes
     });
 
-    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(event, relayState, emptyPendingRooms(), logger);
 
     expect(relayState.has('relay-1')).toBe(true);
     const relay = relayState.get('relay-1')!;
@@ -111,7 +105,7 @@ describe('handleEvent', () => {
       new_load: '42',
     });
 
-    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(event, relayState, emptyPendingRooms(), logger);
 
     expect(relayState.get('relay-1')!.load).toBe(42n);
     expect(logger.info).toHaveBeenCalledWith(
@@ -138,7 +132,7 @@ describe('handleEvent', () => {
       rtt: '25',
     });
 
-    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(event, relayState, emptyPendingRooms(), logger);
 
     expect(relayState.get('relay-1')!.rtt).toBe(25n);
     expect(logger.info).toHaveBeenCalledWith(
@@ -147,48 +141,9 @@ describe('handleEvent', () => {
     );
   });
 
-  it('SignalingRegistered adds signaling node to state', () => {
-    const logger = mockLogger();
-    const relayState = new Map<string, NodeCandidate>();
-    const signalingState = new Map<string, SignalingCandidate>();
-
-    const event = makeSuiEvent('SignalingRegistered', {
-      miner_id: 'sig-1',
-      operator: '0xop',
-      endpoint_url: [119, 115],
-      region: [1],
-      stake_amount: '1000000000',
-    });
-
-    handleEvent(event, relayState, signalingState, emptyPendingRooms(), logger);
-
-    expect(signalingState.has('sig-1')).toBe(true);
-    const sig = signalingState.get('sig-1')!;
-    expect(sig.minerId).toBe('sig-1');
-    expect(sig.load).toBe(0n);
-    expect(sig.region).toBe('1');
-  });
-
-  it('SignalingLoadUpdated updates existing signaling node', () => {
-    const logger = mockLogger();
-    const relayState = new Map<string, NodeCandidate>();
-    const signalingState = new Map<string, SignalingCandidate>();
-    signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: '1' });
-
-    const event = makeSuiEvent('SignalingLoadUpdated', {
-      miner_id: 'sig-1',
-      new_load: '15',
-    });
-
-    handleEvent(event, relayState, signalingState, emptyPendingRooms(), logger);
-
-    expect(signalingState.get('sig-1')!.load).toBe(15n);
-  });
-
   it('RoomCreated stores room in pendingRooms (no immediate assignment)', () => {
     const logger = mockLogger();
     const relayState = new Map<string, NodeCandidate>();
-    const signalingState = new Map<string, SignalingCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
     relayState.set('relay-good', {
@@ -200,7 +155,6 @@ describe('handleEvent', () => {
       region: 'us',
       historyScore: PVR_DEFAULT_HISTORY,
     });
-    signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: 'us' });
 
     const event = makeSuiEvent('RoomCreated', {
       room_id: 'room-1',
@@ -208,7 +162,7 @@ describe('handleEvent', () => {
       relay_mode: 0,
     });
 
-    handleEvent(event, relayState, signalingState, pendingRooms, logger);
+    handleEvent(event, relayState, pendingRooms, logger);
 
     // Room stored in pending, NOT assigned yet
     expect(pendingRooms.has('room-1')).toBe(true);
@@ -218,7 +172,7 @@ describe('handleEvent', () => {
     );
     // No assignment logs
     expect(logger.info).not.toHaveBeenCalledWith(
-      expect.objectContaining({ signalingMinerId: 'sig-1' }),
+      expect.anything(),
       'Room proposal: submitting TX',
     );
   });
@@ -226,7 +180,6 @@ describe('handleEvent', () => {
   it('EscrowCreated triggers scoring and assignment (no TX context)', () => {
     const logger = mockLogger();
     const relayState = new Map<string, NodeCandidate>();
-    const signalingState = new Map<string, SignalingCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
     relayState.set('relay-good', {
@@ -260,7 +213,6 @@ describe('handleEvent', () => {
       region: 'us',
       historyScore: PVR_DEFAULT_HISTORY,
     });
-    signalingState.set('sig-1', { minerId: 'sig-1', load: 0n, region: 'us' });
 
     // Step 1: RoomCreated
     const roomEvent = makeSuiEvent('RoomCreated', {
@@ -268,7 +220,7 @@ describe('handleEvent', () => {
       creator: '0xcreator',
       relay_mode: 0,
     });
-    handleEvent(roomEvent, relayState, signalingState, pendingRooms, logger);
+    handleEvent(roomEvent, relayState, pendingRooms, logger);
 
     // Step 2: EscrowCreated
     const escrowEvent = makeSuiEvent('EscrowCreated', {
@@ -277,7 +229,7 @@ describe('handleEvent', () => {
       creator: '0xcreator',
       amount: '50000000',
     });
-    handleEvent(escrowEvent, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators());
+    handleEvent(escrowEvent, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators());
 
     // Room removed from pending
     expect(pendingRooms.has('room-1')).toBe(false);
@@ -285,7 +237,6 @@ describe('handleEvent', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({
         roomId: 'room-1',
-        signalingMinerId: 'sig-1',
       }),
       'Room proposal: submitting TX',
     );
@@ -299,7 +250,6 @@ describe('handleEvent', () => {
   it('EscrowCreated for unknown room warns', () => {
     const logger = mockLogger();
     const relayState = new Map<string, NodeCandidate>();
-    const signalingState = new Map<string, SignalingCandidate>();
     const pendingRooms = new Map<string, RoomCreated>();
 
     const event = makeSuiEvent('EscrowCreated', {
@@ -309,50 +259,11 @@ describe('handleEvent', () => {
       amount: '50000000',
     });
 
-    handleEvent(event, relayState, signalingState, pendingRooms, logger);
+    handleEvent(event, relayState, pendingRooms, logger);
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room-unknown' }),
       'EscrowCreated for unknown room, ignoring',
-    );
-  });
-
-  it('EscrowCreated with no signaling nodes warns', () => {
-    const logger = mockLogger();
-    const relayState = new Map<string, NodeCandidate>();
-    const signalingState = new Map<string, SignalingCandidate>();
-    const pendingRooms = new Map<string, RoomCreated>();
-
-    relayState.set('relay-1', {
-      minerId: 'relay-1',
-      rtt: 0n,
-      load: 0n,
-      stakeAmount: 1_000_000_000n,
-      heartbeatAge: 0n,
-      region: 'us',
-      historyScore: PVR_DEFAULT_HISTORY,
-    });
-
-    // RoomCreated first
-    const roomEvent = makeSuiEvent('RoomCreated', {
-      room_id: 'room-1',
-      creator: '0xcreator',
-      relay_mode: 0,
-    });
-    handleEvent(roomEvent, relayState, signalingState, pendingRooms, logger);
-
-    // EscrowCreated triggers assignment attempt
-    const escrowEvent = makeSuiEvent('EscrowCreated', {
-      escrow_id: 'escrow-1',
-      room_id: 'room-1',
-      creator: '0xcreator',
-      amount: '50000000',
-    });
-    handleEvent(escrowEvent, relayState, signalingState, pendingRooms, logger);
-
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ roomId: 'room-1' }),
-      'No signaling nodes available — deferring assignment',
     );
   });
 
@@ -362,7 +273,7 @@ describe('handleEvent', () => {
 
     const event = makeSuiEvent('SomeFutureEvent', { data: 'test' });
 
-    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(event, relayState, emptyPendingRooms(), logger);
 
     expect(logger.debug).toHaveBeenCalledWith(
       expect.objectContaining({ eventName: 'SomeFutureEvent' }),
@@ -380,7 +291,7 @@ describe('handleEvent', () => {
       miner_id: 'unknown-relay',
       new_load: '100',
     });
-    handleEvent(loadEvent, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(loadEvent, relayState, emptyPendingRooms(), logger);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ minerId: 'unknown-relay' }),
       'RelayLoadUpdated for unknown relay, ignoring',
@@ -391,7 +302,7 @@ describe('handleEvent', () => {
       miner_id: 'unknown-relay-2',
       rtt: '50',
     });
-    handleEvent(rttEvent, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(rttEvent, relayState, emptyPendingRooms(), logger);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ minerId: 'unknown-relay-2' }),
       'RelayRTTUpdated for unknown relay, ignoring',
@@ -409,7 +320,7 @@ describe('handleEvent', () => {
       creator: '0xcreator',
       relay_mode: 0,
     });
-    handleEvent(roomEvent, relayState, emptySignalingState(), pendingRooms, logger);
+    handleEvent(roomEvent, relayState, pendingRooms, logger);
 
     // EscrowCreated triggers assignment attempt
     const escrowEvent = makeSuiEvent('EscrowCreated', {
@@ -418,7 +329,7 @@ describe('handleEvent', () => {
       creator: '0xcreator',
       amount: '50000000',
     });
-    handleEvent(escrowEvent, relayState, emptySignalingState(), pendingRooms, logger);
+    handleEvent(escrowEvent, relayState, pendingRooms, logger);
 
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room-empty' }),
@@ -456,7 +367,6 @@ describe('handleEvent — RelaySlashed → TurnIssuer kill-switch (S30.B.7)', ()
     handleEvent(
       event,
       relayState,
-      emptySignalingState(),
       emptyPendingRooms(),
       logger,
       undefined,
@@ -487,7 +397,7 @@ describe('handleEvent — RelaySlashed → TurnIssuer kill-switch (S30.B.7)', ()
     });
 
     // txContext absent entirely — kill-switch should warn, not throw
-    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(event, relayState, emptyPendingRooms(), logger);
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ relayMinerId: 'bad-relay' }),
@@ -499,13 +409,11 @@ describe('handleEvent — RelaySlashed → TurnIssuer kill-switch (S30.B.7)', ()
 describe('createEventHandler', () => {
   it('returns handler function and state maps', () => {
     const logger = mockLogger();
-    const { handler, relayState, signalingState, validatorState, pendingRooms, pendingEscrows } = createEventHandler(logger);
+    const { handler, relayState, validatorState, pendingRooms, pendingEscrows } = createEventHandler(logger);
 
     expect(typeof handler).toBe('function');
     expect(relayState).toBeInstanceOf(Map);
     expect(relayState.size).toBe(0);
-    expect(signalingState).toBeInstanceOf(Map);
-    expect(signalingState.size).toBe(0);
     expect(validatorState).toBeInstanceOf(Map);
     expect(validatorState.size).toBe(0);
     expect(pendingRooms).toBeInstanceOf(Map);
@@ -532,33 +440,6 @@ describe('createEventHandler', () => {
     expect(relayState.has('relay-x')).toBe(true);
     expect(relayState.get('relay-x')!.stakeAmount).toBe(2_000_000_000n);
   });
-
-  it('handler with TX context processes signaling events', async () => {
-    const logger = mockLogger();
-    const mockClient = {} as any;
-    const mockSigner = {} as any;
-    const mockConfig = { packageId: '0x1', networkRegistryId: '0x2', roomManagerId: '0x3' } as any;
-
-    const { handler, signalingState } = createEventHandler(logger, undefined, {
-      client: mockClient,
-      signer: mockSigner,
-      config: mockConfig,
-      cpCapId: '0xcap',
-    });
-
-    const event = makeSuiEvent('SignalingRegistered', {
-      miner_id: 'sig-1',
-      operator: '0xop',
-      endpoint_url: [119, 115],
-      region: [2],
-      stake_amount: '1000000000',
-    });
-
-    await handler(event);
-
-    expect(signalingState.has('sig-1')).toBe(true);
-    expect(signalingState.get('sig-1')!.load).toBe(0n);
-  });
 });
 
 // F47 RV-010 — re-vote event routing + OQ-PH16 field-name decode lock.
@@ -575,7 +456,7 @@ describe('handleEvent — F47 re-vote routing (RV-010 + OQ-PH16 field-name lock)
       marked_at: '100',
     });
 
-    handleEvent(ev, new Map<string, NodeCandidate>(), emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(ev, new Map<string, NodeCandidate>(), emptyPendingRooms(), logger);
 
     expect(getRevoteCandidates()).toContain('0xrv-1');
     expect(logger.info).toHaveBeenCalledWith(
@@ -590,7 +471,6 @@ describe('handleEvent — F47 re-vote routing (RV-010 + OQ-PH16 field-name lock)
     handleEvent(
       makeSuiEvent('RevoteEligibleMarked', { miner_id: '0xrv-2', reason: 2, current_role: 1, marked_at: '5' }),
       new Map<string, NodeCandidate>(),
-      emptySignalingState(),
       emptyPendingRooms(),
       logger,
     );
@@ -599,7 +479,6 @@ describe('handleEvent — F47 re-vote routing (RV-010 + OQ-PH16 field-name lock)
     handleEvent(
       makeSuiEvent('RoleTransitioned', { miner_id: '0xrv-2', old_role: 1, new_role: 2 }),
       new Map<string, NodeCandidate>(),
-      emptySignalingState(),
       emptyPendingRooms(),
       logger,
     );
@@ -641,7 +520,6 @@ describe('handleEvent — SecretRotated → TurnIssuer emergency kill-switch (F8
     handleEvent(
       event,
       new Map<string, NodeCandidate>(),
-      emptySignalingState(),
       emptyPendingRooms(),
       logger,
       undefined,
@@ -675,7 +553,6 @@ describe('handleEvent — SecretRotated → TurnIssuer emergency kill-switch (F8
       handleEvent(
         event,
         new Map<string, NodeCandidate>(),
-        emptySignalingState(),
         emptyPendingRooms(),
         logger,
       ),
@@ -697,7 +574,7 @@ describe('REQ-RMS-019 RelayHeartbeat arm refreshes heartbeatAge', () => {
     });
     // currentEpoch is threaded via the handler; the arm computes age = currentEpoch - hb.epoch.
     const event = makeSuiEvent('RelayHeartbeat', { miner_id: 'relay-1', epoch: '10', region: [1] });
-    handleEvent(event, relayState, emptySignalingState(), emptyPendingRooms(), logger);
+    handleEvent(event, relayState, emptyPendingRooms(), logger);
     // After a fresh heartbeat the age must be refreshed toward 0 (was 5n).
     expect(relayState.get('relay-1')!.heartbeatAge).toBe(0n);
   });
@@ -716,7 +593,6 @@ describe('REQ-RMS-002 capacity-aware placement replaces the hardcoded top-2 slic
     // 3rd relay to clear the on-chain MIN_RELAY=3 ballot floor (1 primary + 2 standby) —
     // over-capacity like 'hot' so it never contends for the i* pick, only pads the ballot.
     relayState.set('padding', { minerId: 'padding', rtt: 0n, load: 0n, stakeAmount: 1_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
-    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
       ['hot',  { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }], // 295 + L_r(12) = 307 > C_worker 300 -> rejected
@@ -724,9 +600,9 @@ describe('REQ-RMS-002 capacity-aware placement replaces the hardcoded top-2 slic
       ['padding', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }], // over ceiling too — ballot padding only
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
-    // attestedLoad is the 10th positional arg (after event,relayState,signalingState,pendingRooms,
+    // attestedLoad is the 9th positional arg (after event,relayState,pendingRooms,
     // logger,weights,txContext,pendingEscrows,validatorState). txContext=undefined => test mode logs topRelays.
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), attested);
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), attested);
     const proposalLog = logger.info.mock.calls.find((c: any[]) => c[1] === 'Room proposal: submitting TX');
     // RED today (PVR-top 'hot' wins the hardcoded slice); GREEN after 8.4 (capacity override picks 'cool').
     expect(proposalLog?.[0].topRelays?.[0]).toBe('cool');
@@ -740,7 +616,6 @@ describe('REQ-RMS-002 capacity-aware placement replaces the hardcoded top-2 slic
     relayState.set('ok',   { minerId: 'ok',   rtt: 0n, load: 0n, stakeAmount: 2_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
     relayState.set('full', { minerId: 'full', rtt: 0n, load: 0n, stakeAmount: 1_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
     relayState.set('full2', { minerId: 'full2', rtt: 0n, load: 0n, stakeAmount: 900_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
-    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room2', { room_id: 'room2', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
       ['ok',   { attestedLoadPaths: 10,  heartbeatFreshEpochs: 1 }], // 10 + 12 = 22 <= 300 -> only eligible
@@ -748,7 +623,7 @@ describe('REQ-RMS-002 capacity-aware placement replaces the hardcoded top-2 slic
       ['full2', { attestedLoadPaths: 299, heartbeatFreshEpochs: 1 }], // also over ceiling — ballot padding only
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e2', room_id: 'room2', amount: '1' });
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), attested);
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), attested);
     const proposalLog = logger.info.mock.calls.find((c: any[]) => c[1] === 'Room proposal: submitting TX');
     const ballot = proposalLog?.[0].topRelays as string[] | undefined;
     expect(ballot?.[0]).toBe('ok');                       // chosen (sole eligible) is index 0
@@ -768,30 +643,29 @@ describe('REQ-RMS-022 (D1) — tri-state placement-capacity basis log', () => {
     relayState: new Map<string, NodeCandidate>([
       ['r1', { minerId: 'r1', rtt: 0n, load: 5n, stakeAmount: 2_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY }],
     ]),
-    signalingState: new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]),
     pendingRooms: new Map<string, RoomCreated>([['roomB', { room_id: 'roomB', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]),
     escrow: makeSuiEvent('EscrowCreated', { escrow_id: 'eB', room_id: 'roomB', amount: '1' }),
   });
 
   it('basis=legacy-self-report when NO attestedLoad feed is wired (flag OFF path)', () => {
     const logger = mockLogger();
-    const { relayState, signalingState, pendingRooms, escrow } = seed();
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), undefined);
+    const { relayState, pendingRooms, escrow } = seed();
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), undefined);
     expect(basisLogsOf(logger)).toEqual(['legacy-self-report']);
   });
 
   it('basis=attested when the wired feed has a row for a candidate relay', () => {
     const logger = mockLogger();
-    const { relayState, signalingState, pendingRooms, escrow } = seed();
+    const { relayState, pendingRooms, escrow } = seed();
     const attested = new Map<string, AttestedLoad>([['r1', { attestedLoadPaths: 3, heartbeatFreshEpochs: 1 }]]);
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), attested);
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), attested);
     expect(basisLogsOf(logger)).toEqual(['attested']);
   });
 
   it('basis=defer when the wired feed is EMPTY (strict no-attestation)', () => {
     const logger = mockLogger();
-    const { relayState, signalingState, pendingRooms, escrow } = seed();
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), new Map());
+    const { relayState, pendingRooms, escrow } = seed();
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, undefined, new Map(), threeValidators(), new Map());
     expect(basisLogsOf(logger)).toEqual(['defer']);
   });
 });
@@ -807,7 +681,6 @@ describe('REQ-RMS-004 capacity-selected N-vector reaches submit_pairing_proposal
     relayState.set('cool', { minerId: 'cool', rtt: 0n, load: 0n, stakeAmount: 1_000_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
     // 3rd relay to clear the on-chain MIN_RELAY=3 ballot floor — over-capacity, padding only.
     relayState.set('padding', { minerId: 'padding', rtt: 0n, load: 0n, stakeAmount: 1_000_000n, heartbeatAge: 0n, region: '', historyScore: PVR_DEFAULT_HISTORY });
-    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const validatorState = threeValidators();
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
@@ -823,19 +696,19 @@ describe('REQ-RMS-004 capacity-selected N-vector reaches submit_pairing_proposal
       cpCapId: '0xcap',
     };
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
-    // Full positional call: event, relayState, signalingState, pendingRooms, logger, weights, txContext,
+    // Full positional call: event, relayState, pendingRooms, logger, weights, txContext,
     // pendingEscrows, validatorState, attestedLoad.
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, txContext, new Map(), validatorState, attested);
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, txContext, new Map(), validatorState, attested);
 
     // Placement now round-trips through getRelayReservationLoad (an awaited devInspect read)
     // inside an async IIFE before submitProposal fires — wait for it instead of asserting sync.
     await vi.waitFor(() => expect(spy).toHaveBeenCalled());
     const args = spy.mock.calls[0]!;
-    // args[5] = relayMinerIds (capacity-selected, length >= MIN_RELAY); args[8] = submittedScore (bigint, PVR consensus).
+    // args[5] = relayMinerIds (capacity-selected, length >= MIN_RELAY); args[7] = submittedScore (bigint, PVR consensus).
     expect(Array.isArray(args[5])).toBe(true);
     expect((args[5] as string[]).length).toBeGreaterThanOrEqual(3);
     expect((args[5] as string[])[0]).toBe('cool'); // capacity-selected relay leads the recorded vector
-    expect(typeof args[8]).toBe('bigint');
+    expect(typeof args[7]).toBe('bigint');
     spy.mockRestore();
   });
 });

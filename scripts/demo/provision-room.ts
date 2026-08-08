@@ -1,6 +1,6 @@
 /**
  * provision-room (PROMOTED from .scratch-provision-room.ts; ran live WAN Stage 5.1).
- * Chains register_user → create_room(SFU,2,room_class_hint=0) → assign_relay_and_signaling
+ * Chains register_user → create_room(SFU,2,room_class_hint=0) → assign_relay
  * via the EXTRACTED @dvconf/shared createRoomWithRelay, then writes the shared room manifest
  * to BOTH /shared/room.json (publish-output named volume; in-container readers) AND
  * /shared-host/room.json (host bind-mount ./.demo-shared; the root runner on the host fs reads
@@ -8,7 +8,7 @@
  *
  * Run from dvconf-daemons (where the chain + faucet live):
  *   DEPLOYER_SECRET=suiprivkey1... RELAY_MINER_ID=0x.. ADMIN_CAP_ID=0x.. \
- *   SIGNALING_MINER_ID=0x.. PRIMARY_URL=ws://relay:4001 \
+ *   PRIMARY_URL=ws://relay:4001 \
  *   pnpm exec tsx scripts/demo/provision-room.ts
  * (object IDs resolved by loadNetworkConfig() from the read-publish-output.sh env, like seed-bootstrap.)
  */
@@ -30,7 +30,6 @@ const ROOM_HOST_OUTPUT_PATH = process.env['ROOM_HOST_OUTPUT_PATH'] ?? '/shared-h
 export interface RoomManifest {
   roomId: string;
   relayId: string;
-  signalingId: string;
   primaryUrl: string;
 }
 
@@ -70,7 +69,6 @@ async function main(): Promise<void> {
   const userKp = new Ed25519Keypair(); // fresh user; funded by the injected faucet callback
   const relayMinerId = need('RELAY_MINER_ID');
   const adminCapId = need('ADMIN_CAP_ID');
-  const signalingId = process.env['SIGNALING_MINER_ID'] ?? relayMinerId;
   const primaryUrl = process.env['PRIMARY_URL'] ?? 'ws://relay:4001';
 
   const fundAddress = (address: string): Promise<void> =>
@@ -79,7 +77,7 @@ async function main(): Promise<void> {
   log.info({ deployer: deployer.getPublicKey().toSuiAddress(), relayMinerId }, 'provisioning room+assign');
   const roomId = await createRoomWithRelay(client, userKp, deployer, adminCapId, relayMinerId, config, log, fundAddress);
 
-  const manifest: RoomManifest = { roomId, relayId: relayMinerId, signalingId, primaryUrl };
+  const manifest: RoomManifest = { roomId, relayId: relayMinerId, primaryUrl };
   writeRoomManifest([ROOM_OUTPUT_PATH, ROOM_HOST_OUTPUT_PATH], manifest);
   log.info({ roomId, out: [ROOM_OUTPUT_PATH, ROOM_HOST_OUTPUT_PATH] }, 'room provisioned + manifest written (volume + host)');
   process.stdout.write(`\nROOM_ID=${roomId}\n`);

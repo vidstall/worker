@@ -1,11 +1,12 @@
 /**
- * cp-daemon event-handler case arms — validator/signaling registration + role
+ * cp-daemon event-handler case arms — validator registration + role
  * voting/assignment events (god-file split out of the former monolithic
  * `event-handler.ts`).
  *
- * Covers: ValidatorRegistered, SignalingRegistered, SignalingLoadUpdated,
- * RoomCreated, RoomAssigned, CapabilityIssued, RoleAssigned, RoleChanged,
- * MinerRegistered, RevoteEligibleMarked.
+ * Covers: ValidatorRegistered, RoomCreated, RoomAssigned, CapabilityIssued,
+ * RoleAssigned, RoleChanged, MinerRegistered, RevoteEligibleMarked.
+ * (The standalone signaling node type was removed -- this file formerly also
+ * covered SignalingRegistered/SignalingLoadUpdated.)
  */
 import { randomUUID } from 'node:crypto';
 import type { SuiEvent } from '@mysten/sui/client';
@@ -13,8 +14,6 @@ import type {
   MinerRegistered,
   RoomCreated,
   RoomAssigned,
-  SignalingRegistered,
-  SignalingLoadUpdated,
   ValidatorRegistered,
   RoleAssigned as RoleAssignedEvent,
   RoleChanged,
@@ -22,14 +21,14 @@ import type {
 } from '@dvconf/shared';
 import { MinerRole } from '@dvconf/shared';
 import { PVR_DEFAULT_HISTORY, type NodeCandidate } from '../scoring.js';
-import { clearVotedRoom, type SignalingCandidate } from '../room-assignment.js';
+import { clearVotedRoom } from '../room-assignment.js';
 import { clearVotedMiner, trackUnassignedMiner, trackRevoteCandidate } from '../role-voter.js';
 import type {
   RoomAssignedEvent as IssuerRoomAssigned,
   RoleChangedEvent as IssuerRoleChanged,
   RoleAssignedEvent as IssuerRoleAssigned,
 } from '../cap-token/index.js';
-import { decodeVectorU8ToNumbers, dispatchCapToken, type EventHandlerCtx } from '../event-handler.js';
+import { dispatchCapToken, type EventHandlerCtx } from '../event-handler.js';
 
 export function handleValidatorRegistered(
   _event: SuiEvent,
@@ -49,38 +48,6 @@ export function handleValidatorRegistered(
     };
     ctx.validatorState.set(e.miner_id, candidate);
     ctx.logger.info({ minerId: e.miner_id }, 'Validator registered');
-  }
-}
-
-export function handleSignalingRegistered(
-  _event: SuiEvent,
-  data: Record<string, unknown>,
-  ctx: EventHandlerCtx,
-): void {
-  const e = data as unknown as SignalingRegistered;
-  const regionBytes = decodeVectorU8ToNumbers(e.region);
-  const regionStr = regionBytes ? regionBytes.map((n) => String(n)).join(',') : '';
-  const candidate: SignalingCandidate = {
-    minerId: e.miner_id,
-    load: 0n,
-    region: regionStr,
-  };
-  ctx.signalingState.set(e.miner_id, candidate);
-  ctx.logger.info({ minerId: e.miner_id, region: regionStr }, 'Signaling node registered');
-}
-
-export function handleSignalingLoadUpdated(
-  _event: SuiEvent,
-  data: Record<string, unknown>,
-  ctx: EventHandlerCtx,
-): void {
-  const e = data as unknown as SignalingLoadUpdated;
-  const existing = ctx.signalingState.get(e.miner_id);
-  if (existing) {
-    existing.load = BigInt(e.new_load);
-    ctx.logger.info({ minerId: e.miner_id, newLoad: e.new_load }, 'Signaling load updated');
-  } else {
-    ctx.logger.warn({ minerId: e.miner_id }, 'SignalingLoadUpdated for unknown signaling node, ignoring');
   }
 }
 
@@ -122,7 +89,7 @@ export function handleRoomAssigned(
   ctx.pendingRooms.delete(e.room_id);
   ctx.pendingEscrows?.delete(e.room_id);
   ctx.logger.info(
-    { roomId: e.room_id, relayIds: e.relay_ids, signalingId: e.signaling_id },
+    { roomId: e.room_id, relayIds: e.relay_ids },
     'Room assigned — cleared from voted rooms',
   );
   // F62 M2 W-P2 (D-W9) — issue cap-tokens to every assigned peer (REQ-ADM-001).
@@ -133,7 +100,6 @@ export function handleRoomAssigned(
     const evt: IssuerRoomAssigned = {
       roomId: e.room_id,
       relayIds: e.relay_ids,
-      signalingId: e.signaling_id,
       relayMode: e.relay_mode,
       verifiedScore: e.verified_score,
       consensusReached: e.consensus_reached,

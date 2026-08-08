@@ -63,7 +63,6 @@ export interface NetworkConfig {
   validatorRegistryId: string;
   userRegistryId: string;
   roomManagerId: string;
-  signalingRegistryId: string;
   roleVoteBoxId: string;
   livenessVoteBoxId: string;
   /**

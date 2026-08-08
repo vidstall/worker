@@ -36,9 +36,9 @@ const ZERO = '0x0000000000000000000000000000000000000000000000000000000000000000
 
 // ── BCS schemas mirroring the deployed Move NodeInfo structs ─────────────────
 // Field order MUST match the Move struct declaration order per registry — these
-// differ across registries (CP/Signaling carry an `is_active` bool the others
-// don't, and field ordering varies). Sourced from the orchestrator's live read
-// of dvconf-contracts/sources/**.
+// differ across registries (CP carries an `is_active` bool the others don't,
+// and field ordering varies). Sourced from the orchestrator's live read of
+// dvconf-contracts/sources/**.
 
 /** relay_registry::RelayNodeInfo */
 const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
@@ -74,19 +74,6 @@ const CPNodeInfoSchema = bcs.struct('CPNodeInfo', {
   is_active: bcs.bool(),
   registered_at: bcs.u64(),
   reputation: bcs.u64(),
-});
-
-/** signaling_registry::SignalingNodeInfo */
-const SignalingNodeInfoSchema = bcs.struct('SignalingNodeInfo', {
-  operator: bcs.Address,
-  miner_id: bcs.Address,
-  stake_amount: bcs.u64(),
-  last_heartbeat: bcs.u64(),
-  is_active: bcs.bool(),
-  endpoint_url: bcs.vector(bcs.u8()),
-  region: bcs.vector(bcs.u8()),
-  load: bcs.u64(),
-  registered_at: bcs.u64(),
 });
 
 /** Minimal shape of a devInspect result we read (avoids importing the SDK type). */
@@ -141,13 +128,13 @@ export class SuiChainStateReader implements ChainStateReader {
   }
 
   /**
-   * Active miners across the four role registries, each tagged with its role +
+   * Active miners across the three role registries, each tagged with its role +
    * last_heartbeat epoch. One devInspect per registry; empty registries decode
    * to an empty vector (→ empty array).
    */
   async getActiveMiners(): Promise<MinerHeartbeat[]> {
     const pkg = this.config.packageId;
-    const [relays, validators, cps, signaling] = await Promise.all([
+    const [relays, validators, cps] = await Promise.all([
       this.readActiveVector(
         `${pkg}::relay_registry::get_active_relays`,
         this.config.relayRegistryId,
@@ -163,18 +150,12 @@ export class SuiChainStateReader implements ChainStateReader {
         this.config.cpRegistryId,
         CPNodeInfoSchema,
       ),
-      this.readActiveVector(
-        `${pkg}::signaling_registry::get_active_nodes`,
-        this.config.signalingRegistryId,
-        SignalingNodeInfoSchema,
-      ),
     ]);
 
     const out: MinerHeartbeat[] = [
       ...relays.map((n) => this.toHeartbeat(n, MinerRole.Relay)),
       ...validators.map((n) => this.toHeartbeat(n, MinerRole.Validator)),
       ...cps.map((n) => this.toHeartbeat(n, MinerRole.CP)),
-      ...signaling.map((n) => this.toHeartbeat(n, MinerRole.Signaling)),
     ];
     this.logger.debug(
       { module: MODULE, method: 'getActiveMiners', context: { count: out.length } },
@@ -183,24 +164,23 @@ export class SuiChainStateReader implements ChainStateReader {
     return out;
   }
 
-  /** Active node counts across the four role registries. */
+  /** Active node counts across the three role registries. */
   async getRoleCounts(): Promise<RoleCounts> {
     const pkg = this.config.packageId;
-    const [relay, validator, cp, signaling] = await Promise.all([
+    const [relay, validator, cp] = await Promise.all([
       this.readU64(`${pkg}::relay_registry::active_count`, this.config.relayRegistryId),
       this.readU64(`${pkg}::validator_registry::active_count`, this.config.validatorRegistryId),
       this.readU64(`${pkg}::control_plane_registry::active_cp_count`, this.config.cpRegistryId),
-      this.readU64(`${pkg}::signaling_registry::active_signaling_count`, this.config.signalingRegistryId),
     ]);
     this.logger.debug(
       {
         module: MODULE,
         method: 'getRoleCounts',
-        context: { relay: relay.toString(), validator: validator.toString(), cp: cp.toString(), signaling: signaling.toString() },
+        context: { relay: relay.toString(), validator: validator.toString(), cp: cp.toString() },
       },
       'read role counts',
     );
-    return { relay, validator, cp, signaling };
+    return { relay, validator, cp };
   }
 
   /**

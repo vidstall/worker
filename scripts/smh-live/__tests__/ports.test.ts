@@ -14,7 +14,6 @@ describe('requiredPorts (fixed native-rig set — RECONCILIATION v2, no SMH_PORT
     // fixed singletons
     expect(nums).toContain(9000); // sui RPC
     expect(nums).toContain(9123); // sui faucet
-    expect(nums).toContain(8080); // signaling
     // relay WS + metrics band 4000-4005 (3 relays)
     for (const p of [4000, 4001, 4002, 4003, 4004, 4005]) expect(nums).toContain(p);
     // RTC range expanded to individual ports 10000-10500
@@ -37,7 +36,6 @@ describe('requiredPorts (fixed native-rig set — RECONCILIATION v2, no SMH_PORT
     const nums = requiredPorts({
       suiRpc: 19000,
       suiFaucet: 19123,
-      signaling: 18080,
       relayWs: [14000],
       relayMetrics: [14001],
       rtcRange: [20000, 20002],
@@ -46,7 +44,7 @@ describe('requiredPorts (fixed native-rig set — RECONCILIATION v2, no SMH_PORT
       canaryCoverage: 18105,
     }).map((p) => p.port);
     expect(nums).toEqual(
-      expect.arrayContaining([19000, 19123, 18080, 14000, 14001, 20000, 20001, 20002, 50000, 50001, 18101, 18105]),
+      expect.arrayContaining([19000, 19123, 14000, 14001, 20000, 20001, 20002, 50000, 50001, 18101, 18105]),
     );
     expect(nums).not.toContain(9000);
   });

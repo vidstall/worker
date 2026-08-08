@@ -7,7 +7,7 @@
  *   2. parseSharedObjectFromCreate — pluck the lone shared object out of a
  *      `<module>::create` call result, given the struct name substring.
  *   3. buildEnvContent — format the dvconf-daemons/.env file from the bench
- *      identity bundle (10 chain IDs + 4 daemon keypairs + bench knobs).
+ *      identity bundle (9 chain IDs + 3 daemon keypairs + bench knobs).
  *   4. waitForPort — TCP poll helper used by every wait-for-ready step.
  *
  * Plan: docs/00-meta/progress.md § Session 25 (TS bench bring-up)
@@ -208,7 +208,6 @@ function fakeIds(): BenchIds {
     validatorRegistryId: '0xval',
     userRegistryId: '0xuser',
     roomManagerId: '0xroom',
-    signalingRegistryId: '0xsig',
     roleVoteBoxId: '0xrolebox',
     roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
@@ -219,13 +218,12 @@ function fakeKeys(): DaemonKeys {
   return {
     CP_KEYPAIR: 'suiprivkey1cpcpcp',
     SUI_PRIVATE_KEY: 'suiprivkey1valval',
-    SIGNALING_KEYPAIR: 'suiprivkey1sigsig',
     PRIVATE_KEY: 'suiprivkey1relrelay',
   };
 }
 
 describe('buildEnvContent', () => {
-  it('emits all 10 IDs in canonical order', () => {
+  it('emits all 9 IDs in canonical order', () => {
     const env = buildEnvContent(fakeIds(), fakeKeys());
     expect(env).toContain('PACKAGE_ID=0xpkg');
     expect(env).toContain('NETWORK_REGISTRY_ID=0xnet');
@@ -235,15 +233,13 @@ describe('buildEnvContent', () => {
     expect(env).toContain('VALIDATOR_REGISTRY_ID=0xval');
     expect(env).toContain('USER_REGISTRY_ID=0xuser');
     expect(env).toContain('ROOM_MANAGER_ID=0xroom');
-    expect(env).toContain('SIGNALING_REGISTRY_ID=0xsig');
     expect(env).toContain('ROLE_VOTE_BOX_ID=0xrolebox');
   });
 
-  it('emits all 4 daemon keypairs under canonical env var names', () => {
+  it('emits all 3 daemon keypairs under canonical env var names', () => {
     const env = buildEnvContent(fakeIds(), fakeKeys());
     expect(env).toContain('CP_KEYPAIR=suiprivkey1cpcpcp');
     expect(env).toContain('SUI_PRIVATE_KEY=suiprivkey1valval');
-    expect(env).toContain('SIGNALING_KEYPAIR=suiprivkey1sigsig');
     expect(env).toContain('PRIVATE_KEY=suiprivkey1relrelay');
   });
 
@@ -391,7 +387,7 @@ describe('waitForLogLine', () => {
   it('handles chunked lines split across multiple push calls', async () => {
     const stream = new Readable({ read() {} });
     const promise = waitForLogLine(stream, /chain-aware mode/, 1000);
-    stream.push('Signaling daemon ');
+    stream.push('Relay daemon ');
     stream.push('started — ');
     stream.push('chain-aware mode\n');
     await expect(promise).resolves.toMatch(/chain-aware mode/);

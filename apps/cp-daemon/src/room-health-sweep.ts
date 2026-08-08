@@ -1,34 +1,30 @@
 /**
  * Room health sweep — closes the gap left by validator-driven liveness ejection
- * (`registration::execute_ejection`, added in the liveness_voting module) and
- * signaling's total lack of a failover path.
+ * (`registration::execute_ejection`, added in the liveness_voting module).
  *
- * `execute_ejection` fully removes a dead relay/signaling node from its registry
- * with zero acknowledgment of any room still referencing it — a room's
- * `assigned_relays`/`assigned_signaling` can dangle forever with no on-chain
- * signal. Two gaps this module closes:
+ * `execute_ejection` fully removes a dead relay node from its registry with
+ * zero acknowledgment of any room still referencing it — a room's
+ * `assigned_relays` can dangle forever with no on-chain signal. The gap this
+ * module closes:
  *
- *   1. RELAY: `promote_relay` (see `relay-heartbeat-watcher.ts`, which already
- *      owns the "primary stale but a live standby is already assigned" case end
- *      to end) reads `relay_registry::borrow_info(old_primary)` to check
- *      staleness — this call ABORTS once `old_primary` is fully ejected, so a
- *      dead-and-gone primary can never be promoted via that path. This sweep
- *      handles the two cases `relay-heartbeat-watcher.ts` cannot:
- *        a) primary fully ejected + a live standby already assigned →
- *           `promote_relay_after_ejection` (room_manager.move).
- *        b) primary stale-or-ejected + NO live standby assigned at all →
- *           `authorize_spill_relay` to append a fresh live candidate; a LATER
- *           tick of either watcher then promotes it.
- *      (Residual cost: until this sweep heals case (a) or (b), relay-heartbeat-
- *      watcher's own promote_relay attempts against a fully-ejected primary
- *      will keep aborting on-chain every tick — the same accepted "wasted
- *      retry" cost pattern already tolerated elsewhere (E_ALREADY_VOTED spam).)
+ *   RELAY: `promote_relay` (see `relay-heartbeat-watcher.ts`, which already
+ *   owns the "primary stale but a live standby is already assigned" case end
+ *   to end) reads `relay_registry::borrow_info(old_primary)` to check
+ *   staleness — this call ABORTS once `old_primary` is fully ejected, so a
+ *   dead-and-gone primary can never be promoted via that path. This sweep
+ *   handles the two cases `relay-heartbeat-watcher.ts` cannot:
+ *     a) primary fully ejected + a live standby already assigned →
+ *        `promote_relay_after_ejection` (room_manager.move).
+ *     b) primary stale-or-ejected + NO live standby assigned at all →
+ *        `authorize_spill_relay` to append a fresh live candidate; a LATER
+ *        tick of either watcher then promotes it.
+ *   (Residual cost: until this sweep heals case (a) or (b), relay-heartbeat-
+ *   watcher's own promote_relay attempts against a fully-ejected primary
+ *   will keep aborting on-chain every tick — the same accepted "wasted
+ *   retry" cost pattern already tolerated elsewhere (E_ALREADY_VOTED spam).)
  *
- *   2. SIGNALING: has no failover mechanism at all — `assigned_signaling` is
- *      set once and never reassigned by any other production function. This
- *      sweep is the ENTIRE signaling failover path: `reassign_signaling`
- *      (room_manager.move) covers both fully-ejected and stale-but-registered
- *      old signaling in one on-chain function.
+ * (The standalone signaling node type's failover path -- `reassign_signaling`
+ * -- was removed along with the node type itself.)
  *
  * Design: clones the `RevoteWatcher`/`RelayHeartbeatWatcher` seam pattern — all
  * chain reads go through {@link RoomHealthChainReader} so the decision logic is
@@ -76,8 +72,6 @@ export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 export interface RoomAssignmentSnapshot {
   /** assigned_relays[0]=primary, [1..]=standby/spill. Empty if unassigned. */
   relays: string[];
-  /** assigned_signaling, or null if unassigned. */
-  signaling: string | null;
 }
 
 /** A registry node's id + last_heartbeat, as read from a `get_active_*` getter. */
@@ -95,12 +89,10 @@ export interface RegistryNodeHeartbeat {
 export interface RoomHealthChainReader {
   getCurrentEpoch(): Promise<bigint>;
   getActiveRoomIds(): Promise<string[]>;
-  /** room_manager::get_room_assignment — both relay + signaling in one read. */
+  /** room_manager::get_room_assignment. */
   getRoomAssignment(roomId: string): Promise<RoomAssignmentSnapshot>;
   /** relay_registry::get_active_relays, projected to id + heartbeat. */
   getActiveRelayPool(): Promise<RegistryNodeHeartbeat[]>;
-  /** signaling_registry::get_active_nodes, projected to id + heartbeat. */
-  getActiveSignalingPool(): Promise<RegistryNodeHeartbeat[]>;
 }
 
 // ── Submitters ─────────────────────────────────────────────────────────────────
@@ -116,18 +108,9 @@ export type PromoteAfterEjectionSubmitter = (
 /** Submits `authorize_spill_relay` (CP-cap-gated append). */
 export type SpillRelaySubmitter = (roomId: string, spillRelay: string, traceId: string) => Promise<void>;
 
-/** Submits `reassign_signaling`. */
-export type ReassignSignalingSubmitter = (
-  roomId: string,
-  oldSignaling: string,
-  newSignaling: string,
-  traceId: string,
-) => Promise<void>;
-
 export interface RoomHealthSubmitters {
   promoteAfterEjection: PromoteAfterEjectionSubmitter;
   spillRelay: SpillRelaySubmitter;
-  reassignSignaling: ReassignSignalingSubmitter;
 }
 
 export interface RoomHealthSweepOptions {
@@ -137,7 +120,7 @@ export interface RoomHealthSweepOptions {
 
 export interface RoomHealthAction {
   roomId: string;
-  kind: 'promote_relay_after_ejection' | 'authorize_spill_relay' | 'reassign_signaling';
+  kind: 'promote_relay_after_ejection' | 'authorize_spill_relay';
   oldNodeId: string | null;
   newNodeId: string;
 }
@@ -216,15 +199,13 @@ export class RoomHealthSweep {
     const traceId = randomUUID();
     const actions: RoomHealthAction[] = [];
 
-    const [roomIds, epoch, relayPool, signalingPool] = await Promise.all([
+    const [roomIds, epoch, relayPool] = await Promise.all([
       this.reader.getActiveRoomIds(),
       this.reader.getCurrentEpoch(),
       this.reader.getActiveRelayPool(),
-      this.reader.getActiveSignalingPool(),
     ]);
 
     const relayHbById = new Map(relayPool.map((r) => [normalizeSuiAddress(r.minerId), r.lastHeartbeat]));
-    const signalingHbById = new Map(signalingPool.map((s) => [normalizeSuiAddress(s.minerId), s.lastHeartbeat]));
 
     this.logger.info(
       { trace_id: traceId, module: MODULE, action: 'scan', context: { epoch: epoch.toString(), roomCount: roomIds.length } },
@@ -232,7 +213,7 @@ export class RoomHealthSweep {
     );
 
     for (const roomId of roomIds) {
-      const { relays, signaling } = await this.reader.getRoomAssignment(roomId);
+      const { relays } = await this.reader.getRoomAssignment(roomId);
 
       // ── RELAY ──
       if (relays.length > 0) {
@@ -303,41 +284,6 @@ export class RoomHealthSweep {
           }
           // else: liveStandby exists but primary is merely stale (not ejected) —
           // relay-heartbeat-watcher's promote_relay already owns this case.
-        }
-      }
-
-      // ── SIGNALING (sole reassignment path) ──
-      if (signaling) {
-        const oldSig = normalizeSuiAddress(signaling);
-        const oldHb = signalingHbById.get(oldSig);
-        const eligible = oldHb === undefined || epoch - oldHb > this.maxHeartbeatEpochs;
-        if (eligible) {
-          const candidate = pickCandidate(signalingPool, epoch, this.maxHeartbeatEpochs, new Set([oldSig]));
-          if (candidate) {
-            const key = `reassign_signaling::${roomId}::${oldSig}`;
-            if (!this.actedKeys.has(key)) {
-              const actionTraceId = randomUUID();
-              try {
-                await this.submitters.reassignSignaling(roomId, oldSig, candidate, actionTraceId);
-                this.actedKeys.add(key);
-                actions.push({ roomId, kind: 'reassign_signaling', oldNodeId: oldSig, newNodeId: candidate });
-                this.logger.info(
-                  { trace_id: actionTraceId, module: MODULE, action: 'reassign_signaling_submitted', context: { roomId, oldSignaling: oldSig, newSignaling: candidate, ejected: oldHb === undefined } },
-                  'Room health sweep: reassign_signaling submitted',
-                );
-              } catch (err) {
-                this.logger.warn(
-                  { trace_id: actionTraceId, module: MODULE, context: { roomId, err } },
-                  'Room health sweep: reassign_signaling failed',
-                );
-              }
-            }
-          } else {
-            this.logger.warn(
-              { module: MODULE, context: { roomId, oldSig } },
-              'Room health sweep: signaling assignment unhealthy but no live candidate available',
-            );
-          }
         }
       }
     }
@@ -442,44 +388,6 @@ export function makeSpillRelaySubmitter(
     logger.info(
       { trace_id: traceId, module: MODULE, action: 'spill_relay_confirmed', context: { roomId, spillRelay } },
       'Room health sweep: authorize_spill_relay confirmed on-chain',
-    );
-  };
-}
-
-/**
- * Live `ReassignSignalingSubmitter` — signs + submits `reassign_signaling`.
- * Arg order matches room_manager.move: (net_reg, manager, signaling_reg, room_id, new_signaling, ctx).
- */
-export function makeReassignSignalingSubmitter(
-  client: SuiClient,
-  signer: Ed25519Keypair,
-  config: NetworkConfig,
-  logger: Logger,
-): ReassignSignalingSubmitter {
-  return async (roomId, oldSignaling, newSignaling, traceId) => {
-    await executeWithRetry(
-      client,
-      signer,
-      (tx: Transaction) => {
-        tx.moveCall({
-          // reassign_signaling is defined in the room_manager_reassignment
-          // satellite module (reassignment.move), not room_manager itself.
-          target: `${config.packageId}::room_manager_reassignment::reassign_signaling`,
-          arguments: [
-            tx.object(config.networkRegistryId),
-            tx.object(config.roomManagerId),
-            tx.object(config.signalingRegistryId),
-            tx.pure.id(roomId),
-            tx.pure.id(newSignaling),
-          ],
-        });
-      },
-      'reassign-signaling',
-      logger,
-    );
-    logger.info(
-      { trace_id: traceId, module: MODULE, action: 'reassign_signaling_confirmed', context: { roomId, oldSignaling, newSignaling } },
-      'Room health sweep: reassign_signaling confirmed on-chain',
     );
   };
 }

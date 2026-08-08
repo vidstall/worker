@@ -223,13 +223,12 @@ export interface BenchIds {
   validatorRegistryId: string;
   userRegistryId: string;
   roomManagerId: string;
-  signalingRegistryId: string;
   roleVoteBoxId: string;
   livenessVoteBoxId: string;
 }
 
 /**
- * The four canonical env-var names for daemon keypairs, mirroring the
+ * The three canonical env-var names for daemon keypairs, mirroring the
  * per-app `.env.example` files. Each daemon reads a *different* name so the
  * bundle is a flat record, not a list.
  */
@@ -238,14 +237,12 @@ export interface DaemonKeys {
   CP_KEYPAIR: string;
   /** validator-daemon — apps/validator-daemon/.env.example */
   SUI_PRIVATE_KEY: string;
-  /** signaling — apps/signaling/.env.example */
-  SIGNALING_KEYPAIR: string;
   /** relay — apps/relay/.env.example */
   PRIVATE_KEY: string;
 }
 
 /**
- * Render the dvconf-daemons/.env file the four daemons share. Matches the
+ * Render the dvconf-daemons/.env file the three daemons share. Matches the
  * legacy run-local.ps1 layout so existing daemon code paths (heartbeat,
  * auto-register, latency probe gating via `BENCH_LATENCY=1`) light up
  * unchanged.
@@ -265,12 +262,10 @@ export function buildEnvContent(
     `VALIDATOR_REGISTRY_ID=${ids.validatorRegistryId}`,
     `USER_REGISTRY_ID=${ids.userRegistryId}`,
     `ROOM_MANAGER_ID=${ids.roomManagerId}`,
-    `SIGNALING_REGISTRY_ID=${ids.signalingRegistryId}`,
     `ROLE_VOTE_BOX_ID=${ids.roleVoteBoxId}`,
     `LIVENESS_VOTE_BOX_ID=${ids.livenessVoteBoxId}`,
     `CP_KEYPAIR=${keys.CP_KEYPAIR}`,
     `SUI_PRIVATE_KEY=${keys.SUI_PRIVATE_KEY}`,
-    `SIGNALING_KEYPAIR=${keys.SIGNALING_KEYPAIR}`,
     `PRIVATE_KEY=${keys.PRIVATE_KEY}`,
     'LOG_LEVEL=info',
     'HEARTBEAT_INTERVAL_MS=30000',
@@ -309,7 +304,7 @@ function tryConnectOnce(
 /**
  * Poll a TCP port until it accepts a connection, or fail after `timeoutMs`.
  * Used to wait on the Sui RPC socket (9000), the faucet (9123), and the
- * 4 daemon WS ports (4000 relay, 8080 signaling, etc.).
+ * daemon WS ports (4000 relay, etc.).
  */
 export async function waitForPort(
   host: string,
@@ -388,7 +383,6 @@ export interface LogStream {
  *   - cp-daemon: `"Starting role voting loop"`
  *   - validator-daemon: `"Validator daemon started"`
  * And as a secondary check for those that do:
- *   - signaling: `"Signaling daemon started — chain-aware mode"`
  *   - relay: `"Relay daemon starting"` + later auto-register success
  */
 export function waitForLogLine(
@@ -601,7 +595,7 @@ function cleanStaleState(): void {
   }
   const moveLock = join(CONTRACTS_DIR, 'Move.lock');
   if (existsSync(moveLock)) unlinkSync(moveLock);
-  for (const sub of ['cp-daemon', 'validator-daemon', 'relay', 'signaling']) {
+  for (const sub of ['cp-daemon', 'validator-daemon', 'relay']) {
     const cursorDir = join(DAEMONS_DIR, 'apps', sub, '.cursors');
     if (existsSync(cursorDir)) rmSync(cursorDir, { recursive: true, force: true });
   }
@@ -677,7 +671,7 @@ export async function loadActiveSigner(): Promise<Ed25519Keypair> {
   return Ed25519Keypair.fromSecretKey(exported.exportedPrivateKey);
 }
 
-/** 6 registries that need an explicit `<module>::create(adminCap)` PTB call. */
+/** 5 registries that need an explicit `<module>::create(adminCap)` PTB call. */
 const REGISTRY_SPEC = [
   { module: 'user_registry', structName: 'UserRegistry', key: 'userRegistryId' },
   { module: 'room_manager', structName: 'RoomManager', key: 'roomManagerId' },
@@ -692,11 +686,6 @@ const REGISTRY_SPEC = [
     structName: 'ValidatorRegistry',
     key: 'validatorRegistryId',
   },
-  {
-    module: 'signaling_registry',
-    structName: 'SignalingRegistry',
-    key: 'signalingRegistryId',
-  },
 ] as const;
 
 type RegistryKey =
@@ -704,11 +693,10 @@ type RegistryKey =
   | 'roomManagerId'
   | 'relayRegistryId'
   | 'cpRegistryId'
-  | 'validatorRegistryId'
-  | 'signalingRegistryId';
+  | 'validatorRegistryId';
 
 /**
- * Sequentially create the 6 admin-gated shared registries. SDK PTBs +
+ * Sequentially create the 5 admin-gated shared registries. SDK PTBs +
  * showObjectChanges → parseSharedObjectFromCreate. One TX per registry keeps
  * failure diagnosis simple (one bad TX → one named bad registry).
  */
@@ -746,14 +734,13 @@ export interface DaemonIdentity {
 }
 
 /**
- * Generate the 4 daemon Ed25519 keypairs via the SDK (no sui keytool round-trip).
+ * Generate the 3 daemon Ed25519 keypairs via the SDK (no sui keytool round-trip).
  * Each emits the bech32 `suiprivkey…` form that the daemon .env files expect.
  */
 export function generateDaemonKeypairs(): DaemonIdentity {
   const names: (keyof DaemonKeys)[] = [
     'CP_KEYPAIR',
     'SUI_PRIVATE_KEY',
-    'SIGNALING_KEYPAIR',
     'PRIVATE_KEY',
   ];
   const keys = {} as DaemonKeys;
@@ -779,7 +766,6 @@ export async function fundAddresses(addresses: string[]): Promise<void> {
 const MINT_AMOUNTS: Record<keyof DaemonKeys, bigint> = {
   CP_KEYPAIR: 3_000_000_000n, // 3 DVCONF (CP stake = 2 DVCONF)
   SUI_PRIVATE_KEY: 1_000_000_000n, // 1 DVCONF (validator stake = 0.5)
-  SIGNALING_KEYPAIR: 500_000_000n, // 0.5 DVCONF (signaling stake = 0.25)
   PRIVATE_KEY: 2_000_000_000n, // 2 DVCONF (relay stake = 1)
 };
 
@@ -820,7 +806,7 @@ export async function mintDvconfTokens(
 
 /**
  * Full Phase-1 bring-up: spawn Sui, publish package, create the 6
- * AdminCap-gated registries, generate + fund the 4 daemon keypairs, mint
+ * AdminCap-gated registries, generate + fund the 3 daemon keypairs, mint
  * DVCONF, write `dvconf-daemons/.env`. Returns the assembled bench identity
  * bundle so Phase 2 (daemon spawn + room create) can chain off it.
  */
@@ -870,7 +856,7 @@ export async function bringUpBench(opts: {
     publishOut.adminCapId,
   );
 
-  console.log('[bench] generating 4 daemon keypairs...');
+  console.log('[bench] generating 3 daemon keypairs...');
   const identity = generateDaemonKeypairs();
   console.log('[bench] funding daemon addresses...');
   await fundAddresses(Object.values(identity.addresses));
@@ -913,17 +899,17 @@ export async function bringUpBench(opts: {
 /**
  * Per-daemon spec: where to spawn it, how to detect readiness, what env to
  * pass on top of the shared `.env`. Ports are populated only for daemons that
- * expose a listening socket (signaling 8080, relay 4000). Daemons without a
- * port (cp-daemon, validator-daemon) rely on log-tail alone.
+ * expose a listening socket (relay 4000). Daemons without a port (cp-daemon,
+ * validator-daemon) rely on log-tail alone.
  *
  * Spawn order discipline (see docs/00-meta/gotchas.md G-014): cp-daemon FIRST
- * so its role-voter loop is active before relay/signaling/validator register
- * in voting mode. The other three can come up in parallel after CP is ready
- * because the single-CP quorum (compute_threshold clamps `required >= 1`)
- * satisfies each vote with one self-cast TX.
+ * so its role-voter loop is active before relay/validator register in voting
+ * mode. The other two can come up in parallel after CP is ready because the
+ * single-CP quorum (compute_threshold clamps `required >= 1`) satisfies each
+ * vote with one self-cast TX.
  */
 export interface DaemonSpec {
-  name: 'cp-daemon' | 'relay' | 'signaling' | 'validator-daemon';
+  name: 'cp-daemon' | 'relay' | 'validator-daemon';
   /** Path under `dvconf-daemons/apps/` — usually identical to `name`. */
   appDir: string;
   /** Open TCP port the daemon binds, or undefined for log-only ready check. */
@@ -939,12 +925,6 @@ const DAEMON_SPECS: DaemonSpec[] = [
     name: 'cp-daemon',
     appDir: 'cp-daemon',
     readyLogPattern: /CP daemon started/,
-  },
-  {
-    name: 'signaling',
-    appDir: 'signaling',
-    port: 8080,
-    readyLogPattern: /Signaling daemon started/,
   },
   {
     name: 'relay',
@@ -1084,9 +1064,9 @@ export async function waitForDaemonReady(
 }
 
 /**
- * Spawn all 4 daemons in voting-safe order: cp-daemon first (await ready),
- * then relay + signaling + validator in parallel. Returns all 4 handles for
- * later teardown. On any failure, tears down whatever was already spawned and
+ * Spawn all 3 daemons in voting-safe order: cp-daemon first (await ready),
+ * then relay + validator in parallel. Returns all 3 handles for later
+ * teardown. On any failure, tears down whatever was already spawned and
  * re-throws — leaving orphan daemon processes around would block subsequent
  * runs on the same ports.
  */

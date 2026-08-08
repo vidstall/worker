@@ -93,6 +93,15 @@ export function createSignalingServer(
 ): {
   wss: WebSocketServer;
   getRoomCount: () => number;
+  /**
+   * Rooms-dashboard metrics migration (formerly `apps/signaling/src/rooms.ts`'s
+   * `registerRoomMetrics`, deleted with the standalone signaling app): live
+   * per-room participant counts, sourced directly from this relay's own
+   * `room.peers` map (best visibility — the relay sees every join/leave on its
+   * own WebSocket connections). Read by `startMetricsServer`'s
+   * `dvconf_room_participants{roomId}` gauge on each `/metrics/prom` scrape.
+   */
+  getRoomParticipantCounts: () => Array<{ roomId: string; count: number }>;
   setAccepting: (accepting: boolean) => void;
   closeRooms: () => void;
   /**
@@ -411,6 +420,13 @@ export function createSignalingServer(
   return {
     wss,
     getRoomCount: () => state.rooms.size,
+    getRoomParticipantCounts: () => {
+      const counts: Array<{ roomId: string; count: number }> = [];
+      for (const [roomId, room] of state.rooms) {
+        counts.push({ roomId, count: room.peers.size });
+      }
+      return counts;
+    },
     setAccepting: (next: boolean) => setAcceptingImpl(state, next),
     closeRooms: () => closeRoomsImpl(state),
     fanLocalProducer: (roomId, producerPeerId, producer, peerRelayId) =>

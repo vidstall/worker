@@ -122,7 +122,6 @@ export async function triggerDistribution(
           tx.object(config.relayRegistryId),        // &mut RelayRegistry
           tx.object(config.validatorRegistryId),    // &mut ValidatorRegistry
           tx.object(config.cpRegistryId),            // &ControlPlaneRegistry
-          tx.object(config.signalingRegistryId),     // &SignalingRegistry
         ],
       });
     },

@@ -559,6 +559,11 @@ function buildPeerQualityAggregateGauges(
  *                         lingering in Prometheus forever. Omitted ⇒ a fresh,
  *                         private instance (today's behavior) -- keeps existing
  *                         tests that spin up multiple isolated servers unaffected.
+ * @param getRoomParticipantCounts - Optional resolver for live per-room
+ *                         participant counts (Rooms-dashboard metrics migration,
+ *                         formerly `apps/signaling/src/rooms.ts`'s
+ *                         `registerRoomMetrics`). Backs `dvconf_room_participants
+ *                         {roomId}`. Omitted ⇒ the gauge stays empty (no rows).
  * @returns The HTTP server instance (for graceful shutdown).
  */
 export function startMetricsServer(
@@ -569,6 +574,7 @@ export function startMetricsServer(
   getWorkerDiedCount?: () => number,
   getWorkers?: () => msTypes.Worker[],
   statsWindow: PeerStatsWindow = new PeerStatsWindow(),
+  getRoomParticipantCounts?: () => Array<{ roomId: string; count: number }>,
 ): Server {
   const port = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
 
@@ -638,6 +644,19 @@ export function startMetricsServer(
   const bytesForwardedGauge = new Gauge({
     name: 'dvconf_relay_bytes_forwarded_total',
     help: 'Cumulative bytes forwarded across all sessions (MetricsTracker)',
+    registers: [promRegistry],
+  });
+  // Rooms-dashboard metrics migration (formerly owned by the now-deleted
+  // `apps/signaling/src/rooms.ts`'s `registerRoomMetrics`) -- relay emits
+  // participant count since it sees every join/leave directly on its own
+  // WebSocket connections (best visibility of the 3 daemon types). Wire-
+  // compatible name/labels with what Grafana's Rooms dashboard already
+  // expects; only the emitting job (now relay's `xaisen` scrape job instead
+  // of `xaisen-signaling`) changes.
+  const roomParticipantsGauge = new Gauge({
+    name: 'dvconf_room_participants',
+    help: 'Current participant count for this room',
+    labelNames: ['roomId'],
     registers: [promRegistry],
   });
 
@@ -733,6 +752,10 @@ export function startMetricsServer(
       for (const gauge of Object.values(gauges)) {
         gauge.reset();
       }
+    }
+    roomParticipantsGauge.reset();
+    for (const { roomId, count } of getRoomParticipantCounts?.() ?? []) {
+      roomParticipantsGauge.set({ roomId }, count);
     }
     relayDownHintGauge.reset();
     const gaugeNow = Date.now();

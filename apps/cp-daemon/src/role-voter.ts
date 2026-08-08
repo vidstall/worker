@@ -2,7 +2,7 @@
  * Role voting module — periodic polling for unassigned miners.
  *
  * Tracks unassigned miners discovered via MinerRegistered events (role=0/User).
- * Reads active_count from all 4 registries via devInspect, computes scarcest role,
+ * Reads active_count from all 3 registries via devInspect, computes scarcest role,
  * and casts vote TXs on-chain via RoleVoteBox.
  *
  * Implements VOTE-02, VOTE-05, VOTE-06.
@@ -62,14 +62,12 @@ export function registerRoleVoterMetrics(registry: Registry): void {
 const ROLE_RELAY = MinerRole.Relay;       // 2
 const ROLE_VALIDATOR = MinerRole.Validator; // 1
 const ROLE_CP = MinerRole.CP;             // 3
-const ROLE_SIGNALING = MinerRole.Signaling; // 4
 
 /** Registry active counts snapshot. */
 export interface RegistryCounts {
   relay: bigint;
   validator: bigint;
   cp: bigint;
-  signaling: bigint;
 }
 
 /** Set of miner IDs we have already voted on (avoid duplicate vote errors). */
@@ -122,22 +120,12 @@ async function readMinerField(
 
 /**
  * Read a miner's bandwidth_mbps from on-chain MinerProfile via devInspect.
- * Returns the bandwidth value; 0 means non-relay (signaling/CP/validator).
+ * Returns the bandwidth value; 0 means non-relay (CP/validator).
  */
 async function readMinerBandwidth(
   client: SuiClient, packageId: string, minerStoreId: string, minerId: string, sender: string,
 ): Promise<bigint> {
   return readMinerField(client, packageId, minerStoreId, minerId, 'get_miner_bandwidth', sender);
-}
-
-/**
- * Read a miner's cpu_cores from on-chain MinerProfile via devInspect.
- * Signaling registers with cpu_cores > 0; validators register with cpu_cores == 0.
- */
-async function readMinerCpuCores(
-  client: SuiClient, packageId: string, minerStoreId: string, minerId: string, sender: string,
-): Promise<bigint> {
-  return readMinerField(client, packageId, minerStoreId, minerId, 'get_miner_cpu_cores', sender);
 }
 
 /**
@@ -177,32 +165,30 @@ async function readActiveCount(
 }
 
 /**
- * Read all 4 registry active counts.
+ * Read all 3 registry active counts.
  */
 async function readRegistryCounts(
   client: SuiClient,
   config: NetworkConfig,
   sender: string,
 ): Promise<RegistryCounts> {
-  const [relay, validator, cp, signaling] = await Promise.all([
+  const [relay, validator, cp] = await Promise.all([
     readActiveCount(client, config.packageId, 'relay_registry', 'active_count', config.relayRegistryId, sender),
     readActiveCount(client, config.packageId, 'validator_registry', 'active_count', config.validatorRegistryId, sender),
     readActiveCount(client, config.packageId, 'control_plane_registry', 'active_cp_count', config.cpRegistryId, sender),
-    readActiveCount(client, config.packageId, 'signaling_registry', 'active_signaling_count', config.signalingRegistryId, sender),
   ]);
-  return { relay, validator, cp, signaling };
+  return { relay, validator, cp };
 }
 
 /**
  * Compute which role is scarcest based on registry counts.
  *
  * Returns the role constant (u8) for the role with fewest active nodes.
- * Ties broken by priority: validator > signaling > relay > cp.
+ * Ties broken by priority: validator > relay > cp.
  */
 function computeScarcestRole(counts: RegistryCounts): number {
   const roles: Array<{ role: number; count: bigint }> = [
     { role: ROLE_VALIDATOR, count: counts.validator },
-    { role: ROLE_SIGNALING, count: counts.signaling },
     { role: ROLE_RELAY, count: counts.relay },
     { role: ROLE_CP, count: counts.cp },
   ];
@@ -260,7 +246,6 @@ async function castVote(
           tx.object(config.cpRegistryId),          // &ControlPlaneRegistry
           tx.object(config.relayRegistryId),       // &RelayRegistry
           tx.object(config.validatorRegistryId),   // &ValidatorRegistry
-          tx.object(config.signalingRegistryId),   // &SignalingRegistry
           tx.object(cpCapId),                      // &ControlPlaneCap
           tx.pure.id(minerId),                     // miner_id: ID
           tx.pure.u8(role),                        // role: u8
@@ -387,7 +372,6 @@ export function startRoleVoting(
     [ROLE_RELAY]: 'relay',
     [ROLE_VALIDATOR]: 'validator',
     [ROLE_CP]: 'cp',
-    [ROLE_SIGNALING]: 'signaling',
   };
 
   const poll = async (): Promise<void> => {
@@ -412,7 +396,6 @@ export function startRoleVoting(
           relay: counts.relay.toString(),
           validator: counts.validator.toString(),
           cp: counts.cp.toString(),
-          signaling: counts.signaling.toString(),
           pendingCount: pendingMiners.length,
           revoteCount: pendingRevotes.length,
         },
@@ -421,8 +404,9 @@ export function startRoleVoting(
 
       // 3-4. For each unassigned miner, infer its intended role from metadata:
       //   bandwidth > 0 → relay
-      //   bandwidth == 0, cpu_cores > 0 → signaling
-      //   bandwidth == 0, cpu_cores == 0 → validator
+      //   bandwidth == 0 → validator
+      // (The standalone signaling node type -- inferred from cpu_cores > 0 --
+      // was removed along with the node type itself.)
 
       for (const minerId of pendingMiners) {
         let role: number;
@@ -433,14 +417,8 @@ export function startRoleVoting(
           role = ROLE_RELAY;
           logger.info({ minerId, bandwidth: bandwidth.toString() }, 'Inferred relay daemon from bandwidth');
         } else {
-          const cpuCores = await readMinerCpuCores(client, config.packageId, config.minerStoreId, minerId, sender);
-          if (cpuCores > 0n) {
-            role = ROLE_SIGNALING;
-            logger.info({ minerId, cpuCores: cpuCores.toString() }, 'Inferred signaling daemon from cpu_cores > 0');
-          } else {
-            role = ROLE_VALIDATOR;
-            logger.info({ minerId }, 'Inferred validator daemon from bandwidth=0, cpu_cores=0');
-          }
+          role = ROLE_VALIDATOR;
+          logger.info({ minerId }, 'Inferred validator daemon from bandwidth=0');
         }
 
         logger.info(

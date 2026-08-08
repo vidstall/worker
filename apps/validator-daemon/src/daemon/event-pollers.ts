@@ -187,7 +187,7 @@ export async function startEventPollers(
   });
 
   // "i expect that job belong to validator" -- validator-driven liveness enforcement:
-  // discovers stale relay/signaling/cp-daemon/validator nodes, casts cast_liveness_vote
+  // discovers stale relay/cp-daemon/validator nodes, casts cast_liveness_vote
   // toward a validator-quorum, and cranks execute_ejection once NodeEjectionApproved
   // fires. Independent cadence from the canary cell loop; CRASH-SAFE (see liveness-sweep.ts).
   try {

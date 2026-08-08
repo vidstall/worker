@@ -31,19 +31,18 @@ function fakeKey(tag: string): SeededKey {
   };
 }
 
-/** The exact N=5 substrate seed-multicp writes: 5 cps / 4 validators / 2 relays / 1 signaling. */
+/** The exact N=5 substrate seed-multicp writes: 5 cps / 4 validators / 2 relays. */
 function fakeKeys(): MultiCpKeysFile {
   return {
     cps: [0, 1, 2, 3, 4].map((i) => fakeKey(`cp${i}`)),
     validators: [0, 1, 2, 3].map((j) => fakeKey(`val${j}`)),
     relays: [0, 1].map((k) => fakeKey(`relay${k}`)),
-    signaling: [fakeKey('sig0')],
   };
 }
 
 const USER_MINER_KEY = 'suiprivkey1userminerfresh';
 
-/** The 10 published-config vars every child needs (loadNetworkConfig REQUIRED set). */
+/** The 9 published-config vars every child needs (loadNetworkConfig REQUIRED set). */
 const REQUIRED_CFG_VARS = [
   'PACKAGE_ID',
   'NETWORK_REGISTRY_ID',
@@ -53,11 +52,10 @@ const REQUIRED_CFG_VARS = [
   'VALIDATOR_REGISTRY_ID',
   'USER_REGISTRY_ID',
   'ROOM_MANAGER_ID',
-  'SIGNALING_REGISTRY_ID',
   'ROLE_VOTE_BOX_ID',
 ] as const;
 
-/** A minimal baseEnv carrying exactly the 10 required $CFG vars (distinct values). */
+/** A minimal baseEnv carrying exactly the 9 required $CFG vars (distinct values). */
 function baseCfgEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const k of REQUIRED_CFG_VARS) env[k] = `0x${k.toLowerCase()}_value`;
@@ -91,22 +89,19 @@ function listeningPorts(s: ProcessSpec): number[] {
         Number(s.env['RTC_MAX_PORT']),
         ...pipeBounds(s.env['PIPE_PORT_RANGE']),
       ];
-    case 'signaling':
-      return [Number(s.env['SIGNALING_PORT']), Number(s.env['SIGNALING_HEALTHZ_PORT'])];
     default:
       return [];
   }
 }
 
 describe('buildLaunchPlan — the C3 fleet matrix (pure)', () => {
-  it('produces exactly 13 specs (5 cp + 4 val + 1 user-miner + 2 relay + 1 sig)', () => {
+  it('produces exactly 12 specs (5 cp + 4 val + 1 user-miner + 2 relay)', () => {
     const specs = plan();
-    expect(specs).toHaveLength(13);
+    expect(specs).toHaveLength(12);
     expect(specs.filter((s) => s.app === 'cp-daemon')).toHaveLength(5);
     // validator-daemon binary covers BOTH the 4 infra validators AND the user-miner.
     expect(specs.filter((s) => s.app === 'validator-daemon')).toHaveLength(5);
     expect(specs.filter((s) => s.app === 'relay')).toHaveLength(2);
-    expect(specs.filter((s) => s.app === 'signaling')).toHaveLength(1);
   });
 
   it('allocates pairwise non-colliding listening ports across the whole fleet', () => {
@@ -209,19 +204,7 @@ describe('buildLaunchPlan — the C3 fleet matrix (pure)', () => {
     }
   });
 
-  it('configures the single signaling on the published 8080 + healthz 8082', () => {
-    const sig = byName(plan(), 'sig-0');
-    const keys = fakeKeys();
-    expect(sig.order).toBe('infra');
-    expect(sig.app).toBe('signaling');
-    expect(sig.env['SIGNALING_KEYPAIR']).toBe(keys.signaling[0]!.secretKey);
-    expect(sig.env['MINER_CAP_ID']).toBe(keys.signaling[0]!.capId);
-    expect(sig.env['SIGNALING_PORT']).toBe('8080');
-    expect(sig.env['SIGNALING_HEALTHZ_PORT']).toBe('8082');
-    expect(sig.healthzPort).toBe(8082);
-  });
-
-  it('threads all 10 required $CFG vars into every child env', () => {
+  it('threads all 9 required $CFG vars into every child env', () => {
     const specs = plan();
     const base = baseCfgEnv();
     for (const s of specs) {
@@ -246,11 +229,11 @@ describe('buildLaunchPlan — the C3 fleet matrix (pure)', () => {
     expect(specs.every((s) => s.env['SUI_NETWORK'] === 'http://127.0.0.1:9000')).toBe(true);
   });
 
-  it('groups the spawn waves: 5 cp / 1 user-miner / 7 infra', () => {
+  it('groups the spawn waves: 5 cp / 1 user-miner / 6 infra', () => {
     const specs = plan();
     expect(specs.filter((s) => s.order === 'cp')).toHaveLength(5);
     expect(specs.filter((s) => s.order === 'user-miner')).toHaveLength(1);
-    expect(specs.filter((s) => s.order === 'infra')).toHaveLength(7);
+    expect(specs.filter((s) => s.order === 'infra')).toHaveLength(6);
   });
 
   it('throws loud when a required $CFG var is missing (fail before any spawn)', () => {
@@ -261,12 +244,11 @@ describe('buildLaunchPlan — the C3 fleet matrix (pure)', () => {
 
   // Every role array must be the EXACT genuine-N=5 count: a 5th validator would
   // collide with the user-miner on 8105, a 3rd relay would overlap the RTC range,
-  // etc. Guard ALL four arrays, not just cps.
+  // etc. Guard ALL three arrays, not just cps.
   it.each<[string, (k: MultiCpKeysFile) => void, RegExp]>([
     ['cps', (k) => k.cps.pop(), /cps/i],
     ['validators', (k) => k.validators.pop(), /validators/i],
     ['relays', (k) => k.relays.pop(), /relays/i],
-    ['signaling', (k) => k.signaling.pop(), /signaling/i],
   ])('throws when the %s array is not the genuine N=5 substrate count', (_label, mutate, pattern) => {
     const wrong = fakeKeys();
     mutate(wrong);
@@ -435,7 +417,6 @@ function roomAssigned(over: Partial<RoomAssigned> = {}): RoomAssigned {
   return {
     room_id: addr(5),
     relay_ids: [addr(20), addr(21)],
-    signaling_id: addr(30),
     relay_mode: 0,
     verified_score: '1000',
     consensus_reached: true,

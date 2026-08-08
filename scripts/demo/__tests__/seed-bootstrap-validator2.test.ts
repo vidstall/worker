@@ -9,13 +9,13 @@ const k = (s: string): SeededKey => ({
 });
 
 describe('buildKeysRecord (seed-bootstrap validator-2 slot)', () => {
-  it('emits all 6 role slots INCLUDING a distinct validator-2', () => {
+  it('emits all 5 role slots INCLUDING a distinct validator-2', () => {
     const rec = buildKeysRecord({
       cp: k('cp'), relay: k('relay'), 'relay-standby': k('rs'),
-      validator: k('v1'), 'validator-2': k('v2'), signaling: k('sig'),
+      validator: k('v1'), 'validator-2': k('v2'),
     });
     expect(Object.keys(rec).sort()).toEqual(
-      ['cp', 'relay', 'relay-standby', 'signaling', 'validator', 'validator-2'],
+      ['cp', 'relay', 'relay-standby', 'validator', 'validator-2'],
     );
     // validator-2 MUST be a DISTINCT key from validator (distinct miner_id on-chain).
     expect(rec['validator-2'].secretKey).not.toBe(rec['validator'].secretKey);
@@ -27,7 +27,7 @@ describe('buildKeysRecord (seed-bootstrap validator-2 slot)', () => {
   it('preserves a minerId on every slot (relay.minerId is load-bearing for live-seams)', () => {
     const rec = buildKeysRecord({
       cp: k('cp'), relay: k('relay'), 'relay-standby': k('rs'),
-      validator: k('v1'), 'validator-2': k('v2'), signaling: k('sig'),
+      validator: k('v1'), 'validator-2': k('v2'),
     });
     expect(rec['relay'].minerId).toBe('0xmin-relay');
     for (const slot of Object.values(rec)) {

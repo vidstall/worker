@@ -23,7 +23,7 @@
  *     used only as a manifest binding + a board self-skip — NOT the attestation signer. The
  *     attestation is signed by the per-boot SESSION key, which each validator self-registers on-chain
  *     at boot (self_assign_session_wallet) — so NO session-wallet registration is needed here.
- *   - deployer authority for assign_relay_and_signaling = the publisher (AdminCap owner): its secret +
+ *   - deployer authority for assign_relay = the publisher (AdminCap owner): its secret +
  *     cap id are written to /shared/admin-creds.json by publish-and-init.sh.
  *   - relay.minerId comes from the seed daemon-keys.json (seed-bootstrap now emits it).
  *
@@ -192,7 +192,6 @@ async function main(): Promise<void> {
     const manifest: RoomManifest = {
       roomId,
       relayId: relayMinerId,
-      signalingId: relayMinerId,
       primaryUrl: process.env['PRIMARY_URL'] ?? 'ws://relay:4001',
     };
     writeRoomManifest([ROOM_OUTPUT_PATH, ROOM_HOST_OUTPUT_PATH], manifest);
@@ -252,7 +251,6 @@ async function main(): Promise<void> {
         VALIDATOR_REGISTRY_ID: config.validatorRegistryId,
         USER_REGISTRY_ID: config.userRegistryId,
         ROOM_MANAGER_ID: config.roomManagerId,
-        SIGNALING_REGISTRY_ID: config.signalingRegistryId,
         ROLE_VOTE_BOX_ID: config.roleVoteBoxId,
       },
       null,

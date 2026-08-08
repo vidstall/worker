@@ -1,7 +1,7 @@
 /**
  * CP Daemon — Control Plane daemon entry point.
  *
- * Subscribes to relay/room/validator/signaling/voting events, runs relay + validator
+ * Subscribes to relay/room/validator/voting events, runs relay + validator
  * scoring, sends heartbeat to ControlPlaneRegistry, and participates in role voting.
  *
  * Uses @dvconf/shared for all chain interactions (DAEMON-12) with exponential backoff (DAEMON-07).
@@ -26,6 +26,8 @@ import {
   registerEventPollerMetrics,
   registerRoleAssignmentMetrics,
   createRegistrationGauge,
+  createGauge,
+  createDurationHistogram,
   EventPoller,
   queryHistoricalEvents,
   readIsPaused,
@@ -59,7 +61,6 @@ import {
   startRoomHealthSweep,
   makePromoteAfterEjectionSubmitter,
   makeSpillRelaySubmitter,
-  makeReassignSignalingSubmitter,
   resolveMaxHeartbeatEpochs as resolveRoomHealthMaxHeartbeatEpochs,
 } from './room-health-sweep.js';
 import { LiveRoomHealthChainStateReader } from './room-health-chain-state-reader.js';
@@ -170,7 +171,7 @@ export function startHealthMonitor(args: {
  * The cp-daemon is poller-only (no WS accept, nothing to drain) → `setAccepting`
  * and `drain` are NO-OPs; the substance is the ordered reactive → liveness-LAST
  * groups over the heartbeat + role-voting + the two watchers + the TURN/cap-token
- * issuers + the 9 EventPollers.
+ * issuers + the 8 EventPollers.
  */
 export interface CpShutdownDeps {
   logger: Logger;
@@ -188,7 +189,7 @@ export interface CpShutdownDeps {
   stopRelayHeartbeatWatcher: () => void;
   /** (3) reactive — the WorkerConfirmedDead listener (room_health_alerts fast-failover path). */
   stopWorkerConfirmedDeadListener: () => void;
-  /** (3) reactive — the room-health sweep (post-ejection relay/signaling reassignment). */
+  /** (3) reactive — the room-health sweep (post-ejection relay reassignment). */
   stopRoomHealthSweep: () => void;
   /** (3) reactive — the room-expiry sweep (auto-close stale PENDING/READY rooms). */
   stopRoomExpirySweep: () => void;
@@ -198,7 +199,7 @@ export interface CpShutdownDeps {
   stopCapTokenIssuer: () => void;
   /** (3) reactive — the optional TURN RPC HTTP server (null when TURN_RPC_TOKEN unset). */
   stopTurnRpc?: () => void;
-  /** (3) reactive — the 9 control-plane EventPollers. */
+  /** (3) reactive — the 8 control-plane EventPollers. */
   stopPollers: () => void;
   /** (4) LAST — heartbeat (C-B: moved here so the chain sees the daemon live). */
   stopHeartbeat: () => void;
@@ -271,8 +272,8 @@ export function buildCpShutdownPlan(
  * (CP failover deferred to advisor gate 5) → arms = { paused } ONLY: it subscribes
  * NEITHER economic_layer NOR node_health, so only the `is_paused()` poll is armed.
  * Because both id-filtered arms are off, `ownMinerId` is unused → we pass `''` and
- * SKIP the {@link readCapMinerId} RPC (unlike validator/signaling, which arm
- * `degraded` and need the self-filter id). The `paused` arm reads
+ * SKIP the {@link readCapMinerId} RPC (unlike validator-daemon, which arms
+ * `degraded` and needs the self-filter id). The `paused` arm reads
  * `network_registry::is_paused` via {@link readIsPaused} (devInspect, fail-open).
  * The existing cp event-handler `RelaySlashed` arm (the TURN kill-switch for OTHER
  * relays) is UNTOUCHED — distinct from this self-targeted terminal trigger.
@@ -317,7 +318,7 @@ async function main(): Promise<void> {
 
   // P17 M2b-P10 (DOH-019/027): the ChainEventListener backing the F60
   // SelfShutdownWatcher (pause arm only — NO subscribes) + the /healthz isLive
-  // gate. HONEST CARRY-FORWARD: cp's 9 EventPollers are NOT routed through this
+  // gate. HONEST CARRY-FORWARD: cp's 8 EventPollers are NOT routed through this
   // listener and the watcher's degraded arm is OFF → this listener has ZERO
   // subscribers → isDegraded() is always false → cp /healthz stays 200 in
   // practice (the isLive capability is wired but currently VACUOUS for cp). cp
@@ -349,6 +350,28 @@ async function main(): Promise<void> {
   registerEventPollerMetrics(cpPromRegistry, 'cp-daemon');
   registerRoleVoterMetrics(cpPromRegistry);
   registerRoleAssignmentMetrics(cpPromRegistry, 'cp-daemon');
+  // Rooms-dashboard metrics migration (formerly `apps/signaling/src/rooms.ts`'s
+  // `registerRoomMetrics`, deleted with the standalone signaling app) --
+  // cp-daemon owns `dvconf_rooms_active`/`dvconf_room_duration_seconds` since
+  // it already watches room lifecycle chain-side (room-expiry-sweep.ts) --
+  // single source of truth, not fragmented across relays in a multi-relay
+  // room. See room-expiry-sweep.ts's RoomLifecycleMetricsSink doc.
+  const roomsActiveGauge = createGauge(
+    cpPromRegistry,
+    'dvconf_rooms_active',
+    'Currently open rooms (non-empty peer sets) for this service',
+    ['service'],
+  );
+  const roomDurationHistogram = createDurationHistogram(
+    cpPromRegistry,
+    'dvconf_room_duration_seconds',
+    'Duration a room stayed open, from first join to the last peer leaving',
+    [],
+  );
+  const roomLifecycleMetricsSink = {
+    setRoomsActive: (count: number) => roomsActiveGauge.set({ service: 'cp-daemon' }, count),
+    observeRoomDurationSeconds: (seconds: number) => roomDurationHistogram.observe(seconds),
+  };
   // Replaces the old SSH-grepped `docker logs | grep 'operator address|
   // node_id=|bootstrap failed'` status check (cli/infra/inventory.py's
   // registry_status()) with a real Prometheus series -- see
@@ -465,12 +488,11 @@ async function main(): Promise<void> {
   logger.info({ module: 'cp-daemon' }, 'WorkerConfirmedDead listener started');
 
   // Room health sweep — closes the gap where a validator-quorum liveness
-  // ejection (registration::execute_ejection) removes a relay/signaling node
-  // from its registry without ever touching RoomManager, leaving a room's
-  // assignment dangling forever. Complements relay-heartbeat-watcher (which
-  // owns the "primary stale, live standby already assigned" case): this sweep
-  // handles the "primary fully ejected" and "no live standby at all" relay
-  // gaps, plus signaling's entire failover path (it has no other mechanism).
+  // ejection (registration::execute_ejection) removes a relay node from its
+  // registry without ever touching RoomManager, leaving a room's assignment
+  // dangling forever. Complements relay-heartbeat-watcher (which owns the
+  // "primary stale, live standby already assigned" case): this sweep handles
+  // the "primary fully ejected" and "no live standby at all" relay gaps.
   const roomHealthReader = new LiveRoomHealthChainStateReader(client, config, logger);
   const roomHealthScanMs = parseInt(
     process.env['ROOM_HEALTH_SCAN_INTERVAL_MS'] ?? String(Number(sysState.epochDurationMs)),
@@ -481,7 +503,6 @@ async function main(): Promise<void> {
     {
       promoteAfterEjection: makePromoteAfterEjectionSubmitter(client, signer, config, logger),
       spillRelay: makeSpillRelaySubmitter(client, signer, config, cpCapId, logger),
-      reassignSignaling: makeReassignSignalingSubmitter(client, signer, config, logger),
     },
     logger,
     {
@@ -512,6 +533,7 @@ async function main(): Promise<void> {
       pendingExpiryMs: resolvePendingExpiryMs(process.env['ROOM_EXPIRY_PENDING_MS'], logger),
       readyExpiryMs: resolveReadyExpiryMs(process.env['ROOM_EXPIRY_READY_MS'], logger),
     },
+    roomLifecycleMetricsSink,
   );
   const stopRoomExpirySweep = (): void => roomExpirySweep.stop();
   logger.info({ module: 'cp-daemon', roomExpiryScanMs }, 'room expiry sweep started');
@@ -669,7 +691,7 @@ async function main(): Promise<void> {
     logger.info({ module: 'cp-daemon', feedUrl, feedPollMs }, 'REQ-RMS-022: attested-load poller started (RMS_ATTESTED_PLACEMENT=1)');
   }
 
-  const { handler, relayState, signalingState, validatorState, retryPendingAssignments } = createEventHandler(logger, undefined, {
+  const { handler, relayState, validatorState, retryPendingAssignments } = createEventHandler(logger, undefined, {
     client,
     signer,
     config,
@@ -715,9 +737,9 @@ async function main(): Promise<void> {
     await handler(ev);
   };
 
-  // Bootstrap: replay historical relay/signaling/validator events so state maps are populated
+  // Bootstrap: replay historical relay/validator events so state maps are populated
   // before real-time polling starts (prevents race where relay registers before CP poller runs)
-  for (const mod of ['relay_registry', 'signaling_registry', 'validator_registry', 'registration'] as const) {
+  for (const mod of ['relay_registry', 'validator_registry', 'registration'] as const) {
     try {
       const events = await queryHistoricalEvents(graphqlClient, config.originalPackageId ?? config.packageId, mod, 100);
       rpcTotal++; // F61 rpc_error_rate: a successful queryEvents attempt (DOH-014)
@@ -732,7 +754,7 @@ async function main(): Promise<void> {
     }
   }
   logger.info(
-    { relays: relayState.size, signaling: signalingState.size, validators: validatorState.size },
+    { relays: relayState.size, validators: validatorState.size },
     'Bootstrap complete — state maps populated',
   );
 
@@ -797,15 +819,6 @@ async function main(): Promise<void> {
     pollingIntervalMs: pollIntervalMs,
     cursorPath: cursorDir('room_manager.json'),
     logger: logger.child({ poller: 'room_manager' }),
-  });
-
-  const signalingPoller = new EventPoller({
-    client: graphqlClient,
-    packageId: config.originalPackageId ?? config.packageId,
-    module: 'signaling_registry',
-    pollingIntervalMs: pollIntervalMs,
-    cursorPath: cursorDir('signaling_registry.json'),
-    logger: logger.child({ poller: 'signaling_registry' }),
   });
 
   const economicPoller = new EventPoller({
@@ -874,7 +887,6 @@ async function main(): Promise<void> {
     relayPoller.start(trackedHandler),
     cpPoller.start(trackedHandler),
     roomPoller.start(trackedHandler),
-    signalingPoller.start(trackedHandler),
     economicPoller.start(trackedHandler),
     validatorPoller.start(trackedHandler),
     roleVotingPoller.start(trackedHandler),
@@ -927,7 +939,6 @@ async function main(): Promise<void> {
           relayPoller.stop();
           cpPoller.stop();
           roomPoller.stop();
-          signalingPoller.stop();
           economicPoller.stop();
           validatorPoller.stop();
           roleVotingPoller.stop();

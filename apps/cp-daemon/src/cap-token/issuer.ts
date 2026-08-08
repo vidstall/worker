@@ -61,16 +61,16 @@ import type { CapabilityIssuedLike } from './infra-peer-recovery.js';
 const DEFAULT_EXPIRES_OFFSET_EPOCHS = 100n;
 
 /**
- * Map a relay/signaling/validator address to its Move role enum value used by
+ * Map a relay/validator address to its Move role enum value used by
  * room_capability.move (matches MinerRole constants in dvconf-contracts).
- *   1 = validator, 2 = relay, 3 = CP, 4 = signaling, 0 = user/default
+ *   1 = validator, 2 = relay, 3 = CP, 0 = user/default
+ * (The standalone signaling node type -- role 4 -- was removed along with
+ * the node type itself.)
  */
-function roleForPeerKind(kind: 'relay' | 'signaling' | 'validator'): number {
+function roleForPeerKind(kind: 'relay' | 'validator'): number {
   switch (kind) {
     case 'relay':
       return 2;
-    case 'signaling':
-      return 4;
     case 'validator':
       return 1;
   }
@@ -151,7 +151,6 @@ export class CapTokenIssuer {
     try {
       const peers: Array<{ id: string; role: number }> = [
         ...event.relayIds.map((id) => ({ id, role: roleForPeerKind('relay') })),
-        { id: event.signalingId, role: roleForPeerKind('signaling') },
         ...event.validatorIds.map((id) => ({ id, role: roleForPeerKind('validator') })),
       ];
 
@@ -320,7 +319,7 @@ export class CapTokenIssuer {
     if (this.markSeenOrSkip(dedupeKey, traceId, 'onEmergencyRotation')) return;
 
     // Stage 4 Item #3 — D-012 Addendum fast-path: evict the OLD token from the
-    // signaling daemon's cache BEFORE submitting the rotation TX so any
+    // consuming daemon's cache BEFORE submitting the rotation TX so any
     // concurrent WS verify call short-circuits to null even if the chain
     // `CapabilityRevoked` event has not yet landed in the cache via
     // `handleEvent`. Loose-coupling: `cache` is the optional `CapTokenCacheLike`
@@ -419,7 +418,7 @@ export class CapTokenIssuer {
     // REQ-MCS-012 (W5 M2 P1.0) — resolve the admission `peer_pubkey`.
     //
     // Legacy (infrastructure peer): `peer.id` is the Sui miner-ID hex string
-    // (relay/signaling/validator from the RoomAssigned event); we hex-decode it
+    // (relay/validator from the RoomAssigned event); we hex-decode it
     // so the daemon's canonical_msg and Move's canonical_msg agree structurally
     // (Stage 4 Item #6 + D-014). This was the F62 deferred-wiring placeholder.
     //

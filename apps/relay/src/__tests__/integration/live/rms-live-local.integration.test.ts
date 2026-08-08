@@ -38,7 +38,6 @@ import { createLogger, MinerRole, type Logger, type EscrowCreated } from '@dvcon
 //    cross-app relay tests (canary-forward imports validator-daemon source).
 import { handleEvent, DEFAULT_WEIGHTS } from '../../../../../cp-daemon/src/event-handler.js';
 import { PVR_DEFAULT_HISTORY, type NodeCandidate } from '../../../../../cp-daemon/src/scoring.js';
-import type { SignalingCandidate } from '../../../../../cp-daemon/src/room-assignment.js';
 import { bootLocalnet, type LocalnetHandle } from '../../../../../cp-daemon/src/__tests__/integration/localnet-fixture.js';
 import {
   bootstrapCp,
@@ -155,7 +154,6 @@ describe('Assertion A — on-chain K_r>=3 distinct ACTIVE relays (REQ-RMS-031, L
   let cp: BootstrapCpResult;
   let relayIds: string[];
   let validatorIds: string[];
-  let signalingId: string;
   let roomId: string;
   let userKp: Ed25519Keypair;
   const logger: Logger = createLogger('rms-live-local-assertionA');
@@ -201,28 +199,6 @@ describe('Assertion A — on-chain K_r>=3 distinct ACTIVE relays (REQ-RMS-031, L
       validatorIds.push(id);
     }
 
-    // 1 signaling node — the ballot's signaling_id must resolve to a registered node.
-    signalingId = await registerRoleNode(
-      handle,
-      cp,
-      MinerRole.Signaling,
-      (tx, capId, stakeId) => {
-        tx.moveCall({
-          target: `${handle.config.packageId}::signaling_registry::register_signaling`,
-          arguments: [
-            tx.object(handle.config.networkRegistryId),
-            tx.object(handle.config.signalingRegistryId),
-            tx.object(capId),
-            tx.object(stakeId),
-            tx.pure.vector('u8', [1, 2, 3, 4]),
-            tx.pure.vector('u8', [1, 2, 3, 4]),
-          ],
-        });
-      },
-      'register_signaling',
-      logger,
-    );
-
     // A registered USER creates a PENDING room. expected_participants=2 -> required_validators floors to 4.
     userKp = await createFundedKeypair(logger);
     await signAndAssertLocal(handle.client, userKp, (tx) => {
@@ -265,7 +241,6 @@ describe('Assertion A — on-chain K_r>=3 distinct ACTIVE relays (REQ-RMS-031, L
 
     const relayState = new Map<string, NodeCandidate>(relayIds.map((id) => [id, healthyRelay(id)]));
     const validatorState = new Map<string, NodeCandidate>(validatorIds.map((id) => [id, healthyRelay(id)]));
-    const signalingState = new Map<string, SignalingCandidate>([[signalingId, { minerId: signalingId, load: 0n, region: '' }]]);
     const pendingRooms = new Map([[roomId, { room_id: roomId, creator: userKp.getPublicKey().toSuiAddress(), relay_mode: 0, room_class_hint: 0 }]]);
     const pendingEscrows = new Map<string, EscrowCreated>();
 
@@ -285,7 +260,6 @@ describe('Assertion A — on-chain K_r>=3 distinct ACTIVE relays (REQ-RMS-031, L
     handleEvent(
       escrow,
       relayState,
-      signalingState,
       pendingRooms,
       logger,
       DEFAULT_WEIGHTS,

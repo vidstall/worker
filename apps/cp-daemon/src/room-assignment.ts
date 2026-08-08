@@ -3,6 +3,8 @@
  *
  * Replaces the old assign_relay_and_signaling bypass with the proper multi-CP
  * voting flow. CPs submit proposals; on-chain 2/3 threshold triggers assignment.
+ * `submit_pairing_proposal` is relay-only -- the standalone signaling node
+ * type (and its registry-liveness gate) was removed from the contract.
  *
  * Implements PAIR-01, PAIR-03.
  */
@@ -11,33 +13,6 @@ import type { SuiClient } from '@mysten/sui/client';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { executeWithRetry, type NetworkConfig, type Logger } from '@dvconf/shared';
-
-/** Minimal signaling node state tracked from events. */
-export interface SignalingCandidate {
-  minerId: string;
-  load: bigint;
-  region: string;
-}
-
-/**
- * Score signaling nodes for a room.
- *
- * Simple approach: pick the signaling node with the lowest load.
- * Returns the miner_id of the best candidate, or undefined if none available.
- */
-export function pickSignalingNode(
-  signalingState: Map<string, SignalingCandidate>,
-): string | undefined {
-  let best: SignalingCandidate | undefined;
-
-  for (const candidate of signalingState.values()) {
-    if (!best || candidate.load < best.load) {
-      best = candidate;
-    }
-  }
-
-  return best?.minerId;
-}
 
 /**
  * Track rooms we have already voted on to prevent duplicate proposals (PAIR-03).
@@ -55,7 +30,7 @@ export function clearVotedRoom(roomId: string): void {
  * Submit a pairing proposal TX on-chain (PAIR-01).
  *
  * Replaces the old assign_relay_and_signaling bypass with the proper
- * multi-CP consensus flow via submit_pairing_proposal.
+ * multi-CP consensus flow via submit_pairing_proposal (relay-only).
  */
 export async function submitProposal(
   client: SuiClient,
@@ -65,7 +40,6 @@ export async function submitProposal(
   roomId: string,
   relayMinerIds: string[],
   validatorMinerIds: string[],
-  signalingMinerId: string,
   submittedScore: bigint,
   logger: Logger,
   healthValidatorMinerIds: string[],
@@ -98,12 +72,10 @@ export async function submitProposal(
           tx.object(config.cpRegistryId),            // &mut ControlPlaneRegistry
           tx.object(config.relayRegistryId),         // &RelayRegistry
           tx.object(config.validatorRegistryId),     // &ValidatorRegistry
-          tx.object(config.signalingRegistryId),     // &SignalingRegistry
           tx.object(cpCapId),                        // &ControlPlaneCap
           tx.pure.id(roomId),                        // room_id: ID
           relayVec,                                   // relay_ids: vector<ID>
           validatorVec,                               // validator_ids: vector<ID>
-          tx.pure.id(signalingMinerId),              // signaling_id: ID
           tx.pure.u64(Number(submittedScore)),          // submitted_score: u64
           healthValidatorVec,                          // health_validator_ids: vector<ID>
         ],

@@ -51,7 +51,7 @@ function mkSubmit() {
 }
 
 const ROOM: RoomAssignedEvent = {
-  roomId: '0xroom1', relayIds: ['0xrelay1'], signalingId: '0xsig1', relayMode: 0,
+  roomId: '0xroom1', relayIds: ['0xrelay1'], relayMode: 0,
   verifiedScore: '1', consensusReached: true, winningCp: '0xcp1', validatorIds: [],
 };
 
@@ -75,7 +75,7 @@ describe('CapTokenIssuer expiry from live epoch (W-P2, D-W7)', () => {
   it('issue expiresEpoch = currentEpoch + DEFAULT_EXPIRES_OFFSET_EPOCHS (100) when provider injected', async () => {
     const { issuer, calls } = mkIssuer(() => 42n);
     await issuer.onRoomAssigned(ROOM, 'trace-epoch-1');
-    expect(calls).toHaveLength(2); // 1 relay + 1 signaling
+    expect(calls).toHaveLength(1); // 1 relay
     for (const c of calls) {
       expect(c.args.expiresEpoch).toBe(142n);
     }

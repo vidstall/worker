@@ -400,28 +400,28 @@ Steps (run on the VM; the keypairs are **throwaway localnet keys**, safe only he
    > NOTE: `publish-and-init.sh` is written for the docker localnet; on the VM you run the
    > same six steps against the host `sui` directly. Map the published objects to env names
    > with `dvconf-daemons/scripts/read-publish-output.sh`.
-4. **Write `~/dvconf-daemons/.env`** on the VM with the 10 fresh IDs
+4. **Write `~/dvconf-daemons/.env`** on the VM with the 9 fresh IDs
    (`PACKAGE_ID`, `NETWORK_REGISTRY_ID`, `MINER_STORE_ID`, `USER_REGISTRY_ID`,
    `RELAY_REGISTRY_ID`, `CP_REGISTRY_ID`, `VALIDATOR_REGISTRY_ID`, `ROOM_MANAGER_ID`,
-   `SIGNALING_REGISTRY_ID`, `ROLE_VOTE_BOX_ID`) + `SUI_NETWORK=localnet` + the four
-   throwaway keypairs (`PRIVATE_KEY`, `SIGNALING_KEYPAIR`, `CP_KEYPAIR`, `SUI_PRIVATE_KEY`).
-   Import + faucet `PRIVATE_KEY` and `SIGNALING_KEYPAIR` (the relay stakes 0.25 SUI at
+   `ROLE_VOTE_BOX_ID`) + `SUI_NETWORK=localnet` + the three
+   throwaway keypairs (`PRIVATE_KEY`, `CP_KEYPAIR`, `SUI_PRIVATE_KEY`).
+   Import + faucet `PRIVATE_KEY` (the relay stakes 0.25 SUI at
    registration, so its address needs gas).
-5. **DEVIATION 8a — acquire the relay/signaling ROLES via CP-voting.** `determine_role()`
-   in `staking.move` only ever returns `role_cp` or `role_user`, so the relay and signaling
-   nodes cannot get their role directly — a CP must vote them in. The live run used a helper,
-   `scripts/demo/wan-bootstrap.ts` (10 steps: register a CP → cast role votes for the relay
-   and signaling addresses → apply the voted roles → register in the relay and signaling
-   registries). Run it once after step 4:
+5. **DEVIATION 8a — acquire the relay ROLE via CP-voting.** `determine_role()`
+   in `staking.move` only ever returns `role_cp` or `role_user`, so the relay
+   node cannot get its role directly — a CP must vote it in. The live run used a helper,
+   `scripts/demo/wan-bootstrap.ts` (register a CP → cast a role vote for the relay
+   address → apply the voted role → register in the relay
+   registry). Run it once after step 4:
 
    ```bash
-   # wan-bootstrap.ts reads PRIVATE_KEY + SIGNALING_KEYPAIR (from .env) and DEPLOYER_ADDRESS
+   # wan-bootstrap.ts reads PRIVATE_KEY (from .env) and DEPLOYER_ADDRESS
    # (the deployer address minted in step 3). Replace <deployer-addr> with that address:
    ssh azureuser@"$VM_IP" "cd ~/dvconf-daemons && set -a && . ./.env && set +a && DEPLOYER_ADDRESS=<deployer-addr> npx tsx scripts/demo/wan-bootstrap.ts"
    ```
 
    > `wan-bootstrap.ts` is committed at `dvconf-daemons/scripts/demo/wan-bootstrap.ts`. It
-   > reads all secrets / run-specific values from env (`PRIVATE_KEY`, `SIGNALING_KEYPAIR`,
+   > reads all secrets / run-specific values from env (`PRIVATE_KEY`,
    > `DEPLOYER_ADDRESS`) and the object IDs from `~/publish-output.json` — nothing is
    > hardcoded, so it is reusable across any localnet genesis.
 
@@ -682,12 +682,12 @@ grep -o '"metric":"t_hop_network"[^}]*"value_ms":[0-9.]*' bench-output/"$RUN_ID"
   from that file:
 
   ```bash
-  # The publish threw at step 7, but publish-output.json has the 10 IDs. Map them
-  # to .env names (same 10 as §6.1a step 4) and write the .env manually:
+  # The publish threw at step 7, but publish-output.json has the 9 IDs. Map them
+  # to .env names (same 9 as §6.1a step 4) and write the .env manually:
   ssh azureuser@"$KR_IP" "cd ~/dvconf-daemons && \
     bash scripts/read-publish-output.sh ~/publish-output.json"   # prints the ID=value lines
   # -> paste those into ~/dvconf-daemons/.env, add SUI_NETWORK=localnet + the throwaway
-  #    keypairs (PRIVATE_KEY / SIGNALING_KEYPAIR / CP_KEYPAIR / SUI_PRIVATE_KEY), same as §6.1a.
+  #    keypairs (PRIVATE_KEY / CP_KEYPAIR / SUI_PRIVATE_KEY), same as §6.1a.
   ```
 
 - **(d) Standing landmine — restart any relay ⇒ clear its cursors first.** On ANY
@@ -866,7 +866,7 @@ ssh azureuser@"$VM_IP" "systemctl status coturn || (sudo apt-get install -y cotu
 | 1. Provision | `az vm create` | VM running, IP captured in `$VM_IP` |
 | 2. NSG | `az network nsg rule create` x8 (incl. TCP 4000 relay-WS + TCP 8081 bench-sink) | All rules show `Succeeded` |
 | 3. UFW / bootstrap | `sudo bash -s` < `bootstrap-vm.sh` + pin `pnpm@10.30.3` + build mediasoup worker + allow 4000/8081/tcp | Exit 0, UFW active, worker binary present |
-| 3b. Localnet (VM) | publish contracts + write `.env` (10 IDs) + `wan-bootstrap.ts` (CP-voting roles) | `sui client chain-identifier` OK; relay/signaling registered |
+| 3b. Localnet (VM) | publish contracts + write `.env` (9 IDs) + `wan-bootstrap.ts` (CP-voting roles) | `sui client chain-identifier` OK; relay registered |
 | 4a. Daemons (VM) | signaling + relay `start` with `BENCH_LATENCY=1`, relay also `ANNOUNCED_IP=$VM_IP RTC_MIN_PORT=40000 RTC_MAX_PORT=40100` | bench-sink → HTTP 405; :4000/:8081 listening |
 | 4b. Page (each client) | `cd dvconf-client && pnpm dev` | vite on localhost:5173 |
 | 4c. Run | `wan-split-driver.ts --role produce\|consume --start-epoch <E>` on 2 ISPs (same E) | `session i/30 … done`; sink JSONL grows |

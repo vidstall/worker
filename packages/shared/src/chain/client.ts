@@ -118,7 +118,6 @@ export function loadNetworkConfig(): NetworkConfig {
     validatorRegistryId: required('VALIDATOR_REGISTRY_ID'),
     userRegistryId: required('USER_REGISTRY_ID'),
     roomManagerId: required('ROOM_MANAGER_ID'),
-    signalingRegistryId: required('SIGNALING_REGISTRY_ID'),
     roleVoteBoxId: required('ROLE_VOTE_BOX_ID'),
     livenessVoteBoxId: required('LIVENESS_VOTE_BOX_ID'),
     // Optional: unset on any deployment that hasn't published/initialized

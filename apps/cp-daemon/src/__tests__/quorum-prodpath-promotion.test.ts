@@ -257,7 +257,6 @@ describe('Leg 7c (c)+(d) — InfraPeerPubkeyCache recovery on submitIssue (infra
       {
         roomId: ROOM_C,
         relayIds: [RELAY_C],
-        signalingId: RELAY_C, // reuse so its CapabilityIssued is cached too
         relayMode: 1,
         verifiedScore: '900',
         consensusReached: true,
@@ -304,7 +303,6 @@ describe('Leg 7c (c)+(d) — InfraPeerPubkeyCache recovery on submitIssue (infra
       {
         roomId: ROOM_D,
         relayIds: [RELAY_D],
-        signalingId: RELAY_D,
         relayMode: 1,
         verifiedScore: '900',
         consensusReached: true,

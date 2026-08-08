@@ -18,8 +18,6 @@ export interface PortConfig {
   suiRpc: number;
   /** Sui faucet (hardcoded 9123, not overridable). */
   suiFaucet: number;
-  /** Signaling WS server (index-1 hardcoded 8080). */
-  signaling: number;
   /** Relay WS ports (4000 + (i-1)*2 → 4000/4002/4004 at N=3). */
   relayWs: number[];
   /** Relay metrics ports (4001 + (i-1)*2 → 4001/4003/4005 at N=3). */
@@ -60,7 +58,6 @@ export const DEFAULT_CANARY_COVERAGE_PORT = 8105;
 export const DEFAULT_PORT_CONFIG: PortConfig = {
   suiRpc: 9000,
   suiFaucet: 9123,
-  signaling: 8080,
   relayWs: [4000, 4002, 4004],
   relayMetrics: [4001, 4003, 4005],
   rtcRange: [10000, 10500],
@@ -80,7 +77,6 @@ export function requiredPorts(cfg: PortConfig = DEFAULT_PORT_CONFIG): PortSpec[]
   return [
     { port: cfg.suiRpc, label: 'sui RPC' },
     { port: cfg.suiFaucet, label: 'sui faucet' },
-    { port: cfg.signaling, label: 'signaling WS' },
     ...cfg.relayWs.map((p, i) => ({ port: p, label: `relay-${i + 1} WS` })),
     ...cfg.relayMetrics.map((p, i) => ({ port: p, label: `relay-${i + 1} metrics` })),
     ...expand(cfg.rtcRange, 'relay RTC'),

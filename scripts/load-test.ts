@@ -166,7 +166,7 @@ async function waitForAssignment(
   config: NetworkConfig,
   roomId: string,
   logger: Logger,
-): Promise<{ relayId: string; signalingId: string }> {
+): Promise<{ relayId: string }> {
   return pollUntil(
     async () => {
       try {
@@ -184,22 +184,21 @@ async function waitForAssignment(
           sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
         });
 
-        // Parse return values — (Option<ID>, Option<ID>)
+        // get_room_assignment's sole return value is now assigned_relays: vector<ID>
+        // (was a tuple with a signaling Option<ID> before the standalone signaling
+        // node type's removal). BCS vector<address>: 1 ULEB128 length byte (small
+        // vectors) followed by 32-byte addresses back to back.
         const returnValues = result.results?.[0]?.returnValues;
-        if (!returnValues || returnValues.length < 2) return null;
+        if (!returnValues || returnValues.length < 1) return null;
 
-        // BCS-encoded Option<ID>: first byte 0=None, 1=Some followed by 32 bytes
-        const relayBytes = returnValues[0]![0] as unknown as number[];
-        const signalingBytes = returnValues[1]![0] as unknown as number[];
+        const bytes = returnValues[0]![0] as unknown as number[];
+        if (!bytes || bytes.length < 1 || bytes[0] === 0) return null; // empty vector = unassigned
 
-        if (!relayBytes || relayBytes[0] !== 1) return null;
-        if (!signalingBytes || signalingBytes[0] !== 1) return null;
+        const relayBytes = bytes.slice(1, 33);
+        if (relayBytes.length < 32) return null;
+        const relayAddr = '0x' + Buffer.from(relayBytes).toString('hex');
 
-        // Extract the 32-byte address after the Option tag byte
-        const relayAddr = '0x' + Buffer.from(relayBytes.slice(1)).toString('hex');
-        const signalingAddr = '0x' + Buffer.from(signalingBytes.slice(1)).toString('hex');
-
-        return { relayId: relayAddr, signalingId: signalingAddr };
+        return { relayId: relayAddr };
       } catch (err) {
         logger.debug({ err }, 'devInspect failed, retrying');
         return null;
@@ -469,7 +468,7 @@ async function waitForRewards(
 interface SessionResult {
   roomId: string;
   escrowId: string | null;
-  assignment: { relayId: string; signalingId: string } | null;
+  assignment: { relayId: string } | null;
   clients: ClientResult[];
   relayMetrics: RelayMetrics | null;
   rewards: RewardResult | null;
@@ -514,7 +513,7 @@ async function runSession(
     sessionLogger.info('Waiting for CP assignment...');
     result.assignment = await waitForAssignment(client, config, result.roomId, sessionLogger);
     sessionLogger.info(
-      { relayId: result.assignment.relayId, signalingId: result.assignment.signalingId },
+      { relayId: result.assignment.relayId },
       'Room assigned',
     );
 

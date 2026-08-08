@@ -17,7 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json .npmrc ./
 COPY apps/cp-daemon/package.json apps/cp-daemon/package.json
 COPY apps/relay/package.json apps/relay/package.json
-COPY apps/signaling/package.json apps/signaling/package.json
 COPY apps/validator-daemon/package.json apps/validator-daemon/package.json
 COPY packages/chain-event-listener/package.json packages/chain-event-listener/package.json
 COPY packages/health-monitor/package.json packages/health-monitor/package.json

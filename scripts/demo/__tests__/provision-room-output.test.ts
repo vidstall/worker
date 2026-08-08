@@ -9,11 +9,10 @@ const outB = join(tmpdir(), `room-b-${Date.now()}.json`);
 afterEach(() => { for (const p of [outA, outB]) if (existsSync(p)) rmSync(p); });
 
 describe('writeRoomManifest', () => {
-  it('writes {roomId,relayId,signalingId,primaryUrl} pretty-printed + trailing newline to EVERY path', () => {
+  it('writes {roomId,relayId,primaryUrl} pretty-printed + trailing newline to EVERY path', () => {
     const manifest: RoomManifest = {
       roomId: '0x7c60b80e',
       relayId: '0x93c9564e',
-      signalingId: '0x93c9564e',
       primaryUrl: 'ws://relay:4001',
     };
     writeRoomManifest([outA, outB], manifest);

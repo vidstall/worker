@@ -1,8 +1,9 @@
 /**
  * wan-bootstrap.ts — one-shot bootstrap for WAN bench.
  *
- * Uses deployer to register as CP, then votes for relay + signaling roles,
- * then registers both in their respective registries.
+ * Uses deployer to register as CP, then votes for the relay role,
+ * then registers it in the relay registry. (The standalone signaling node
+ * type was removed from the contract — this script no longer bootstraps one.)
  * Outputs MINER_CAP_IDs.
  */
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
@@ -42,7 +43,6 @@ const NETWORK_REGISTRY_ID = extractShared('NetworkRegistry');
 const MINER_STORE_ID = extractShared('MinerStore');
 const ROLE_VOTE_BOX_ID = extractShared('RoleVoteBox');
 const RELAY_REGISTRY_ID = extractShared('RelayRegistry');
-const SIGNALING_REGISTRY_ID = extractShared('SignalingRegistry');
 const CP_REGISTRY_ID = extractShared('ControlPlaneRegistry');
 const VALIDATOR_REGISTRY_ID = extractShared('ValidatorRegistry');
 
@@ -147,7 +147,6 @@ async function findOwnedObject(owner: string, typeSubstr: string): Promise<strin
 }
 
 const ROLE_RELAY = 2;
-const ROLE_SIGNALING = 4;
 const CP_STAKE = 1_000_000_000n;
 const MINER_STAKE = 300_000_000n;
 
@@ -159,15 +158,12 @@ function toBytes(s: string): number[] {
 async function main() {
   const deployerKp = getDeployerKey();
   const relayKp = loadKp(requireEnv('PRIVATE_KEY'));          // relay node keypair (stakes 0.25 SUI)
-  const signalingKp = loadKp(requireEnv('SIGNALING_KEYPAIR')); // signaling node keypair
 
   const deployerAddr = deployerKp.toSuiAddress();
   const relayAddr = relayKp.toSuiAddress();
-  const sigAddr = signalingKp.toSuiAddress();
 
   console.log('Deployer:', deployerAddr);
   console.log('Relay:', relayAddr);
-  console.log('Signaling:', sigAddr);
 
   // Step 1: Register deployer as CP (1.0 SUI -> determine_role yields role_cp)
   // IDEMPOTENT: check if already registered
@@ -267,43 +263,6 @@ async function main() {
     await waitForObject(relayStakeId);
   }
 
-  // Step 4: Register signaling as miner (role_user initially)
-  console.log('\n=== Step 4: Register signaling as miner (role_user) ===');
-  let sigMinerCapId = await findOwnedObject(sigAddr, '::caps::MinerCap');
-  let sigStakeId = await findOwnedObject(sigAddr, '::staking::StakePosition');
-
-  if (sigMinerCapId && sigStakeId) {
-    console.log('[Step 4] Already registered, reusing sigMinerCapId=' + sigMinerCapId);
-  } else {
-    const sigRegResult = await executeAndWait(signalingKp, (tx) => {
-      const [stakeCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(MINER_STAKE)]);
-      tx.moveCall({
-        target: `${PKG}::registration::register`,
-        arguments: [
-          tx.object(NETWORK_REGISTRY_ID),
-          tx.object(MINER_STORE_ID),
-          stakeCoin!,
-          tx.pure.vector('u8', toBytes('127.0.0.1')),
-          tx.pure.u16(8080),
-          tx.pure.vector('u8', []),
-          tx.pure.vector('u8', []),
-          tx.pure.vector('u8', toBytes('asia-southeast1')),
-          tx.pure.u64(100),
-          tx.pure.u64(50),
-          tx.pure.u64(4),
-          tx.pure.vector('u8', []),
-        ],
-      });
-    }, 'register-signaling-miner');
-
-    sigMinerCapId = extractCreatedByType(sigRegResult, '::caps::MinerCap');
-    sigStakeId = extractCreatedByType(sigRegResult, '::staking::StakePosition');
-    if (!sigMinerCapId || !sigStakeId) throw new Error('No MinerCap or StakePosition from signaling register');
-    console.log('Signaling MinerCap:', sigMinerCapId);
-    await waitForObject(sigMinerCapId);
-    await waitForObject(sigStakeId);
-  }
-
   // Helper: run a step, ignoring specific Move abort codes
   async function tryStep(
     label: string,
@@ -326,6 +285,10 @@ async function main() {
 
   // Step 5: CP votes for relay role (role=2)
   // E_ALREADY_VOTED=704, E_MINER_ALREADY_ACTIVE=705
+  // Arg order matches role_voting.move's current signature: net_reg, vote_box,
+  // miner_store, cp_reg, _relay_reg, _validator_reg, cap, miner_id, role — the
+  // standalone signaling node type's registry param was dropped from the contract,
+  // not just left vestigial like relay_reg/validator_reg.
   console.log('\n=== Step 5: CP votes for relay (role=2) ===');
   await tryStep('Step 5', () => executeAndWait(deployerKp, (tx) => {
     tx.moveCall({
@@ -337,7 +300,6 @@ async function main() {
         tx.object(CP_REGISTRY_ID),
         tx.object(RELAY_REGISTRY_ID),
         tx.object(VALIDATOR_REGISTRY_ID),
-        tx.object(SIGNALING_REGISTRY_ID),
         tx.object(cpCapId),
         tx.pure.id(relayAddr),
         tx.pure.u8(ROLE_RELAY),
@@ -345,38 +307,26 @@ async function main() {
     });
   }, 'vote-relay-role'), [704, 705], 'Vote already cast or relay already active, skipping');
 
-  // Step 6: CP votes for signaling role (role=4)
-  // E_ALREADY_VOTED=704, E_MINER_ALREADY_ACTIVE=705
-  console.log('\n=== Step 6: CP votes for signaling (role=4) ===');
-  await tryStep('Step 6', () => executeAndWait(deployerKp, (tx) => {
-    tx.moveCall({
-      target: `${PKG}::role_voting::cast_role_vote`,
+  // Step 6: Relay applies voted role.
+  // registration::apply_voted_role no longer takes the RoleVoteBox directly (or a
+  // signaling_reg) — the assignment is consumed via role_voting::consume_voted_assignment
+  // in the SAME PTB, whose u8 return feeds apply_voted_role's new_role param.
+  // E_NO_ASSIGNMENT=707 means role already applied.
+  console.log('\n=== Step 6: Relay applies voted role ===');
+  await tryStep('Step 6', () => executeAndWait(relayKp, (tx) => {
+    const [newRole] = tx.moveCall({
+      target: `${PKG}::role_voting::consume_voted_assignment`,
       arguments: [
-        tx.object(NETWORK_REGISTRY_ID),
         tx.object(ROLE_VOTE_BOX_ID),
-        tx.object(MINER_STORE_ID),
-        tx.object(CP_REGISTRY_ID),
-        tx.object(RELAY_REGISTRY_ID),
-        tx.object(VALIDATOR_REGISTRY_ID),
-        tx.object(SIGNALING_REGISTRY_ID),
-        tx.object(cpCapId),
-        tx.pure.id(sigAddr),
-        tx.pure.u8(ROLE_SIGNALING),
+        tx.object(relayMinerCapId),
       ],
     });
-  }, 'vote-signaling-role'), [704, 705], 'Vote already cast or signaling already active, skipping');
-
-  // Step 7: Relay applies voted role
-  // E_NO_ASSIGNMENT=707 means role already applied
-  console.log('\n=== Step 7: Relay applies voted role ===');
-  await tryStep('Step 7', () => executeAndWait(relayKp, (tx) => {
     tx.moveCall({
       target: `${PKG}::registration::apply_voted_role`,
       arguments: [
         tx.object(NETWORK_REGISTRY_ID),
         tx.object(MINER_STORE_ID),
-        tx.object(ROLE_VOTE_BOX_ID),
-        tx.object(SIGNALING_REGISTRY_ID),
+        newRole,
         tx.object(RELAY_REGISTRY_ID),
         tx.object(VALIDATOR_REGISTRY_ID),
         tx.object(CP_REGISTRY_ID),
@@ -386,30 +336,10 @@ async function main() {
     });
   }, 'relay-apply-voted-role'), [707], 'No pending assignment (already applied), skipping');
 
-  // Step 8: Signaling applies voted role
-  // E_NO_ASSIGNMENT=707 means role already applied
-  console.log('\n=== Step 8: Signaling applies voted role ===');
-  await tryStep('Step 8', () => executeAndWait(signalingKp, (tx) => {
-    tx.moveCall({
-      target: `${PKG}::registration::apply_voted_role`,
-      arguments: [
-        tx.object(NETWORK_REGISTRY_ID),
-        tx.object(MINER_STORE_ID),
-        tx.object(ROLE_VOTE_BOX_ID),
-        tx.object(SIGNALING_REGISTRY_ID),
-        tx.object(RELAY_REGISTRY_ID),
-        tx.object(VALIDATOR_REGISTRY_ID),
-        tx.object(CP_REGISTRY_ID),
-        tx.object(sigMinerCapId),
-        tx.object(sigStakeId),
-      ],
-    });
-  }, 'signaling-apply-voted-role'), [707], 'No pending assignment (already applied), skipping');
-
-  // Step 9: Relay registers in relay_registry
+  // Step 7: Relay registers in relay_registry
   // E_ALREADY_REGISTERED=521
-  console.log('\n=== Step 9: Relay registers in relay_registry ===');
-  await tryStep('Step 9', () => executeAndWait(relayKp, (tx) => {
+  console.log('\n=== Step 7: Relay registers in relay_registry ===');
+  await tryStep('Step 7', () => executeAndWait(relayKp, (tx) => {
     tx.moveCall({
       target: `${PKG}::relay_registry::register_relay`,
       arguments: [
@@ -423,28 +353,9 @@ async function main() {
     });
   }, 'relay-register-relay-registry'), [521], 'Relay already in relay registry, skipping');
 
-  // Step 10: Signaling registers in signaling_registry
-  // E_ALREADY_REGISTERED=601
-  console.log('\n=== Step 10: Signaling registers in signaling_registry ===');
-  await tryStep('Step 10', () => executeAndWait(signalingKp, (tx) => {
-    tx.moveCall({
-      target: `${PKG}::signaling_registry::register_signaling`,
-      arguments: [
-        tx.object(NETWORK_REGISTRY_ID),
-        tx.object(SIGNALING_REGISTRY_ID),
-        tx.object(sigMinerCapId),
-        tx.object(sigStakeId),
-        tx.pure.vector('u8', toBytes('ws://85.211.181.194:8080')),
-        tx.pure.vector('u8', toBytes('asia-southeast1')),
-      ],
-    });
-  }, 'signaling-register-signaling-registry'), [601], 'Signaling already in signaling registry, skipping');
-
   console.log('\n=== BOOTSTRAP COMPLETE ===');
   console.log('RELAY_MINER_CAP_ID=' + relayMinerCapId);
   console.log('RELAY_STAKE_ID=' + relayStakeId);
-  console.log('SIGNALING_MINER_CAP_ID=' + sigMinerCapId);
-  console.log('SIGNALING_STAKE_ID=' + sigStakeId);
 }
 
 main().catch((e: unknown) => {

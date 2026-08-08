@@ -3,7 +3,7 @@
  *
  * Boots a fresh Sui localnet from the pinned framework rev, publishes the
  * dvconf-contracts package, bootstraps the minimum on-chain state (1 CP + 2 relays
- * + 4 validators + 1 signaling via the register -> cast_role_vote -> apply_voted_role
+ * + 4 validators via the register -> cast_role_vote -> apply_voted_role
  * -> <role>_registry::register lifecycle), then captures the REAL
  * `effects.gasUsed` (all 4 fields: computationCost, storageCost, storageRebate,
  * nonRefundableStorageFee) for EVERY measurable on-chain function + the publish tx.
@@ -13,13 +13,16 @@
  * (only reference_gas_price differs, applied after). No faucet needed beyond the
  * self-spawned localnet's built-in faucet.
  *
- * ── SCOPE (Dispatch-1, retained VERBATIM at the head of the run) ──
- *   publish + the 9 NO-SIGNATURE ("trivial") functions:
+ * ── SCOPE (Dispatch-1, retained VERBATIM at the head of the run where the contract
+ *    still allows it -- the standalone signaling node type + its registry were
+ *    removed from the contract, so the signaling_registry::heartbeat row is gone) ──
+ *   publish + the 8 NO-SIGNATURE ("trivial") functions:
  *     cast_role_vote, apply_voted_role, register_relay, control_plane_registry::heartbeat,
- *     signaling_registry::heartbeat, validator_registry::heartbeat, relay_heartbeat,
- *     update_load, report_degradation.
- *   These 9 rows + publish are captured FIRST, in the EXACT same order/args as
- *   Dispatch-1, so their gas fields are byte-for-byte reproducible (determinism cross-check).
+ *     validator_registry::heartbeat, relay_heartbeat, update_load, report_degradation.
+ *   These 8 rows + publish are captured FIRST, in the same relative order as
+ *   Dispatch-1, so their gas fields stay directly comparable (determinism cross-check;
+ *   NOT byte-for-byte reproducible against the pre-removal 2026-07-12 baseline, since
+ *   apply_voted_role's on-chain shape changed along with the signaling removal).
  *
  * ── SCOPE (Dispatch-2, appended AFTER the trivial rows, sharing the same publish + RGP) ──
  *   The two HARD ed25519-dual-key functions + a full room lifecycle:
@@ -27,7 +30,7 @@
  *     economic_layer::distribute_rewards
  *   plus the room-lifecycle "bonus" rows that round out a full-session cost picture:
  *     registration::register, control_plane_registry::register_cp,
- *     validator_registry::register_validator, signaling_registry::register_signaling,
+ *     validator_registry::register_validator,
  *     validator_registry::self_assign_session_wallet, user_registry::register_user,
  *     room_manager::create_room, room_manager::submit_pairing_proposal,
  *     economic_layer::create_escrow, room_manager::close_room.
@@ -39,9 +42,9 @@
  *   - `min_relay` = 2 → ballot needs TWO registered relays.
  *   - A validator is put into `room.assigned_validators` ONLY via a winning pairing
  *     proposal (submit_pairing_proposal) or the dispute finalize path — AdminCap
- *     assign_relay_and_signaling does NOT assign validators. With 1 active CP,
- *     `required = ceil(1 * 2/3) = 1`, so ONE CP proposal finalizes the room immediately
- *     (PENDING → READY) and writes assigned_validators.
+ *     assign_relay (renamed from assign_relay_and_signaling) does NOT assign validators.
+ *     With 1 active CP, `required = ceil(1 * 2/3) = 1`, so ONE CP proposal finalizes the
+ *     room immediately (PENDING → READY) and writes assigned_validators.
  *   - submit_session_proof: sender = session wallet B (self_assign_session_wallet-bound);
  *     pubkey_public = validator MAIN wallet A (= registered operator; blake2b256(0x00||pk)
  *     must equal info_operator); pubkey_session = wallet B (blake2b256 must equal sender).
@@ -415,13 +418,10 @@ async function main(): Promise<void> {
     // ── measure the CP-voted lifecycle for ONE relay, capturing each step ──
     const relay = await measureRelayLifecycle(client, cp, config, rows, logger);
 
-    // ── register a validator + signaling via the sealed helper (state only) ──
+    // ── register a validator via the sealed helper (state only) ──
     logger.info({ module: MODULE, action: 'seed_validator' }, 'seeding validator...');
     const validator: SeededKey = await voteAndApplyMiner(client, cp, 'validator', config, logger);
     const validatorKp = Ed25519Keypair.fromSecretKey(validator.secretKey);
-    logger.info({ module: MODULE, action: 'seed_signaling' }, 'seeding signaling...');
-    const signaling: SeededKey = await voteAndApplyMiner(client, cp, 'signaling', config, logger);
-    const signalingKp = Ed25519Keypair.fromSecretKey(signaling.secretKey);
 
     // ── 5. control_plane_registry::heartbeat (signed by CP main wallet) ───
     rows.push(
@@ -444,28 +444,7 @@ async function main(): Promise<void> {
       ),
     );
 
-    // ── 6. signaling_registry::heartbeat (signed by signaling miner) ─────
-    rows.push(
-      await measure(
-        client,
-        signalingKp,
-        'heartbeat',
-        'signaling_registry',
-        (tx) => {
-          tx.moveCall({
-            target: `${config.packageId}::signaling_registry::heartbeat`,
-            arguments: [
-              tx.object(config.networkRegistryId),
-              tx.object(config.signalingRegistryId),
-              tx.object(signaling.capId),
-            ],
-          });
-        },
-        logger,
-      ),
-    );
-
-    // ── 7. validator_registry::heartbeat (signed by validator miner) ────
+    // ── 6. validator_registry::heartbeat (signed by validator miner) ────
     rows.push(
       await measure(
         client,
@@ -486,7 +465,7 @@ async function main(): Promise<void> {
       ),
     );
 
-    // ── 8. relay_registry::relay_heartbeat (signed by relay miner) ──────
+    // ── 7. relay_registry::relay_heartbeat (signed by relay miner) ──────
     rows.push(
       await measure(
         client,
@@ -507,7 +486,7 @@ async function main(): Promise<void> {
       ),
     );
 
-    // ── 9. relay_registry::update_load (signed by relay miner) ──────────
+    // ── 8. relay_registry::update_load (signed by relay miner) ──────────
     rows.push(
       await measure(
         client,
@@ -529,7 +508,7 @@ async function main(): Promise<void> {
       ),
     );
 
-    // ── 10. relay_registry::report_degradation (ad-hoc PTB) ─────────────
+    // ── 9. relay_registry::report_degradation (ad-hoc PTB) ─────────────
     const dummyRoomId = normalizeSuiAddress('0x1'); // ID = 32-byte address; unchecked by the fn
     rows.push(
       await measure(
@@ -560,7 +539,7 @@ async function main(): Promise<void> {
     // BLOCK B — DISPATCH-2: hard ed25519 fns + full room lifecycle + bonus rows.
     // Appended AFTER Block A so the 10 trivial rows above are untouched.
     // ═══════════════════════════════════════════════════════════════════════
-    await measureDispatch2(client, config, cp, relay, validator, validatorKp, signaling, rows, logger, graphqlClient);
+    await measureDispatch2(client, config, cp, relay, validator, validatorKp, rows, logger, graphqlClient);
 
     // ── write raw JSONL (provenance line first, then one line per fn) ────
     const proofRows = validateK2ProofRows(rows);
@@ -704,7 +683,10 @@ async function measureRelayLifecycle(
   if (minerCapId === null) throw new Error('measureRelayLifecycle: no MinerCap');
   if (stakeId === null) throw new Error('measureRelayLifecycle: no StakePosition');
 
-  // step 2: role_voting::cast_role_vote (signed by CP) — MEASURED
+  // step 2: role_voting::cast_role_vote (signed by CP) — MEASURED. Package split
+  // (see services/contract/role-voting): role_voting lives in its own package.
+  // Signature no longer takes a signaling_reg -- the standalone signaling node
+  // type was removed from the contract.
   rows.push(
     await measure(
       client,
@@ -713,7 +695,7 @@ async function measureRelayLifecycle(
       'role_voting',
       (tx) => {
         tx.moveCall({
-          target: `${config.packageId}::role_voting::cast_role_vote`,
+          target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
           arguments: [
             tx.object(config.networkRegistryId),
             tx.object(config.roleVoteBoxId),
@@ -721,7 +703,6 @@ async function measureRelayLifecycle(
             tx.object(config.cpRegistryId),
             tx.object(config.relayRegistryId),
             tx.object(config.validatorRegistryId),
-            tx.object(config.signalingRegistryId),
             tx.object(cp.cpCapId),
             tx.pure.id(minerId),
             tx.pure.u8(ROLE_RELAY),
@@ -732,7 +713,13 @@ async function measureRelayLifecycle(
     ),
   );
 
-  // step 3: registration::apply_voted_role (signed by relay miner) — MEASURED
+  // step 3: registration::apply_voted_role (signed by relay miner) — MEASURED.
+  // apply_voted_role no longer takes the RoleVoteBox (or a signaling_reg) directly
+  // -- consume the pending assignment via role_voting::consume_voted_assignment in
+  // the SAME PTB and feed its u8 return into apply_voted_role's new_role param
+  // (mirrors packages/shared/src/chain/role-assignment.ts applyVotedRole). The
+  // measured gasUsed now covers both calls -- that IS the on-chain cost of
+  // "applying a voted role" post-removal.
   rows.push(
     await measure(
       client,
@@ -740,13 +727,19 @@ async function measureRelayLifecycle(
       'apply_voted_role',
       'registration',
       (tx) => {
+        const [newRole] = tx.moveCall({
+          target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+          arguments: [
+            tx.object(config.roleVoteBoxId),
+            tx.object(minerCapId),
+          ],
+        });
         tx.moveCall({
           target: `${config.packageId}::registration::apply_voted_role`,
           arguments: [
             tx.object(config.networkRegistryId),
             tx.object(config.minerStoreId),
-            tx.object(config.roleVoteBoxId),
-            tx.object(config.signalingRegistryId),
+            newRole,
             tx.object(config.relayRegistryId),
             tx.object(config.validatorRegistryId),
             tx.object(config.cpRegistryId),
@@ -871,13 +864,14 @@ async function buildReadyValidator(
     rows.push(makeRow('register', 'registration', reg.result));
   }
 
-  // CP casts the role vote (already measured in the relay lifecycle; here executed only).
+  // CP casts the role vote (already measured in the relay lifecycle; here executed
+  // only). Package split: role_voting lives in its own package; no signaling_reg.
   await signAndCapture(
     client,
     cp.kp,
     (tx) => {
       tx.moveCall({
-        target: `${config.packageId}::role_voting::cast_role_vote`,
+        target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.roleVoteBoxId),
@@ -885,7 +879,6 @@ async function buildReadyValidator(
           tx.object(config.cpRegistryId),
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
-          tx.object(config.signalingRegistryId),
           tx.object(cp.cpCapId),
           tx.pure.id(reg.minerId),
           tx.pure.u8(ROLE_VALIDATOR),
@@ -896,18 +889,26 @@ async function buildReadyValidator(
     logger,
   );
 
-  // miner applies the voted role.
+  // miner applies the voted role. Consume the pending assignment via
+  // role_voting::consume_voted_assignment in the SAME PTB (apply_voted_role no
+  // longer takes the RoleVoteBox or a signaling_reg directly).
   await signAndCapture(
     client,
     mainKp,
     (tx) => {
+      const [newRole] = tx.moveCall({
+        target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+        arguments: [
+          tx.object(config.roleVoteBoxId),
+          tx.object(reg.minerCapId),
+        ],
+      });
       tx.moveCall({
         target: `${config.packageId}::registration::apply_voted_role`,
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.minerStoreId),
-          tx.object(config.roleVoteBoxId),
-          tx.object(config.signalingRegistryId),
+          newRole,
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
           tx.object(config.cpRegistryId),
@@ -986,7 +987,7 @@ async function buildSecondRelay(
 
   await signAndCapture(client, cp.kp, (tx) => {
     tx.moveCall({
-      target: `${config.packageId}::role_voting::cast_role_vote`,
+      target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
       arguments: [
         tx.object(config.networkRegistryId),
         tx.object(config.roleVoteBoxId),
@@ -994,7 +995,6 @@ async function buildSecondRelay(
         tx.object(config.cpRegistryId),
         tx.object(config.relayRegistryId),
         tx.object(config.validatorRegistryId),
-        tx.object(config.signalingRegistryId),
         tx.object(cp.cpCapId),
         tx.pure.id(reg.minerId),
         tx.pure.u8(ROLE_RELAY),
@@ -1003,13 +1003,19 @@ async function buildSecondRelay(
   }, 'cast_role_vote(relay2)', logger);
 
   await signAndCapture(client, kp, (tx) => {
+    const [newRole] = tx.moveCall({
+      target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+      arguments: [
+        tx.object(config.roleVoteBoxId),
+        tx.object(reg.minerCapId),
+      ],
+    });
     tx.moveCall({
       target: `${config.packageId}::registration::apply_voted_role`,
       arguments: [
         tx.object(config.networkRegistryId),
         tx.object(config.minerStoreId),
-        tx.object(config.roleVoteBoxId),
-        tx.object(config.signalingRegistryId),
+        newRole,
         tx.object(config.relayRegistryId),
         tx.object(config.validatorRegistryId),
         tx.object(config.cpRegistryId),
@@ -1063,7 +1069,7 @@ function extractEscrowId(result: TxResult): string {
 /**
  * The whole Dispatch-2 room-lifecycle + hard-function measurement block.
  * Preconditions satisfied inline (see module-header comment). Reuses the already-
- * seeded CP / primary relay / primary validator / signaling from Block A.
+ * seeded CP / primary relay / primary validator from Block A.
  */
 async function measureDispatch2(
   client: SuiClient,
@@ -1072,7 +1078,6 @@ async function measureDispatch2(
   primaryRelay: { minerId: string },
   primaryValidator: SeededKey,
   primaryValidatorKp: Ed25519Keypair,
-  signaling: SeededKey,
   rows: CostRow[],
   logger: Logger,
   graphqlClient: SuiGraphQLClient,
@@ -1182,12 +1187,15 @@ async function measureDispatch2(
   }
   logger.info({ module: MODULE, action: 'escrow_created', escrowId }, 'escrow created');
 
-  // room_manager::submit_pairing_proposal (CP-signed) — MEASURED.
+  // room_manager::submit_pairing_proposal (CP-signed) — MEASURED. relay-only:
+  // the standalone signaling node type (and its registry-liveness gate) was
+  // removed from the contract, and this entry now also takes a
+  // health_validator_ids ballot argument (all four ready validators, here).
   // With 1 active CP, required = ceil(1 * 2/3) = 1 → this single proposal FINALIZES the
   // room (PENDING → READY) and writes assigned_relays + assigned_validators.
   // Runs AFTER create_escrow (see ORDER-CRITICAL note above) but BEFORE the proofs
   // (submit_session_proof asserts the validator IS assigned).
-  // Ballot: [relay1, relay2] (>= min_relay 2), [v0..v3] (>= required_validators 4), signaling.
+  // Ballot: [relay1, relay2] (>= min_relay 2), [v0..v3] (>= required_validators 4).
   const relayIds = [primaryRelay.minerId, relay2MinerId];
   {
     const { row } = await measureCapture(
@@ -1206,13 +1214,12 @@ async function measureDispatch2(
             tx.object(config.cpRegistryId),
             tx.object(config.relayRegistryId),
             tx.object(config.validatorRegistryId),
-            tx.object(config.signalingRegistryId),
             tx.object(cp.cpCapId),
             tx.pure.id(roomId),
             tx.pure.vector('id', relayIds),
             tx.pure.vector('id', validatorIds),
-            tx.pure.id(signaling.minerId),
             tx.pure.u64(1000), // submitted_score (arbitrary; contract does NOT recompute)
+            tx.pure.vector('id', validatorIds), // health_validator_ids (all four are healthy)
           ],
         });
       },
@@ -1300,7 +1307,6 @@ async function measureDispatch2(
             tx.object(config.relayRegistryId),
             tx.object(config.validatorRegistryId),
             tx.object(config.cpRegistryId),
-            tx.object(config.signalingRegistryId),
           ],
         });
       },

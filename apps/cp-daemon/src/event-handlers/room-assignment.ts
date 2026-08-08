@@ -1,8 +1,10 @@
 /**
  * cp-daemon event-handler case arm — EscrowCreated (god-file split out of the
  * former monolithic `event-handler.ts`). This is the single largest arm: relay
- * scoring/ranking, MCU-aware weighting, capacity-aware placement, signaling-node
- * pairing, and pairing-proposal submission.
+ * scoring/ranking, MCU-aware weighting, capacity-aware placement, and
+ * pairing-proposal submission (relay-only -- the standalone signaling node
+ * type was removed from the contract, dropping the signaling-pairing step
+ * this arm used to do here).
  */
 import type { SuiEvent } from '@mysten/sui/client';
 import type { EscrowCreated } from '@dvconf/shared';
@@ -22,7 +24,7 @@ import {
   type RelayCapacity,
 } from '../admission-capacity.js';
 import { timedCanonicalSort } from '../latency-probe.js';
-import { submitProposal, pickSignalingNode, votedRooms } from '../room-assignment.js';
+import { submitProposal, votedRooms } from '../room-assignment.js';
 import { probeCandidates } from '../relay-liveness-probe.js';
 import { getRelayReservationLoad } from '../relay-reservation-reader.js';
 import type { EventHandlerCtx } from '../event-handler.js';
@@ -32,7 +34,7 @@ export function handleEscrowCreated(
   data: Record<string, unknown>,
   ctx: EventHandlerCtx,
 ): void {
-  const { relayState, signalingState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState, attestedLoad, byzantineFlag } = ctx;
+  const { relayState, pendingRooms, logger, weights, txContext, pendingEscrows, validatorState, attestedLoad, byzantineFlag } = ctx;
 
   const e = data as unknown as EscrowCreated;
   const roomData = pendingRooms.get(e.room_id);
@@ -88,15 +90,6 @@ export function handleEscrowCreated(
   const topRelay = rankedRelays[0];
   if (!topRelay) {
     logger.warn({ roomId: e.room_id }, 'Scoring returned no results');
-    pendingRooms.set(e.room_id, roomData);
-    pendingEscrows?.set(e.room_id, e);
-    return;
-  }
-
-  // Pick a signaling node
-  const signalingMinerId = pickSignalingNode(signalingState);
-  if (!signalingMinerId) {
-    logger.warn({ roomId: e.room_id }, 'No signaling nodes available — deferring assignment');
     pendingRooms.set(e.room_id, roomData);
     pendingEscrows?.set(e.room_id, e);
     return;
@@ -304,7 +297,6 @@ export function handleEscrowCreated(
       topRelayScore: computeNodeScore(topRelay, targetRegion, weights).toString(),
       validatorCount: validators.length,
       topValidators: topValidatorIds,
-      signalingMinerId,
       submittedScore: submittedScore.toString(),
     },
     'Room proposal: submitting TX',
@@ -321,14 +313,13 @@ export function handleEscrowCreated(
         e.room_id,
         relayIds,
         topValidatorIds,
-        signalingMinerId,
         submittedScore,
         logger,
         healthValidatorMinerIds,
       ).then((success) => {
         if (success) {
           logger.info(
-            { roomId: e.room_id, relays: relayIds, validators: topValidatorIds, signalingId: signalingMinerId },
+            { roomId: e.room_id, relays: relayIds, validators: topValidatorIds },
             'Pairing proposal submitted successfully',
           );
           return;

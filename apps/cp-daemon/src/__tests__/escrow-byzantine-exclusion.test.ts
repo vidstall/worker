@@ -10,8 +10,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // the module body, so the spy must be created with vi.hoisted() (a bare `const spy` would
 // be in the temporal dead zone when the hoisted factory runs).
 // submitProposal is exported from room-assignment.js (verified event-handler.ts:56-62);
-// keep the rest of that module REAL (votedRooms/pickSignalingNode are used here).
-// Variadic signature so mock.calls[i] is unknown[] (the real submitProposal takes 10 positional
+// keep the rest of that module REAL (votedRooms is used here).
+// Variadic signature so mock.calls[i] is unknown[] (the real submitProposal takes 9 positional
 // args; the spy ignores them but we read index 5 = topRelayIds, so the tuple must not be length-0).
 const { submitProposalSpy } = vi.hoisted(() => ({
   submitProposalSpy: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
@@ -38,7 +38,7 @@ function ev(type: string, parsedJson: Record<string, unknown>): Parameters<typeo
 /** Minimal fake txContext so the arm reaches submitProposal (the spy). */
 const fakeTxContext = {
   client: {} as never, signer: {} as never, config: {} as never, cpCapId: 'cap',
-} as unknown as Parameters<typeof handleEvent>[6]; // index 6 = txContext (NOT [5]=weights)
+} as unknown as Parameters<typeof handleEvent>[5]; // index 5 = txContext (NOT [4]=weights)
 
 /** room_health_validators floor (room_health_alerts.move) needs >= 3 to reach placement logic at all. */
 const threeValidators = new Map<string, NodeCandidate>([
@@ -55,7 +55,6 @@ describe('REQ-RMS-015 — EscrowCreated proposes WITHOUT the canary-flagged rela
     const relayState = new Map<string, NodeCandidate>([
       ['R1', node('R1')], ['R-byz', node('R-byz')], ['R2', node('R2')], ['R3', node('R3')],
     ]);
-    const signalingState = new Map([['S1', { minerId: 'S1', load: 0n } as never]]);
     const pendingRooms = new Map<string, never>();
     const pendingEscrows = new Map<string, never>();
 
@@ -63,19 +62,19 @@ describe('REQ-RMS-015 — EscrowCreated proposes WITHOUT the canary-flagged rela
     // flag that marks R-byz; txContext present => the arm calls submitProposal.
     handleEvent(
       { type: '0xpkg::room_manager::RoomCreated', parsedJson: { room_id: 'room1', creator: 'c', relay_mode: 0 } } as never,
-      relayState, signalingState as never, pendingRooms as never, logger, undefined, undefined, pendingEscrows as never, threeValidators,
+      relayState, pendingRooms as never, logger, undefined, undefined, pendingEscrows as never, threeValidators,
     );
     const isFlagged = (id: string): boolean => id === 'R-byz';
     handleEvent(
       ev('EscrowCreated', { room_id: 'room1', escrow_id: 'esc1', amount: '100' }),
-      relayState, signalingState as never, pendingRooms as never, logger,
-      undefined,               // [5] weights (default)
-      fakeTxContext,           // [6] txContext present => the EscrowCreated arm calls submitProposal
-      pendingEscrows as never, // [7] pendingEscrows
-      threeValidators,         // [8] validatorState
-      undefined,               // [9] attestedLoad  (M1 param, unused here)
-      undefined,               // [10] currentEpoch (M1 param, unused here)
-      isFlagged,               // [11] byzantineFlag (M3) => excludes R-byz from the proposed set
+      relayState, pendingRooms as never, logger,
+      undefined,               // [4] weights (default)
+      fakeTxContext,           // [5] txContext present => the EscrowCreated arm calls submitProposal
+      pendingEscrows as never, // [6] pendingEscrows
+      threeValidators,         // [7] validatorState
+      undefined,               // [8] attestedLoad  (M1 param, unused here)
+      undefined,               // [9] currentEpoch (M1 param, unused here)
+      isFlagged,               // [10] byzantineFlag (M3) => excludes R-byz from the proposed set
     );
 
     // submitProposal(client, signer, config, cpCapId, roomId, topRelayIds, ...) —

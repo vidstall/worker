@@ -5,8 +5,9 @@
  * the cascade ORDERING + a self-verifying on-chain probe + a multi-CP keys file.
  *
  * THE CASCADE (design spec §3): `staking::determine_role` (staking.move:55) auto-
- * mints only CP/User; every relay/validator/signaling role is created via a CP-
- * quorum vote, and with the Phase A fix `required = ceil(active_cp_count * 2/3)`.
+ * mints only CP/User; every relay/validator role is created via a CP-
+ * quorum vote (the standalone signaling node type was removed from the contract),
+ * and with the Phase A fix `required = ceil(active_cp_count * 2/3)`.
  * So we MUST seed all infra WHILE only 1 CP exists (required=1, a single vote
  * finalizes), THEN register CP#2..#5 to reach active_cp_count=5 (required=4) for
  * the genuine multi-CP demo. Registering 5 CPs first would make every infra seed
@@ -15,13 +16,13 @@
  *   1. bootstrap CP#1 (1.0 SUI → ControlPlaneCap → register_cp; active_cp_count=1).
  *   2. seed ALL infra via the generalised voteAndApplyMiner (each finalizes on
  *      CP#1's lone vote): 4 validators (pairing validator floor=4,
- *      pairing_score.move:93-101) + 2 relays + 1 signaling.
+ *      pairing_score.move:93-101) + 2 relays.
  *   3. scale CPs — bootstrap CP#2..#5 (4 more funded register_cp; no infra needed,
  *      they just lift active_cp_count to 5). 1.0 SUI clears the per-CP dynamic
  *      tiers 0.5..0.9 (constants.move:25-26: base 0.5 + 0.1 × existing-CP-count).
  *   4. write the keys file (one slot per CP + per infra node) C3's launcher reads.
  *   5. self-verify on-chain: HARD-ASSERT active_cp_count==5 AND 4 validators /
- *      2 relays / 1 signaling registered (throws loud on any mismatch).
+ *      2 relays registered (throws loud on any mismatch).
  *
  * SCOPE: connects to an ALREADY-RUNNING localnet with the `multi-cp-live` package
  * already published (loadNetworkConfig reads PACKAGE_ID + *_REGISTRY_ID / … from
@@ -67,7 +68,6 @@ const MODULE = 'seed-multicp';
 const N_CPS = 5;
 const N_VALIDATORS = 4; // pairing validator floor = 4 (pairing_score.move:93-101)
 const N_RELAYS = 2;
-const N_SIGNALING = 1;
 
 /** Read-only devInspect sender — no gas, no signature (role-assignment.ts:41). */
 const DEV_INSPECT_SENDER =
@@ -89,7 +89,6 @@ export interface MultiCpKeysFile {
   cps: SeededKey[];
   validators: SeededKey[];
   relays: SeededKey[];
-  signaling: SeededKey[];
 }
 
 /** A bootstrapped CP's handle → the persisted keys-file slot (mirrors seed-bootstrap.ts:541). */
@@ -139,28 +138,26 @@ async function readU64Count(
 
 /**
  * HARD-ASSERT the genuine N=5 substrate on-chain: active_cp_count==5 AND exactly
- * 4 validators / 2 relays / 1 signaling registered. Throws with all four actual-
- * vs-expected counts on any mismatch.
+ * 4 validators / 2 relays registered. Throws with all three actual-vs-expected
+ * counts on any mismatch.
  */
 async function verifyOnChain(client: SuiClient, config: NetworkConfig, logger: Logger): Promise<void> {
   const cpCount = await readU64Count(client, config.packageId, 'control_plane_registry', 'active_cp_count', config.cpRegistryId);
   const validatorCount = await readU64Count(client, config.packageId, 'validator_registry', 'active_count', config.validatorRegistryId);
   const relayCount = await readU64Count(client, config.packageId, 'relay_registry', 'active_count', config.relayRegistryId);
-  const signalingCount = await readU64Count(client, config.packageId, 'signaling_registry', 'active_signaling_count', config.signalingRegistryId);
 
   const mismatches: string[] = [];
   if (cpCount !== N_CPS) mismatches.push(`active_cp_count=${cpCount} (expected ${N_CPS})`);
   if (validatorCount !== N_VALIDATORS) mismatches.push(`validators=${validatorCount} (expected ${N_VALIDATORS})`);
   if (relayCount !== N_RELAYS) mismatches.push(`relays=${relayCount} (expected ${N_RELAYS})`);
-  if (signalingCount !== N_SIGNALING) mismatches.push(`signaling=${signalingCount} (expected ${N_SIGNALING})`);
 
   if (mismatches.length > 0) {
     throw new Error(`seed-multicp on-chain verification FAILED: ${mismatches.join('; ')}`);
   }
 
   logger.info(
-    { module: MODULE, action: 'verify', context: { cpCount, validatorCount, relayCount, signalingCount } },
-    'on-chain substrate verified: 5 CPs, 4 validators, 2 relays, 1 signaling',
+    { module: MODULE, action: 'verify', context: { cpCount, validatorCount, relayCount } },
+    'on-chain substrate verified: 5 CPs, 4 validators, 2 relays',
   );
 }
 
@@ -198,10 +195,6 @@ async function main(): Promise<void> {
   for (let i = 0; i < N_RELAYS; i++) {
     relays.push(await voteAndApplyMiner(client, cp1, 'relay', config, logger));
   }
-  const signaling: SeededKey[] = [];
-  for (let i = 0; i < N_SIGNALING; i++) {
-    signaling.push(await voteAndApplyMiner(client, cp1, 'signaling', config, logger));
-  }
 
   // 3. Scale CPs to N=5 — CP#2..#5 only register (no infra needed). After this,
   //    required = ceil(5 * 2/3) = 4, so the demo's role-vote/pairing are a genuine
@@ -213,11 +206,11 @@ async function main(): Promise<void> {
   }
 
   // 4. Write the keys file the launcher (C3) reads.
-  const keys: MultiCpKeysFile = { cps, validators, relays, signaling };
+  const keys: MultiCpKeysFile = { cps, validators, relays };
   mkdirSync(dirname(KEYS_OUTPUT_PATH), { recursive: true });
   writeFileSync(KEYS_OUTPUT_PATH, `${JSON.stringify(keys, null, 2)}\n`, 'utf8');
   logger.info(
-    { module: MODULE, action: 'write_keys', context: { keysOut: KEYS_OUTPUT_PATH, cps: cps.length, validators: validators.length, relays: relays.length, signaling: signaling.length } },
+    { module: MODULE, action: 'write_keys', context: { keysOut: KEYS_OUTPUT_PATH, cps: cps.length, validators: validators.length, relays: relays.length } },
     'keys file written',
   );
 
@@ -230,10 +223,10 @@ async function main(): Promise<void> {
       action: 'done',
       context: {
         keysOut: KEYS_OUTPUT_PATH,
-        counts: { cps: N_CPS, validators: N_VALIDATORS, relays: N_RELAYS, signaling: N_SIGNALING },
+        counts: { cps: N_CPS, validators: N_VALIDATORS, relays: N_RELAYS },
       },
     },
-    `seed-multicp complete — substrate ready (N=5 CPs, ${N_VALIDATORS} validators, ${N_RELAYS} relays, ${N_SIGNALING} signaling); keys → ${KEYS_OUTPUT_PATH}`,
+    `seed-multicp complete — substrate ready (N=5 CPs, ${N_VALIDATORS} validators, ${N_RELAYS} relays); keys → ${KEYS_OUTPUT_PATH}`,
   );
 }
 

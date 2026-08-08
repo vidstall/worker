@@ -25,7 +25,7 @@
  * RUN (on vm1, all ids from the publish + create phase passed via env):
  *   PACKAGE_ID=.. NETWORK_REGISTRY_ID=.. MINER_STORE_ID=.. ROLE_VOTE_BOX_ID=.. USER_REGISTRY_ID=.. \
  *   ROOM_MANAGER_ID=.. RELAY_REGISTRY_ID=.. CP_REGISTRY_ID=.. VALIDATOR_REGISTRY_ID=.. \
- *   SIGNALING_REGISTRY_ID=.. ADMIN_CAP_ID=.. DEPLOYER_SECRET=suiprivkey1.. SUI_NETWORK=http://127.0.0.1:9000 \
+ *   ADMIN_CAP_ID=.. DEPLOYER_SECRET=suiprivkey1.. SUI_NETWORK=http://127.0.0.1:9000 \
  *   pnpm --dir dvconf-daemons exec tsx scripts/demo/native-bwan-bootstrap.ts
  */
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
@@ -144,18 +144,29 @@ async function main(): Promise<void> {
   const relayStakeId = createdByType(relayReg, '::staking::StakePosition', 'register relay');
   await signAndAssert(client, cpKp, (tx) => {
     tx.moveCall({
-      target: `${config.packageId}::role_voting::cast_role_vote`,
+      // Package split (see services/contract/role-voting): role_voting now lives in
+      // its own package, not config.packageId. Signature no longer takes a
+      // signaling_reg -- the standalone signaling node type was removed.
+      target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
       arguments: [tx.object(config.networkRegistryId), tx.object(config.roleVoteBoxId),
         tx.object(config.minerStoreId), tx.object(config.cpRegistryId), tx.object(config.relayRegistryId),
-        tx.object(config.validatorRegistryId), tx.object(config.signalingRegistryId), tx.object(cpCapId),
+        tx.object(config.validatorRegistryId), tx.object(cpCapId),
         tx.pure.id(relayMinerId), tx.pure.u8(MinerRole.Relay)],
     });
   }, 'cast_role_vote_relay', logger);
   await signAndAssert(client, relayKp, (tx) => {
+    // apply_voted_role no longer takes the RoleVoteBox (or a signaling_reg) directly
+    // -- consume the pending assignment via role_voting::consume_voted_assignment in
+    // the SAME PTB and feed its u8 return into apply_voted_role's new_role param
+    // (mirrors packages/shared/src/chain/role-assignment.ts applyVotedRole).
+    const [newRole] = tx.moveCall({
+      target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+      arguments: [tx.object(config.roleVoteBoxId), tx.object(relayCapId)],
+    });
     tx.moveCall({
       target: `${config.packageId}::registration::apply_voted_role`,
       arguments: [tx.object(config.networkRegistryId), tx.object(config.minerStoreId),
-        tx.object(config.roleVoteBoxId), tx.object(config.signalingRegistryId), tx.object(config.relayRegistryId),
+        newRole, tx.object(config.relayRegistryId),
         tx.object(config.validatorRegistryId), tx.object(config.cpRegistryId), tx.object(relayCapId),
         tx.object(relayStakeId)],
     });
@@ -188,7 +199,6 @@ async function main(): Promise<void> {
     VALIDATOR_REGISTRY_ID: config.validatorRegistryId,
     USER_REGISTRY_ID: config.userRegistryId,
     ROOM_MANAGER_ID: config.roomManagerId,
-    SIGNALING_REGISTRY_ID: config.signalingRegistryId,
     ROLE_VOTE_BOX_ID: config.roleVoteBoxId,
   };
   const write0600 = (name: string, obj: unknown): void => {

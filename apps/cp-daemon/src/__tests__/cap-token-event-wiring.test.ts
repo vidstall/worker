@@ -71,7 +71,6 @@ describe('event-handler → CapTokenIssuer wiring (W-P2, D-W8/D-W9)', () => {
       ev('room_manager', 'RoomAssigned', {
         room_id: '0xroom1',
         relay_ids: ['0xrelay1', '0xrelay2'],
-        signaling_id: '0xsig1',
         relay_mode: 1,
         verified_score: '950',
         consensus_reached: true,
@@ -84,7 +83,6 @@ describe('event-handler → CapTokenIssuer wiring (W-P2, D-W8/D-W9)', () => {
     expect(payload).toEqual({
       roomId: '0xroom1',
       relayIds: ['0xrelay1', '0xrelay2'],
-      signalingId: '0xsig1',
       relayMode: 1,
       verifiedScore: '950',
       consensusReached: true,
@@ -140,7 +138,7 @@ describe('event-handler → CapTokenIssuer wiring (W-P2, D-W8/D-W9)', () => {
   it('guard: with no capTokenIssuer in txContext, no issuer method is called (no crash)', async () => {
     const { handler } = createEventHandler(mockLogger(), undefined, ctx(undefined, fakeTurnIssuer()));
     await handler(ev('room_manager', 'RoomAssigned', {
-      room_id: '0xroom1', relay_ids: [], signaling_id: '0xsig1', relay_mode: 0,
+      room_id: '0xroom1', relay_ids: [], relay_mode: 0,
       verified_score: '0', consensus_reached: true, winning_cp: '0xcp1', validator_ids: [],
     }));
     await handler(ev('registration', 'RoleChanged', {

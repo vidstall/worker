@@ -12,10 +12,11 @@
  * needs off-chain, then submitting one follow-up TX via `executeWithRetry`.
  *
  * PROBE COVERAGE GAP (mirrors the client-side scoping note in
- * useWorkerHealthCheck's design): only `relay_registry` and
- * `signaling_registry` expose `endpoint_url` on-chain — `control_plane_registry`
- * does not (confirmed via schema grep), so a cp-role target cannot be
- * independently HTTP-probed by this daemon at all. Rather than vote blind
+ * useWorkerHealthCheck's design): only `relay_registry` exposes `endpoint_url`
+ * on-chain — `control_plane_registry` does not (confirmed via schema grep), so
+ * a cp-role target cannot be independently HTTP-probed by this daemon at all.
+ * (The standalone signaling node type, formerly the other probeable role via
+ * `signaling_registry`, was removed.) Rather than vote blind
  * (trusting the client-alert leg alone, which has its own known trust gap —
  * see room_health_alerts.move's module doc), cp-role WorkerDownReported events
  * are logged only, same log-and-alert posture cp-daemon's
@@ -44,9 +45,8 @@ const cursorDir = (name: string): string => join(process.env.DATA_DIR ?? '.', '.
 
 const ZERO = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
-/** Mirrors dvconf::constants role codes (role_relay=2, role_signaling=4). */
+/** Mirrors dvconf::constants role codes (role_relay=2). */
 const ROLE_RELAY = 2;
-const ROLE_SIGNALING = 4;
 
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 2500;
@@ -63,19 +63,6 @@ const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
   endpoint_url: bcs.vector(bcs.u8()),
   reserved_primary_count: bcs.u64(),
   reserved_standby_count: bcs.u64(),
-});
-
-// signaling_registry.move — field order mirrors the deployed Move struct.
-const SignalingNodeInfoSchema = bcs.struct('SignalingNodeInfo', {
-  operator: bcs.Address,
-  miner_id: bcs.Address,
-  stake_amount: bcs.u64(),
-  last_heartbeat: bcs.u64(),
-  is_active: bcs.bool(),
-  endpoint_url: bcs.vector(bcs.u8()),
-  region: bcs.vector(bcs.u8()),
-  load: bcs.u64(),
-  registered_at: bcs.u64(),
 });
 
 interface DevInspectLike {
@@ -98,9 +85,7 @@ async function resolveTargetEndpoint(
   const roleConfig =
     targetRole === ROLE_RELAY
       ? { target: `${config.packageId}::relay_registry::get_active_relays`, registryId: config.relayRegistryId, schema: RelayNodeInfoSchema }
-      : targetRole === ROLE_SIGNALING
-        ? { target: `${config.packageId}::signaling_registry::get_active_nodes`, registryId: config.signalingRegistryId, schema: SignalingNodeInfoSchema }
-        : null;
+      : null;
   if (!roleConfig) return null;
 
   try {
@@ -287,7 +272,7 @@ export function startRoomHealthVoteWatcher(opts: RoomHealthVoteWatcherOptions): 
     const dedupKey = key(roomId, targetMinerId);
     if (votedFor.has(dedupKey)) return;
 
-    if (targetRole !== ROLE_RELAY && targetRole !== ROLE_SIGNALING) {
+    if (targetRole !== ROLE_RELAY) {
       // No endpoint_url on control_plane_registry -> no independent probe possible.
       // Log-and-alert only, same posture as the cp-daemon WorkerConfirmedDead listener's
       // non-relay handling (see module doc's PROBE COVERAGE GAP).

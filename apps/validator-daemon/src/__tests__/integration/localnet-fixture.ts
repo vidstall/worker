@@ -368,7 +368,6 @@ const REGISTRY_SPEC = [
   { module: 'relay_registry', structName: 'RelayRegistry', key: 'relayRegistryId' },
   { module: 'control_plane_registry', structName: 'ControlPlaneRegistry', key: 'cpRegistryId' },
   { module: 'validator_registry', structName: 'ValidatorRegistry', key: 'validatorRegistryId' },
-  { module: 'signaling_registry', structName: 'SignalingRegistry', key: 'signalingRegistryId' },
 ] as const;
 
 type RegistryKey =
@@ -376,10 +375,9 @@ type RegistryKey =
   | 'roomManagerId'
   | 'relayRegistryId'
   | 'cpRegistryId'
-  | 'validatorRegistryId'
-  | 'signalingRegistryId';
+  | 'validatorRegistryId';
 
-/** Sequentially create the 6 admin-gated shared registries. */
+/** Sequentially create the 5 admin-gated shared registries. */
 async function createRegistries(
   client: SuiClient,
   signer: Ed25519Keypair,
@@ -459,7 +457,6 @@ export async function bootLocalnet(
       validatorRegistryId: registries.validatorRegistryId,
       userRegistryId: registries.userRegistryId,
       roomManagerId: registries.roomManagerId,
-      signalingRegistryId: registries.signalingRegistryId,
     };
 
     const teardown = async (): Promise<void> => {

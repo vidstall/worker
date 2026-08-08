@@ -24,7 +24,7 @@ let roleAssignmentCounter: Counter<string> | null = null;
 // Reuses the same opt-in module-level pattern as roleAssignmentCounter above.
 let roleAssignmentWaitHistogram: Histogram<string> | null = null;
 
-/** Wire `dvconf_role_assignments_total{service}` and `dvconf_role_assignment_wait_seconds{service,result}` into `registry` -- call once at startup on the voted-on side (relay/signaling/validator-daemon). */
+/** Wire `dvconf_role_assignments_total{service}` and `dvconf_role_assignment_wait_seconds{service,result}` into `registry` -- call once at startup on the voted-on side (relay/validator-daemon). */
 export function registerRoleAssignmentMetrics(registry: Registry, service: string): void {
   roleAssignmentCounter = createCounter(
     registry,
@@ -138,14 +138,14 @@ export async function applyVotedRole(
       tx.moveCall({
         target: `${config.packageId}::registration::apply_voted_role`,
         // F47 Phase 1.5 (REQ-RV-005): arg order MUST match the Move param order in
-        // registration::apply_voted_role. The 4 role registries were added so the
-        // entry can clean up the miner's stale OLD-role registry entry on a transition.
+        // registration::apply_voted_role. The 3 role registries were added so the
+        // entry can clean up the miner's stale OLD-role registry entry on a transition
+        // (signaling_reg dropped with the standalone signaling node type's removal).
         // ctx is auto-injected by the runtime and is NOT passed here.
         arguments: [
           tx.object(config.networkRegistryId),    // registry
           tx.object(config.minerStoreId),         // store
           newRole,                                // new_role (was: vote_box)
-          tx.object(config.signalingRegistryId),  // signaling_reg
           tx.object(config.relayRegistryId),      // relay_reg
           tx.object(config.validatorRegistryId),  // validator_reg
           tx.object(config.cpRegistryId),         // cp_reg

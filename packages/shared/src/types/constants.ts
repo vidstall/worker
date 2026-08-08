@@ -15,7 +15,6 @@ export const MinerRole = {
   Validator: 1,
   Relay: 2,
   CP: 3,
-  Signaling: 4,
 } as const;
 export type MinerRole = (typeof MinerRole)[keyof typeof MinerRole];
 
@@ -80,13 +79,6 @@ export const ErrorCodes = {
     E_NOT_REGISTERED: 541,
     E_PAUSED: 542,
   },
-  signalingRegistry: {
-    E_NOT_SIGNALING: 600,
-    E_ALREADY_REGISTERED: 601,
-    E_NOT_REGISTERED: 602,
-    E_PAUSED: 603,
-    E_NOT_OPERATOR: 604,
-  },
   economicLayer: {
     E_PAUSED: 650,
     E_NOT_ROOM_CREATOR: 651,
@@ -104,9 +96,6 @@ export const ErrorCodes = {
 } as const;
 
 // ── Economic layer constants ──────────────────────────────────────
-
-/** Flat reward per session routed by a signaling node. */
-export const SIGNALING_SESSION_REWARD = 50;
 
 /** Minimum validator proofs needed before reward distribution. */
 export const MIN_PROOFS_FOR_DISTRIBUTION = 2;

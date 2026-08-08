@@ -19,7 +19,7 @@ import type { InfraPeerPubkeyCache } from './infra-peer-recovery.js';
  * Loose-coupling shape of `CapTokenCache.emergencyInvalidate` (Stage 4 Item #3,
  * sibling lane-cache D-013). The issuer constructor accepts this optional
  * dependency to avoid importing across the file-ownership boundary into
- * `apps/signaling/src/cap-token-cache.ts`. When `undefined`, the canonical
+ * the now-deleted `apps/signaling/src/cap-token-cache.ts`. When `undefined`, the canonical
  * chain-event-driven invalidation path satisfies REQ-ADM-005 ≤5s steady-state
  * eviction; cache fast-path is a sub-second optimization per D-012 Addendum.
  */
@@ -70,7 +70,6 @@ export interface CpKeystore {
 export interface RoomAssignedEvent {
   roomId: string;
   relayIds: string[];
-  signalingId: string;
   relayMode: number;
   verifiedScore: string;
   consensusReached: boolean;

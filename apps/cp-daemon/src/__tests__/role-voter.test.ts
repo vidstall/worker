@@ -30,7 +30,7 @@ function mockConfig(): NetworkConfig {
     rpcUrl: 'http://localhost:9000', packageId: '0xpkg', networkRegistryId: '0xreg',
     minerStoreId: '0xstore', cpRegistryId: '0xcp', relayRegistryId: '0xrelay',
     validatorRegistryId: '0xval', userRegistryId: '0xuser', roomManagerId: '0xroom',
-    signalingRegistryId: '0xsig', roleVoteBoxId: '0xvotebox',
+    roleVoteBoxId: '0xvotebox',
     roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
   };
@@ -62,18 +62,18 @@ describe('RevoteCandidates tracking (RV-010)', () => {
 // ── computeBestRoleForRevote (RV-010 done-criterion #3, reuses scarcity logic) ──
 describe('computeBestRoleForRevote (RV-010)', () => {
   it('returns the scarcest role given registry counts', () => {
-    const counts: RegistryCounts = { relay: 10n, validator: 0n, cp: 3n, signaling: 4n };
+    const counts: RegistryCounts = { relay: 10n, validator: 0n, cp: 3n };
     expect(computeBestRoleForRevote(counts)).toBe(MinerRole.Validator); // validator scarcest (0)
   });
 
-  it('breaks ties by priority validator > signaling > relay > cp', () => {
-    const counts: RegistryCounts = { relay: 5n, validator: 5n, cp: 5n, signaling: 5n };
+  it('breaks ties by priority validator > relay > cp', () => {
+    const counts: RegistryCounts = { relay: 5n, validator: 5n, cp: 5n };
     expect(computeBestRoleForRevote(counts)).toBe(MinerRole.Validator);
   });
 
-  it('picks signaling when it is the sole scarcest', () => {
-    const counts: RegistryCounts = { relay: 9n, validator: 7n, cp: 8n, signaling: 1n };
-    expect(computeBestRoleForRevote(counts)).toBe(MinerRole.Signaling);
+  it('picks relay when it is the sole scarcest', () => {
+    const counts: RegistryCounts = { relay: 7n, validator: 9n, cp: 8n };
+    expect(computeBestRoleForRevote(counts)).toBe(MinerRole.Relay);
   });
 });
 
@@ -168,14 +168,11 @@ describe('startRoleVoting on-chain reconciliation', () => {
       .fn()
       // 0. reconcile: get_unassigned_miners -> one miner
       .mockResolvedValueOnce({ results: [{ returnValues: [[idVectorBytes(), 'vector<address>']] }] })
-      // 1-4. readRegistryCounts (relay/validator/cp/signaling)
+      // 1-3. readRegistryCounts (relay/validator/cp)
       .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
       .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
       .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
-      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(5), 'u64']] }] })
-      // 5. readMinerBandwidth -> 0 (not relay)
-      .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(0), 'u64']] }] })
-      // 6. readMinerCpuCores -> 0 (validator)
+      // 4. readMinerBandwidth -> 0 (not relay -> validator)
       .mockResolvedValueOnce({ results: [{ returnValues: [[U64_BYTES(0), 'u64']] }] });
 
     const client = { devInspectTransactionBlock } as any;

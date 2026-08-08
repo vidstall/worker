@@ -293,27 +293,27 @@ async function activeCount(client: SuiClient, packageId: string, moduleFn: strin
 interface ActiveCounts {
   relays: number;
   validators: number;
-  signaling: number;
 }
 
 /**
- * Poll on-chain active counts until >=3 relays + >=4 validators (ballot floor) + >=1 signaling, or
+ * Poll on-chain active counts until >=3 relays + >=4 validators (ballot floor), or
  * deadline. The native daemons self-register asynchronously (voting flow) AFTER `daemons` returns;
  * seeding the room BEFORE they are up makes the cp defer at "No relays available" and the escrow
  * re-drive only fires on RelayRegistered (NOT ValidatorRegistered), so we must gate on full readiness.
+ * (The standalone signaling node type was removed from the contract, so there is no signaling
+ * count to gate on anymore.)
  */
 async function waitForRegistration(client: SuiClient, config: NetworkConfig, logger: Logger, deadlineMs: number): Promise<ActiveCounts> {
   const deadline = Date.now() + deadlineMs;
-  let counts: ActiveCounts = { relays: 0, validators: 0, signaling: 0 };
+  let counts: ActiveCounts = { relays: 0, validators: 0 };
   while (Date.now() < deadline) {
     try {
       counts = {
         relays: await activeCount(client, config.packageId, 'relay_registry::active_count', config.relayRegistryId),
         validators: await activeCount(client, config.packageId, 'validator_registry::active_count', config.validatorRegistryId),
-        signaling: await activeCount(client, config.packageId, 'signaling_registry::active_signaling_count', config.signalingRegistryId),
       };
       logger.info({ ...counts }, 'registration readiness poll');
-      if (counts.relays >= 3 && counts.validators >= 4 && counts.signaling >= 1) return counts;
+      if (counts.relays >= 3 && counts.validators >= 4) return counts;
     } catch (err) {
       logger.debug({ err }, 'readiness poll failed — retrying');
     }
@@ -399,7 +399,7 @@ async function runD1a(logger: Logger): Promise<PhaseResult> {
   const config = loadFreshConfig();
   const client = createSuiClient('localnet');
   const ready = await waitForRegistration(client, config, logger, 240_000);
-  lines.push(`registration readiness: relays=${ready.relays} validators=${ready.validators} signaling=${ready.signaling}`);
+  lines.push(`registration readiness: relays=${ready.relays} validators=${ready.validators}`);
 
   const roomId = await seedRoom(client, config, logger);
   lines.push(`room=${roomId} + escrow created (placement trigger)`);
@@ -424,7 +424,7 @@ async function runD1b(logger: Logger): Promise<D1bResult> {
   const config = loadFreshConfig();
   const client = createSuiClient('localnet');
   const ready = await waitForRegistration(client, config, logger, 240_000);
-  lines.push(`registration readiness: relays=${ready.relays} validators=${ready.validators} signaling=${ready.signaling}`);
+  lines.push(`registration readiness: relays=${ready.relays} validators=${ready.validators}`);
 
   const roomId = await seedRoom(client, config, logger);
   lines.push(`room=${roomId} + escrow created`);

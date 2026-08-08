@@ -138,7 +138,7 @@ export interface CapTokenIssueClaim {
   roomId: string;
   /** 32-byte ed25519 infra/session peer pubkey (G3 — resolved BEFORE the cell opens). */
   peerPubkey: number[];
-  /** MinerRole enum (0=user, 1=validator, 2=relay, 3=CP, 4=signaling). */
+  /** MinerRole enum (0=user, 1=validator, 2=relay, 3=CP). */
   role: number;
   /** Sui epoch the minted token expires at. */
   expiresEpoch: bigint;

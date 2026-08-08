@@ -2,8 +2,8 @@
  * Validator-driven liveness enforcement sweep.
  *
  * "i expect that job belong to validator" — the on-chain `liveness_voting.move`
- * module lets a validator-quorum vote a stale node (relay / signaling / cp-daemon
- * / another validator) stale and, once quorum is reached, `registration::
+ * module lets a validator-quorum vote a stale node (relay / cp-daemon /
+ * another validator) stale and, once quorum is reached, `registration::
  * execute_ejection` removes it from its registry and returns its stake to its
  * original owner. This file is the OFF-CHAIN half: it discovers candidate nodes,
  * decides which look stale enough to vote on, casts `cast_liveness_vote`, and —
@@ -12,7 +12,7 @@
  * `economic_layer::distribute_rewards`).
  *
  * DISCOVERY (mirrors canary/validator-discovery.ts's convention): each of the
- * four registries' `get_active_*` getters is read via a read-only `devInspect`
+ * three registries' `get_active_*` getters is read via a read-only `devInspect`
  * (no gas, no signature) using a hand-copied positional BCS schema matching the
  * Move struct's field order EXACTLY (load-bearing, same convention as
  * ValidatorInfoSchema there).
@@ -21,8 +21,8 @@
  * longer gates on the target's on-chain last_heartbeat/epoch — epoch granularity
  * floors at the network's real epoch length (e.g. 1 HOUR on devnet), which cannot
  * express a sub-hour SLA like "5 minutes no response". Instead this module tracks
- * each node's most recent heartbeat EVENT (RelayHeartbeat / SignalingHeartbeat /
- * CPHeartbeat / ValidatorHeartbeat), which carries a REAL wall-clock timestamp
+ * each node's most recent heartbeat EVENT (RelayHeartbeat / CPHeartbeat /
+ * ValidatorHeartbeat), which carries a REAL wall-clock timestamp
  * (unlike the on-chain epoch field), via four EventPoller subscriptions. A node is
  * voted stale once its most-recently-seen heartbeat event is older than
  * `staleThresholdMs` (default 5 minutes) in real time. The 2/3-of-active-validator
@@ -66,11 +66,11 @@ const cursorDir = (name: string): string => join(process.env.DATA_DIR ?? '.', '.
 
 const ZERO = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
-// Role codes (dvconf::constants — role_user=0, role_validator=1, role_relay=2, role_cp=3, role_signaling=4).
+// Role codes (dvconf::constants — role_user=0, role_validator=1, role_relay=2, role_cp=3).
+// (role_signaling=4 was removed along with the standalone signaling node type.)
 const ROLE_VALIDATOR = 1;
 const ROLE_RELAY = 2;
 const ROLE_CP = 3;
-const ROLE_SIGNALING = 4;
 
 /** Default tick cadence: independent of, and much slower than, the canary cell loop. */
 const DEFAULT_TICK_INTERVAL_MS = 60_000;
@@ -79,8 +79,8 @@ const DEFAULT_VOTE_COOLDOWN_MS = 5 * 60_000;
 /**
  * No heartbeat event observed for this long (real wall-clock ms) -> vote stale.
  * Deliberately generous (not the raw "5 minutes no response" SLA) -- a validator's
- * own EventPoller can lag several minutes behind chain tip on the relay/signaling
- * heartbeat streams specifically (far higher event volume than CP/validator), and
+ * own EventPoller can lag several minutes behind chain tip on the relay
+ * heartbeat stream specifically (far higher event volume than CP/validator), and
  * a target newly discovered mid-lag gets `seed()`-ed to "now" with no way to tell
  * catch-up lag apart from genuine staleness. A false-positive ejection destroys
  * the target's StakePosition (see registration::execute_ejection) -- unrecoverable
@@ -122,19 +122,6 @@ const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
   endpoint_url: bcs.vector(bcs.u8()),
   reserved_primary_count: bcs.u64(),
   reserved_standby_count: bcs.u64(),
-});
-
-// signaling_registry.move:28-36
-const SignalingNodeInfoSchema = bcs.struct('SignalingNodeInfo', {
-  operator: bcs.Address,
-  miner_id: bcs.Address,
-  stake_amount: bcs.u64(),
-  last_heartbeat: bcs.u64(),
-  is_active: bcs.bool(),
-  endpoint_url: bcs.vector(bcs.u8()),
-  region: bcs.vector(bcs.u8()),
-  load: bcs.u64(),
-  registered_at: bcs.u64(),
 });
 
 // control_plane_registry.move:27-33
@@ -203,14 +190,14 @@ async function discoverRole(
   }
 }
 
-/** Discover all active nodes across all four role registries. */
+/** Discover all active nodes across all three role registries. */
 export async function discoverAllActiveNodes(
   client: SuiClient,
   config: NetworkConfig,
   logger: Logger,
 ): Promise<LivenessCandidate[]> {
   const pkg = config.packageId;
-  const [validators, relays, signaling, cps] = await Promise.all([
+  const [validators, relays, cps] = await Promise.all([
     discoverRole(
       client, config,
       `${pkg}::validator_registry::get_active_validators`,
@@ -223,22 +210,16 @@ export async function discoverAllActiveNodes(
     ),
     discoverRole(
       client, config,
-      `${pkg}::signaling_registry::get_active_nodes`,
-      config.signalingRegistryId, SignalingNodeInfoSchema, ROLE_SIGNALING, logger,
-    ),
-    discoverRole(
-      client, config,
       `${pkg}::control_plane_registry::get_active_cps`,
       config.cpRegistryId, CPNodeInfoSchema, ROLE_CP, logger,
     ),
   ]);
-  return [...validators, ...relays, ...signaling, ...cps];
+  return [...validators, ...relays, ...cps];
 }
 
 /** module name -> the heartbeat event's own `::TypeName` suffix, for filtering. */
 const HEARTBEAT_EVENT_MODULES: ReadonlyArray<{ module: string; eventSuffix: string }> = [
   { module: 'relay_registry', eventSuffix: '::RelayHeartbeat' },
-  { module: 'signaling_registry', eventSuffix: '::SignalingHeartbeat' },
   { module: 'control_plane_registry', eventSuffix: '::CPHeartbeat' },
   { module: 'validator_registry', eventSuffix: '::ValidatorHeartbeat' },
 ];
@@ -323,7 +304,6 @@ async function castLivenessVote(
           tx.object(config.minerStoreId),
           tx.object(config.validatorRegistryId),
           tx.object(config.relayRegistryId),
-          tx.object(config.signalingRegistryId),
           tx.object(config.cpRegistryId),
           tx.object(minerCapId),
           tx.pure.id(targetMinerId),
@@ -416,7 +396,6 @@ async function executeEjection(
           tx.object(config.networkRegistryId),
           tx.object(config.livenessVoteBoxId),
           tx.object(config.minerStoreId),
-          tx.object(config.signalingRegistryId),
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
           tx.object(config.cpRegistryId),

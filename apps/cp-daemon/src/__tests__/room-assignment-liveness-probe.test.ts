@@ -33,7 +33,6 @@ vi.mock('../relay-liveness-probe.js', () => ({
 
 import { handleEvent, DEFAULT_WEIGHTS } from '../event-handler.js';
 import type { NodeCandidate } from '../scoring.js';
-import type { SignalingCandidate } from '../room-assignment.js';
 import * as roomAssignment from '../room-assignment.js';
 import { PVR_DEFAULT_HISTORY } from '../scoring.js';
 import type { AttestedLoad } from '../coverage-load-reader.js';
@@ -110,7 +109,6 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
       ['cool', candidate('cool', 1_000_000_000n)],
       ['peerA', candidate('peerA', 500_000_000n)],
     ]);
-    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
       ['hot', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }], // over ceiling -- ballot padding only
@@ -119,7 +117,7 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
 
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
 
     await vi.waitFor(() => expect(spy).toHaveBeenCalled());
     expect(mockProbeCandidates).toHaveBeenCalledWith(expect.anything(), expect.anything(), ['cool', 'peerA', 'hot'], logger);
@@ -143,7 +141,6 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
       ['peerB', candidate('peerB', 400_000_000n)],
       ['warm', candidate('warm', 300_000_000n)],
     ]);
-    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
       ['hot', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }],
@@ -154,7 +151,7 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
 
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
 
     await vi.waitFor(() => expect(spy).toHaveBeenCalled());
     const args = spy.mock.calls[0]!;
@@ -175,7 +172,6 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
       ['cool', candidate('cool', 1_000_000_000n)],
       ['peerA', candidate('peerA', 500_000_000n)],
     ]);
-    const signalingState = new Map<string, SignalingCandidate>([['sig', { minerId: 'sig', load: 0n, region: '' }]]);
     const pendingRooms = new Map<string, RoomCreated>([['room1', { room_id: 'room1', creator: '0xc', relay_mode: 0, room_class_hint: 0 }]]);
     const attested = new Map<string, AttestedLoad>([
       ['hot', { attestedLoadPaths: 295, heartbeatFreshEpochs: 1 }],
@@ -184,7 +180,7 @@ describe('RMS_RELAY_HEALTH_PROBE=1 liveness gate', () => {
     ]);
     const escrow = makeSuiEvent('EscrowCreated', { escrow_id: 'e1', room_id: 'room1', amount: '1' });
 
-    handleEvent(escrow, relayState, signalingState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
+    handleEvent(escrow, relayState, pendingRooms, logger, DEFAULT_WEIGHTS, baseTxContext(), new Map(), threeValidators(), attested);
 
     await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ roomId: 'room1' }),

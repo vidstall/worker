@@ -110,9 +110,9 @@ export class LiveRelayChainStateReader implements RelayChainStateReader {
 
   /**
    * Assigned relays for the room: assigned_relays[0]=primary, [1]=standby.
-   * Reads room_manager::get_room_assignment, whose first return value is the
-   * `vector<ID>` we want (the second is the signaling Option<ID>, ignored).
-   * Returns [] if the room is unassigned or the call errors.
+   * Reads room_manager::get_room_assignment, whose sole return value is the
+   * `vector<ID>` we want. Returns [] if the room is unassigned or the call
+   * errors.
    */
   async getAssignedRelays(roomId: string): Promise<string[]> {
     try {

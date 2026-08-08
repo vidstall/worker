@@ -68,12 +68,11 @@ export interface MinerHeartbeat {
   lastHeartbeat: bigint;
 }
 
-/** Active node counts across the four role registries. */
+/** Active node counts across the three role registries. */
 export interface RoleCounts {
   relay: bigint;
   validator: bigint;
   cp: bigint;
-  signaling: bigint;
 }
 
 /**
@@ -85,7 +84,7 @@ export interface ChainStateReader {
   getCurrentEpoch(): Promise<bigint>;
   /** Active miners with their role + last_heartbeat epoch. */
   getActiveMiners(): Promise<MinerHeartbeat[]>;
-  /** Active counts across the four role registries. */
+  /** Active counts across the three role registries. */
   getRoleCounts(): Promise<RoleCounts>;
   /** `revote_eligible_since[minerId]` on-chain, or null if the miner was never marked. */
   getRevoteEligibleSince(minerId: string): Promise<bigint | null>;
@@ -114,14 +113,13 @@ export interface RevoteWatcherOptions {
  */
 export function computeSurplusRoles(counts: RoleCounts, floorBps: bigint): Set<number> {
   const surplus = new Set<number>();
-  const total = counts.relay + counts.validator + counts.cp + counts.signaling;
+  const total = counts.relay + counts.validator + counts.cp;
   if (total === 0n) return surplus; // empty network → treated as balanced on-chain
 
   const rawRelay = total / (counts.relay > 0n ? counts.relay : 1n);
   const rawValidator = total / (counts.validator > 0n ? counts.validator : 1n);
   const rawCp = total / (counts.cp > 0n ? counts.cp : 1n);
-  const rawSig = total / (counts.signaling > 0n ? counts.signaling : 1n);
-  const rawTotal = rawRelay + rawValidator + rawCp + rawSig;
+  const rawTotal = rawRelay + rawValidator + rawCp;
   if (rawTotal === 0n) return surplus;
 
   // Per-role surplus test — identical bigint math to the Move authority
@@ -135,7 +133,6 @@ export function computeSurplusRoles(counts: RoleCounts, floorBps: bigint): Set<n
   flag(rawRelay, MinerRole.Relay);
   flag(rawValidator, MinerRole.Validator);
   flag(rawCp, MinerRole.CP);
-  flag(rawSig, MinerRole.Signaling);
   return surplus;
 }
 
@@ -241,8 +238,9 @@ export class RevoteWatcher {
 /**
  * Build a real {@link MarkSubmitter} that signs + submits `mark_revote_eligible_*`
  * TXs via `executeWithRetry`. Arg order matches role_voting.move exactly
- * (net_reg, vote_box, miner_store, relay_reg, validator_reg, cp_reg, signaling_reg,
- * miner_id) — `ctx` is implicit in a PTB.
+ * (net_reg, vote_box, miner_store, relay_reg, validator_reg, cp_reg, miner_id)
+ * — `ctx` is implicit in a PTB (signaling_reg dropped with the standalone
+ * signaling node type's removal).
  *
  * NOTE: targets the F47 Phase 1 entries, which are only callable once the new
  * package is republished (the deployed testnet v3 predates Phase 1). Exercised
@@ -280,7 +278,6 @@ export function makeMarkSubmitter(
             tx.object(config.relayRegistryId),      // relay_reg: &RelayRegistry
             tx.object(config.validatorRegistryId),  // validator_reg: &ValidatorRegistry
             tx.object(config.cpRegistryId),         // cp_reg: &ControlPlaneRegistry
-            tx.object(config.signalingRegistryId),  // signaling_reg: &SignalingRegistry
             tx.pure.id(minerId),                    // miner_id: ID
           ],
         });

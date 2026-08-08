@@ -1,20 +1,21 @@
 /**
- * Multi-CP Voting Live (N=5) — Phase C (GĐ2) Task C3: the NATIVE 13-process
+ * Multi-CP Voting Live (N=5) — Phase C (GĐ2) Task C3: the NATIVE 12-process
  * launcher. Spawns the full local fleet against an already-staged localnet and
  * proves it ALL-UP healthy, then tears it down. This is the launcher SKELETON:
  * it does NOT run the live demo flows (#6 role vote / #7 pairing) — those are
  * C4, which EXTENDS main() at the clearly-marked seam below.
  *
- * THE FLEET (13 processes — the genuine N=5 substrate seed-multicp writes):
+ * THE FLEET (12 processes — the genuine N=5 substrate seed-multicp writes; the
+ * standalone signaling node type was removed from the contract, so there is no
+ * signaling process/wave anymore):
  *   wave 1  cp-0..cp-4         5 cp-daemon   (role-vote loops — MUST be up first)
  *   wave 2  val-0..val-3       4 validator   (pre-registered infra: VALIDATOR_CAP_ID set)
  *           relay-0,relay-1    2 relay
- *           sig-0              1 signaling
  *   wave 3  user-miner         1 validator-daemon in VOTING mode (the vote subject)
  *
  * WHY THE ORDER (load-bearing for determinism): all 5 CPs must be healthy BEFORE
  * the user-miner registers, so every role-vote loop is live and the genuine
- * 4-of-5 (required = ceil(5·2/3)) quorum can form. Infra (validators/relays/sig)
+ * 4-of-5 (required = ceil(5·2/3)) quorum can form. Infra (validators/relays)
  * comes up in parallel between them; the user-miner is spawned LAST.
  *
  * KEY MATRIX FACTS (verified against the daemon entrypoints — see per-field
@@ -80,7 +81,7 @@ const WORKTREE_ROOT = resolve(SCRIPT_DIR, '..', '..'); // …/dvconf-daemons-mul
 const RUN_DIR = join(WORKTREE_ROOT, '.run');
 const KEYS_PATH = process.env['MULTICP_KEYS_PATH'] ?? join(RUN_DIR, 'multicp-keys.json');
 
-type App = 'cp-daemon' | 'validator-daemon' | 'relay' | 'signaling';
+type App = 'cp-daemon' | 'validator-daemon' | 'relay';
 
 /** Absolute path to a daemon entry (foreign CWD ⇒ MUST be absolute; the spec's R6). */
 function entryFor(app: App): string {
@@ -96,15 +97,12 @@ function cwdFor(name: string): string {
 const EXPECTED_CPS = 5;
 const EXPECTED_VALIDATORS = 4;
 const EXPECTED_RELAYS = 2;
-const EXPECTED_SIGNALING = 1;
 
 // ── port allocation (no collisions; demo profile = canary/TURN/quorum off) ──
 
 const CP_HEALTHZ_BASE = 8091; // cp-0..4 → 8091..8095
 const VALIDATOR_HEALTHZ_BASE = 8101; // val-0..3 → 8101..8104
 const USER_MINER_HEALTHZ_PORT = 8105;
-const SIGNALING_PORT = 8080; // published port (hardcoded — keep exactly ONE signaling)
-const SIGNALING_HEALTHZ_PORT = 8082;
 const RELAY_WS_BASE = 4000; // relay-k WS → 4000, 4010
 const RELAY_METRICS_BASE = 4001; // relay-k /metrics + /healthz → 4001, 4011
 const RELAY_PORT_STRIDE = 10;
@@ -115,7 +113,7 @@ const RELAY_PIPE_HIGH_BASE = 40100; // → 40100, 40300
 const RELAY_RANGE_STRIDE = 200;
 
 /**
- * The 10 published-config vars loadNetworkConfig REQUIRES (any missing ⇒ a child
+ * The 9 published-config vars loadNetworkConfig REQUIRES (any missing ⇒ a child
  * throws on startup). Every child inherits these; the launcher fails loud here
  * BEFORE any spawn if baseEnv omits one.
  */
@@ -128,7 +126,6 @@ const REQUIRED_CFG_VARS = [
   'VALIDATOR_REGISTRY_ID',
   'USER_REGISTRY_ID',
   'ROOM_MANAGER_ID',
-  'SIGNALING_REGISTRY_ID',
   'ROLE_VOTE_BOX_ID',
 ] as const;
 
@@ -149,7 +146,6 @@ const IDENTITY_ENV_KEYS = [
   'VALIDATOR_CAP_ID',
   'PRIVATE_KEY',
   'MINER_CAP_ID',
-  'SIGNALING_KEYPAIR',
   'REGISTRATION_MODE',
 ] as const;
 
@@ -159,7 +155,7 @@ const IDENTITY_ENV_KEYS = [
 export type SpawnOrder = 'cp' | 'infra' | 'user-miner';
 
 export interface ProcessSpec {
-  /** Stable per-process name, e.g. 'cp-0', 'val-2', 'relay-1', 'user-miner', 'sig-0'. */
+  /** Stable per-process name, e.g. 'cp-0', 'val-2', 'relay-1', 'user-miner'. */
   name: string;
   /** Which daemon binary under apps/<app>/src/index.ts. */
   app: App;
@@ -222,9 +218,6 @@ export function buildLaunchPlan(
   if (keys.relays.length !== EXPECTED_RELAYS) {
     throw new Error(`buildLaunchPlan: expected ${EXPECTED_RELAYS} relays, got ${keys.relays.length}`);
   }
-  if (keys.signaling.length !== EXPECTED_SIGNALING) {
-    throw new Error(`buildLaunchPlan: expected ${EXPECTED_SIGNALING} signaling, got ${keys.signaling.length}`);
-  }
 
   const cfg = buildSharedCfg(baseEnv);
   const specs: ProcessSpec[] = [];
@@ -245,7 +238,7 @@ export function buildLaunchPlan(
         CAP_TOKEN_QUORUM_THRESHOLD: '1', // KISS: orthogonal to the role-vote quorum (=4); '1' needs no QUORUM_STATE_OBJECT_ID
         ROLE_VOTING_INTERVAL_MS: '30000',
         HEARTBEAT_INTERVAL_MS: '30000',
-        POLL_INTERVAL_MS: '10000', // R9: ease :9000 RPC pressure under a 13-process boot (5 CPs poll)
+        POLL_INTERVAL_MS: '10000', // R9: ease :9000 RPC pressure under a 12-process boot (5 CPs poll)
         REVOTE_SCAN_INTERVAL_EPOCHS: '5',
       },
       healthzPort,
@@ -308,28 +301,6 @@ export function buildLaunchPlan(
       healthzPort: metricsPort, // relay serves /healthz on the metrics port (index.ts:933)
       order: 'infra',
     });
-  });
-
-  // ── wave 2c — 1 signaling (exactly one; published port 8080, no override) ──
-  const sig = keys.signaling[0]!; // length asserted === 1 above
-  specs.push({
-    name: 'sig-0',
-    app: 'signaling',
-    entry: entryFor('signaling'),
-    cwd: cwdFor('sig-0'),
-    env: {
-      ...cfg,
-      SIGNALING_KEYPAIR: sig.secretKey,
-      MINER_CAP_ID: sig.capId, // set ⇒ skip register (auto-register.ts:97)
-      SIGNALING_PORT: String(SIGNALING_PORT),
-      SIGNALING_HEALTHZ_PORT: String(SIGNALING_HEALTHZ_PORT),
-      ENDPOINT_URL: `ws://127.0.0.1:${SIGNALING_PORT}`,
-      REGION: 'local',
-      HEARTBEAT_INTERVAL_MS: '30000',
-      RELAY_ENDPOINT_POLL_INTERVAL_MS: '5000',
-    },
-    healthzPort: SIGNALING_HEALTHZ_PORT,
-    order: 'infra',
   });
 
   // ── wave 3 — USER-miner LAST (validator-daemon binary, VOTING mode, NO cap) ──
@@ -1149,7 +1120,7 @@ export async function launchFleet(
     await Promise.all(cpHandles.map((h) => waitHealthy(h)));
 
     // wave 2 — infra in parallel.
-    logger.info({ module: MODULE, action: 'wave', context: { wave: 'infra', count: infraSpecs.length } }, 'wave 2: spawning 4 validators + 2 relays + 1 signaling');
+    logger.info({ module: MODULE, action: 'wave', context: { wave: 'infra', count: infraSpecs.length } }, 'wave 2: spawning 4 validators + 2 relays');
     const infraHandles = infraSpecs.map((s) => spawnProcess(s, logger));
     handles.push(...infraHandles);
     await Promise.all(infraHandles.map((h) => waitHealthy(h)));
@@ -1177,7 +1148,7 @@ async function main(): Promise<void> {
   const logger = createLogger(MODULE);
   logger.info(
     { module: MODULE, action: 'start', context: { keysPath: KEYS_PATH, worktreeRoot: WORKTREE_ROOT } },
-    'run-multicp-voting starting — launching the 13-process N=5 fleet',
+    'run-multicp-voting starting — launching the 12-process N=5 fleet',
   );
 
   // main OWNS the handles so a Ctrl-C during the (up to 3×120s) bringup — or under

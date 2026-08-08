@@ -73,7 +73,6 @@ function makeConfig(): NetworkConfig {
     validatorRegistryId: ID('0a'),
     userRegistryId: ID('06'),
     roomManagerId: ID('07'),
-    signalingRegistryId: ID('5a'),
     roleVoteBoxId: ID('b0'),
     roleVotingPackageId: ROLE_VOTING_PKG,
     livenessVoteBoxId: ID('b1'),
@@ -150,12 +149,11 @@ describe('SuiChainStateReader', () => {
     expect(capturedTargets).toContain(`${ROLE_VOTING_PKG}::role_voting::revote_cooldown_epochs`);
   });
 
-  it('getRoleCounts maps the 4 active_count u64s to {relay,validator,cp,signaling}', async () => {
+  it('getRoleCounts maps the 3 active_count u64s to {relay,validator,cp}', async () => {
     const byTarget: Record<string, string> = {
       [`${PKG}::relay_registry::active_count`]: '5',
       [`${PKG}::validator_registry::active_count`]: '3',
       [`${PKG}::control_plane_registry::active_cp_count`]: '2',
-      [`${PKG}::signaling_registry::active_signaling_count`]: '7',
     };
     const client = {
       devInspectTransactionBlock: vi.fn().mockImplementation(({ transactionBlock }) => {
@@ -166,7 +164,7 @@ describe('SuiChainStateReader', () => {
       }),
     } as never;
     const reader = new SuiChainStateReader(client, config, logger);
-    expect(await reader.getRoleCounts()).toEqual({ relay: 5n, validator: 3n, cp: 2n, signaling: 7n });
+    expect(await reader.getRoleCounts()).toEqual({ relay: 5n, validator: 3n, cp: 2n });
   });
 
   it('getActiveMiners decodes a 2-entry vector<RelayNodeInfo> → 2 MinerHeartbeat (role=Relay)', async () => {
@@ -235,7 +233,6 @@ describe('SuiChainStateReader', () => {
     expect(seen).toContain(`${PKG}::relay_registry::get_active_relays`);
     expect(seen).toContain(`${PKG}::validator_registry::get_active_validators`);
     expect(seen).toContain(`${PKG}::control_plane_registry::get_active_cps`);
-    expect(seen).toContain(`${PKG}::signaling_registry::get_active_nodes`);
   });
 
   it('getRevoteEligibleSince returns null when the dynamic field is not found (error)', async () => {

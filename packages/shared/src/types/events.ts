@@ -141,7 +141,6 @@ export interface RoomCreated {
 export interface RoomAssigned {
   room_id: string;
   relay_ids: string[];
-  signaling_id: string;
   relay_mode: number;
   verified_score: string;
   consensus_reached: boolean;
@@ -173,31 +172,6 @@ export interface UserProfileUpdated {
   display_name: number[];
 }
 
-// ── Signaling events (signaling_registry module) ────────────────────
-
-export interface SignalingRegistered {
-  miner_id: string;
-  operator: string;
-  endpoint_url: number[];
-  region: number[];
-  stake_amount: string;
-}
-
-export interface SignalingHeartbeat {
-  miner_id: string;
-  epoch: string;
-}
-
-export interface SignalingLoadUpdated {
-  miner_id: string;
-  new_load: string;
-}
-
-export interface SignalingUnregistered {
-  miner_id: string;
-  operator: string;
-}
-
 // ── Economic Layer events (economic_layer module) ───────────────────
 // Per ADD IC-5: Event Name/Field Alignment Contract
 
@@ -221,7 +195,6 @@ export interface RewardsDistributed {
   relay_reward: string;
   validator_pool: string;
   cp_pool: string;
-  signaling_pool: string;
   remainder: string;
 }
 
@@ -255,13 +228,14 @@ export interface SecretRotated {
 /**
  * P17 M2a — emitted by `dvconf::node_health::{report_node_degradation,
  * report_cp_degradation}`. A faithful 3-level (0/1/2) self-degradation signal
- * spanning all four daemon types (validator / relay / cp / signaling). This is
+ * spanning all three daemon types (validator / relay / cp). This is
  * the SINGLE-OWNER TS mirror (M2a-P5): field names + types + ORDER byte-mirror
  * the FROZEN Move struct (node_health.move:48-54). A daemon decodes this by
  * Sui-JSON KEY (NOT positional BCS), so a rename/reorder breaks the wire
  * contract — the Move-side 74-byte BCS layout is pinned by the P4 #[test_only]
  * foreign-id test.
- *   node_type: u8 — 1=validator, 2=relay, 3=cp, 4=signaling (constants.move:13-17).
+ *   node_type: u8 — 1=validator, 2=relay, 3=cp (constants.move:13-17; the old
+ *              4=signaling slot is retired, not reused).
  *                   `report_node_degradation` derives it from the cap role
  *                   (unforgeable); `report_cp_degradation` hardcodes 3.
  *   level:     u8 — 0=healthy, 1=degraded, 2=unhealthy.
@@ -301,10 +275,6 @@ export type DvconfEvent =
   | RoomRulesUpdated
   | UserRegistered
   | UserProfileUpdated
-  | SignalingRegistered
-  | SignalingHeartbeat
-  | SignalingLoadUpdated
-  | SignalingUnregistered
   | EscrowCreated
   | SessionProofSubmitted
   | RewardsDistributed

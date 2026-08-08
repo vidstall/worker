@@ -197,7 +197,7 @@ async function withLockRetry<T>(label: string, fn: () => Promise<T>, attempts = 
   throw lastErr;
 }
 
-interface RoomManifest { roomId: string; relayId?: string; signalingId?: string; primaryUrl?: string }
+interface RoomManifest { roomId: string; relayId?: string; primaryUrl?: string }
 
 /** A keypair from a bech32 `suiprivkey1...` secret. */
 function kpFromSecret(secret: string): Ed25519Keypair {
@@ -582,12 +582,15 @@ async function registerFreshValidatorWithSession(
 
   // CP casts Validator role (cp_reg first — role_voting.move:197). withLockRetry: the seed CP key is
   // shared with the live cp-daemon, so its gas coin can transiently lock.
+  // Package split (see services/contract/role-voting): role_voting now lives in its
+  // own package, not config.packageId. Signature no longer takes a signaling_reg --
+  // the standalone signaling node type was removed from the contract.
   await withLockRetry('cast_role_vote (validator)', () => signAndAssert(
     client,
     cp.kp,
     (tx) => {
       tx.moveCall({
-        target: `${config.packageId}::role_voting::cast_role_vote`,
+        target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.roleVoteBoxId),
@@ -595,7 +598,6 @@ async function registerFreshValidatorWithSession(
           tx.object(config.cpRegistryId),
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
-          tx.object(config.signalingRegistryId),
           tx.object(cp.cpCapId),
           tx.pure.id(minerId),
           tx.pure.u8(MinerRole.Validator),
@@ -606,18 +608,28 @@ async function registerFreshValidatorWithSession(
     logger,
   ));
 
-  // miner applies the voted role (registration.move:141).
+  // miner applies the voted role (registration.move:113). apply_voted_role no longer
+  // takes the RoleVoteBox (or a signaling_reg) directly -- consume the pending
+  // assignment via role_voting::consume_voted_assignment in the SAME PTB and feed
+  // its u8 return into apply_voted_role's new_role param (mirrors
+  // packages/shared/src/chain/role-assignment.ts applyVotedRole).
   await signAndAssert(
     client,
     minerKp,
     (tx) => {
+      const [newRole] = tx.moveCall({
+        target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+        arguments: [
+          tx.object(config.roleVoteBoxId),
+          tx.object(minerCapId),
+        ],
+      });
       tx.moveCall({
         target: `${config.packageId}::registration::apply_voted_role`,
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.minerStoreId),
-          tx.object(config.roleVoteBoxId),
-          tx.object(config.signalingRegistryId),
+          newRole,
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
           tx.object(config.cpRegistryId),
@@ -777,12 +789,15 @@ async function registerFreshRelay(
   const minerCapId = createdObjectByType(reg, '::caps::MinerCap', 'registerFreshRelay');
   const stakeId = createdObjectByType(reg, '::staking::StakePosition', 'registerFreshRelay');
 
+  // Package split (see services/contract/role-voting): role_voting now lives in its
+  // own package, not config.packageId. Signature no longer takes a signaling_reg --
+  // the standalone signaling node type was removed from the contract.
   await withLockRetry('cast_role_vote (relay)', () => signAndAssert(
     client,
     cp.kp,
     (tx) => {
       tx.moveCall({
-        target: `${config.packageId}::role_voting::cast_role_vote`,
+        target: `${config.roleVotingPackageId}::role_voting::cast_role_vote`,
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.roleVoteBoxId),
@@ -790,7 +805,6 @@ async function registerFreshRelay(
           tx.object(config.cpRegistryId),
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
-          tx.object(config.signalingRegistryId),
           tx.object(cp.cpCapId),
           tx.pure.id(minerId),
           tx.pure.u8(MinerRole.Relay),
@@ -800,17 +814,26 @@ async function registerFreshRelay(
     'cast_role_vote_relay',
     logger,
   ));
+  // apply_voted_role no longer takes the RoleVoteBox (or a signaling_reg) directly --
+  // consume the pending assignment via role_voting::consume_voted_assignment in the
+  // SAME PTB and feed its u8 return into apply_voted_role's new_role param.
   await signAndAssert(
     client,
     minerKp,
     (tx) => {
+      const [newRole] = tx.moveCall({
+        target: `${config.roleVotingPackageId}::role_voting::consume_voted_assignment`,
+        arguments: [
+          tx.object(config.roleVoteBoxId),
+          tx.object(minerCapId),
+        ],
+      });
       tx.moveCall({
         target: `${config.packageId}::registration::apply_voted_role`,
         arguments: [
           tx.object(config.networkRegistryId),
           tx.object(config.minerStoreId),
-          tx.object(config.roleVoteBoxId),
-          tx.object(config.signalingRegistryId),
+          newRole,
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
           tx.object(config.cpRegistryId),

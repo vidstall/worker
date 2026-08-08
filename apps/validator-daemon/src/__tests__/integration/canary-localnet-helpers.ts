@@ -56,7 +56,6 @@ const GAS_BUDGET = 100_000_000;
 export const CP_STAKE_MIST = 600_000_000n; // 0.6 SUI → determine_role = CP → ControlPlaneCap
 export const RELAY_STAKE_MIST = 300_000_000n; // 0.3 SUI → role User at register → MinerCap (relay min 0.25)
 export const VALIDATOR_STAKE_MIST = 300_000_000n; // 0.3 SUI → role User at register; validator min 0.1
-export const SIGNALING_STAKE_MIST = 300_000_000n; // 0.3 SUI → role User at register; signaling min 0.05
 
 // ── object-change shape (subset) ─────────────────────────────────────────────
 
@@ -249,7 +248,6 @@ export async function castRoleVoteFromCp(
           tx.object(config.cpRegistryId),
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
-          tx.object(config.signalingRegistryId),
           tx.object(cp.cpCapId),
           tx.pure.id(minerId),
           tx.pure.u8(role),
@@ -280,7 +278,6 @@ export async function applyVotedRoleAs(
           tx.object(config.networkRegistryId),
           tx.object(config.minerStoreId),
           tx.object(config.roleVoteBoxId),
-          tx.object(config.signalingRegistryId),
           tx.object(config.relayRegistryId),
           tx.object(config.validatorRegistryId),
           tx.object(config.cpRegistryId),
@@ -345,52 +342,6 @@ export async function registerRelay(
   return { minerId: reg.minerId, minerCapId: reg.minerCapId, stakeId: reg.stakeId, kp: minerKp };
 }
 
-export interface SignalingResult {
-  minerId: string;
-  minerCapId: string;
-  stakeId: string;
-  kp: Ed25519Keypair;
-}
-
-/**
- * Full signaling lifecycle: register (User→MinerCap) → CP votes Signaling → miner
- * applies → register_signaling. Mirrors `registerRelay` exactly, one role over.
- */
-export async function registerSignaling(
-  client: SuiClient,
-  cp: CpResult,
-  config: NetworkConfig,
-  logger: Logger,
-): Promise<SignalingResult> {
-  const minerKp = await createFundedKeypair(logger);
-  const reg = await registerMiner(client, minerKp, config, SIGNALING_STAKE_MIST, logger);
-  if (reg.minerCapId === null) {
-    throw new Error('registerSignaling: expected a MinerCap from a 0.3 SUI register, got none');
-  }
-  await castRoleVoteFromCp(client, cp, reg.minerId, MinerRole.Signaling, config, logger);
-  await applyVotedRoleAs(client, minerKp, reg.minerCapId, reg.stakeId, config, logger);
-  await signAndAssert(
-    client,
-    minerKp,
-    (tx) => {
-      tx.moveCall({
-        target: `${config.packageId}::signaling_registry::register_signaling`,
-        arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.signalingRegistryId),
-          tx.object(reg.minerCapId!),
-          tx.object(reg.stakeId),
-          tx.pure.vector('u8', [1, 2, 3, 4]), // endpoint_url
-          tx.pure.vector('u8', [1, 2, 3, 4]), // region
-        ],
-      });
-    },
-    'register_signaling',
-    logger,
-  );
-  logger.info({ module: MODULE, action: 'register_signaling', context: { minerId: reg.minerId } }, 'signaling registered');
-  return { minerId: reg.minerId, minerCapId: reg.minerCapId, stakeId: reg.stakeId, kp: minerKp };
-}
 
 export interface ValidatorResult {
   minerId: string;

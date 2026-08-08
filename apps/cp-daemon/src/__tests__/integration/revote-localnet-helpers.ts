@@ -291,7 +291,6 @@ export async function castRoleVoteFromCp(
           tx.object(config.cpRegistryId), // cp_reg: &ControlPlaneRegistry
           tx.object(config.relayRegistryId), // relay_reg: &RelayRegistry
           tx.object(config.validatorRegistryId), // validator_reg: &ValidatorRegistry
-          tx.object(config.signalingRegistryId), // signaling_reg: &SignalingRegistry
           tx.object(cp.cpCapId), // cap: &ControlPlaneCap
           tx.pure.id(minerId), // miner_id: ID
           tx.pure.u8(role), // role: u8
@@ -311,8 +310,8 @@ export async function castRoleVoteFromCp(
  * `amount(stake) >= minimum_for_role(new_role)`. Returns the TX result so callers
  * can read RoleTransitioned / RoleApplied.
  *
- * Arg order (registration.move:141): registry, store, vote_box, signaling_reg,
- * relay_reg, validator_reg, cp_reg, cap, stake.
+ * Arg order (registration.move:141): registry, store, vote_box, relay_reg,
+ * validator_reg, cp_reg, cap, stake.
  */
 export async function applyVotedRoleAs(
   client: SuiClient,
@@ -332,7 +331,6 @@ export async function applyVotedRoleAs(
           tx.object(config.networkRegistryId), // registry: &NetworkRegistry
           tx.object(config.minerStoreId), // store: &mut MinerStore
           tx.object(config.roleVoteBoxId), // vote_box: &mut RoleVoteBox
-          tx.object(config.signalingRegistryId), // signaling_reg: &mut SignalingRegistry
           tx.object(config.relayRegistryId), // relay_reg: &mut RelayRegistry
           tx.object(config.validatorRegistryId), // validator_reg: &mut ValidatorRegistry
           tx.object(config.cpRegistryId), // cp_reg: &mut ControlPlaneRegistry

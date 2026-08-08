@@ -656,13 +656,11 @@ describe('event-handler — RelayPromoted arm (REQ-RO-009 observer side)', () =>
     const observer = { onRelayPromoted: vi.fn().mockResolvedValue(undefined) };
     const logger = mockLogger();
     const relayState = new Map();
-    const signalingState = new Map();
     const pendingRooms = new Map();
 
     handleEvent(
       makeRelayPromotedEvent(),
       relayState,
-      signalingState,
       pendingRooms,
       logger,
       undefined,
@@ -684,14 +682,12 @@ describe('event-handler — RelayPromoted arm (REQ-RO-009 observer side)', () =>
   it('RED test 6: RelayPromoted with no observer → no throw, debug log emitted', () => {
     const logger = mockLogger();
     const relayState = new Map();
-    const signalingState = new Map();
     const pendingRooms = new Map();
 
     expect(() =>
       handleEvent(
         makeRelayPromotedEvent(),
         relayState,
-        signalingState,
         pendingRooms,
         logger,
         undefined,

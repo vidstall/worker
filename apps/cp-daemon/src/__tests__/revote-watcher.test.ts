@@ -31,7 +31,6 @@ function mockConfig(): NetworkConfig {
     validatorRegistryId: '0xval',
     userRegistryId: '0xuser',
     roomManagerId: '0xroom',
-    signalingRegistryId: '0xsig',
     roleVoteBoxId: '0xvotebox',
     roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',
@@ -78,7 +77,7 @@ class FakeChainStateReader implements ChainStateReader {
   }
 }
 
-const balancedCounts: RoleCounts = { relay: 5n, validator: 5n, cp: 5n, signaling: 5n };
+const balancedCounts: RoleCounts = { relay: 5n, validator: 5n, cp: 5n };
 
 function reader(over: Partial<FakeChainStateReader['state']> = {}): FakeChainStateReader {
   return new FakeChainStateReader({
@@ -116,7 +115,7 @@ describe('RevoteWatcher.scanCompositionShift', () => {
   it('returns miners of a surplus role (raw pre-clamp ratio < floor) — mirrors on-chain raw math', async () => {
     // relay surplus: 50 relays vs 2 each → raw_relay ratio 117bps < 500 floor
     const r = reader({
-      counts: { relay: 50n, validator: 2n, cp: 2n, signaling: 2n },
+      counts: { relay: 50n, validator: 2n, cp: 2n },
       miners: [
         { minerId: '0xr1', role: MinerRole.Relay, lastHeartbeat: 99n },
         { minerId: '0xr2', role: MinerRole.Relay, lastHeartbeat: 99n },
@@ -206,16 +205,16 @@ describe('RevoteWatcher structured logging', () => {
 // ── computeSurplusRoles (exported helper, mirrors economic_layer raw math) ──────
 describe('computeSurplusRoles', () => {
   it('flags the over-supplied role', () => {
-    expect(computeSurplusRoles({ relay: 50n, validator: 2n, cp: 2n, signaling: 2n }, 500n)).toEqual(
+    expect(computeSurplusRoles({ relay: 50n, validator: 2n, cp: 2n }, 500n)).toEqual(
       new Set([MinerRole.Relay]),
     );
   });
   it('empty network → no surplus (matches on-chain "balanced" branch)', () => {
-    expect(computeSurplusRoles({ relay: 0n, validator: 0n, cp: 0n, signaling: 0n }, 500n)).toEqual(new Set());
+    expect(computeSurplusRoles({ relay: 0n, validator: 0n, cp: 0n }, 500n)).toEqual(new Set());
   });
   it('never flags a zero-count role as surplus (exact Move parity, raw = total is maximal)', () => {
     // relay surplus (50); validator zero-count must NOT be flagged.
-    expect(computeSurplusRoles({ relay: 50n, validator: 0n, cp: 2n, signaling: 2n }, 500n)).toEqual(
+    expect(computeSurplusRoles({ relay: 50n, validator: 0n, cp: 2n }, 500n)).toEqual(
       new Set([MinerRole.Relay]),
     );
   });
@@ -225,7 +224,7 @@ describe('computeSurplusRoles', () => {
 describe('makeMarkSubmitter', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('builds mark_revote_eligible_idle with the 8 Move args in exact order', async () => {
+  it('builds mark_revote_eligible_idle with the 7 Move args in exact order', async () => {
     let captured: any;
     mockExecuteWithRetry.mockImplementation(async (_c: unknown, _s: unknown, builder: (tx: any) => void) => {
       const calls: any[] = [];
@@ -241,15 +240,14 @@ describe('makeMarkSubmitter', () => {
     await submit('0xminer', MarkReason.Idle, 'trace-1');
 
     expect(captured.target).toBe('0xrolevotingpkg::role_voting::mark_revote_eligible_idle');
-    expect(captured.arguments).toHaveLength(8);
+    expect(captured.arguments).toHaveLength(7);
     expect(captured.arguments[0]).toEqual({ kind: 'object', x: '0xreg' });      // net_reg
     expect(captured.arguments[1]).toEqual({ kind: 'object', x: '0xvotebox' });  // vote_box
     expect(captured.arguments[2]).toEqual({ kind: 'object', x: '0xstore' });    // miner_store
     expect(captured.arguments[3]).toEqual({ kind: 'object', x: '0xrelay' });    // relay_reg
     expect(captured.arguments[4]).toEqual({ kind: 'object', x: '0xval' });      // validator_reg
     expect(captured.arguments[5]).toEqual({ kind: 'object', x: '0xcp' });       // cp_reg
-    expect(captured.arguments[6]).toEqual({ kind: 'object', x: '0xsig' });      // signaling_reg
-    expect(captured.arguments[7]).toEqual({ kind: 'id', x: '0xminer' });        // miner_id: ID
+    expect(captured.arguments[6]).toEqual({ kind: 'id', x: '0xminer' });        // miner_id: ID
   });
 
   it('targets mark_revote_eligible_composition_shift for CompositionShift', async () => {

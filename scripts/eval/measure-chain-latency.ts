@@ -147,7 +147,6 @@ interface Roster {
   cp: CpHandle;
   relayIds: [string, string];
   validators: [ReadyValidator, ReadyValidator, ReadyValidator, ReadyValidator];
-  signaling: SeededKey;
   userKp: Ed25519Keypair;
 }
 
@@ -828,7 +827,6 @@ async function buildRoster(
   const cp = await bootstrapCp(client, config, logger);
   const relay = await voteAndApplyMiner(client, cp, 'relay', config, logger);
   const relayStandby = await voteAndApplyMiner(client, cp, 'relay-standby', config, logger);
-  const signaling = await voteAndApplyMiner(client, cp, 'signaling', config, logger);
 
   const validators: ReadyValidator[] = [];
   for (let index = 0; index < EXPECTED_VALIDATORS; index += 1) {
@@ -877,7 +875,6 @@ async function buildRoster(
       normalizeSuiAddress(relayStandby.minerId),
     ],
     validators: validators as Roster['validators'],
-    signaling,
     userKp,
   };
 }
@@ -937,6 +934,10 @@ async function submitPairing(
   roster: Roster,
   roomId: string,
 ): Promise<void> {
+  // relay-only: the standalone signaling node type (and its registry-liveness gate)
+  // was removed from the contract, and this entry now also takes a
+  // health_validator_ids ballot argument (all four roster validators, here).
+  const validatorIds = roster.validators.map((validator) => validator.minerId);
   await executeUnmeasured(client, roster.cp.kp, 'submit_pairing_proposal', (tx) => {
     tx.moveCall({
       // submit_pairing_proposal is defined in the room_manager_pairing
@@ -948,13 +949,12 @@ async function submitPairing(
         tx.object(config.cpRegistryId),
         tx.object(config.relayRegistryId),
         tx.object(config.validatorRegistryId),
-        tx.object(config.signalingRegistryId),
         tx.object(roster.cp.cpCapId),
         tx.pure.id(roomId),
         tx.pure.vector('id', roster.relayIds),
-        tx.pure.vector('id', roster.validators.map((validator) => validator.minerId)),
-        tx.pure.id(roster.signaling.minerId),
+        tx.pure.vector('id', validatorIds),
         tx.pure.u64(1_000),
+        tx.pure.vector('id', validatorIds), // health_validator_ids (all four are healthy)
       ],
     });
   });
@@ -1185,7 +1185,6 @@ async function measureSettlement(
         tx.object(config.relayRegistryId),
         tx.object(config.validatorRegistryId),
         tx.object(config.cpRegistryId),
-        tx.object(config.signalingRegistryId),
       ],
     });
   });
@@ -1390,13 +1389,11 @@ async function runMeasurement(options: ChainLatencyOptions): Promise<void> {
         relay_registry_id: config.relayRegistryId,
         cp_registry_id: config.cpRegistryId,
         validator_registry_id: config.validatorRegistryId,
-        signaling_registry_id: config.signalingRegistryId,
       },
       topology: {
         cp: 1,
         relays: EXPECTED_RELAYS,
         validators: EXPECTED_VALIDATORS,
-        signaling: 1,
         registered_users: 1,
         proofs_per_room: PROOFS_PER_ROOM,
         escrow_amount_mist: ESCROW_AMOUNT_MIST.toString(),

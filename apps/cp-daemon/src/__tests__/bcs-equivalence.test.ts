@@ -96,7 +96,7 @@ describe('BCS canonical-message byte-equivalence (Item #6)', () => {
 
   it('refresh: concat = id_to_bytes(old_id) || new_role(u8) || new_expires(u64-le) || refresh_nonce(u64-le)', () => {
     const oldTokenId = '0x' + 'cd'.repeat(32);
-    const newRole = 4; // signaling
+    const newRole = 4; // arbitrary u8 role value (byte-layout test only)
     const newExpiresEpoch = 250n;
     const refreshNonce = 2;
 

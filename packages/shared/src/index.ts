@@ -29,10 +29,6 @@ export type {
   RoomRulesUpdated,
   UserRegistered,
   UserProfileUpdated,
-  SignalingRegistered,
-  SignalingHeartbeat,
-  SignalingLoadUpdated,
-  SignalingUnregistered,
   EscrowCreated,
   SessionProofSubmitted,
   RewardsDistributed,
@@ -54,7 +50,6 @@ export {
   RelayMode,
   MinerRole,
   ErrorCodes,
-  SIGNALING_SESSION_REWARD,
   MIN_PROOFS_FOR_DISTRIBUTION,
   QUALITY_EXCELLENT_BPS,
   QUALITY_GOOD_BPS,
@@ -111,8 +106,7 @@ export type {
 } from './metrics-prom.js';
 
 // Cap-token primitive contract types (F62 W1 Stage 1 + Phase 2.4-retro). Append-only
-// re-exports so daemon consumers (Phase 3.1 cap-token-issuer, Phase 3.2 signaling auth,
-// Phase 3.3 signaling cache) can import QuorumSig + Capability* types from the root.
+// re-exports so daemon consumers can import QuorumSig + Capability* types from the root.
 export type {
   QuorumSig,
   QuorumConfigState,
@@ -166,8 +160,8 @@ export type {
 
 // Relay endpoint cache (REQ-RO-008 / D-RO-3 — relay-ID → WS-URL map + room →
 // ordered relay-IDs, populated from RelayRegistered + RoomAssigned chain events).
-// Extracted from apps/signaling (G3.2a) so the signaling + relay daemons share
-// ONE impl. `DualRelayRouter` (ws-dependent) stays in apps/signaling.
+// Originally extracted from the now-deleted standalone signaling app (G3.2a);
+// relay is its sole consumer today.
 export { InMemoryRelayEndpointCache, subscribeRelayEndpoints } from './chain/relay-endpoint-cache.js';
 export type { RelayEndpointCache } from './chain/relay-endpoint-cache.js';
 
@@ -212,7 +206,7 @@ export type {
 export { DAEMON_PORTS_IN_USE, assertClaimsPortFree, resolveClaimsPort } from './claims-port.js';
 export { isBearerAuthorized } from './bearer-auth.js';
 
-// Committed room-provisioning lifecycle (register_user → create_room → assign_relay_and_signaling),
+// Committed room-provisioning lifecycle (register_user → create_room → assign_relay),
 // extracted from validator-daemon __tests__ so the test helper + scripts/demo/provision-room.ts share
 // ONE source. fundAddress is injected so this stays test-free.
 export { createRoomWithRelay, extractRoomId, signAndAssert } from './chain/provision-room.js';

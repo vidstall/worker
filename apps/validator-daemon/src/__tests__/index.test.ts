@@ -87,7 +87,6 @@ describe('Validator daemon', () => {
     validatorRegistryId: '0xvalreg',
     userRegistryId: '0xuserreg',
     roomManagerId: '0xroom',
-    signalingRegistryId: '0xsigreg',
     roleVoteBoxId: '0xvotebox',
     roleVotingPackageId: '0xrolevotingpkg',
     livenessVoteBoxId: '0xlivenessbox',

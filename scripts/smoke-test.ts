@@ -186,7 +186,7 @@ async function main(): Promise<void> {
   }
 
   // 4. Poll for CP assignment (30s timeout)
-  let assignment: { relayId: string; signalingId: string } | null = null;
+  let assignment: { relayId: string } | null = null;
   try {
     assignment = await pollUntil(
       async () => {
@@ -205,19 +205,21 @@ async function main(): Promise<void> {
             sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
           });
 
+          // get_room_assignment's sole return value is now assigned_relays: vector<ID>
+          // (was a tuple with a signaling Option<ID> before the standalone signaling
+          // node type's removal). BCS vector<address>: 1 ULEB128 length byte (small
+          // vectors) followed by 32-byte addresses back to back.
           const returnValues = result.results?.[0]?.returnValues;
-          if (!returnValues || returnValues.length < 2) return null;
+          if (!returnValues || returnValues.length < 1) return null;
 
-          const relayBytes = returnValues[0]![0] as unknown as number[];
-          const signalingBytes = returnValues[1]![0] as unknown as number[];
+          const bytes = returnValues[0]![0] as unknown as number[];
+          if (!bytes || bytes.length < 1 || bytes[0] === 0) return null; // empty vector = unassigned
 
-          if (!relayBytes || relayBytes[0] !== 1) return null;
-          if (!signalingBytes || signalingBytes[0] !== 1) return null;
+          const relayBytes = bytes.slice(1, 33);
+          if (relayBytes.length < 32) return null;
+          const relayAddr = '0x' + Buffer.from(relayBytes).toString('hex');
 
-          const relayAddr = '0x' + Buffer.from(relayBytes.slice(1)).toString('hex');
-          const signalingAddr = '0x' + Buffer.from(signalingBytes.slice(1)).toString('hex');
-
-          return { relayId: relayAddr, signalingId: signalingAddr };
+          return { relayId: relayAddr };
         } catch {
           return null;
         }
@@ -227,7 +229,7 @@ async function main(): Promise<void> {
     );
 
     if (assignment) {
-      pass('CP assignment received', `relay: ${assignment.relayId.slice(0, 10)}..., signaling: ${assignment.signalingId.slice(0, 10)}...`);
+      pass('CP assignment received', `relay: ${assignment.relayId.slice(0, 10)}...`);
     } else {
       fail('CP assignment received', 'timeout after 30s');
     }

@@ -151,6 +151,23 @@ export interface RoomExpiryAction {
   expiredFromStatus: number;
 }
 
+/**
+ * Rooms-dashboard metrics migration (formerly `apps/signaling/src/rooms.ts`'s
+ * `registerRoomMetrics`, deleted with the standalone signaling app) — cp-daemon
+ * is the single chain-observed source of truth for room lifecycle (this sweep
+ * already polls `getActiveRoomIds()` every tick), so it owns
+ * `dvconf_rooms_active` (this scan's active-room count) and
+ * `dvconf_room_duration_seconds` (observed when a previously-active room drops
+ * out of the active set, using the first RoomCreated timestamp this daemon
+ * observed as the room's "open" time) — unlike relay's per-connection
+ * `dvconf_room_participants`, duration/active-count would fragment across
+ * multiple relays in a multi-relay room if owned there instead.
+ */
+export interface RoomLifecycleMetricsSink {
+  setRoomsActive(count: number): void;
+  observeRoomDurationSeconds(seconds: number): void;
+}
+
 // ── RoomExpirySweep ─────────────────────────────────────────────────────────
 
 export class RoomExpirySweep {
@@ -159,6 +176,10 @@ export class RoomExpirySweep {
   private readonly pollIntervalMs: number;
   /** De-dup: one successful close attempt per roomId, for this watcher's lifetime. */
   private readonly actedKeys = new Set<string>();
+  /** Room IDs observed active on the PREVIOUS scan -- diffed against the
+   *  current scan to detect closures (by any path, not just this sweep's own
+   *  close_expired_room calls) for `dvconf_room_duration_seconds`. */
+  private previousActiveRoomIds = new Set<string>();
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -166,6 +187,7 @@ export class RoomExpirySweep {
     private readonly submitCloseExpiredRoom: CloseExpiredRoomSubmitter,
     private readonly logger: Logger,
     options: RoomExpirySweepOptions = {},
+    private readonly metricsSink?: RoomLifecycleMetricsSink,
   ) {
     this.pendingExpiryMs = options.pendingExpiryMs ?? DEFAULT_PENDING_EXPIRY_MS;
     this.readyExpiryMs = options.readyExpiryMs ?? DEFAULT_READY_EXPIRY_MS;
@@ -217,6 +239,24 @@ export class RoomExpirySweep {
       { trace_id: traceId, module: MODULE, action: 'scan', context: { roomCount: roomIds.length } },
       'Room expiry sweep: scan cycle',
     );
+
+    this.metricsSink?.setRoomsActive(roomIds.length);
+
+    // dvconf_room_duration_seconds: a room in the PREVIOUS scan's active set
+    // that is no longer in this scan's is a room that closed (by any path --
+    // this sweep's own close_expired_room, or a host-initiated close) since
+    // the last tick. createdAtMs is this daemon's own observed RoomCreated
+    // wall-clock time (recordRoomLifecycleTimestamp) -- absent (e.g. daemon
+    // started after the room was created and never saw RoomAssigned either)
+    // means no duration can be attributed, so that room is silently skipped.
+    const currentActiveRoomIds = new Set(roomIds);
+    for (const roomId of this.previousActiveRoomIds) {
+      if (currentActiveRoomIds.has(roomId)) continue;
+      const createdAtMs = this.reader.getRoomCreatedAtMs(roomId);
+      if (createdAtMs === undefined) continue;
+      this.metricsSink?.observeRoomDurationSeconds((nowMs - createdAtMs) / 1000);
+    }
+    this.previousActiveRoomIds = currentActiveRoomIds;
 
     for (const roomId of roomIds) {
       if (this.actedKeys.has(roomId)) continue;
@@ -281,8 +321,9 @@ export function startRoomExpirySweep(
   submitCloseExpiredRoom: CloseExpiredRoomSubmitter,
   logger: Logger,
   options: RoomExpirySweepOptions = {},
+  metricsSink?: RoomLifecycleMetricsSink,
 ): RoomExpirySweep {
-  const sweep = new RoomExpirySweep(reader, submitCloseExpiredRoom, logger, options);
+  const sweep = new RoomExpirySweep(reader, submitCloseExpiredRoom, logger, options, metricsSink);
   sweep.start();
   return sweep;
 }

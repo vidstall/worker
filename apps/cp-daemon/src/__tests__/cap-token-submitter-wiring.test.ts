@@ -31,7 +31,6 @@ function mockLogger() {
 const ROOM_EVENT = {
   roomId: '0xroom1',
   relayIds: ['0xrelay1'],
-  signalingId: '0xsig1',
   relayMode: 1,
   verifiedScore: '900',
   consensusReached: true,

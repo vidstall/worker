@@ -162,7 +162,6 @@ function buildConfig(publishOutput: { objectChanges?: ObjChange[] }): NetworkCon
     validatorRegistryId: byType('::ValidatorRegistry'),
     userRegistryId: byType('::UserRegistry'),
     roomManagerId: byType('::RoomManager'),
-    signalingRegistryId: byType('::SignalingRegistry'),
     roleVoteBoxId: byType('::RoleVoteBox'),
     // TODO(package split, services/contract/role-voting): publish-output.json
     // is produced by an external demo-setup harness (outside this repo's
@@ -246,7 +245,8 @@ type MarkFn = 'mark_revote_eligible_idle' | 'mark_revote_eligible_composition_sh
  * Single-shot mark (NO retry, so an expected abort surfaces fast + intact). Marks
  * are NOT cap-gated -- any sender works; we sign with the funded CP keypair.
  * Arg order (role_voting.move:347 / :412): net_reg, vote_box, miner_store,
- * relay_reg, validator_reg, cp_reg, signaling_reg, miner_id.
+ * relay_reg, validator_reg, cp_reg, miner_id (signaling_reg dropped -- role
+ * removed from the 4-way scarcity math, now 3-way relay/validator/cp).
  */
 async function markTx(fn: MarkFn, minerId: string): Promise<TxStatusLike> {
   const tx = new Transaction();
@@ -259,7 +259,6 @@ async function markTx(fn: MarkFn, minerId: string): Promise<TxStatusLike> {
       tx.object(config.relayRegistryId),
       tx.object(config.validatorRegistryId),
       tx.object(config.cpRegistryId),
-      tx.object(config.signalingRegistryId),
       tx.pure.id(minerId),
     ],
   });

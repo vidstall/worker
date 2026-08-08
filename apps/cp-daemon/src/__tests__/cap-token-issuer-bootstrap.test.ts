@@ -204,7 +204,6 @@ describe('startCapTokenIssuer (Item #1 — cp-daemon bootstrap factory)', () => 
       {
         roomId: '0xroom1',
         relayIds: ['0xrelay1'],
-        signalingId: '0xsig1',
         relayMode: 1,
         verifiedScore: '900',
         consensusReached: true,
@@ -214,7 +213,7 @@ describe('startCapTokenIssuer (Item #1 — cp-daemon bootstrap factory)', () => 
       'trace-bootstrap-1',
     );
 
-    expect(calls.length).toBe(3); // relay + signaling + validator
+    expect(calls.length).toBe(2); // relay + validator
     for (const c of calls) {
       expect(c.label).toBe('issue-capability-token');
     }

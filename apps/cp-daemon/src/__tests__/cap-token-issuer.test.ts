@@ -138,7 +138,6 @@ function mkIssuer(overrides?: {
 const ROOM_ASSIGNED: RoomAssignedEvent = {
   roomId: '0xroom1',
   relayIds: ['0xrelay1', '0xrelay2'],
-  signalingId: '0xsig1',
   relayMode: 1, // SFU
   verifiedScore: '950',
   consensusReached: true,
@@ -149,13 +148,13 @@ const ROOM_ASSIGNED: RoomAssignedEvent = {
 const ROLE_CHANGED: RoleChangedEvent = {
   minerId: '0xminer1',
   oldRole: 2, // relay
-  newRole: 4, // signaling
+  newRole: 3, // cp
   newStake: '1000000000',
 };
 
 const ROLE_ASSIGNED: RoleAssignedEvent = {
   minerId: '0xminer1',
-  role: 4, // signaling
+  role: 3, // cp
   voteCount: '3',
   threshold: '2',
 };
@@ -169,14 +168,14 @@ const RELAY_SLASHED: RelaySlashedEvent = {
 // ── REQ-ADM-001 — Issuance on RoomAssigned ───────────────────────────────
 
 describe('CapTokenIssuer.onRoomAssigned (REQ-ADM-001)', () => {
-  it('issues capability tokens on RoomAssigned — one TX per peer (relays + signaling + validators)', async () => {
+  it('issues capability tokens on RoomAssigned — one TX per peer (relays + validators)', async () => {
     const { submitFn, calls } = mkSubmit();
     const issuer = mkIssuer({ submitFn });
 
     await issuer.onRoomAssigned(ROOM_ASSIGNED, 'trace-001');
 
-    // 2 relays + 1 signaling + 2 validators = 5 peers
-    expect(calls).toHaveLength(5);
+    // 2 relays + 2 validators = 4 peers
+    expect(calls).toHaveLength(4);
     // All calls target issue_capability_token
     for (const c of calls) {
       expect(c.label).toBe('issue-capability-token');
@@ -209,11 +208,11 @@ describe('CapTokenIssuer.onRoomAssigned (REQ-ADM-001)', () => {
     const issuer = mkIssuer({ submitFn, logger });
 
     await issuer.onRoomAssigned(ROOM_ASSIGNED, 'trace-003a');
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(4);
 
     // Same event delivered again
     await issuer.onRoomAssigned(ROOM_ASSIGNED, 'trace-003b');
-    expect(calls).toHaveLength(5); // no new TXs
+    expect(calls).toHaveLength(4); // no new TXs
 
     // Dedupe warn log emitted
     const dedupeWarn = (logger.warn.mock.calls as any[]).find(
@@ -234,8 +233,8 @@ describe('CapTokenIssuer M-of-N quorum (REQ-ADM-003, M=2/N=3 default per D-B4)',
 
     await issuer.onRoomAssigned(ROOM_ASSIGNED, 'trace-q1');
 
-    // collect called once per peer (5 peers)
-    expect(collectCalls).toHaveLength(5);
+    // collect called once per peer (4 peers)
+    expect(collectCalls).toHaveLength(4);
     for (const c of collectCalls) {
       expect(c.threshold).toBe(2);
       expect(c.msg).toBeInstanceOf(Uint8Array);
@@ -362,7 +361,7 @@ describe('CapTokenIssuer.onRoleChanged + onRoleAssigned + onRelaySlashed', () =>
     const dedupeWarn = (logger.warn.mock.calls as any[]).find(
       (c) =>
         (c[0]?.context?.dedupe_key ?? c[0]?.dedupe_key) ===
-        '0xminer1::4::role-change',
+        '0xminer1::3::role-change',
     );
     expect(dedupeWarn).toBeDefined();
   });
@@ -380,7 +379,7 @@ describe('CapTokenIssuer.onRoleChanged + onRoleAssigned + onRelaySlashed', () =>
     const dedupeWarn = (logger.warn.mock.calls as any[]).find(
       (c) =>
         (c[0]?.context?.dedupe_key ?? c[0]?.dedupe_key) ===
-        '0xminer1::4::role-assigned',
+        '0xminer1::3::role-assigned',
     );
     expect(dedupeWarn).toBeDefined();
   });
@@ -414,7 +413,7 @@ const EMERGENCY_EVENT = {
   reason: 'leaked-key',
   oldTokenId: '0xoldtok-emerg',
   roomId: '0xroom-emerg',
-  role: 4, // signaling
+  role: 3, // cp
 };
 
 /** Build a RoleChangedEvent populated with Phase 3.4 fields so the issuer can
