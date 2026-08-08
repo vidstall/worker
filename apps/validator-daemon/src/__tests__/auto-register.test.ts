@@ -121,8 +121,27 @@ describe('ensureRegistered', () => {
   it('returns VALIDATOR_CAP_ID from env when set (skips registration)', async () => {
     process.env['VALIDATOR_CAP_ID'] = '0xexisting-cap';
 
+    // ensureRegistered's env-cap path now confirms the cap ALREADY carries
+    // role=Validator and is ALREADY in ValidatorRegistry (see auto-register.ts's
+    // getMinerCapInfo/isRegisteredInValidatorRegistry) before short-circuiting --
+    // so "skips registration" here means the client's happy-path reads must
+    // be stubbed, not that the client goes unused.
+    // tx.pure.id() (inside isRegisteredInValidatorRegistry) requires a real
+    // 32-byte hex object id -- an obviously-fake string like "0xminer-id"
+    // throws there, which the surrounding try/catch swallows into a silent
+    // "assume not registered" false, masking the devInspect mock entirely.
+    const minerId = `0x${'1'.repeat(64)}`;
+    const client = {
+      getObject: vi.fn().mockResolvedValue({
+        data: { content: { fields: { miner_id: minerId, role: '1' } } },
+      }),
+      devInspectTransactionBlock: vi.fn().mockResolvedValue({
+        results: [{ returnValues: [[[1], 'bool']] }],
+      }),
+    };
+
     const result = await ensureRegistered(
-      mockClient() as any,
+      client as any,
       new Ed25519Keypair(),
       mockConfig(),
       mockLogger(),
