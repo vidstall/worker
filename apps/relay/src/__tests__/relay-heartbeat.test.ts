@@ -174,3 +174,63 @@ describe('createRelayHeartbeat (REQ-RO-006)', () => {
     ctrl.stop();
   });
 });
+
+describe('createRelayHeartbeat — peerUrl scheme normalization (TLS gap fix)', () => {
+  const INTERVAL_MS = 1000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    setTestPingFn(null);
+    vi.useRealTimers();
+  });
+
+  /**
+   * Production primaryUrl values are public wss:// endpoints (same registry
+   * the browser client reads — relay_registry's on-chain endpoint_url).
+   * ping()'s underlying transport picks http vs https by inspecting the
+   * SAME normalized URL the test seam receives here, so asserting on the
+   * seam's captured URL pins the exact normalization contract without
+   * reaching into Node's http/https modules directly.
+   */
+  it.each([
+    ['wss://primary.example.com:4000', 'https://primary.example.com:4000/healthz'],
+    ['ws://primary.example.com:4000', 'http://primary.example.com:4000/healthz'],
+    ['https://primary.example.com:4000', 'https://primary.example.com:4000/healthz'],
+    ['http://primary.example.com:4000', 'http://primary.example.com:4000/healthz'],
+  ])('normalizes %s to a pingable %s', async (peerUrl, expectedPingUrl) => {
+    const seenUrls: string[] = [];
+    setTestPingFn(async (url) => {
+      seenUrls.push(url);
+      return true;
+    });
+
+    const ctrl = createRelayHeartbeat('room-scheme', peerUrl, vi.fn(), { intervalMs: INTERVAL_MS });
+    ctrl.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS + 100);
+    ctrl.stop();
+
+    expect(seenUrls[0]).toBe(expectedPingUrl);
+  });
+
+  it('falls back to the raw peerUrl on a malformed URL (fails the ping, not the constructor)', async () => {
+    const seenUrls: string[] = [];
+    setTestPingFn(async (url) => {
+      seenUrls.push(url);
+      return true;
+    });
+
+    expect(() =>
+      createRelayHeartbeat('room-malformed', 'not-a-url', vi.fn(), { intervalMs: INTERVAL_MS }),
+    ).not.toThrow();
+
+    const ctrl = createRelayHeartbeat('room-malformed', 'not-a-url', vi.fn(), { intervalMs: INTERVAL_MS });
+    ctrl.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS + 100);
+    ctrl.stop();
+
+    expect(seenUrls.at(-1)).toBe('not-a-url/healthz');
+  });
+});

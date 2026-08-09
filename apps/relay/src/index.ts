@@ -35,6 +35,8 @@ import {
 } from '@dvconf/chain-event-listener';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
+import type { RelayHeartbeatController } from './relay-heartbeat.js';
+import { createPromotionHandlers } from './relay-promotion.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
 import { createSignalingServer, type TurnContext, type InterRelayContext } from './signaling/index.js';
 import { MetricsTracker } from './metrics.js';
@@ -227,6 +229,16 @@ if (isMainModule) {
     // for new id) — needed so a RelaySlotReplaced handler can resolve the primary's endpoint the
     // same way RoomAssigned does, without an extra chain read.
     const roomAssignedRelays = new Map<string, string[]>();
+    /**
+     * REQ-RO-006 (Layer B fast local promotion) — one relay-heartbeat controller
+     * per room this relay is currently STANDBY for. Started whenever this relay
+     * resolves a primary to ping (RoomAssigned/RelaySlotReplaced standby
+     * branches below); stopped on promotion (either via this fast local path or
+     * the on-chain RelayPromoted event — see promoteToPrimary), on ejection, or
+     * on room teardown (releaseRoom below). Single-room K=2 demo scope, same as
+     * standbyLink above.
+     */
+    const standbyHeartbeats = new Map<string, RelayHeartbeatController>();
     /**
      * REQ-RMS-028 (L1.3-b, Bridge A) — the per-peer inter-relay socket map, OWNED
      * here and SHARED into createSignalingServer (its tagged-peer attach writes
@@ -655,6 +667,9 @@ if (isMainModule) {
         // slot release is preserved) and additionally every cascade leg.
         primaryPipe.clearRoom(roomId);
         standbyWarmPipe.clearRoom(roomId);
+        // REQ-RO-006: stop this room's fast-promotion ping loop, if any — a
+        // reused roomId must not resume pinging a now-stale primaryUrl.
+        stopStandbyHeartbeat(roomId);
       },
     };
 
@@ -911,6 +926,20 @@ if (isMainModule) {
       }
     }, standbyRewarmIntervalMs);
 
+    // REQ-RO-006 — the shared "this relay is now primary for roomId" transition
+    // + the standby-side fast local ping loop that can trigger it. Extracted to
+    // relay-promotion.ts (mirrors reverse-announce-handler.ts's factory shape)
+    // so it's unit-testable without index.ts's daemon-`main` side effects — see
+    // that module's docstring for the full two-trigger/idempotency contract.
+    const { promoteToPrimary, startStandbyHeartbeat, stopStandbyHeartbeat } = createPromotionHandlers({
+      standbyWarmPipe,
+      interRelayContext,
+      probeLiveness,
+      standbyPrewarmRooms,
+      standbyHeartbeats,
+      logger,
+    });
+
     const roomPoller = new EventPoller({
       client: graphqlClient,
       packageId: config.originalPackageId ?? config.packageId,
@@ -990,7 +1019,10 @@ if (isMainModule) {
             // it mints+connects the primary pipe, pipes the producer, and announces
             // the PIPED consumer id over the accepted standby socket. No work here
             // beyond recording the role.
-            if (roomId) standbyPrewarmRooms.delete(roomId); // no longer standby — stop the re-warm sweep for it
+            if (roomId) {
+              standbyPrewarmRooms.delete(roomId); // no longer standby — stop the re-warm sweep for it
+              stopStandbyHeartbeat(roomId); // REQ-RO-006: stop any stale ping loop from a prior standby stint
+            }
             logger.info({ roomId, relayMode, role }, 'G1: relay is PRIMARY for room');
           } else {
             // STANDBY: resolve the primary's WS endpoint so the inter-relay link
@@ -1032,6 +1064,13 @@ if (isMainModule) {
               void prewarmRoom(roomId, prewarmMode).catch((err) => {
                 logger.error({ err, roomId }, 'Standby pre-warm: Router pre-creation failed');
               });
+
+              // REQ-RO-006 (Layer B): ping the primary directly so a genuinely
+              // dead primary is caught locally in ~3s instead of waiting on the
+              // ~30s on-chain watcher cadence — see promoteToPrimary. Restart
+              // fresh on every re-pairing so a stale heartbeat against an old
+              // primaryUrl never lingers.
+              startStandbyHeartbeat(roomId, primaryUrl);
             }
           }
 
@@ -1062,9 +1101,13 @@ if (isMainModule) {
         const roomId = data['room_id'] as string | undefined;
         const newPrimary = data['new_primary'] as string | undefined;
         if (roomId && newPrimary === myMinerId) {
-          interRelayContext.role = 'primary';
-          probeLiveness.role = 'primary';
-          standbyPrewarmRooms.delete(roomId); // no longer standby — stop the re-warm sweep for it
+          // REQ-RO-006: routed through the SAME promoteToPrimary the fast local
+          // ping-based path uses, so this is a harmless no-op if that path
+          // already fired for this room (idempotent — see promoteToPrimary's
+          // doc) — and, unlike the role-flip-only behavior this replaced, it
+          // now ALSO resumes the paused warm-pipe consumer, which nothing
+          // previously did for a promotion confirmed only on-chain.
+          promoteToPrimary(roomId);
           logger.info({ roomId, newPrimary }, 'RelayPromoted: this relay is now PRIMARY for room (role flipped in memory)');
         }
       } else if (eventName === 'RelaySlotReplaced') {
@@ -1104,8 +1147,13 @@ if (isMainModule) {
           void prewarmRoom(roomId, prewarmMode).catch((err) => {
             logger.error({ err, roomId }, 'RelaySlotReplaced: standby pre-warm failed');
           });
+
+          // REQ-RO-006 — same fast local ping loop as the RoomAssigned standby
+          // branch, against the freshly-resolved primaryUrl for this swap.
+          startStandbyHeartbeat(roomId, primaryUrl);
         } else if (deadRelayId === myMinerId) {
           standbyPrewarmRooms.delete(roomId); // ejected from this room — stop the re-warm sweep
+          stopStandbyHeartbeat(roomId); // REQ-RO-006: no longer serving this room at all
           logger.info({ roomId, deadRelayId }, 'RelaySlotReplaced: this relay was ejected from room (dead standby replaced)');
         }
       }

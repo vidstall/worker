@@ -3,10 +3,15 @@
  *
  * The standby relay pings the primary relay every intervalMs. On
  * missThreshold consecutive misses it fires onStandbyReady(roomId) exactly
- * once (idempotent), which triggers consumer.resume() + emits the internal
- * standby-ready signal to the signaling daemon.
+ * once (idempotent). Wired from apps/relay/src/index.ts: onStandbyReady
+ * resumes this room's paused warm-pipe consumer and flips local role
+ * bookkeeping (the same state transition the on-chain RelayPromoted handler
+ * performs, kept idempotent against a later duplicate promotion) — purely a
+ * local data-plane action, no chain transaction is submitted from here.
  *
- * Protocol: HTTP GET to peerUrl/healthz.
+ * Protocol: HTTP(S) GET to peerUrl/healthz. peerUrl is normalized from
+ * whatever scheme it was resolved in (ws://, wss://, http://, https://) via
+ * toHealthzBase before pinging.
  * Per-ping timeout: intervalMs / 2 (e.g. 500ms at default 1000ms interval).
  * On timeout or non-2xx: consecutiveMisses++.
  * On success (2xx): consecutiveMisses reset to 0.
@@ -16,6 +21,7 @@
  */
 
 import http from 'http';
+import https from 'https';
 import { recordFailoverPhase } from './failover-metrics.js';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -53,6 +59,31 @@ export function setTestPingFn(fn: PingFn | null): void {
   _testPingFn = fn;
 }
 
+// ── URL normalization ────────────────────────────────────────────────
+
+/**
+ * Normalizes a relay endpoint to a pingable HTTP(S) origin. relay_registry's
+ * on-chain endpoint_url (and the room-assignment-resolved primaryUrl passed
+ * in from index.ts) is a ws://(wss://) WebSocket URL, but /healthz is a
+ * plain HTTP(S) route on that SAME origin -- mirrors the exact scheme-swap
+ * already used by the client's probeWorkerHealthz (useWorkerHealthCheck.ts)
+ * and RoomPage.tsx's Pushgateway push. Swaps protocol only, keeps the
+ * origin's own host+port. http:/https: URLs pass through unchanged (test
+ * fixtures + any future plain-HTTP deployment). Falls back to the raw input
+ * on a malformed URL so a bad primaryUrl fails the ping (and so surfaces as
+ * a miss) instead of throwing out of createRelayHeartbeat.
+ */
+function toHealthzBase(peerUrl: string): string {
+  try {
+    const parsed = new URL(peerUrl);
+    const protocol =
+      parsed.protocol === 'wss:' ? 'https:' : parsed.protocol === 'ws:' ? 'http:' : parsed.protocol;
+    return `${protocol}//${parsed.host}`;
+  } catch {
+    return peerUrl;
+  }
+}
+
 // ── Internal ping ─────────────────────────────────────────────────────
 
 /**
@@ -64,6 +95,10 @@ function ping(baseUrl: string, timeoutMs: number): Promise<boolean> {
   if (_testPingFn !== null) {
     return _testPingFn(`${baseUrl}/healthz`, timeoutMs);
   }
+
+  // Production relay endpoints are public wss:// (-> https:// here) —
+  // Node's http module can't speak TLS, so route by scheme.
+  const client = baseUrl.startsWith('https:') ? https : http;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -80,7 +115,7 @@ function ping(baseUrl: string, timeoutMs: number): Promise<boolean> {
       settle(false);
     }, timeoutMs);
 
-    const req = http.get(`${baseUrl}/healthz`, (res) => {
+    const req = client.get(`${baseUrl}/healthz`, (res) => {
       settle((res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300);
       // Drain body to prevent memory leak
       res.resume();
@@ -100,7 +135,10 @@ function ping(baseUrl: string, timeoutMs: number): Promise<boolean> {
  * Factory. Creates an app-level heartbeat controller for the standby relay.
  *
  * @param roomId         - Room this heartbeat monitors (passed to onStandbyReady).
- * @param peerUrl        - HTTP base URL of the primary relay (e.g. "http://primary:4001").
+ * @param peerUrl        - The primary relay's endpoint URL, in WHATEVER scheme
+ *                         it was resolved in (ws://, wss://, http://, https://
+ *                         all accepted -- normalized once here via
+ *                         toHealthzBase to a pingable HTTP(S) origin).
  * @param onStandbyReady - Callback fired once when missThreshold misses reached.
  * @param options        - Interval + threshold overrides.
  */
@@ -113,6 +151,7 @@ export function createRelayHeartbeat(
   const intervalMs = options?.intervalMs ?? 1000;
   const missThreshold = options?.missThreshold ?? 3;
   const pingTimeoutMs = Math.floor(intervalMs / 2);
+  const healthzBase = toHealthzBase(peerUrl);
 
   let consecutiveMisses = 0;
   let fired = false;
@@ -120,7 +159,7 @@ export function createRelayHeartbeat(
   let handle: ReturnType<typeof setInterval> | null = null;
 
   async function tick(): Promise<void> {
-    const ok = await ping(peerUrl, pingTimeoutMs);
+    const ok = await ping(healthzBase, pingTimeoutMs);
 
     if (ok) {
       consecutiveMisses = 0;

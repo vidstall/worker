@@ -23,7 +23,6 @@
     "bench:replay": "tsx scripts/bench/replay.ts",
     "bench:harness": "tsx scripts/bench/mediasoup-client-harness.ts",
     "bench:smoke": "tsx scripts/bench/run-smoke.ts --peers 2 --runs 5 --duration 60",
-    "failover:smoke": "tsx scripts/failover/failover-smoke.ts",
     "smh:live": "tsx scripts/smh-live/run-smh-live.ts",
     "smh:live:test": "vitest run scripts/smh-live/__tests__"
   },

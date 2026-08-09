@@ -208,9 +208,9 @@ export type PushGatewayMetric = {
  * (see `IaC/ansible/roles/docker_service/templates/observer-caddyfile.j2`'s
  * bearer-gated `pushgateway.<ip>.sslip.io` site block). Used by
  * `scripts/eval/{measure-onchain-cost,measure-chain-latency,run-scale-ramp}.ts`
- * and `scripts/failover/failover-smoke.ts` -- none of these run continuously,
- * so they can't be scraped directly the way daemons are; Pushgateway is the
- * standard Prometheus pattern for batch/one-shot job results. Uses PUT (not
+ * -- none of these run continuously, so they can't be scraped directly the way
+ * daemons are; Pushgateway is the standard Prometheus pattern for batch/one-
+ * shot job results. Uses PUT (not
  * POST) so each call fully replaces the metric set under this grouping key,
  * matching Pushgateway's own recommended semantics for a single job run.
  */

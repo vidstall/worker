@@ -10,7 +10,7 @@ import type { WebSocket } from 'ws';
 import type { Logger } from '@dvconf/shared';
 import type { MediasoupManager } from '../mediasoup-manager.js';
 import type { MetricsTracker } from '../metrics.js';
-import type { RoomState, PeerState } from '../room-handler.js';
+import { removePeer, type RoomState, type PeerState } from '../room-handler.js';
 import type { JoinMessage } from './messages.js';
 import { sendJson, deriveRoomMode, hashRoomPassword, validateSessionPubkey } from './helpers.js';
 import type { SignalingServerState, SignalingConfig, InterRelayContext } from './state.js';
@@ -159,6 +159,28 @@ export async function handleJoin(
   } finally {
     release();
     state.roomCreationLocks.delete(roomId);
+  }
+
+  // Duplicate-peerId guard: two sockets joining the SAME room with the SAME
+  // peerId (e.g. two browser tabs sharing one connected wallet address —
+  // walletPeerId in RoomPage.tsx falls back to the raw address, not a
+  // per-tab id) previously just overwrote room.peers[peerId] here, silently
+  // orphaning the FIRST socket: it stayed open but was no longer reachable
+  // through room.peers, so notifyNewProducer/handleJoin's existing-producers
+  // replay (both keyed off this map) never reached it again — the tab sat
+  // there looking connected while permanently deaf/blind to every other
+  // peer's media. Evict the stale session properly (same teardown a real
+  // disconnect gets) before registering the new one, so exactly one socket
+  // ever holds this peerId.
+  const staleDuplicate = room.peers.get(peerId);
+  if (staleDuplicate && staleDuplicate.ws !== ws) {
+    logger.warn({ roomId, peerId }, 'Duplicate peerId join — evicting the prior stale session');
+    // Unmap the OLD socket first so its own 'close' handler (fired below by
+    // .close()) sees no wsToRoom entry and no-ops, instead of racing in later
+    // and tearing down the NEW peer we're about to register under this id.
+    state.wsToRoom.delete(staleDuplicate.ws);
+    await removePeer(room, peerId, logger);
+    staleDuplicate.ws.close(4001, 'Duplicate session — replaced by a newer join');
   }
 
   // Create peer state. W5 M2 P1.0 (REQ-MCS-013): record the validated session

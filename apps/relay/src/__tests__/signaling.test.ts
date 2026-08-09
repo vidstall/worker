@@ -99,22 +99,54 @@ function startServer(
   });
 }
 
+// FIFO per-socket message queue: handleJoin (and other handlers) can send
+// MULTIPLE messages back-to-back with no `await` between them (e.g.
+// routerRtpCapabilities then roomMode). A one-shot `ws.once('message', ...)`
+// registered AFTER awaiting the first message can lose the second message
+// entirely if it was already emitted before the new listener re-attaches —
+// `.once` does not buffer/queue events with no listener; they're just gone.
+// A SINGLE persistent listener attached from connect() onward, buffering into
+// a queue that waitForMessage drains from, makes message consumption order-
+// and-timing-safe regardless of how many messages arrive before the next await.
+const messageQueues = new WeakMap<WebSocket, Record<string, unknown>[]>();
+const messageWaiters = new WeakMap<WebSocket, Array<(msg: Record<string, unknown>) => void>>();
+
 /** Connect a raw WebSocket client to the server. */
 function connect(port: number): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    messageQueues.set(ws, []);
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString()) as Record<string, unknown>;
+      const waiters = messageWaiters.get(ws);
+      const next = waiters?.shift();
+      if (next) {
+        next(msg);
+      } else {
+        messageQueues.get(ws)!.push(msg);
+      }
+    });
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
   });
 }
 
-/** Wait for the next JSON message on a WebSocket. */
+/** Wait for the next JSON message on a WebSocket (FIFO — see messageQueues doc above). */
 function waitForMessage(ws: WebSocket, timeoutMs = 3000): Promise<Record<string, unknown>> {
+  const queue = messageQueues.get(ws);
+  const buffered = queue?.shift();
+  if (buffered) return Promise.resolve(buffered);
+
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Message timeout')), timeoutMs);
-    ws.once('message', (data) => {
+    let waiters = messageWaiters.get(ws);
+    if (!waiters) {
+      waiters = [];
+      messageWaiters.set(ws, waiters);
+    }
+    waiters.push((msg) => {
       clearTimeout(timer);
-      resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+      resolve(msg);
     });
   });
 }
@@ -169,10 +201,16 @@ describe('Relay signaling server', () => {
 
     const ws = await connect(port);
 
-    // Must join first
+    // Must join first. handleJoin sends TWO messages back-to-back with no
+    // await between them (routerRtpCapabilities, then roomMode) — drain both
+    // before registering the next listener, or a slow enough scheduler tick
+    // lets the still-in-flight roomMode land on transportPromise's listener
+    // instead (flaky failure: msg.type === 'roomMode' where 'transportCreated'
+    // was expected).
     const joinPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'join', roomId: 'room-2', peerId: 'peer-2' }));
     await joinPromise;
+    await waitForMessage(ws); // drain roomMode
 
     // Request send transport
     const transportPromise = waitForMessage(ws);
@@ -193,9 +231,12 @@ describe('Relay signaling server', () => {
 
     const ws = await connect(port);
 
+    // See the "createTransport (send)" test above for why roomMode must be
+    // drained here too.
     const joinPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'join', roomId: 'room-3', peerId: 'peer-3' }));
     await joinPromise;
+    await waitForMessage(ws); // drain roomMode
 
     const transportPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'createTransport', direction: 'recv' }));
@@ -244,6 +285,50 @@ describe('Relay signaling server', () => {
 
     ws1.close();
     ws2.close();
+  });
+
+  it('a second join with the SAME peerId evicts the stale prior session instead of silently orphaning it', async () => {
+    // Regression: two sockets sharing one peerId (e.g. two browser tabs on the
+    // same connected wallet) used to both linger in room.peers -- actually only
+    // the SECOND ever really worked; room.peers.set(peerId, ...) silently
+    // overwrote the first entry, so the first socket stayed open but became
+    // unreachable through room.peers, permanently missing every future
+    // newProducer notification. Fixed by evicting the stale session (closing
+    // it with 4001) before registering the new one.
+    const { wss, port } = await startServer();
+    server = wss;
+
+    const wsOld = await connect(port);
+    const oldJoinPromise = waitForMessage(wsOld);
+    wsOld.send(JSON.stringify({ type: 'join', roomId: 'room-dup', peerId: 'peer-dup' }));
+    await oldJoinPromise;
+
+    const oldClosePromise = new Promise<number>((resolve) => {
+      wsOld.once('close', (code) => resolve(code));
+    });
+
+    const wsNew = await connect(port);
+    const newJoinPromise = waitForMessage(wsNew);
+    wsNew.send(JSON.stringify({ type: 'join', roomId: 'room-dup', peerId: 'peer-dup' }));
+    const newJoinMsg = await newJoinPromise;
+    expect(newJoinMsg['type']).toBe('routerRtpCapabilities');
+
+    // The OLD socket must be actively closed with the duplicate-session code —
+    // not left dangling open-but-unreachable.
+    const closeCode = await oldClosePromise;
+    expect(closeCode).toBe(4001);
+
+    // A THIRD peer joining afterward must see exactly the NEW session's
+    // producers reachable, i.e. the room has one live peer under 'peer-dup',
+    // not zero (both evicted) and not a stale duplicate.
+    const wsThird = await connect(port);
+    const thirdJoinPromise = waitForMessage(wsThird);
+    wsThird.send(JSON.stringify({ type: 'join', roomId: 'room-dup', peerId: 'peer-third' }));
+    const thirdJoinMsg = await thirdJoinPromise;
+    expect(thirdJoinMsg['type']).toBe('routerRtpCapabilities');
+
+    wsNew.close();
+    wsThird.close();
   });
 
   it('invalid JSON message does not crash the server', async () => {
@@ -375,6 +460,7 @@ describe('Relay signaling with turnContext (S30.C)', () => {
     const joinPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'join', roomId: 'room-turn-1', peerId: 'peer-9' }));
     await joinPromise;
+    await waitForMessage(ws); // drain roomMode
 
     const transportPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'createTransport', direction: 'send' }));
@@ -398,6 +484,7 @@ describe('Relay signaling with turnContext (S30.C)', () => {
     const joinPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'join', roomId: 'room-turn-2', peerId: 'peer-10' }));
     await joinPromise;
+    await waitForMessage(ws); // drain roomMode
 
     const transportPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'createTransport', direction: 'send' }));
@@ -422,6 +509,7 @@ describe('Relay signaling with turnContext (S30.C)', () => {
     const joinPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'join', roomId: 'room-turn-3', peerId: 'peer-11' }));
     await joinPromise;
+    await waitForMessage(ws); // drain roomMode
 
     const transportPromise = waitForMessage(ws);
     ws.send(JSON.stringify({ type: 'createTransport', direction: 'send' }));
