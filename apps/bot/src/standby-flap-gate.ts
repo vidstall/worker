@@ -17,14 +17,8 @@
 /** Default flap-gate probe deadline in ms (short, fail-open). */
 export const STANDBY_FLAP_GATE_TIMEOUT_MS = 200;
 
-/**
- * Relay metrics/probe HTTP port. The WS RELAY_URL is :4000; /api/probe is
- * served from the relay's METRICS_PORT (default 4001).
- */
-const METRICS_PORT = Number(process.env['RELAY_METRICS_PORT'] ?? '4001');
-
 export interface StandbyFlapGateOptions {
-  /** Full probe URL to GET (e.g. http://host:4001/api/probe). */
+  /** Full probe URL to GET (e.g. https://host.sslip.io/akamai-001/relay-1/api/probe). */
   probeUrl: string;
   /** Probe deadline in ms. Default {@link STANDBY_FLAP_GATE_TIMEOUT_MS} (200). */
   timeoutMs?: number;
@@ -40,15 +34,21 @@ export interface StandbyFlapGate {
 }
 
 /**
- * Map a WS relay URL to its probe base URL: ws->http / wss->https, and REPLACE
- * the port with the relay METRICS_PORT (the WS :4000 is not the probe :4001).
- * Returns the host:port base (no path); the caller appends `/api/probe`.
+ * Map a WS relay URL to its probe base URL: ws->http / wss->https, preserving
+ * the URL's host AND path. The caller appends `/api/probe`. Used to only
+ * rewrite the port to the relay's separate METRICS_PORT (the WS port doesn't
+ * serve /api/probe) -- since path-based Caddy routing (see Caddyfile.j2)
+ * fronts every worker's metrics port on the SAME public :443 + path as its
+ * main port, there is no longer a separate public port to redirect to; the
+ * metrics/probe route is reached over the identical origin+path as the WS
+ * endpoint. Any trailing slash on the path is trimmed so the caller's own
+ * `${base}/api/probe` never doubles up.
  */
 export function wsToProbeUrl(wsUrl: string): string {
   const u = new URL(wsUrl);
-  u.protocol = u.protocol === 'wss:' || u.protocol === 'https:' ? 'https:' : 'http:';
-  u.port = String(METRICS_PORT);
-  return u.origin;
+  const protocol = u.protocol === 'wss:' || u.protocol === 'https:' ? 'https:' : 'http:';
+  const path = u.pathname.replace(/\/$/, '');
+  return `${protocol}//${u.host}${path}`;
 }
 
 /**

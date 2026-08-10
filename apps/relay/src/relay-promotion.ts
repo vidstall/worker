@@ -77,12 +77,13 @@ export function createPromotionHandlers(deps: PromotionDeps): PromotionHandlers 
     deps.probeLiveness.role = 'primary';
     deps.standbyPrewarmRooms.delete(roomId); // no longer standby — stop the re-warm sweep for it
     stopStandbyHeartbeat(roomId);
+    deps.logger.warn({ module: 'relay-promotion', roomId }, 'REQ-RO-006: promoted to PRIMARY for room');
   }
 
   function startStandbyHeartbeat(roomId: string, primaryUrl: string | null): void {
     stopStandbyHeartbeat(roomId);
     if (primaryUrl !== null) {
-      const hb = createRelayHeartbeat(roomId, primaryUrl, promoteToPrimary);
+      const hb = createRelayHeartbeat(roomId, primaryUrl, promoteToPrimary, undefined, deps.logger);
       hb.start();
       deps.standbyHeartbeats.set(roomId, hb);
     }

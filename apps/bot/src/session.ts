@@ -220,50 +220,73 @@ export async function startBotSession(
         degraded = true;
         return;
       }
-      let standbyUrl: string | null = null;
+      // Try each candidate in order, attempting a REAL connect (not just the
+      // health probe) before giving up on it. getStandbyRelayUrls re-resolves
+      // the SAME fixed assigned-relay order every call, so on a SECOND death
+      // (of the relay we just cut over to), candidate[0] is that just-died
+      // relay again — and createStandbyFlapGate's probe is FAIL-OPEN (a
+      // timeout/reject reads as "healthy"), so a truly-dead relay routinely
+      // passes the gate. Without a per-candidate connect attempt + fallback,
+      // picking-then-committing to the first gate-passing candidate meant a
+      // single connect failure from that stale-healthy dead relay aborted the
+      // WHOLE cutover, leaving every OTHER genuinely-healthy standby untried
+      // (confirmed live twice: once via a 502 from a dead relay's edge proxy,
+      // once via a TLS EPROTO/"SSL alert internal error" from a redeployed
+      // relay). Mirrors the browser client's runOneCutoverPass
+      // (standby-cutover.ts), which already retries the next candidate on a
+      // real connect failure.
+      let cutOver = false;
       for (const candidate of standbyUrls) {
         const gate = createStandbyFlapGate({ probeUrl: `${wsToProbeUrl(candidate)}/api/probe` });
-        if (await gate.check()) {
-          standbyUrl = candidate;
-          break;
+        if (!(await gate.check())) {
+          logger.warn(
+            { module: 'bot-session', sessionId: id, roomId, candidate },
+            'standby candidate reported unhealthy — trying next assigned relay',
+          );
+          continue;
         }
-        logger.warn(
-          { module: 'bot-session', sessionId: id, roomId, candidate },
-          'standby candidate reported unhealthy — trying next assigned relay',
-        );
+        try {
+          const newPeer = new BotPeer({
+            relayUrl: candidate,
+            roomId,
+            peerId: `bot-${id}`,
+            roomPassword: botConfig.roomPassword,
+            logger,
+            onRelayClosed: () => {
+              void handleRelayDeath();
+            },
+            heartbeatIntervalMs: botConfig.wsHeartbeatIntervalMs,
+          });
+          await newPeer.connect();
+          if (videoSource) await newPeer.produceVideo(videoSource.createTrack());
+          if (audioSource) await newPeer.produceAudio(audioSource.createTrack());
+          // The OLD peer's ws already closed itself (that's why we're here) —
+          // this just tears down its transports/stats-reporter. A WS 'close'
+          // event fires exactly once per socket, so this does NOT re-trigger
+          // onRelayClosed.
+          peer.close();
+          peer = newPeer;
+          degraded = false;
+          cutOver = true;
+          logger.info(
+            { module: 'bot-session', sessionId: id, roomId, standbyUrl: candidate },
+            'bot session cut over to standby relay',
+          );
+          break;
+        } catch (err) {
+          logger.warn(
+            { module: 'bot-session', sessionId: id, roomId, candidate, err },
+            'standby candidate connect/produce failed — trying next assigned relay',
+          );
+        }
       }
-      if (!standbyUrl) {
+      if (!cutOver) {
         logger.error(
           { module: 'bot-session', sessionId: id, roomId, standbyUrls },
-          'every assigned standby reported unhealthy — bot session degraded',
+          'every assigned standby failed health probe or connect — bot session degraded',
         );
         degraded = true;
-        return;
       }
-      const newPeer = new BotPeer({
-        relayUrl: standbyUrl,
-        roomId,
-        peerId: `bot-${id}`,
-        roomPassword: botConfig.roomPassword,
-        logger,
-        onRelayClosed: () => {
-          void handleRelayDeath();
-        },
-        heartbeatIntervalMs: botConfig.wsHeartbeatIntervalMs,
-      });
-      await newPeer.connect();
-      if (videoSource) await newPeer.produceVideo(videoSource.createTrack());
-      if (audioSource) await newPeer.produceAudio(audioSource.createTrack());
-      // The OLD peer's ws already closed itself (that's why we're here) — this
-      // just tears down its transports/stats-reporter. A WS 'close' event
-      // fires exactly once per socket, so this does NOT re-trigger onRelayClosed.
-      peer.close();
-      peer = newPeer;
-      degraded = false;
-      logger.info(
-        { module: 'bot-session', sessionId: id, roomId, standbyUrl },
-        'bot session cut over to standby relay',
-      );
     } catch (err) {
       logger.error(
         { module: 'bot-session', sessionId: id, roomId, err },

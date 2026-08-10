@@ -22,6 +22,7 @@
 
 import http from 'http';
 import https from 'https';
+import type { Logger } from '@dvconf/shared';
 import { recordFailoverPhase } from './failover-metrics.js';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -62,23 +63,28 @@ export function setTestPingFn(fn: PingFn | null): void {
 // ── URL normalization ────────────────────────────────────────────────
 
 /**
- * Normalizes a relay endpoint to a pingable HTTP(S) origin. relay_registry's
+ * Normalizes a relay endpoint to a pingable HTTP(S) base. relay_registry's
  * on-chain endpoint_url (and the room-assignment-resolved primaryUrl passed
  * in from index.ts) is a ws://(wss://) WebSocket URL, but /healthz is a
- * plain HTTP(S) route on that SAME origin -- mirrors the exact scheme-swap
- * already used by the client's probeWorkerHealthz (useWorkerHealthCheck.ts)
- * and RoomPage.tsx's Pushgateway push. Swaps protocol only, keeps the
- * origin's own host+port. http:/https: URLs pass through unchanged (test
- * fixtures + any future plain-HTTP deployment). Falls back to the raw input
- * on a malformed URL so a bad primaryUrl fails the ping (and so surfaces as
- * a miss) instead of throwing out of createRelayHeartbeat.
+ * plain HTTP(S) route on that SAME origin+path -- mirrors the exact
+ * scheme-swap already used by the client's probeWorkerHealthz
+ * (useWorkerHealthCheck.ts). Swaps protocol only, keeps the origin's own
+ * host+port AND path (path-based Caddy routing means multiple workers share
+ * one host -- dropping the path would ping a DIFFERENT worker's /healthz,
+ * or a route that doesn't exist at all, see Caddyfile.j2). Any trailing
+ * slash on the path is trimmed so the caller's own `${base}/healthz` never
+ * doubles up. http:/https: URLs pass through unchanged (test fixtures + any
+ * future plain-HTTP deployment). Falls back to the raw input on a malformed
+ * URL so a bad primaryUrl fails the ping (and so surfaces as a miss) instead
+ * of throwing out of createRelayHeartbeat.
  */
 function toHealthzBase(peerUrl: string): string {
   try {
     const parsed = new URL(peerUrl);
     const protocol =
       parsed.protocol === 'wss:' ? 'https:' : parsed.protocol === 'ws:' ? 'http:' : parsed.protocol;
-    return `${protocol}//${parsed.host}`;
+    const path = parsed.pathname.replace(/\/$/, '');
+    return `${protocol}//${parsed.host}${path}`;
   } catch {
     return peerUrl;
   }
@@ -141,12 +147,20 @@ function ping(baseUrl: string, timeoutMs: number): Promise<boolean> {
  *                         toHealthzBase to a pingable HTTP(S) origin).
  * @param onStandbyReady - Callback fired once when missThreshold misses reached.
  * @param options        - Interval + threshold overrides.
+ * @param logger         - Optional. Previously this loop was completely
+ *                         silent (no log line for start/miss/recover/fire),
+ *                         which made a stuck-in-standby relay indistinguishable
+ *                         from "never started" or "always passing" from the
+ *                         logs alone -- confirmed live: a standby that never
+ *                         promoted left zero trace of why. Every state
+ *                         transition below is now logged when provided.
  */
 export function createRelayHeartbeat(
   roomId: string,
   peerUrl: string,
   onStandbyReady: StandbyReadyCallback,
   options?: Partial<HeartbeatOptions>,
+  logger?: Logger,
 ): RelayHeartbeatController {
   const intervalMs = options?.intervalMs ?? 1000;
   const missThreshold = options?.missThreshold ?? 3;
@@ -162,13 +176,28 @@ export function createRelayHeartbeat(
     const ok = await ping(healthzBase, pingTimeoutMs);
 
     if (ok) {
+      if (consecutiveMisses > 0) {
+        logger?.info(
+          { module: 'relay-heartbeat', roomId, healthzBase, misses: consecutiveMisses },
+          'REQ-RO-006: primary heartbeat recovered — resetting miss count',
+        );
+      }
       consecutiveMisses = 0;
     } else {
       if (consecutiveMisses === 0) firstMissAt = Date.now();
       consecutiveMisses++;
+      logger?.warn(
+        { module: 'relay-heartbeat', roomId, healthzBase, misses: consecutiveMisses, missThreshold },
+        'REQ-RO-006: primary heartbeat miss',
+      );
       if (consecutiveMisses >= missThreshold && !fired) {
         fired = true;
-        recordFailoverPhase('detect', (Date.now() - firstMissAt) / 1000);
+        const detectSeconds = (Date.now() - firstMissAt) / 1000;
+        recordFailoverPhase('detect', detectSeconds);
+        logger?.warn(
+          { module: 'relay-heartbeat', roomId, healthzBase, misses: consecutiveMisses, detectSeconds },
+          'REQ-RO-006: primary heartbeat threshold reached — promoting to primary',
+        );
         onStandbyReady(roomId);
       }
     }
@@ -177,6 +206,10 @@ export function createRelayHeartbeat(
   return {
     start(): void {
       if (handle !== null) return; // idempotent
+      logger?.info(
+        { module: 'relay-heartbeat', roomId, healthzBase, intervalMs, missThreshold },
+        'REQ-RO-006: starting standby heartbeat loop',
+      );
       handle = setInterval(() => {
         void tick();
       }, intervalMs);
@@ -186,6 +219,7 @@ export function createRelayHeartbeat(
       if (handle !== null) {
         clearInterval(handle);
         handle = null;
+        logger?.info({ module: 'relay-heartbeat', roomId, healthzBase }, 'REQ-RO-006: stopped standby heartbeat loop');
       }
     },
   };

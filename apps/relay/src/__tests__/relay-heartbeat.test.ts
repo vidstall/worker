@@ -215,6 +215,46 @@ describe('createRelayHeartbeat — peerUrl scheme normalization (TLS gap fix)', 
     expect(seenUrls[0]).toBe(expectedPingUrl);
   });
 
+  it('preserves a path prefix (path-based Caddy routing shares one host across workers)', async () => {
+    const seenUrls: string[] = [];
+    setTestPingFn(async (url) => {
+      seenUrls.push(url);
+      return true;
+    });
+
+    const ctrl = createRelayHeartbeat(
+      'room-path',
+      'wss://45-79-134-247.sslip.io/akamai-001/relay-1',
+      vi.fn(),
+      { intervalMs: INTERVAL_MS },
+    );
+    ctrl.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS + 100);
+    ctrl.stop();
+
+    expect(seenUrls[0]).toBe('https://45-79-134-247.sslip.io/akamai-001/relay-1/healthz');
+  });
+
+  it('trims a trailing slash on the path so /healthz never doubles up', async () => {
+    const seenUrls: string[] = [];
+    setTestPingFn(async (url) => {
+      seenUrls.push(url);
+      return true;
+    });
+
+    const ctrl = createRelayHeartbeat(
+      'room-path-trailing-slash',
+      'wss://45-79-134-247.sslip.io/akamai-001/relay-1/',
+      vi.fn(),
+      { intervalMs: INTERVAL_MS },
+    );
+    ctrl.start();
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS + 100);
+    ctrl.stop();
+
+    expect(seenUrls[0]).toBe('https://45-79-134-247.sslip.io/akamai-001/relay-1/healthz');
+  });
+
   it('falls back to the raw peerUrl on a malformed URL (fails the ping, not the constructor)', async () => {
     const seenUrls: string[] = [];
     setTestPingFn(async (url) => {

@@ -7,8 +7,11 @@
  * work-based reward gross=0 (G-DEMO-9). This reader maps each relay's on-chain ws endpoint to
  * its metrics base URL so `measureRelay` reaches whichever relay actually forwards the room.
  *
- * The relay metrics-server binds METRICS_PORT = WS_PORT + 1 (run-rms-live-local.ps1), so a
- * registered `ws://host:PORT` resolves to `http://host:(PORT+1)`.
+ * Path-based Caddy routing (see Caddyfile.j2) fronts every worker's metrics route on the SAME
+ * public host+port as its WS endpoint, disambiguated by path (`/<provider>-<host>/<service>-
+ * <index>`) rather than a separate port -- so a registered `wss://host/<instance>/<worker>`
+ * resolves to `https://host/<instance>/<worker>` (scheme swapped, host+path preserved), not a
+ * `WS_PORT + 1` port rewrite.
  */
 import { bcs } from '@mysten/sui/bcs';
 import { Transaction } from '@mysten/sui/transactions';
@@ -31,14 +34,23 @@ const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
 
 /**
  * Derive the metrics base URL from a relay's registered ws endpoint.
- * `ws://host:PORT` -> `http://host:(PORT+1)`. Returns null if unparseable.
+ * `ws(s)://host[/path]` -> `http(s)://host[/path]`, preserving host AND path
+ * (path-based Caddy routing shares one public host across every worker on a
+ * host -- dropping the path would probe a DIFFERENT worker's metrics, or a
+ * nonexistent route, instead of this one's). Any trailing slash on the path
+ * is trimmed so the caller's own `${base}/metrics/${roomId}` never doubles
+ * up. Returns null if unparseable.
  */
 export function metricsUrlFromEndpoint(endpointUrl: string): string | null {
-  const m = endpointUrl.match(/^wss?:\/\/([^/:]+):(\d+)/i);
-  if (!m) return null;
-  const port = Number.parseInt(m[2], 10);
-  if (!Number.isFinite(port)) return null;
-  return `http://${m[1]}:${port + 1}`;
+  try {
+    const parsed = new URL(endpointUrl);
+    const scheme =
+      parsed.protocol === 'wss:' ? 'https:' : parsed.protocol === 'ws:' ? 'http:' : parsed.protocol;
+    const path = parsed.pathname.replace(/\/$/, '');
+    return `${scheme}//${parsed.host}${path}`;
+  } catch {
+    return null;
+  }
 }
 
 /**

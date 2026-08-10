@@ -7,12 +7,24 @@ afterEach(() => {
 });
 
 describe('wsToProbeUrl', () => {
-  it('rewrites wss:// to https:// and swaps the port to the metrics port (4001)', () => {
-    expect(wsToProbeUrl('wss://relay.example.com:4000')).toBe('https://relay.example.com:4001');
+  it('rewrites wss:// to https://, preserving host and port', () => {
+    expect(wsToProbeUrl('wss://relay.example.com:4000')).toBe('https://relay.example.com:4000');
   });
 
-  it('rewrites ws:// to http:// and swaps the port to the metrics port (4001)', () => {
-    expect(wsToProbeUrl('ws://relay.example.com:4000')).toBe('http://relay.example.com:4001');
+  it('rewrites ws:// to http://, preserving host and port', () => {
+    expect(wsToProbeUrl('ws://relay.example.com:4000')).toBe('http://relay.example.com:4000');
+  });
+
+  it('preserves a path prefix (path-based Caddy routing shares one host across workers)', () => {
+    expect(wsToProbeUrl('wss://45-79-134-247.sslip.io/akamai-001/relay-1')).toBe(
+      'https://45-79-134-247.sslip.io/akamai-001/relay-1',
+    );
+  });
+
+  it('trims a trailing slash on the path so /api/probe never doubles up', () => {
+    expect(wsToProbeUrl('wss://45-79-134-247.sslip.io/akamai-001/relay-1/')).toBe(
+      'https://45-79-134-247.sslip.io/akamai-001/relay-1',
+    );
   });
 });
 

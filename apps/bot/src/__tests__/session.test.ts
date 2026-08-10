@@ -288,6 +288,50 @@ describe('startBotSession — standby cutover on relay death', () => {
     expect(session.isDegraded()).toBe(false);
   });
 
+  it('falls through to standby 2 when standby 1 passes the (fail-open) health probe but the real connect fails', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlsMock.mockResolvedValueOnce(['wss://standby-1.example:4000', 'wss://standby-2.example:4000']);
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'camera' }, baseDeps());
+    expect(botPeerMock).toHaveBeenCalledTimes(1);
+
+    // Both candidates pass the flap-gate (fail-open covers a truly-dead relay
+    // too — this is the live-reproduced bug: the gate alone can't tell a
+    // dead relay from a slow one), but the FIRST candidate's actual WS
+    // connect fails (e.g. a 502 from an edge proxy fronting a dead origin, or
+    // a TLS EPROTO/"SSL alert internal error" from a mid-redeploy relay).
+    // Queued AFTER startup so it doesn't affect the primary's own connect().
+    connectMock.mockRejectedValueOnce(new Error('Unexpected server response: 502'));
+
+    const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+    onRelayClosed();
+
+    // Falls through: a THIRD BotPeer construction (standby-2) happens after
+    // standby-1's BotPeer construction + failed connect.
+    await vi.waitFor(() => expect(botPeerMock).toHaveBeenCalledTimes(3));
+    expect(botPeerMock.mock.calls[1]![0].relayUrl).toBe('wss://standby-1.example:4000');
+    expect(botPeerMock.mock.calls[2]![0].relayUrl).toBe('wss://standby-2.example:4000');
+    expect(session.isDegraded()).toBe(false);
+  });
+
+  it('marks the session degraded only once every candidate has been tried and failed to connect', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlsMock.mockResolvedValueOnce(['wss://standby-1.example:4000', 'wss://standby-2.example:4000']);
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'listen' }, baseDeps());
+    // Queued AFTER startup so it doesn't affect the primary's own connect();
+    // every standby candidate attempted from here on fails to connect.
+    connectMock.mockRejectedValue(new Error('Unexpected server response: 502'));
+
+    const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+    onRelayClosed();
+
+    await vi.waitFor(() => expect(botPeerMock).toHaveBeenCalledTimes(3));
+    expect(botPeerMock.mock.calls[1]![0].relayUrl).toBe('wss://standby-1.example:4000');
+    expect(botPeerMock.mock.calls[2]![0].relayUrl).toBe('wss://standby-2.example:4000');
+    await vi.waitFor(() => expect(session.isDegraded()).toBe(true));
+  });
+
   it('marks the session degraded (no second BotPeer) when no standby is assigned', async () => {
     createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
     getStandbyRelayUrlsMock.mockResolvedValueOnce([]);

@@ -80,18 +80,23 @@ export async function getActiveRelayEndpoints(
 }
 
 /**
- * GETs `<endpoint's host>/healthz` (the same public route Caddyfile.j2
+ * GETs `<endpoint's host+path>/healthz` (the same public route Caddyfile.j2
  * proxies to the relay's metrics-server, alongside /metrics) with a short
  * timeout. `endpointUrl` is a `wss://`/`ws://` URL (relay_registry's
  * on-chain endpoint_url shape) -- rewritten to `https://`/`http://` since
- * the probe is a plain HTTP GET, not a WebSocket handshake.
+ * the probe is a plain HTTP GET, not a WebSocket handshake. The path is
+ * PRESERVED (not dropped) -- path-based Caddy routing shares one public
+ * hostname across every worker on a host, disambiguated by
+ * `/<provider>-<host>/<service>-<index>`; dropping it would probe a
+ * different worker's /healthz (or a nonexistent route) instead of this one's.
  */
 export async function probeRelayHealthz(endpointUrl: string, timeoutMs = 2500): Promise<boolean> {
   let healthzUrl: string;
   try {
     const parsed = new URL(endpointUrl);
     const scheme = parsed.protocol === 'wss:' ? 'https:' : parsed.protocol === 'ws:' ? 'http:' : parsed.protocol;
-    healthzUrl = `${scheme}//${parsed.host}/healthz`;
+    const path = parsed.pathname.replace(/\/$/, '');
+    healthzUrl = `${scheme}//${parsed.host}${path}/healthz`;
   } catch {
     return false;
   }
