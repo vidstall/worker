@@ -18,13 +18,16 @@
  * Default port: 4001 (configurable via METRICS_PORT env var).
  *
  * Requirements: Phase 14 IC-5, RO-020
+ *
+ * Body types + POST validators live in metrics-server-types.ts /
+ * metrics-body-validators.ts; the Prometheus gauge builders live in
+ * metrics-prom-gauges.ts; the request handlers (stats/logs/relay-down-hint
+ * ingestion, gauge refresh, summary) live in metrics-request-handlers.ts.
+ * This file wires them together and owns the HTTP route dispatch.
  */
 
 import { createServer, type Server } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
 import { hostname } from 'node:os';
-import type { IncomingMessage } from 'node:http';
-import { Gauge, Counter } from 'prom-client';
 import type { types as msTypes } from 'mediasoup';
 import {
   type Logger,
@@ -36,502 +39,28 @@ import {
   registerTxMetrics,
   registerEventPollerMetrics,
   registerRoleAssignmentMetrics,
-  type Registry,
 } from '@dvconf/shared';
 import { registerFailoverMetrics } from './failover-metrics.js';
 import { registerRtcQualityMetrics } from './rtc-quality-metrics.js';
 import type { MetricsTracker } from './metrics.js';
-import { PeerStatsWindow, type PeerQualitySample, type PeerQualityAggregates } from './stats-window.js';
-import type { RoomState } from './room-handler.js';
+import { PeerStatsWindow } from './stats-window.js';
+import {
+  JSON_HEADERS,
+  type ProbeStateProvider,
+  type GetRoomFn,
+} from './metrics-server-types.js';
+import { isMetricsAuthorized, buildProbeResponse } from './metrics-body-validators.js';
+import { buildPeerQualityGauges, buildPeerQualityAggregateGauges, buildRelayGauges } from './metrics-prom-gauges.js';
+import {
+  handleStatsReport,
+  handleLogsReport,
+  handleRelayDownHint,
+  refreshPromGauges,
+  buildSummary,
+  hasFreshRelayDownHint,
+} from './metrics-request-handlers.js';
 
-/**
- * Shared response headers (P17 M2b-P7, DOH-029). `access-control-allow-origin: *`
- * lets the browser dashboard's `useDaemonHealthz` hook fetch the relay's /healthz
- * cross-origin (parallel to the shared healthz.ts edit). CORS ONLY — the relay's
- * /healthz stays always-2xx (F1 = Option A; its standby polls it via
- * relay-heartbeat.ts:82 2xx-range, so no isLive-503 is wired here).
- */
-const JSON_HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': '*',
-} as const;
-
-/**
- * Snapshot of this relay's standby-liveness state for a /api/probe response.
- *
- * Resolved lazily on each probe so it always reflects current topology (the
- * RoomAssigned poller flips `role`; the warm-pipe coordinator sets the pipe
- * consumer). All fields are plain booleans/strings — no mediasoup types leak
- * across the HTTP boundary.
- */
-export interface ProbeState {
-  /** 'primary' (relay_ids[0]) or 'standby' (relay_ids[1..]) for this relay. */
-  role: 'primary' | 'standby' | 'unknown';
-  /**
-   * The standby's pipe consumer is open (warm pipe established). A dead/absent
-   * pipe consumer => the standby cannot resume media => not live.
-   */
-  pipeConsumerAlive: boolean;
-  /** RTCP keepalive is flowing on the warm pipe (REQ-RO-005). */
-  rtcpAlive: boolean;
-  /**
-   * REQ-RMS-025 byte-proof — cumulative bytes on the standby's inter-relay pipe
-   * TRANSPORT (bytesReceived + bytesSent). A DIRECT live measure that cross-relay
-   * active-forward RTP crossed (>0 => bytes traversed the pipe), independent of
-   * the paused keepalive consumer's rtcpAlive. Defaults to 0 (additive).
-   */
-  pipeBytesObserved?: number;
-}
-
-/**
- * Resolves the current {@link ProbeState}. Injected by the daemon wiring
- * (index.ts) so the metrics server stays decoupled from topology state.
- * Returns `undefined` when probe state is not available (no provider wired).
- */
-export type ProbeStateProvider = () => ProbeState | undefined;
-
-/** Liveness JSON returned by GET /api/probe (RO-020 standby contract). */
-export interface ProbeResponse {
-  /**
-   * Standby liveness verdict. true ONLY when role==='standby' AND the pipe
-   * consumer is alive AND RTCP keepalive is flowing. The validator gates the
-   * standby SessionProof's duration_seconds on this: ok:true => duration > 0;
-   * ok:false (or an unanswered probe) => duration_seconds = 0.
-   * A primary always answers ok:true (it is the live media path).
-   */
-  ok: boolean;
-  /** This relay's role for the room ('primary' | 'standby' | 'unknown'). */
-  role: 'primary' | 'standby' | 'unknown';
-  /** Wall-clock timestamp (ms epoch) the probe was answered. */
-  ts: number;
-  /**
-   * SERVER-HANDLING round-trip in ms (time spent building this response) — NOT
-   * the media-plane RTP RTT. Lets the validator record handling latency without
-   * mistaking it for a media measurement.
-   */
-  latency_ms: number;
-  /** Whether the standby's warm-pipe consumer is open. */
-  pipe_consumer_alive: boolean;
-  /** Whether RTCP keepalive is flowing on the warm pipe. */
-  rtcp_alive: boolean;
-  /**
-   * REQ-RMS-025 byte-proof — cumulative bytes on the standby's inter-relay pipe
-   * transport (bytesReceived + bytesSent). >0 proves cross-relay active-forward
-   * RTP actually crossed the pipe (DIRECT live measure). 0 for primary / unwired.
-   */
-  pipe_bytes_observed: number;
-}
-
-// ── /metrics Bearer-token auth (REQ-MCS-007) ─────────────────────────────
-//
-// Design: env-gated + OPEN-when-METRICS_AUTH_TOKEN-unset (backward-compat).
-// When token is SET: require `Authorization: Bearer <token>` on /metrics and
-// /metrics/:roomId. Constant-time comparison mirrors the G3.2b inter-relay
-// auth pattern (timingSafeEqual, NOT ===) to avoid timing side-channels.
-// /healthz and /api/probe are ALWAYS open (RO-020 invariant).
-//
-// wss/TLS termination is a Traefik deployment concern (DA-6) — not here.
-
-/**
- * Validate the `Authorization: Bearer <token>` header against the configured
- * METRICS_AUTH_TOKEN. Returns true (open) when `expectedToken` is empty —
- * the gate is OPEN-when-unset for backward-compatibility (validator path
- * `fetchRelayMetrics` calls /metrics/:roomId without auth when no token
- * is configured; setting the token opts-in to enforcement).
- *
- * Mirrors `isValidInterRelayToken` from inter-relay.ts (G3.2b pattern):
- * constant-time on content via `timingSafeEqual`; length-mismatch short-
- * circuits before the call (timingSafeEqual throws on unequal-length buffers
- * and the token length is not secret).
- */
-function isMetricsAuthorized(req: IncomingMessage, expectedToken: string): boolean {
-  // OPEN-when-unset: if no token configured, all callers are admitted.
-  if (expectedToken === '') return true;
-  const authHeader = req.headers['authorization'];
-  if (typeof authHeader !== 'string') return false;
-  const prefix = 'Bearer ';
-  if (!authHeader.startsWith(prefix)) return false;
-  const presented = authHeader.slice(prefix.length);
-  if (presented.length === 0) return false;
-  const a = Buffer.from(presented, 'utf8');
-  const b = Buffer.from(expectedToken, 'utf8');
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
-
-/**
- * Compute the {@link ProbeResponse} from the resolved probe state.
- *
- * Liveness rule (RO-020 / RO-016 standby-liveness gate):
- *   - primary  => ok:true (it IS the live media path).
- *   - standby  => ok:true IFF pipeConsumerAlive AND rtcpAlive.
- *   - unknown / no provider => ok:false (validator gates duration=0; honest).
- */
-function buildProbeResponse(state: ProbeState | undefined, startedAt: number): ProbeResponse {
-  const role = state?.role ?? 'unknown';
-  const pipeConsumerAlive = state?.pipeConsumerAlive ?? false;
-  const rtcpAlive = state?.rtcpAlive ?? false;
-  const ok =
-    role === 'primary' || (role === 'standby' && pipeConsumerAlive && rtcpAlive);
-  return {
-    ok,
-    role,
-    ts: Date.now(),
-    // Server-handling RTT: monotonic elapsed since the request landed.
-    latency_ms: Math.max(0, performance.now() - startedAt),
-    pipe_consumer_alive: pipeConsumerAlive,
-    rtcp_alive: rtcpAlive,
-    pipe_bytes_observed: state?.pipeBytesObserved ?? 0,
-  };
-}
-
-// ── POST /stats/report — client-reported per-peer call-quality ingestion ──
-//
-// Auth is NOT the METRICS_AUTH_TOKEN bearer — it is admission-membership: the
-// reporting peerId must be a peer CURRENTLY admitted into roomId (live
-// room-handler.ts state, injected via `getRoom`). Body capped ~2KB (413 over);
-// rate-limited to ~1 report / 2s per peerId (204 no-op on violation, not an
-// error — a chatty/misbehaving client should not see failures).
-
-const STATS_REPORT_MAX_BODY_BYTES = 2048;
-const STATS_REPORT_MIN_INTERVAL_MS = 2000;
-
-interface StatsReportBody {
-  roomId: string;
-  peerId: string;
-  sample: PeerQualitySample;
-  /**
-   * Client-computed cumulative avg/min/max per field since the peer joined
-   * this room (RoomPage.tsx's aggregator ref) -- OPTIONAL: absent for any
-   * client (e.g. the bot's stats-reporter.ts) that doesn't maintain one.
-   */
-  aggregates?: PeerQualityAggregates;
-}
-
-/** Resolves the live room state a peer must be admitted into. Injected by index.ts. */
-export type GetRoomFn = (roomId: string) => RoomState | undefined;
-
-/**
- * Reads the request body up to `STATS_REPORT_MAX_BODY_BYTES`. Resolves
- * `{ ok: false, status: 413 }` the moment the cap is exceeded (destroys the
- * socket read, does not buffer past the cap) rather than after the fact.
- */
-function readCappedJsonBody(
-  req: IncomingMessage,
-  maxBodyBytes: number = STATS_REPORT_MAX_BODY_BYTES,
-): Promise<{ ok: true; body: unknown } | { ok: false; status: 413 | 400 }> {
-  return new Promise((resolve) => {
-    let received = 0;
-    const chunks: Buffer[] = [];
-    let settled = false;
-
-    req.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      received += chunk.length;
-      if (received > maxBodyBytes) {
-        settled = true;
-        // Don't destroy() the socket — that resets the connection before the
-        // 413 response can be written. Just stop retaining chunks; subsequent
-        // 'data' events are dropped by the `settled` guard above.
-        resolve({ ok: false, status: 413 });
-        return;
-      }
-      chunks.push(chunk);
-    });
-
-    req.on('end', () => {
-      if (settled) return;
-      settled = true;
-      const text = Buffer.concat(chunks).toString('utf8').trim();
-      if (text === '') {
-        resolve({ ok: false, status: 400 });
-        return;
-      }
-      try {
-        resolve({ ok: true, body: JSON.parse(text) });
-      } catch {
-        resolve({ ok: false, status: 400 });
-      }
-    });
-
-    req.on('error', () => {
-      if (settled) return;
-      settled = true;
-      resolve({ ok: false, status: 400 });
-    });
-  });
-}
-
-const REQUIRED_SAMPLE_FIELDS: ReadonlyArray<keyof PeerQualitySample> = [
-  'latencyMs',
-  'packetLoss',
-  'jitterMs',
-  'bitrateUpKbps',
-  'bitrateDownKbps',
-  'resolutionWidth',
-  'resolutionHeight',
-  'framerate',
-  'packetReorderingRate',
-  'encodeLatencyMs',
-  'decodeLatencyMs',
-  'freezeCount',
-  'pauseCount',
-  'connectionSetupMs',
-  'iceSuccess',
-  'reconnectMs',
-  'avSyncDriftMs',
-];
-
-// ── POST /logs/report — client-reported frontend log batch ingestion ──
-//
-// Same admission gate as /stats/report (peerId must be a currently-admitted
-// member of roomId) — no separate auth mechanism. The entire "shipping"
-// mechanism is `console.log`-ing each accepted entry as one structured JSON
-// line: every worker container's stdout/stderr is already tailed to Loki via
-// Docker's `loki` logging driver (see run_container.yml), so this needs no
-// new infra, secrets, or Loki-side changes. Body capped larger than
-// /stats/report's since this carries a batch of entries, not one sample;
-// entry count is separately capped to bound worst-case payload size.
-
-const LOGS_REPORT_MAX_BODY_BYTES = 8192;
-const LOGS_REPORT_MAX_ENTRIES = 20;
-const LOGS_REPORT_MIN_INTERVAL_MS = 2000;
-
-interface ClientLogEntry {
-  level: string;
-  module: string;
-  message: string;
-  context?: unknown;
-  timestamp: string;
-}
-
-interface LogsReportBody {
-  roomId: string;
-  peerId: string;
-  entries: ClientLogEntry[];
-}
-
-/** Structural validator for a single frontend log entry. Pure — no I/O. */
-function parseClientLogEntry(entry: unknown): ClientLogEntry | null {
-  if (typeof entry !== 'object' || entry === null) return null;
-  const e = entry as Record<string, unknown>;
-  if (typeof e['level'] !== 'string' || e['level'] === '') return null;
-  if (typeof e['module'] !== 'string' || e['module'] === '') return null;
-  if (typeof e['message'] !== 'string') return null;
-  if (typeof e['timestamp'] !== 'string' || e['timestamp'] === '') return null;
-  return { level: e['level'], module: e['module'], message: e['message'], context: e['context'], timestamp: e['timestamp'] };
-}
-
-/** Structural validator for the POST /logs/report body. Pure — no I/O. */
-function parseLogsReportBody(body: unknown): LogsReportBody | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const b = body as Record<string, unknown>;
-  if (typeof b['roomId'] !== 'string' || b['roomId'] === '') return null;
-  if (typeof b['peerId'] !== 'string' || b['peerId'] === '') return null;
-  const rawEntries = b['entries'];
-  if (!Array.isArray(rawEntries) || rawEntries.length === 0) return null;
-  const entries: ClientLogEntry[] = [];
-  for (const rawEntry of rawEntries.slice(0, LOGS_REPORT_MAX_ENTRIES)) {
-    const parsed = parseClientLogEntry(rawEntry);
-    if (!parsed) return null;
-    entries.push(parsed);
-  }
-  return { roomId: b['roomId'], peerId: b['peerId'], entries };
-}
-
-// ── POST /relay-down-hint — client-reported "primary relay just died" hint ──
-//
-// A best-effort, LOW-TRUST accelerant: it never itself triggers a liveness
-// vote or ejection (that stays exclusively validator-daemon's own actively-
-// probed conclusion, see liveness-sweep.ts). It only makes validator-daemon
-// re-probe the room's primary sooner than its normal ~60s cycle. Admission
-// gate mirrors /stats/report: peerId must be a currently-admitted member of
-// roomId ON THE RELAY RECEIVING THE POST (i.e. the still-alive standby —
-// the client never tells us which relay died, and doesn't need to: the
-// receiving relay's own identity is enough for validator-daemon to resolve
-// the room's primary/standby pair).
-
-const RELAY_DOWN_HINT_TTL_MS = 70_000;
-const RELAY_DOWN_HINT_MIN_INTERVAL_MS = 2000;
-
-interface RelayDownHintBody {
-  roomId: string;
-  peerId: string;
-}
-
-/** Structural validator for the POST /relay-down-hint body. Pure — no I/O. */
-function parseRelayDownHintBody(body: unknown): RelayDownHintBody | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const b = body as Record<string, unknown>;
-  if (typeof b['roomId'] !== 'string' || b['roomId'] === '') return null;
-  if (typeof b['peerId'] !== 'string' || b['peerId'] === '') return null;
-  return { roomId: b['roomId'], peerId: b['peerId'] };
-}
-
-/**
- * Structural validator for an OPTIONAL `aggregates` body field: when present,
- * requires `{avg, min, max}` (all finite numbers) for every one of the
- * REQUIRED_SAMPLE_FIELDS (iceSuccess included -- as a 0/1-valued field for
- * aggregation purposes, not a boolean here). Returns `null` on ANY
- * malformed field (rejects the whole body, same strictness as `sample`);
- * the field itself being entirely ABSENT from the body is handled by the
- * caller, not here.
- */
-function parseAggregates(aggregates: unknown): PeerQualityAggregates | null {
-  if (typeof aggregates !== 'object' || aggregates === null) return null;
-  const a = aggregates as Record<string, unknown>;
-  const out = {} as Record<string, { avg: number; min: number; max: number }>;
-  for (const field of REQUIRED_SAMPLE_FIELDS) {
-    const entry = a[field];
-    if (typeof entry !== 'object' || entry === null) return null;
-    const e = entry as Record<string, unknown>;
-    const { avg, min, max } = e;
-    if (
-      typeof avg !== 'number' || !Number.isFinite(avg) ||
-      typeof min !== 'number' || !Number.isFinite(min) ||
-      typeof max !== 'number' || !Number.isFinite(max)
-    ) {
-      return null;
-    }
-    out[field] = { avg, min, max };
-  }
-  return out as unknown as PeerQualityAggregates;
-}
-
-/** Structural validator for the POST /stats/report body. Pure — no I/O. */
-function parseStatsReportBody(body: unknown): StatsReportBody | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const b = body as Record<string, unknown>;
-  if (typeof b['roomId'] !== 'string' || b['roomId'] === '') return null;
-  if (typeof b['peerId'] !== 'string' || b['peerId'] === '') return null;
-  const sample = b['sample'];
-  if (typeof sample !== 'object' || sample === null) return null;
-  const s = sample as Record<string, unknown>;
-  for (const field of REQUIRED_SAMPLE_FIELDS) {
-    const v = s[field];
-    if (field === 'iceSuccess') {
-      if (typeof v !== 'boolean') return null;
-    } else if (typeof v !== 'number' || !Number.isFinite(v)) {
-      return null;
-    }
-  }
-
-  let aggregates: PeerQualityAggregates | undefined;
-  if (b['aggregates'] !== undefined) {
-    const parsed = parseAggregates(b['aggregates']);
-    if (!parsed) return null;
-    aggregates = parsed;
-  }
-
-  return {
-    roomId: b['roomId'],
-    peerId: b['peerId'],
-    sample: s as unknown as PeerQualitySample,
-    ...(aggregates ? { aggregates } : {}),
-  };
-}
-
-/** Per-field Prometheus gauges for the `/metrics/prom` peer-quality export. */
-interface PeerQualityGauges {
-  latencyMs: Gauge<'roomId' | 'peerId'>;
-  packetLoss: Gauge<'roomId' | 'peerId'>;
-  jitterMs: Gauge<'roomId' | 'peerId'>;
-  bitrateUpKbps: Gauge<'roomId' | 'peerId'>;
-  bitrateDownKbps: Gauge<'roomId' | 'peerId'>;
-  resolutionWidth: Gauge<'roomId' | 'peerId'>;
-  resolutionHeight: Gauge<'roomId' | 'peerId'>;
-  framerate: Gauge<'roomId' | 'peerId'>;
-  packetReorderingRate: Gauge<'roomId' | 'peerId'>;
-  encodeLatencyMs: Gauge<'roomId' | 'peerId'>;
-  decodeLatencyMs: Gauge<'roomId' | 'peerId'>;
-  freezeCount: Gauge<'roomId' | 'peerId'>;
-  pauseCount: Gauge<'roomId' | 'peerId'>;
-  connectionSetupMs: Gauge<'roomId' | 'peerId'>;
-  iceSuccess: Gauge<'roomId' | 'peerId'>;
-  reconnectMs: Gauge<'roomId' | 'peerId'>;
-  avSyncDriftMs: Gauge<'roomId' | 'peerId'>;
-}
-
-/**
- * Base Prometheus metric name + help text per `PeerQualitySample` field —
- * the single source of truth both the current-value gauges below AND the
- * cumulative avg/min/max gauges (`buildPeerQualityAggregateGauges`) are
- * generated from, so the two stay in sync without hand-duplicating 17
- * name/help pairs three times over.
- */
-const PEER_QUALITY_METRIC_INFO: Record<keyof PeerQualitySample, { name: string; help: string }> = {
-  latencyMs: { name: 'dvconf_relay_peer_latency_ms', help: 'Client-reported RTT/latency, ms' },
-  packetLoss: { name: 'dvconf_relay_peer_packet_loss', help: 'Client-reported packet loss' },
-  jitterMs: { name: 'dvconf_relay_peer_jitter_ms', help: 'Client-reported jitter, ms' },
-  bitrateUpKbps: { name: 'dvconf_relay_peer_bitrate_up_kbps', help: 'Client-reported uplink bitrate, kbps' },
-  bitrateDownKbps: {
-    name: 'dvconf_relay_peer_bitrate_down_kbps',
-    help: 'Client-reported downlink bitrate, kbps',
-  },
-  resolutionWidth: { name: 'dvconf_relay_peer_resolution_width', help: 'Client-reported video width, px' },
-  resolutionHeight: {
-    name: 'dvconf_relay_peer_resolution_height',
-    help: 'Client-reported video height, px',
-  },
-  framerate: { name: 'dvconf_relay_peer_framerate', help: 'Client-reported framerate, fps' },
-  packetReorderingRate: {
-    name: 'dvconf_relay_peer_packet_reordering_rate',
-    help: 'Client-reported APPROXIMATE packet reordering rate',
-  },
-  encodeLatencyMs: { name: 'dvconf_relay_peer_encode_latency_ms', help: 'Client-reported encode latency, ms' },
-  decodeLatencyMs: { name: 'dvconf_relay_peer_decode_latency_ms', help: 'Client-reported decode latency, ms' },
-  freezeCount: { name: 'dvconf_relay_peer_freeze_count', help: 'Client-reported cumulative freeze count' },
-  pauseCount: { name: 'dvconf_relay_peer_pause_count', help: 'Client-reported cumulative pause count' },
-  connectionSetupMs: {
-    name: 'dvconf_relay_peer_connection_setup_ms',
-    help: 'Client-reported connection-setup time, ms',
-  },
-  iceSuccess: {
-    name: 'dvconf_relay_peer_ice_success',
-    help: 'Client-reported ICE success (1) / failure (0)',
-  },
-  reconnectMs: { name: 'dvconf_relay_peer_reconnect_ms', help: 'Client-reported reconnect time, ms' },
-  avSyncDriftMs: {
-    name: 'dvconf_relay_peer_av_sync_drift_ms',
-    help: "Client-reported audio-vs-video sync offset, ms (audio playout timestamp minus video's; positive = audio ahead)",
-  },
-};
-
-function buildPeerQualityGauges(registry: Registry): PeerQualityGauges {
-  const mk = (name: string, help: string): Gauge<'roomId' | 'peerId'> =>
-    new Gauge({ name, help, labelNames: ['roomId', 'peerId'], registers: [registry] });
-  const gauges = {} as PeerQualityGauges;
-  for (const field of Object.keys(PEER_QUALITY_METRIC_INFO) as Array<keyof PeerQualitySample>) {
-    const { name, help } = PEER_QUALITY_METRIC_INFO[field];
-    gauges[field] = mk(name, help);
-  }
-  return gauges;
-}
-
-/**
- * Client-computed cumulative avg/min/max per field (RoomPage.tsx's
- * aggregator ref, since the peer joined the room) — one NEW, separately
- * named gauge per field per stat (e.g. `dvconf_relay_peer_latency_ms_avg`),
- * NOT a label variant of the existing current-value gauges above, so no
- * existing dashboard query needs to change.
- */
-function buildPeerQualityAggregateGauges(
-  registry: Registry,
-): Record<'avg' | 'min' | 'max', PeerQualityGauges> {
-  const mk = (name: string, help: string): Gauge<'roomId' | 'peerId'> =>
-    new Gauge({ name, help, labelNames: ['roomId', 'peerId'], registers: [registry] });
-  const stats = ['avg', 'min', 'max'] as const;
-  const result = {} as Record<'avg' | 'min' | 'max', PeerQualityGauges>;
-  for (const stat of stats) {
-    const gauges = {} as PeerQualityGauges;
-    for (const field of Object.keys(PEER_QUALITY_METRIC_INFO) as Array<keyof PeerQualitySample>) {
-      const { name, help } = PEER_QUALITY_METRIC_INFO[field];
-      gauges[field] = mk(`${name}_${stat}`, `${help} (cumulative ${stat} since room join)`);
-    }
-    result[stat] = gauges;
-  }
-  return result;
-}
+export type { ProbeState, ProbeStateProvider, ProbeResponse, GetRoomFn } from './metrics-server-types.js';
 
 /**
  * Start the metrics HTTP server.
@@ -604,61 +133,7 @@ export function startMetricsServer(
   registerRtcQualityMetrics(promRegistry);
   const peerGauges = buildPeerQualityGauges(promRegistry);
   const peerAggregateGauges = buildPeerQualityAggregateGauges(promRegistry);
-  const workerDiedGauge = new Gauge({
-    name: 'dvconf_relay_worker_died_total',
-    help: 'Cumulative count of mediasoup Worker died events (F61 health signal, DOH-014)',
-    registers: [promRegistry],
-  });
-  // Monitoring-redesign gap #5: mediasoup Worker resource usage was never
-  // scraped (only the 'died' event count above). ru_utime/ru_stime are
-  // already reported in ms by mediasoup's WorkerResourceUsage type (not raw
-  // timeval structs); ru_maxrss is KB per the underlying getrusage(2) convention.
-  const workerRuUtimeGauge = new Gauge({
-    name: 'dvconf_relay_worker_ru_utime_ms',
-    help: 'mediasoup Worker user CPU time, ms (getResourceUsage().ru_utime)',
-    labelNames: ['worker'],
-    registers: [promRegistry],
-  });
-  const workerRuStimeGauge = new Gauge({
-    name: 'dvconf_relay_worker_ru_stime_ms',
-    help: 'mediasoup Worker system CPU time, ms (getResourceUsage().ru_stime)',
-    labelNames: ['worker'],
-    registers: [promRegistry],
-  });
-  const workerRuMaxrssGauge = new Gauge({
-    name: 'dvconf_relay_worker_ru_maxrss_kb',
-    help: 'mediasoup Worker max resident set size, KB (getResourceUsage().ru_maxrss)',
-    labelNames: ['worker'],
-    registers: [promRegistry],
-  });
-  const activeSessionsGauge = new Gauge({
-    name: 'dvconf_relay_active_sessions',
-    help: 'Active relay sessions (MetricsTracker)',
-    registers: [promRegistry],
-  });
-  const roomCountGauge = new Gauge({
-    name: 'dvconf_relay_room_count',
-    help: 'Active room count (MetricsTracker)',
-    registers: [promRegistry],
-  });
-  const bytesForwardedGauge = new Gauge({
-    name: 'dvconf_relay_bytes_forwarded_total',
-    help: 'Cumulative bytes forwarded across all sessions (MetricsTracker)',
-    registers: [promRegistry],
-  });
-  // Rooms-dashboard metrics migration (formerly owned by the now-deleted
-  // `apps/signaling/src/rooms.ts`'s `registerRoomMetrics`) -- relay emits
-  // participant count since it sees every join/leave directly on its own
-  // WebSocket connections (best visibility of the 3 daemon types). Wire-
-  // compatible name/labels with what Grafana's Rooms dashboard already
-  // expects; only the emitting job (now relay's `xaisen` scrape job instead
-  // of `xaisen-signaling`) changes.
-  const roomParticipantsGauge = new Gauge({
-    name: 'dvconf_room_participants',
-    help: 'Current participant count for this room',
-    labelNames: ['roomId'],
-    registers: [promRegistry],
-  });
+  const gauges = buildRelayGauges(promRegistry);
 
   // `/stats/report` rate limit: last-accepted-report wall-clock ts per peerId.
   const lastReportAt = new Map<string, number>();
@@ -670,34 +145,6 @@ export function startMetricsServer(
   // per-peerId rate limit map.
   const relayDownHints = new Map<string, { reportedAtMs: number }>();
   const lastRelayDownHintAt = new Map<string, number>();
-  const relayDownHintGauge = new Gauge({
-    name: 'dvconf_relay_down_hint_active',
-    help: 'Client-reported relay-down hint currently fresh for this room (1) or not (0)',
-    labelNames: ['roomId'],
-    registers: [promRegistry],
-  });
-  // Vestigial: a bare (unlabeled) cumulative counter + last-seen gauge for
-  // THIS relay instance's client-reported down-hints, without per-room
-  // cardinality. The browser now pushes its relay-down-hint directly to
-  // Pushgateway instead (see services/client/client/src/lib/relay-down-hint.ts),
-  // so nothing currently calls `POST /relay-down-hint` -- left in place
-  // rather than removed since it's a working, harmless endpoint.
-  const relayDownHintTotalCounter = new Counter({
-    name: 'dvconf_relay_down_hint_total',
-    help: 'Cumulative client-reported relay-down hints received by this relay instance',
-    registers: [promRegistry],
-  });
-  const relayDownHintLastAtGauge = new Gauge({
-    name: 'dvconf_relay_down_hint_last_at_seconds',
-    help: 'Unix timestamp (seconds) of the most recent client-reported relay-down hint',
-    registers: [promRegistry],
-  });
-
-  /** True iff roomId has a hint recorded within the last RELAY_DOWN_HINT_TTL_MS. */
-  function hasFreshRelayDownHint(roomId: string, now: number): boolean {
-    const hint = relayDownHints.get(roomId);
-    return hint !== undefined && now - hint.reportedAtMs < RELAY_DOWN_HINT_TTL_MS;
-  }
 
   const workerId =
     process.env['RELAY_INSTANCE'] ?? process.env['WORKER_ID'] ?? hostname();
@@ -715,245 +162,6 @@ export function startMetricsServer(
     lastCpuSampleAt = now;
     if (elapsedMicros <= 0) return 0;
     return Math.max(0, ((userDiff + sysDiff) / elapsedMicros) * 100);
-  }
-
-  async function refreshPromGauges(): Promise<void> {
-    const globalMetrics = metrics.getGlobalMetrics();
-    activeSessionsGauge.set(globalMetrics.activeSessions);
-    roomCountGauge.set(globalMetrics.roomCount);
-    bytesForwardedGauge.set(Number(globalMetrics.totalBytesForwarded));
-    workerDiedGauge.set(getWorkerDiedCount?.() ?? 0);
-
-    // Monitoring-redesign gap #5: per-worker CPU/RSS, best-effort -- a single
-    // worker's getResourceUsage() rejecting (e.g. mid-close) must not drop
-    // the whole scrape.
-    workerRuUtimeGauge.reset();
-    workerRuStimeGauge.reset();
-    workerRuMaxrssGauge.reset();
-    const workers = getWorkers?.() ?? [];
-    await Promise.all(
-      workers.map(async (worker, index) => {
-        try {
-          const ru = await worker.getResourceUsage();
-          const label = { worker: String(worker.pid ?? index) };
-          workerRuUtimeGauge.set(label, ru.ru_utime);
-          workerRuStimeGauge.set(label, ru.ru_stime);
-          workerRuMaxrssGauge.set(label, ru.ru_maxrss);
-        } catch (err) {
-          logger.warn({ err, workerPid: worker.pid }, 'getResourceUsage() failed for worker; skipping');
-        }
-      }),
-    );
-
-    for (const gauge of Object.values(peerGauges)) {
-      gauge.reset();
-    }
-    for (const gauges of Object.values(peerAggregateGauges)) {
-      for (const gauge of Object.values(gauges)) {
-        gauge.reset();
-      }
-    }
-    roomParticipantsGauge.reset();
-    for (const { roomId, count } of getRoomParticipantCounts?.() ?? []) {
-      roomParticipantsGauge.set({ roomId }, count);
-    }
-    relayDownHintGauge.reset();
-    const gaugeNow = Date.now();
-    for (const [roomId] of relayDownHints) {
-      relayDownHintGauge.set({ roomId }, hasFreshRelayDownHint(roomId, gaugeNow) ? 1 : 0);
-    }
-    for (const peerId of statsWindow.peerIds()) {
-      const current = statsWindow.current(peerId);
-      if (!current) continue;
-      const labels = { roomId: current.roomId, peerId };
-      peerGauges.latencyMs.set(labels, current.latencyMs);
-      peerGauges.packetLoss.set(labels, current.packetLoss);
-      peerGauges.jitterMs.set(labels, current.jitterMs);
-      peerGauges.bitrateUpKbps.set(labels, current.bitrateUpKbps);
-      peerGauges.bitrateDownKbps.set(labels, current.bitrateDownKbps);
-      peerGauges.resolutionWidth.set(labels, current.resolutionWidth);
-      peerGauges.resolutionHeight.set(labels, current.resolutionHeight);
-      peerGauges.framerate.set(labels, current.framerate);
-      peerGauges.packetReorderingRate.set(labels, current.packetReorderingRate);
-      peerGauges.encodeLatencyMs.set(labels, current.encodeLatencyMs);
-      peerGauges.decodeLatencyMs.set(labels, current.decodeLatencyMs);
-      peerGauges.freezeCount.set(labels, current.freezeCount);
-      peerGauges.pauseCount.set(labels, current.pauseCount);
-      peerGauges.connectionSetupMs.set(labels, current.connectionSetupMs);
-      peerGauges.iceSuccess.set(labels, current.iceSuccess ? 1 : 0);
-      peerGauges.reconnectMs.set(labels, current.reconnectMs);
-      peerGauges.avSyncDriftMs.set(labels, current.avSyncDriftMs);
-
-      // Cumulative-since-join avg/min/max (RoomPage.tsx's aggregator) --
-      // absent for peers that never sent an `aggregates` body (e.g. the bot).
-      const aggregates = statsWindow.currentAggregates(peerId);
-      if (aggregates) {
-        for (const field of Object.keys(PEER_QUALITY_METRIC_INFO) as Array<keyof PeerQualitySample>) {
-          const { avg, min, max } = aggregates[field];
-          peerAggregateGauges.avg[field].set(labels, avg);
-          peerAggregateGauges.min[field].set(labels, min);
-          peerAggregateGauges.max[field].set(labels, max);
-        }
-      }
-    }
-  }
-
-  function buildSummary(): {
-    workerId: string;
-    activeSessions: number;
-    cpuPercent: number;
-    memMB: number;
-    peers: Array<{ peerId: string; roomId: string } & PeerQualitySample>;
-  } {
-    const peers: Array<{ peerId: string; roomId: string } & PeerQualitySample> = [];
-    for (const peerId of statsWindow.peerIds()) {
-      const current = statsWindow.current(peerId);
-      if (!current) continue;
-      const { lastUpdatedAt: _lastUpdatedAt, ...sample } = current;
-      peers.push({ peerId, ...sample });
-    }
-    return {
-      workerId,
-      activeSessions: metrics.getActiveSessionCount(),
-      cpuPercent: sampleCpuPercent(),
-      memMB: process.memoryUsage().rss / (1024 * 1024),
-      peers,
-    };
-  }
-
-  async function handleStatsReport(req: IncomingMessage, reqLog: Logger): Promise<{
-    status: number;
-    body?: unknown;
-  }> {
-    const read = await readCappedJsonBody(req);
-    if (!read.ok) {
-      return { status: read.status, body: { error: read.status === 413 ? 'payload_too_large' : 'bad_request' } };
-    }
-    const parsed = parseStatsReportBody(read.body);
-    if (!parsed) {
-      return { status: 400, body: { error: 'invalid_body' } };
-    }
-    const { roomId, peerId, sample, aggregates } = parsed;
-
-    const room = getRoom?.(roomId);
-    if (!room) {
-      reqLog.warn({ roomId, peerId }, 'stats/report: unknown room (404)');
-      return { status: 404, body: { error: 'room_not_found' } };
-    }
-    if (!room.peers.has(peerId)) {
-      reqLog.warn({ roomId, peerId }, 'stats/report: peer not admitted (403)');
-      return { status: 403, body: { error: 'peer_not_admitted' } };
-    }
-
-    const now = Date.now();
-    const last = lastReportAt.get(peerId);
-    if (last !== undefined && now - last < STATS_REPORT_MIN_INTERVAL_MS) {
-      // Rate-limited: silently no-op (not the caller's fault, don't error).
-      return { status: 204 };
-    }
-    lastReportAt.set(peerId, now);
-
-    statsWindow.push(roomId, peerId, sample, now, aggregates);
-    metrics.updateQuality(roomId, peerId, sample.packetLoss, sample.jitterMs, {
-      latencyMs: sample.latencyMs,
-      bitrateUpKbps: sample.bitrateUpKbps,
-      bitrateDownKbps: sample.bitrateDownKbps,
-      resolutionWidth: sample.resolutionWidth,
-      resolutionHeight: sample.resolutionHeight,
-      framerate: sample.framerate,
-      packetReorderingRate: sample.packetReorderingRate,
-      encodeLatencyMs: sample.encodeLatencyMs,
-      decodeLatencyMs: sample.decodeLatencyMs,
-      freezeCount: sample.freezeCount,
-      pauseCount: sample.pauseCount,
-      connectionSetupMs: sample.connectionSetupMs,
-      iceSuccess: sample.iceSuccess,
-      reconnectMs: sample.reconnectMs,
-      avSyncDriftMs: sample.avSyncDriftMs,
-    });
-
-    return { status: 204 };
-  }
-
-  async function handleLogsReport(req: IncomingMessage, reqLog: Logger): Promise<{
-    status: number;
-    body?: unknown;
-  }> {
-    const read = await readCappedJsonBody(req, LOGS_REPORT_MAX_BODY_BYTES);
-    if (!read.ok) {
-      return { status: read.status, body: { error: read.status === 413 ? 'payload_too_large' : 'bad_request' } };
-    }
-    const parsed = parseLogsReportBody(read.body);
-    if (!parsed) {
-      return { status: 400, body: { error: 'invalid_body' } };
-    }
-    const { roomId, peerId, entries } = parsed;
-
-    const room = getRoom?.(roomId);
-    if (!room) {
-      reqLog.warn({ roomId, peerId }, 'logs/report: unknown room (404)');
-      return { status: 404, body: { error: 'room_not_found' } };
-    }
-    if (!room.peers.has(peerId)) {
-      reqLog.warn({ roomId, peerId }, 'logs/report: peer not admitted (403)');
-      return { status: 403, body: { error: 'peer_not_admitted' } };
-    }
-
-    const now = Date.now();
-    const last = lastLogsReportAt.get(peerId);
-    if (last !== undefined && now - last < LOGS_REPORT_MIN_INTERVAL_MS) {
-      // Rate-limited: silently no-op (not the caller's fault, don't error).
-      return { status: 204 };
-    }
-    lastLogsReportAt.set(peerId, now);
-
-    // The entire shipping mechanism: one structured JSON line per entry on
-    // this process's own stdout, already tailed to Loki by Docker's `loki`
-    // logging driver — no separate transport/secret needed.
-    for (const entry of entries) {
-      console.log(JSON.stringify({ source: 'frontend', roomId, peerId, ...entry }));
-    }
-
-    return { status: 204 };
-  }
-
-  async function handleRelayDownHint(req: IncomingMessage, reqLog: Logger): Promise<{
-    status: number;
-    body?: unknown;
-  }> {
-    const read = await readCappedJsonBody(req);
-    if (!read.ok) {
-      return { status: read.status, body: { error: read.status === 413 ? 'payload_too_large' : 'bad_request' } };
-    }
-    const parsed = parseRelayDownHintBody(read.body);
-    if (!parsed) {
-      return { status: 400, body: { error: 'invalid_body' } };
-    }
-    const { roomId, peerId } = parsed;
-
-    const room = getRoom?.(roomId);
-    if (!room) {
-      reqLog.warn({ roomId, peerId }, 'relay-down-hint: unknown room (404)');
-      return { status: 404, body: { error: 'room_not_found' } };
-    }
-    if (!room.peers.has(peerId)) {
-      reqLog.warn({ roomId, peerId }, 'relay-down-hint: peer not admitted (403)');
-      return { status: 403, body: { error: 'peer_not_admitted' } };
-    }
-
-    const now = Date.now();
-    const last = lastRelayDownHintAt.get(peerId);
-    if (last !== undefined && now - last < RELAY_DOWN_HINT_MIN_INTERVAL_MS) {
-      // Rate-limited: silently no-op (not the caller's fault, don't error).
-      return { status: 204 };
-    }
-    lastRelayDownHintAt.set(peerId, now);
-
-    relayDownHints.set(roomId, { reportedAtMs: now });
-    relayDownHintTotalCounter.inc();
-    relayDownHintLastAtGauge.set(now / 1000);
-    reqLog.warn({ roomId, peerId }, 'relay-down-hint: client reported its primary relay down');
-    return { status: 204 };
   }
 
   const server = createServer((req, res) => {
@@ -985,7 +193,7 @@ export function startMetricsServer(
 
     // Route: POST /stats/report — client-reported per-peer quality sample.
     if (req.method === 'POST' && url === '/stats/report') {
-      handleStatsReport(req, reqLog)
+      handleStatsReport(req, reqLog, { getRoom, lastReportAt, statsWindow, metrics })
         .then(({ status, body }) => {
           res.writeHead(status, JSON_HEADERS);
           res.end(body === undefined ? undefined : JSON.stringify(body));
@@ -1000,7 +208,7 @@ export function startMetricsServer(
 
     // Route: POST /logs/report — client-reported frontend log batch ingestion.
     if (req.method === 'POST' && url === '/logs/report') {
-      handleLogsReport(req, reqLog)
+      handleLogsReport(req, reqLog, { getRoom, lastLogsReportAt })
         .then(({ status, body }) => {
           res.writeHead(status, JSON_HEADERS);
           res.end(body === undefined ? undefined : JSON.stringify(body));
@@ -1015,7 +223,13 @@ export function startMetricsServer(
 
     // Route: POST /relay-down-hint — client-reported "primary relay down" hint.
     if (req.method === 'POST' && url === '/relay-down-hint') {
-      handleRelayDownHint(req, reqLog)
+      handleRelayDownHint(req, reqLog, {
+        getRoom,
+        lastRelayDownHintAt,
+        relayDownHints,
+        relayDownHintTotalCounter: gauges.relayDownHintTotalCounter,
+        relayDownHintLastAtGauge: gauges.relayDownHintLastAtGauge,
+      })
         .then(({ status, body }) => {
           res.writeHead(status, JSON_HEADERS);
           res.end(body === undefined ? undefined : JSON.stringify(body));
@@ -1067,7 +281,18 @@ export function startMetricsServer(
           res.end(JSON.stringify({ error: 'Unauthorized' }));
           return;
         }
-        refreshPromGauges()
+        refreshPromGauges({
+          metrics,
+          getWorkerDiedCount,
+          getWorkers,
+          logger,
+          gauges,
+          peerGauges,
+          peerAggregateGauges,
+          statsWindow,
+          getRoomParticipantCounts,
+          relayDownHints,
+        })
           .then(() => promRegistry.metrics())
           .then((text) => {
             res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
@@ -1091,7 +316,7 @@ export function startMetricsServer(
           return;
         }
         res.writeHead(200, JSON_HEADERS);
-        res.end(JSON.stringify(buildSummary()));
+        res.end(JSON.stringify(buildSummary({ workerId, metrics, statsWindow, sampleCpuPercent })));
         return;
       }
 
@@ -1119,7 +344,7 @@ export function startMetricsServer(
         res.writeHead(200, JSON_HEADERS);
         res.end(
           JSON.stringify(
-            hasFreshRelayDownHint(roomId, Date.now())
+            hasFreshRelayDownHint(relayDownHints, roomId, Date.now())
               ? { ...roomMetrics, clientReportedDeadRelayHint: true }
               : roomMetrics,
           ),

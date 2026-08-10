@@ -22,79 +22,25 @@ import {
   EventPoller,
   InMemoryRelayEndpointCache,
   subscribeRelayEndpoints,
-  readIsPaused,
-  readCapMinerId,
-  type NetworkConfig,
-  type Logger,
 } from '@dvconf/shared';
-import {
-  ChainEventListener,
-  SelfShutdownWatcher,
-  runGracefulShutdown,
-  readGracefulShutdownConfig,
-} from '@dvconf/chain-event-listener';
 import { ensureRegistered } from './auto-register.js';
 import { startHeartbeat } from './heartbeat.js';
-import type { RelayHeartbeatController } from './relay-heartbeat.js';
 import { createPromotionHandlers } from './relay-promotion.js';
 import { createMediasoupManager } from './mediasoup-manager.js';
-import { createSignalingServer, type TurnContext, type InterRelayContext } from './signaling/index.js';
+import { createSignalingServer } from './signaling/index.js';
 import { MetricsTracker } from './metrics.js';
 import { PeerStatsWindow } from './stats-window.js';
 import { startMetricsServer, type ProbeState } from './metrics-server.js';
-import { closeRelayProbe, ensureRelayProbe, type RoomState } from './room-handler.js';
 import { startHealthMonitor } from './health-monitor-wiring.js';
-import { buildRelayShutdownPlan, startRelaySelfShutdownWatcher, type RelayShutdownDeps } from './graceful-shutdown.js';
-import { makeOnReverseAnnounce } from './reverse-announce-handler.js';
-import { deriveCoturnUrl } from './coturn-url.js';
-import { fetchTurnCredential } from './turn-fetcher.js';
-import type { types as msTypes } from 'mediasoup';
-import {
-  InterRelayProducerRegistry,
-  createInterRelayAnnouncer,
-  createWsInterRelaySender,
-  StandbyWarmPipeCoordinator,
-  PrimaryPipeCoordinator,
-  handleInboundInterRelayFrame,
-  buildPipeConnectFrame,
-  buildPipeProducerAnnounce,
-  DEFAULT_PEER_RELAY_ID,
-  type InterRelaySocketLike,
-  type PipeConnectParams,
-} from '@dvconf/inter-relay-client';
-import { createInterRelaySocketMap } from './inter-relay-socket-map.js';
-import { openInterRelayLink, createStandbyLinkManager } from '@dvconf/inter-relay-client';
-import {
-  determineRole,
-  parsePipePortRange,
-  createPipePortAllocator,
-  createPipeLivenessObserver,
-  type RoomTopology,
-} from '@dvconf/inter-relay-client';
-import { resolvePrimaryEndpoint, resolveTreeParentDial, resolveRelayEndpoint } from './relay-endpoint-resolver.js';
-import { deriveTreePosition, computeTreeFanPlan, type TreePosition } from './tree-position.js';
+import { createPipeLivenessObserver, buildPipeProducerAnnounce } from '@dvconf/inter-relay-client';
 import { recordFailoverPhase } from './failover-metrics.js';
+import { buildRelayWiring, stopStandbyHeartbeatBox } from './relay-wiring-context.js';
+import { createRoomEventHandler } from './relay-room-events.js';
+import { setupRelayShutdown } from './relay-shutdown.js';
 
 const logger = createLogger('relay-daemon');
 
 const WS_PORT = parseInt(process.env['WS_PORT'] ?? '4000', 10);
-/** G3.2b: Bearer token the standby presents on the inter-relay link (and the
- *  primary's signaling server validates). Undefined → single-host / unauthed. */
-const INTER_RELAY_TOKEN = process.env['INTER_RELAY_TOKEN'];
-// RMS M4 L1: mesh-mode active-forward gate. Default OFF preserves the REQ-RO-005
-// paused-keepalive (M1 / relay-overlap 2-relay failover) bandwidth saving; set to '1'
-// in mesh mode (the run-rms-live-local demo sets it alongside cp-daemon RMS_KR_MIN>1).
-const RMS_ACTIVE_FORWARD = process.env['RMS_ACTIVE_FORWARD'] === '1';
-// Cascade-tree (T-B) flags. Default OFF → the shipped flat-STAR data-plane is untouched
-// (byte-stable). RMS_TREE_ACTIVE gates deriving+storing each room's tree position and
-// re-targeting the inter-relay dial from slot-0 to the tree PARENT (N1). RMS_TREE_DEGREE
-// is the B1 SHAPING degree (D = min(shapingDegree, live-capacity-cap)); RMS_TREE_MAX_HEIGHT
-// is the diameter bound H (REQ-RMS-041).
-const RMS_TREE_ACTIVE = process.env['RMS_TREE_ACTIVE'] === '1';
-// NaN-guard: a malformed operator value must fall back to the numeric default, never NaN —
-// deriveTree would index ids[NaN] and throw inside the RoomAssigned poller callback.
-const RMS_TREE_MAX_HEIGHT = ((n) => (Number.isFinite(n) ? n : 3))(parseInt(process.env['RMS_TREE_MAX_HEIGHT'] ?? '3', 10));
-const RMS_TREE_DEGREE = ((n) => (Number.isFinite(n) ? n : 2))(parseInt(process.env['RMS_TREE_DEGREE'] ?? '2', 10)); // B1 shaping degree
 
 // Only start the server when run directly (not imported in tests)
 const isMainModule =
@@ -134,544 +80,23 @@ if (isMainModule) {
     const statsWindow = new PeerStatsWindow();
 
     // Step 4: Start WebSocket signaling server.
-    // S30.C: build optional TurnContext when ENABLE_TURN_DELIVERY=1 +
-    // CP_DAEMON_RPC_URL + TURN_RPC_TOKEN are set. The signaling layer
-    // delegates the credential fetch per createTransport so it stays
-    // decoupled from the cp-daemon RPC plumbing.
-    const turnContext: TurnContext | undefined =
-      process.env['ENABLE_TURN_DELIVERY'] === '1' &&
-      process.env['CP_DAEMON_RPC_URL'] &&
-      process.env['TURN_RPC_TOKEN']
-        ? (() => {
-            const coturnUrl = deriveCoturnUrl(endpointUrl);
-            if (!coturnUrl) {
-              logger.warn(
-                { endpointUrl },
-                'ENABLE_TURN_DELIVERY=1 but endpointUrl unparseable; TURN disabled',
-              );
-              return undefined;
-            }
-            const cpRpcUrl = process.env['CP_DAEMON_RPC_URL']!;
-            const token = process.env['TURN_RPC_TOKEN']!;
-            const stunUrl = process.env['STUN_URL'] ?? 'stun:stun.l.google.com:19302';
-            const myMinerId = signer.toSuiAddress();
-            logger.info(
-              { coturnUrl, cpRpcUrl, stunUrl },
-              'TURN delivery enabled; relay will inline iceServers in transportCreated',
-            );
-            return {
-              buildIceServers: async (peerId: string) => {
-                const cred = await fetchTurnCredential({
-                  cpRpcUrl,
-                  token,
-                  targetMinerId: myMinerId,
-                  userId: peerId,
-                });
-                if (cred === null) return null;
-                return [
-                  { urls: stunUrl },
-                  {
-                    urls: [coturnUrl],
-                    username: cred.username,
-                    credential: cred.password,
-                  },
-                ];
-              },
-            };
-          })()
-        : undefined;
-
-    // G1/G3.2b inter-relay coordination context. The registry is shared; role +
-    // links are populated lazily by the RoomAssigned poller (Step 7) once this
-    // relay learns its role + the paired relay's endpoint. The standby OPENS a
-    // live WS link to the primary (G3.2b openStandbyLink) to receive
-    // `pipe-producer` announces; the primary pushes announces over the accepted
-    // socket (attachPeerSocket → interRelayLink.socket).
-    //
-    // NOTE: this index.ts wiring is not unit-tested (mirrors the isMainModule
-    // guard) but the pieces it assembles ARE: the announce contract + producerId
-    // resolution + auth tag/dispatch gate + inbound handler + link dial
-    // (inter-relay*.test.ts, inter-relay-auth*.test.ts, inter-relay-link.test.ts).
-    // The cross-HOST RTP media path (PipeTransport connect-param exchange) is NOT
-    // here — it is the bench's manual pairing (warmpipe-rtp.integration.test.ts),
-    // BENCH-3 scope (advisor-gate W1/W4). G3.2b wires the producerId-announce
-    // coordination + the paused warm-pipe lifecycle cross-daemon, not WAN RTP.
-    const interRelayRegistry = new InterRelayProducerRegistry();
-    /**
-     * G1/G3.2b: the LIVE accepted standby socket on the PRIMARY. Held in a mutable
-     * box and read by the WS sender on every announce. Set by the signaling
-     * server's `attachPeerSocket` callback when a tagged inter-relay peer (the
-     * standby's authenticated link) connects; reset to null on its close. Until a
-     * socket is attached the sender drops best-effort (no throw). Single
-     * per-daemon box (per-room keying is the carry-forward — see standbyLink).
-     */
-    const interRelayLink: { socket: InterRelaySocketLike | null } = { socket: null };
-    /**
-     * G3.2a/b: the STANDBY's resolved PRIMARY endpoint URL. The RoomAssigned
-     * poller (Step 7) resolves `relayIds[0]` → primaryUrl via the shared endpoint
-     * cache and writes it here. G3.2b READS it in two places: the standby arm
-     * dials the live inter-relay link (`openStandbyLink`), and `onStandbyRoomReady`
-     * feeds it into `RoomTopology.primaryEndpoint`. `null` until a standby
-     * assignment resolves (or while the primary's endpoint is not yet on chain).
-     *
-     * Single per-DAEMON box (mirrors `interRelayLink`), not per-room. A relay that
-     * is primary for room A AND standby for room B at once needs per-room keying
-     * (Map<roomId, url>) so the live dial does not pick up a stale primary across
-     * role/room transitions — the documented G3.2b carry-forward (single-room K=2
-     * demo scope holds today).
-     */
-    const standbyLink: { primaryUrl: string | null } = { primaryUrl: null };
-    // T-B: this relay's tree position per room, derived on RoomAssigned (RMS_TREE_ACTIVE).
-    // Read by the tree-active dial (resolveTreeParentDial → tree PARENT) and, later, fanToTreeNeighbors.
-    const roomTreePosition = new Map<string, TreePosition>();
-    // Mid-call standby-swap (relay_replacement.move): the last-known assigned_relays vector
-    // per room, recorded on RoomAssigned and kept current on RelaySlotReplaced (dead id swapped
-    // for new id) — needed so a RelaySlotReplaced handler can resolve the primary's endpoint the
-    // same way RoomAssigned does, without an extra chain read.
-    const roomAssignedRelays = new Map<string, string[]>();
-    /**
-     * REQ-RO-006 (Layer B fast local promotion) — one relay-heartbeat controller
-     * per room this relay is currently STANDBY for. Started whenever this relay
-     * resolves a primary to ping (RoomAssigned/RelaySlotReplaced standby
-     * branches below); stopped on promotion (either via this fast local path or
-     * the on-chain RelayPromoted event — see promoteToPrimary), on ejection, or
-     * on room teardown (releaseRoom below). Single-room K=2 demo scope, same as
-     * standbyLink above.
-     */
-    const standbyHeartbeats = new Map<string, RelayHeartbeatController>();
-    /**
-     * REQ-RMS-028 (L1.3-b, Bridge A) — the per-peer inter-relay socket map, OWNED
-     * here and SHARED into createSignalingServer (its tagged-peer attach writes
-     * cascade legs into it). The PRIMARY reads it to route per-peer announce/param
-     * sends: `socketFor` resolves a cascade peerRelayId to its own live socket, and
-     * the DEFAULT peer (undefined / DEFAULT_PEER_RELAY_ID) to the legacy
-     * interRelayLink.socket so the single-standby path stays byte-identical.
-     */
-    const interRelaySockets = createInterRelaySocketMap();
-    const socketFor = (p?: string): InterRelaySocketLike | null =>
-      p && p !== DEFAULT_PEER_RELAY_ID ? interRelaySockets.get(p) : interRelayLink.socket;
-    const sendToPeer = (p: string | undefined, data: string): void => {
-      try {
-        // REUSE the OPEN/null-guarded WS sender per-peer (drops best-effort).
-        createWsInterRelaySender(() => socketFor(p), logger).send(data);
-      } catch {
-        /* OPEN/null guarded by the sender; a momentary link-down must not throw. */
-      }
-    };
-    /**
-     * Outbound inter-relay link sink — now a REAL transmitter (was a no-op log
-     * stub that never put bytes on the wire). When a standby socket is attached
-     * and OPEN, the announce frame is actually sent; otherwise dropped best-effort.
-     */
-    const interRelaySender = createWsInterRelaySender(() => interRelayLink.socket, logger);
-    /**
-     * STANDBY warm-pipe coordinator (BENCH-2 / G1). Resolves the primary's real
-     * producerId from the announce registry on first peer join + drives the
-     * not-ready re-run on announce arrival. The standby's signaling layer hands
-     * it the room topology/router at the bench; instantiated here so the wiring
-     * owns a single coordinator backed by the shared registry.
-     */
-    // REQ-RMS-027 (L1.3-b, Bridge B) — late-bound handle to the signaling layer's
-    // fanLocalProducer. interRelayContext (and standbyWarmPipe below) are built
-    // BEFORE createSignalingServer returns, and onLocalProducer is a readonly ctor
-    // param with no setter, so we box the fn and assign it once the server starts.
-    // The callback only fires after the server is live, so the box is always set
-    // in time (mirrors the post-construction interRelayContext.role mutation).
-    const signalingRef: {
-      fanLocalProducer:
-        | ((
-            roomId: string,
-            producerPeerId: string | undefined,
-            producer: msTypes.Producer,
-            peerRelayId?: string,
-          ) => void)
-        | null;
-      getRoom?: (roomId: string) => RoomState | undefined;
-      registerReverseMinted?: (
-        roomId: string,
-        minted: msTypes.Producer,
-        originRelayId: string,
-        producerPeerId?: string,
-        // T-B (REQ-RMS-043/044/046) — immutable origin + inbound hop budget for the tree hub-fan.
-        originProducerId?: string,
-        inboundHopTtl?: number,
-      ) => void;
-      // REQ-RMS-037 (Task B4b): STANDBY re-announce-on-reopen — back-fill local
-      // producers UP after an outbound-link flap (late-bound like the rest).
-      reannounceLocalProducersUp?: (roomId: string) => void;
-    } = { fanLocalProducer: null };
-    const standbyWarmPipe = new StandbyWarmPipeCoordinator(
-      interRelayRegistry,
-      logger,
-      // REQ-RMS-027: a standby minted a LOCAL forwarded producer → fan it to this
-      // relay's OWN local clients. Bind to the ORIGINAL publisher (producerPeerId)
-      // when the announce carried it, else the cascade peerRelayId.
-      // REQ-RMS-034: pass RAW producerPeerId + peerRelayId — the publisher-binding
-      // `??` resolution now lives INSIDE fanLocalProducer (behavior-neutral for the
-      // shipped forward leg; C1 later replaces it with the E2EE gate).
-      (roomId, producer, producerPeerId, peerRelayId, originProducerId, inboundHopTtl) => {
-        signalingRef.fanLocalProducer?.(roomId, producerPeerId, producer, peerRelayId);
-        // T-B (REQ-RMS-042/043/044) — INTERNAL-node received-DOWN re-forward (the dual role). The
-        // standby coordinator just minted a FRESH local producer from its PARENT's pipe; re-forward
-        // it DOWN this node's tree edges via fanToTreeNeighbors. peerRelayId is the edge (URL) it
-        // arrived on = the PARENT link, so the helper edge-scopes it (fans to CHILDREN only, never
-        // echoes back UP the parent). origin id = the IMMUTABLE origin off the announce (NOT
-        // producer.id — Task 5 mints a fresh local id per hop); router from getRoom (NOT a fabricated
-        // producer.appData.router); inboundHopTtl decrements + the helper's `<= 0` guard terminates a
-        // leaf / exhausted budget. Flag OFF → return before any tree work (shipped star path
-        // byte-identical: this is exactly the prior single fanLocalProducer call).
-        if (!RMS_TREE_ACTIVE) return;
-        const room = signalingRef.getRoom?.(roomId);
-        if (!room) return;
-        // M-3 observability — this producer was minted from the PARENT's pipe (cross-relay), so a
-        // MISSING originProducerId is a THREADING GAP (not a real local origin): the fallback to
-        // producer.id (the fresh per-hop mint) mislabels the origin → per-room dedup degrades. WARN as
-        // an anomaly (fires ~never once the announce carries originProducerId end-to-end).
-        if (originProducerId === undefined) {
-          logger.warn(
-            { roomId, mintedId: producer.id, peerRelayId },
-            'T-B: internal re-forward missing originProducerId — threading gap, dedup may degrade',
-          );
-        }
-        fanToTreeNeighbors(
-          roomId, room.router, producer, producerPeerId,
-          originProducerId ?? producer.id, peerRelayId, inboundHopTtl,
-        );
-      },
-      // L1.4: opt in to active-forward only in mesh mode (RMS_ACTIVE_FORWARD='1').
-      // Default false preserves the REQ-RO-005 paused-keepalive BW saving for M1 /
-      // relay-overlap 2-relay failover rooms where the flag is not set.
-      RMS_ACTIVE_FORWARD,
-      // T6 (REQ-RMS-046): cascade-tree data plane — fresh local id per hop + per-room
-      // origin dedup. Default false (flag off) → the shipped star mint stays byte-stable.
-      RMS_TREE_ACTIVE,
-      // Lane-B t_hop_network sampler (REQ-WLM-08). BENCH_LATENCY unset → probe is null
-      // → undefined passed → zero-cost no-op inside the coordinator (byte-identical).
-      // When enabled: starts a roundTripTime interval poller on the freshly-minted piped
-      // producer (RECEIVER/inbound-rtp stat, empirically verified). `endpointUrl` is this
-      // relay's stable unique identity (used as peerRelayId for the outbound link as well).
-      (() => {
-        const _benchProbe = ensureRelayProbe(logger);
-        if (_benchProbe === null) return undefined;
-        const _localRelayId = endpointUrl;
-        return (producer: import('mediasoup').types.Producer, fromRelayId: string): (() => void) =>
-          _benchProbe.startRtpStreamSampler(producer, { fromRelay: fromRelayId, toRelay: _localRelayId });
-      })(),
-    );
-
-    // ── G3.2b: live cross-daemon inter-relay LINK glue ───────────────────────
-    // isMainModule wiring that assembles the unit-tested pieces: openInterRelayLink
-    // (the live dial), createStandbyLinkManager (the dedup/reconnect state machine),
-    // handleInboundInterRelayFrame (inbound routing), StandbyWarmPipeCoordinator,
-    // the signaling-side attach/dispatch gate. PIPE_PORT_RANGE.min is the standby
-    // pipe port for the single-room demo; multi-room port allocation + per-room link
-    // keying are the documented carry-forward (single-box interRelayLink/standbyLink).
-    const pipePortRange = parsePipePortRange(process.env['PIPE_PORT_RANGE']);
-    // F1 (REQ-RO-009): per-(room, role) PIPE_PORT allocator over [min..max].
-    // Idempotent per key (preserves the N3 re-run invariant); released on room
-    // close. Replaces the single hardcoded pipePortRange.min (EADDRINUSE for >1
-    // room). Keyed `${roomId}` (standby) + `${roomId}:primary` (primary) so a
-    // same-host primary+standby pair never collide. Mesh carry-forward (§12): the
-    // key generalizes to per-(roomId, peerRelayId) additively.
-    const pipePortAllocator = createPipePortAllocator(pipePortRange);
-    const reconnectMs = parseInt(process.env['INTER_RELAY_RECONNECT_MS'] ?? '3000', 10);
-
-    // C6 (REQ-RMS-008): this standby's DISTINCT inter-relay peer id, tagged on the
-    // outbound link so the primary buckets ≥2 standbys (the live K_r≥2 mesh) each
-    // under their own peerRelayId instead of colliding on DEFAULT_PEER_RELAY_ID
-    // (the displaced standby would then mint 0 — the live C6 root cause). We reuse
-    // endpointUrl — already this relay's stable, unique identity (standbyEndpoint
-    // below) — so no extra chain read is needed; the peerRelayId is an opaque
-    // routing/keying token (socket map + registry meshKey), never compared to an
-    // on-chain miner_id. GATED on the active-forward mesh flag: when OFF (M1 /
-    // relay-overlap failover) we send NO peer id → the primary resolves DEFAULT →
-    // that path is byte-stable. The SAME value keys ensure() below so the
-    // primary-echoed announce re-run matches the warm-pipe state it recorded.
-    const interRelayPeerId = RMS_ACTIVE_FORWARD ? endpointUrl : undefined;
-
-    // The standby's outbound link lifecycle (dedup + reconnect) lives in the
-    // unit-tested createStandbyLinkManager; index.ts only supplies the live socket
-    // factory (openInterRelayLink) + the inbound-frame → registry/cutover routing.
-    const standbyLinkManager = createStandbyLinkManager({
-      open: (url) =>
-        openInterRelayLink({
-          url,
-          ...(INTER_RELAY_TOKEN ? { token: INTER_RELAY_TOKEN } : {}),
-          ...(interRelayPeerId ? { peerRelayId: interRelayPeerId } : {}),
-          onFrame: (raw) =>
-            handleInboundInterRelayFrame(raw, {
-              registry: interRelayRegistry,
-              // C6 (REQ-RMS-008): thread the frame's cascade peerRelayId into the
-              // coordinator re-run so it keys the SAME (room, peer) warm-pipe
-              // state ensure() recorded (undefined/legacy frame → DEFAULT).
-              onAnnounce: (roomId, peerRelayId) => {
-                void standbyWarmPipe.onAnnounce(roomId, undefined, undefined, undefined, peerRelayId);
-              },
-              // F1 (REQ-RO-003/008): the primary's DOWN pipe-connect reply.
-              // Feed its {ip,port} into the standby's already-bound PipeTransport
-              // so the link is connect()'d BEFORE the announce arrives (the
-              // coordinator drains pending producers once both ends connect).
-              // C6 part-2: thread the echoed peerRelayId → connect the SAME
-              // per-(room,peer) warm-pipe leg ensure() bound (undefined → DEFAULT).
-              onConnectParams: (roomId, params, peerRelayId) => {
-                void standbyWarmPipe.onPrimaryConnectParams(roomId, params, peerRelayId);
-              },
-              logger,
-            }),
-          logger,
-        }),
-      reconnectMs,
-      // REQ-RMS-037 (D3, static-mesh-hardening): on link RE-open, re-deliver reverse
-      // announces that were silently dropped during the down window. First-open is
-      // back-filled by the A2 reversePending drain -- never resend there. Defensive: the
-      // manager already guards this callback against throws; we also isolate per-room so
-      // one bad room does not skip the rest.
-      onOpen: (url, isReopen) => {
-        if (!isReopen) return;
-        for (const roomId of standbyWarmPipe.roomsWithStoredAnnounces()) {
-          try {
-            standbyWarmPipe.resendReverseAnnounces(roomId);
-          } catch (err) {
-            logger.warn({ err, roomId }, 'REQ-RMS-037: resend-on-reopen failed for room (isolated)');
-          }
-        }
-        logger.info({ url }, 'REQ-RMS-037: link reopen -- stored reverse announces re-delivered');
-      },
-      logger,
-    });
-
-    /** Primary-side producer announcer (unit-tested factory). */
-    const pushAnnounce = createInterRelayAnnouncer(interRelaySender);
-    // F1 (REQ-RO-001/002/008): the PRIMARY half driver. Mints + connects the
-    // primary PipeTransport, pipes the room's real producer onto it, and announces
-    // the PIPED consumer id (NOT producer.id) via pushAnnounce. Holds per-room
-    // {pipeTransport|null, connected, pendingProducers[], standbyParams|null} and
-    // drains pendingProducers once the standby's connect params arrive — tolerates
-    // either arrival order (producer-first or params-first). All logic is in the
-    // factory; index.ts only injects the announcer + port allocator + the
-    // standby->primary param sender (the link's new send() path).
-    const primaryPipe = new PrimaryPipeCoordinator({
-      // The coordinator's announcer dep + createInterRelayAnnouncer's closure now share
-      // the SAME arg order (roomId, producer, producerPeerId?, peerRelayId?, rtpParameters?),
-      // so the adapter forwards each slot 1:1.
-      //   • producerPeerId (REQ-RMS-029): the drain threads the ORIGINAL publisher's
-      //     peerId on the CASCADE/mesh path so a cross-relay consume binds the stream/
-      //     E2EE-key to the real publisher (not the cascade relayId). The publisher
-      //     peerId travels ALONGSIDE the piped consumer id; it is undefined on the
-      //     DEFAULT/legacy single-standby leg → that part of the frame stays byte-stable.
-      //   • peerRelayId (REQ-RMS-008) is DEFAULT-gated in drain (DEFAULT → undefined) →
-      //     omitted on the legacy/default path → that part of the frame stays byte-stable.
-      //   • rtpParameters (REQ-RMS-026) is supplied UNCONDITIONALLY by drain (a real
-      //     Consumer always has it) → the live single-standby (DEFAULT) frame intentionally
-      //     NOW carries it (additive — a standby that ignores it still parses via the
-      //     unchanged guard); it is NOT byte-identical to the pre-REQ-RMS-026 frame.
-      //     Builder-level byte-identity holds only when the 5th arg is OMITTED (the
-      //     in-process announceProducer path below, which passes no rtpParameters).
-      // REQ-RMS-028 (L1.3-b): route the cascade announce to the RIGHT per-peer
-      // socket via sendToPeer (DEFAULT peer → the legacy interRelayLink.socket).
-      // REUSE createInterRelayAnnouncer to build the locked frame (producerPeerId +
-      // peerRelayId + rtpParameters) and hand its bytes to sendToPeer.
-      // T-B (REQ-RMS-044/046): thread the trailing loop-guard budget + immutable origin so a
-      // tree DOWN announce carries them. Undefined on the shipped forward path → the builder
-      // omits both → byte-identical frame.
-      announcer: (roomId, producer, producerPeerId, peerRelayId, rtpParameters, hopTtl, originProducerId) =>
-        createInterRelayAnnouncer({ send: (data) => sendToPeer(peerRelayId, data) })(
-          roomId,
-          producer,
-          producerPeerId,
-          peerRelayId,
-          rtpParameters,
-          hopTtl,
-          originProducerId,
-        ),
-      portAllocator: pipePortAllocator,
-      // REQ-RMS-028 (L1.3-b): the DOWN pipe-connect reply routes to the SAME
-      // per-peer socket (C contract is (roomId, params[, peerRelayId])).
-      // C6 part-2: carry peerRelayId BACK on the reply frame so the standby
-      // connect()s the SAME leg (sendToPeer already routes by it). The DEFAULT
-      // sentinel is mapped to undefined so the legacy single-standby reply frame
-      // stays byte-identical (omits the field) — only a real cascade peer carries it.
-      paramSender: (roomId, params, peerRelayId) =>
-        sendToPeer(
-          peerRelayId,
-          JSON.stringify(
-            buildPipeConnectFrame(
-              roomId,
-              params,
-              peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
-            ),
-          ),
-        ),
-      // REQ-RMS-037 (Task B4a): close the A6 double-race fan tail. When BOTH the
-      // reverse leg AND the standby params were absent at announce time the handler
-      // QUEUES the announce (reverseMint -> null) so its immediate
-      // registerReverseMinted never ran. drainReverseMints (run by ensureReverseLeg
-      // on a later reverse announce / inter-relay peer attach -- its SOLE caller; the
-      // forward onStandbyConnectParams/onProducer drain only the FORWARD queue) now
-      // fires onReverseMinted per drained mint -> registerReverseMinted fans it to
-      // local clients + hub-fans DOWN, threading the ORIGINAL publisher's
-      // producerPeerId carried on the queue entry.
-      // T-B (REQ-RMS-043/044/046, T7 I-1): thread the IMMUTABLE origin + inbound hop budget the drain
-      // carried off the queued announce, so the DRAIN Path B feeds the tree hub-fan the SAME origin +
-      // budget the immediate path does — NOT minted.id / a reseeded full diameter. Undefined on a pre-
-      // tree drain → registerReverseMinted's flag-off flood path is byte-stable.
-      onReverseMinted: (roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl) =>
-        signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl),
-      // T6 (REQ-RMS-046): cascade-tree reverse hub mint uses a fresh local id per hop.
-      // Default false (flag off) → the shipped same-id reverse mint stays byte-stable.
-      treeActive: RMS_TREE_ACTIVE,
-      logger,
-    });
-    const interRelayContext: InterRelayContext = {
-      // Default to 'primary'; corrected per-room by the RoomAssigned poller.
-      role: 'primary',
-      registry: interRelayRegistry,
-      announceProducer: (roomId, producer, producerPeerId) => {
-        pushAnnounce(roomId, producer, producerPeerId);
-      },
-      // G3.2b PRIMARY: the signaling server hands us the accepted standby socket
-      // (tagged inter-relay) so the announce sender transmits over it; null on detach.
-      attachPeerSocket: (socket) => {
-        interRelayLink.socket = socket;
-      },
-      // REQ-RMS-037 (part-3 reverse leg, Task B4b) PRIMARY: on a newly-attached
-      // inter-relay peer, eagerly ensure its reverse pipe leg exists (so a pure-
-      // reverse room forms its leg before the first reverse announce). DRY — the
-      // SAME primaryPipe.ensureReverseLeg already used by makeOnReverseAnnounce below.
-      ensureReverseLeg: (roomId, router, peerRelayId) =>
-        primaryPipe.ensureReverseLeg(roomId, router, peerRelayId),
-      // F1 (REQ-RO-001/002/008) PRIMARY: a real producer was created for a room
-      // this relay is primary for. Hand it to the coordinator, which mints+connects
-      // the primary pipe (port from the allocator, key `${roomId}:primary`), pipes
-      // the producer, and announces the PIPED consumer id. Drains immediately if
-      // the standby's connect params already arrived, else queues (pending).
-      // REQ-RMS-028 (L1.3-b): forward the cascade peerRelayId so the coordinator
-      // mints a per-peer pipe leg (DEFAULT/undefined → the legacy single leg).
-      // REQ-RMS-029: also forward the ORIGINAL publisher's producerPeerId so the
-      // coordinator drain threads it into the cascade announce.
-      // T-B (REQ-RMS-044/046): thread the trailing loop-guard budget + immutable origin into the
-      // coordinator so a tree DOWN fan carries them into the announce. Undefined on the shipped
-      // flat-STAR fanout (handleProduce) → byte-stable frame.
-      onPrimaryProducer: (roomId, router, producer, peerRelayId, producerPeerId, hopTtl, originProducerId) =>
-        void primaryPipe.onProducer(roomId, router, producer, peerRelayId, producerPeerId, hopTtl, originProducerId),
-      // REQ-RMS-034 (part-3 reverse leg) STANDBY: a standby-homed LOCAL client
-      // produced. Consume it onto the warm pipe UP toward the primary + announce UP
-      // (the reverse dual of onPrimaryProducer). Key under THIS standby's own
-      // interRelayPeerId (same value tagged on the outbound link + ensure()).
-      // T-B (REQ-RMS-044/046): thread the trailing loop-guard budget + immutable origin so a tree
-      // UP fan carries them onto the reverse announce UP. Undefined on the shipped local-client
-      // reverse path (handleProduce) → byte-stable frame.
-      onStandbyProducer: (roomId, router, producer, producerPeerId, hopTtl, originProducerId) => {
-        void standbyWarmPipe.onLocalClientProducer(
-          roomId,
-          router,
-          producer,
-          producerPeerId,
-          interRelayPeerId,
-          hopTtl,
-          originProducerId,
-        );
-      },
-      // REQ-RMS-034/035/037 (part-3 reverse leg) PRIMARY: a reverse announce arrived
-      // from a standby's local client. The handler (EXTRACTED to reverse-announce-
-      // handler.ts so it is unit-testable without index.ts's main side effects)
-      // ensures+drains the reverse leg FIRST, then mints a LOCAL hub copy and seeds +
-      // fans it via registerReverseMinted. Fail-safe: a missing room or absent
-      // rtpParameters is a no-op; only a truthy mint is registered. peerRelayId
-      // undefined (legacy) -> DEFAULT (single-leg). getRoom/registerReverseMinted are
-      // bound through the signalingRef box so they return undefined / no-op before the
-      // signaling server is live (preserving pre-server-live safety).
-      onReverseAnnounce: makeOnReverseAnnounce({
-        ensureReverseLeg: (roomId, router, peerRelayId) =>
-          primaryPipe.ensureReverseLeg(roomId, router, peerRelayId),
-        reverseMint: (roomId, router, announced, peerRelayId) =>
-          primaryPipe.reverseMint(roomId, router, announced, peerRelayId),
-        getRoom: (roomId) => signalingRef.getRoom?.(roomId),
-        // T-B (REQ-RMS-043/044/046): thread the immutable origin + inbound hop budget the handler
-        // read off the reverse announce into the tree hub-fan (undefined on a pre-tree frame).
-        registerReverseMinted: (roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl) =>
-          signalingRef.registerReverseMinted?.(roomId, minted, originRelayId, producerPeerId, originProducerId, inboundHopTtl),
-      }),
-      // F1 (REQ-RO-003/008): the standby's UP pipe-connect frame, delivered through
-      // the SAME interRelayPeers token gate as pipe-producer announces. PRIMARY
-      // feeds it to the coordinator, which binds + connect()s the primary pipe to
-      // these params, then replies DOWN with its own tuple (paramSender) and drains
-      // any pending producers.
-      // C6 part-2: thread the standby's peerRelayId → connect the SAME per-(room,peer)
-      // producer pipe leg the cascade onPrimaryProducer minted (undefined → DEFAULT).
-      // WAN PRODUCER-FIRST fix: also thread the room ROUTER (via signalingRef.getRoom
-      // — same accessor onReverseAnnounce/onLocalProducer use) so the coordinator can
-      // mint the forward pipe HERE when the all-local producer arrived first and is
-      // queued. getRoom is late-bound (undefined pre-server-live) → the coordinator
-      // falls back to the record-only path, byte-stable.
-      onConnectParams: (roomId, params, peerRelayId) => {
-        const router = signalingRef.getRoom?.(roomId)?.router;
-        void primaryPipe.onStandbyConnectParams(roomId, params, peerRelayId, router);
-      },
-      // G3.2b STANDBY: on the first peer join for a standby room, build the room's
-      // topology + open the paused warm pipe in the LIVE signaling path. F1: the
-      // pipe port is now ALLOCATED per room (REQ-RO-009) instead of the single
-      // hardcoded min, and the standby announces its bound {ip,port} UP to the
-      // primary over the link's new send() path so both ends connect() before RTP.
-      onStandbyRoomReady: (roomId, router) => {
-        const pipePort = pipePortAllocator.allocate(roomId);
-        const topology: RoomTopology = {
-          roomId,
-          role: 'standby',
-          primaryEndpoint: standbyLink.primaryUrl ?? '',
-          standbyEndpoint: endpointUrl,
-          pipePort,
-          pipeConsumer: null,
-          pipeTransport: null,
-        };
-        void standbyWarmPipe
-          // C6 (REQ-RMS-008): key the warm-pipe state under this standby's OWN
-          // peerRelayId (same value tagged on the outbound link) so the primary-
-          // echoed announce re-run (onAnnounce above) finds this state instead of
-          // missing under DEFAULT. undefined (non-mesh) → DEFAULT — byte-stable.
-          .ensure(topology, router, pipePort, interRelayPeerId)
-          .then(() => {
-            // F1 (REQ-RO-003): announce the standby's bound {ip,port} UP to the
-            // primary so it can connect() its end. ANNOUNCED_IP default 127.0.0.1
-            // (single-host/localnet scope, design §9.5; enableSrtp:false). Best-
-            // effort: send() is OPEN-guarded — dropped if the link is not yet up
-            // (the standby re-announces on reconnect; the coordinator re-drives).
-            const ip = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
-            const params: PipeConnectParams = { ip, port: pipePort };
-            // C6 part-2: tag the UP pipe-connect with this standby's OWN peerRelayId
-            // (same value as the link header + ensure() key) so the primary binds the
-            // RIGHT per-(room,peer) leg. undefined (non-mesh) → frame omits it → DEFAULT.
-            standbyLinkManager.send(JSON.stringify(buildPipeConnectFrame(roomId, params, interRelayPeerId)));
-          })
-          .catch((err) => logger.error({ err, roomId }, 'G3.2b: standby warm-pipe ensure failed'));
-      },
-      // F1 (REQ-RO-009): room teardown — release the standby pipe port and drop
-      // both coordinator states, so a reused roomId starts fresh and the port
-      // range does not leak. Routed through the context (mirrors registry.clear)
-      // so signaling.ts stays decoupled from the allocator/coordinator handles.
-      //
-      // REQ-RMS-008: the `${roomId}:primary` slot is released by
-      // primaryPipe.clear(roomId) itself — its DEFAULT-peer primaryPortKey
-      // degrades to exactly `${roomId}:primary` (inter-relay.ts:78-82), and clear
-      // releases that key (inter-relay.ts:1061, proven by
-      // inter-relay-primary-coordinator.test.ts:240 + warmpipe-rtp integration
-      // :714). So PrimaryPipeCoordinator is the SOLE owner of that slot's
-      // lifecycle — we no longer double-release it here, avoiding two owners of one
-      // key as the M2 cascade lands real per-peer primary legs.
-      releaseRoom: (roomId) => {
-        pipePortAllocator.release(roomId);
-        // B6b (REQ-RMS-036): clearRoom drops EVERY (room, peer) leg across all
-        // peerRelayId buckets, not just DEFAULT. `clear(roomId)` left the cascade
-        // legs (states + reverse dedup/pending maps) alive -> stale state on a reused
-        // roomId. clearRoom still tears down the DEFAULT leg (so the `${roomId}:primary`
-        // slot release is preserved) and additionally every cascade leg.
-        primaryPipe.clearRoom(roomId);
-        standbyWarmPipe.clearRoom(roomId);
-        // REQ-RO-006: stop this room's fast-promotion ping loop, if any — a
-        // reused roomId must not resume pinging a now-stale primaryUrl.
-        stopStandbyHeartbeat(roomId);
-      },
-    };
+    // The bulk of the inter-relay coordination wiring (env flags, TURN
+    // context, mutable state boxes, interRelayContext, fanToTreeNeighbors)
+    // lives in relay-wiring-context.ts; see buildRelayWiring's docstring.
+    const wiring = buildRelayWiring({ logger, endpointUrl, signer });
+    const {
+      turnContext,
+      interRelayContext,
+      signalingRef,
+      standbyWarmPipe,
+      standbyHeartbeats,
+      interRelaySockets,
+      standbyLinkManager,
+      relayEndpointCacheRef,
+      roomTreePosition,
+      roomAssignedRelays,
+      standbyLink,
+    } = wiring;
 
     const {
       wss,
@@ -699,15 +124,16 @@ if (isMainModule) {
     // REQ-RMS-027 (L1.3-b): late-bind the fan so onLocalProducer can reach it.
     signalingRef.fanLocalProducer = fanLocalProducer;
     // REQ-RMS-034 (part-3 reverse leg): late-bind the room lookup + reverse-mint
-    // registrar so onReverseAnnounce (built above) can reach them once the server
-    // is live (same box pattern as fanLocalProducer).
+    // registrar so onReverseAnnounce (built in relay-wiring-context.ts) can
+    // reach them once the server is live (same box pattern as fanLocalProducer).
     signalingRef.getRoom = getRoom;
     signalingRef.registerReverseMinted = registerReverseMinted;
     // REQ-RMS-037: late-bind the standby UP re-announce. SUPERSEDED for the link-flap /
     // reopen case by StandbyWarmPipeCoordinator.resendReverseAnnounces (static-mesh-hardening
-    // D3, wired via the standbyLinkManager onOpen above) — a flap must RE-DELIVER stored
-    // announce frames, not re-drive this path (reverseConsumedIds would skip every already-
-    // consumed producer). Kept as an ops/manual utility; not wired to a production reopen trigger.
+    // D3, wired via the standbyLinkManager onOpen in relay-wiring-context.ts) — a flap must
+    // RE-DELIVER stored announce frames, not re-drive this path (reverseConsumedIds would skip
+    // every already-consumed producer). Kept as an ops/manual utility; not wired to a
+    // production reopen trigger.
     signalingRef.reannounceLocalProducersUp = reannounceLocalProducersUp;
     // REQ-RMS-034: bind the reverse UP-announcer on the standby coordinator. Uses
     // the SAME UP link seam as the pipe-connect frame (standbyLinkManager.send),
@@ -841,6 +267,7 @@ if (isMainModule) {
     // room poller below), so it polls `relay_registry` ONLY — dropping the
     // redundant room_manager poll the G3.2a extraction left in (opts.modules).
     const relayEndpointCache = new InMemoryRelayEndpointCache();
+    relayEndpointCacheRef.current = relayEndpointCache;
     const stopRelayEndpoints = await subscribeRelayEndpoints(
       graphqlClient,
       config.packageId,
@@ -849,65 +276,7 @@ if (isMainModule) {
       { modules: ['relay_registry'] },
     );
 
-    /**
-     * T-B (REQ-RMS-042/043/044): re-forward a producer along THIS node's tree edges, edge-scoped +
-     * hop-guarded, in BOTH directions. The relayId→URL translation (B2 id-space bridge) happens
-     * here, where the endpoint cache + tree position + both legs are in scope.
-     *   receiveEdgeUrl = the peer URL the producer arrived on; null for a local-origin produce.
-     *   inboundHopTtl  = the INBOUND budget (undefined at a local origin → seeded from pos.diameter).
-     *
-     * NOTE (T4/Task 6): the helper is DEFINED + bound here but NOT yet wired to any fan site — the
-     * three fan sites (handleProduce forward, onLocalProducer, reverse) route through it in Task 7.
-     * Bound on interRelayContext only when RMS_TREE_ACTIVE (undefined otherwise → byte-stable).
-     */
-    function fanToTreeNeighbors(
-      roomId: string,
-      router: msTypes.Router,
-      producer: msTypes.Producer,
-      producerPeerId: string | undefined,
-      originProducerId: string,
-      receiveEdgeUrl: string | null,
-      inboundHopTtl: number | undefined,
-    ): void {
-      if (!RMS_TREE_ACTIVE) return;
-      const pos = roomTreePosition.get(roomId);
-      if (!pos) return;
-      // Compute the tree-position-driven fan PLAN (pure + unit-tested — computeTreeFanPlan /
-      // tree-forwarding.test.ts): the post-transition hop budget + edge-scoped DOWN child URLs +
-      // the (optional) UP parent URL. ROOT → parentUrl null (DOWN only); INTERNAL → both legs; LEAF →
-      // childUrls empty (UP only) — this is the §3.3 uniform, role-independent fan. M-2: the hop-guard
-      // lives in ONE place — computeTreeFanPlan returns an EMPTY plan (childUrls [], parentUrl null)
-      // when hop <= 0, so the loop + UP-branch below no-op naturally (no redundant `plan.hop <= 0`
-      // guard here). Local clients were already fanned by the caller regardless.
-      const resolve = (id: string) => resolveRelayEndpoint(relayEndpointCache, id);
-      const plan = computeTreeFanPlan(pos, receiveEdgeUrl, inboundHopTtl, resolve);
-      // DOWN to children (via the shipped primary pipe primitive).
-      for (const childUrl of plan.childUrls) {
-        interRelayContext.onPrimaryProducer?.(roomId, router, producer, childUrl, producerPeerId, plan.hop, originProducerId);
-      }
-      // UP to the parent (via the shipped reverse announcer) — a single up-link (null = root /
-      // unresolved / arrived-from-parent edge-scope).
-      if (plan.parentUrl !== null) {
-        interRelayContext.onStandbyProducer?.(roomId, router, producer, producerPeerId, plan.hop, originProducerId);
-      }
-    }
-    // T-B: bind the tree fan + the tree-active flag onto the signaling context so the fan sites
-    // (Task 7) can route through them. Flag OFF → fanToTreeNeighbors undefined → the shipped
-    // flat-STAR data plane is untouched (byte-stable).
-    // ⚠️ OPERATIONAL CAUTION: RMS_TREE_ACTIVE is NOT live-safe until Task 7 wires the fan sites.
-    // Enabling it at THIS commit yields a relay that dials its TREE PARENT (Task 4) + mints FRESH
-    // per-hop ids (Task 5) but STILL fans media via the flat-STAR interRelaySockets.keys() flood
-    // (nothing calls fanToTreeNeighbors yet) — a half-migrated data plane. Do NOT set it in a
-    // live / multi-host environment until Task 7 routes the three fan sites through the helper.
-    interRelayContext.fanToTreeNeighbors = RMS_TREE_ACTIVE ? fanToTreeNeighbors : undefined;
-    interRelayContext.treeActive = RMS_TREE_ACTIVE;
-
     // Step 7: Poll room_manager events for MCU room assignments.
-    // module is 'room_manager_events' (NOT 'room_manager') -- RoomAssigned
-    // etc. are defined in the companion room_manager_events module
-    // (LOC-budget split, room_manager/events.move); events are pinned to
-    // whichever module FIRST DEFINED the struct -- confirmed via live
-    // GraphQL introspection against a real create_room tx.
     const pollIntervalMs = parseInt(process.env['POLL_INTERVAL_MS'] ?? '5000', 10);
     const myMinerId = signer.toSuiAddress();
 
@@ -939,6 +308,9 @@ if (isMainModule) {
       standbyHeartbeats,
       logger,
     });
+    // relay-wiring-context.ts's interRelayContext.releaseRoom bridges to this
+    // stopStandbyHeartbeat via a late-bound box (mirrors signalingRef).
+    stopStandbyHeartbeatBox.current = stopStandbyHeartbeat;
 
     const roomPoller = new EventPoller({
       client: graphqlClient,
@@ -951,213 +323,24 @@ if (isMainModule) {
       cursorPath: join(process.env['DATA_DIR'] ?? '.', '.cursors', 'room_manager.json'),
       logger: logger.child({ poller: 'room_manager' }),
     });
-    roomPoller.start(async (event) => {
-      const eventName = event.type.split('::').pop() ?? '';
-      if (eventName === 'RoomAssigned') {
-        const data = event.parsedJson as Record<string, unknown>;
-        const relayIds = data['relay_ids'] as string[] | undefined;
-        const relayMode = data['relay_mode'] as number | undefined;
-        const roomId = data['room_id'] as string | undefined;
-        if (relayIds && roomId) {
-          roomAssignedRelays.set(roomId, relayIds);
-        }
-        if (relayIds && relayIds.includes(myMinerId)) {
-          // G1: determine this relay's role for the room (primary = relay_ids[0],
-          // standby = [1..]; reads .length, never hardcodes 2). Drives the
-          // inter-relay producer-announce direction.
-          let role: 'primary' | 'standby' = 'primary';
-          try {
-            role = determineRole(relayIds, myMinerId);
-          } catch (err) {
-            logger.warn({ err, roomId, relayIds }, 'G1: could not determine relay role for room');
-          }
-          interRelayContext.role = role;
-          // RO-020: reflect the live role on the /api/probe state box.
-          probeLiveness.role = role;
-
-          // T-B (REQ-RMS-042): derive + store THIS relay's deterministic tree position for
-          // the room (same tree every assigned relay derives). Flag-gated (RMS_TREE_ACTIVE,
-          // default OFF) so the shipped flat-STAR path is byte-identical. No forwarding change
-          // here — the tree-aware fan is a later task; this only records position + re-targets
-          // the dial. The dial is now a PURE function of tree position (I1): the tree root is the
-          // sorted-min canonical id, which need NOT equal chain slot-0 (survives promote_relay /
-          // unsorted relay_ids) — so the dial below does not gate on role === 'primary'.
-          if (RMS_TREE_ACTIVE && roomId) {
-            // TODO(T-B capacity task): compute a capacityCap via deriveDegreeCap(RMS_C_WORKER_PATHS, uLocal, producersPerPeer) and pass it as deriveTreePosition's 5th arg. Omitted now → shape governs (B1).
-            const pos = deriveTreePosition(relayIds, myMinerId, RMS_TREE_DEGREE, RMS_TREE_MAX_HEIGHT);
-            roomTreePosition.set(roomId, pos);
-            if (!pos.withinDiameterBound) {
-              logger.warn({ roomId, K: relayIds.length, maxHeight: RMS_TREE_MAX_HEIGHT },
-                'T-B: tree exceeds maxHeight — over capacity for the height bound (defer-and-flag, REQ-RMS-041)');
-            }
-            logger.info({ roomId, role: pos.role, parent: pos.parent, children: pos.children, diameter: pos.diameter },
-              'T-B: derived tree position for room');
-          }
-
-          if (RMS_TREE_ACTIVE && roomId) {
-            // T-B (I1 / N1): under the tree the inter-relay DIAL is a PURE function of tree position,
-            // NOT the chain slot-0 role. The tree root (sorted-min canonical id) diverges from chain
-            // slot-0 after promote_relay or when relay_ids arrives unsorted (deriveTree is order-
-            // independent by design), so gating the dial on role==='primary' would leave a non-root
-            // chain-primary never dialing its tree parent. Every node with a parent dials it (child->
-            // parent live link); the true tree root (pos.parent===null) dials nobody = accept-only.
-            // The WS accept path is unchanged (a node accepts its children's dials automatically).
-            // TODO(T-C): the pure dial (resolveTreeParentDial) IS unit-covered RED-on-revert — relay-endpoint-resolver.test.ts pins the non-root chain-primary → tree-parent + root → nobody cases (incl. non-sorted relay_ids). This HANDLER wiring — that THIS RoomAssigned poller runs the dial for a non-root chain-primary, not re-gated on role==='primary' — is REVIEW-ONLY (Task 9's tree-multihop I1 test asserts it as a function COMPOSITION, NOT the booted poller); a RED-on-revert guard on the live handler needs a daemon boot and is a T-C obligation.
-            const pos = roomTreePosition.get(roomId);
-            const dialUrl = resolveTreeParentDial(pos, relayEndpointCache);
-            standbyLink.primaryUrl = dialUrl;
-            if (dialUrl !== null) standbyLinkManager.connectTo(dialUrl);
-            logger.info(
-              { roomId, relayMode, role, treeRole: pos?.role ?? 'unknown', dialUrl, resolved: dialUrl !== null },
-              dialUrl !== null
-                ? 'T-B: relay opened live inter-relay link to its TREE PARENT'
-                : 'T-B: relay is the TREE ROOT (or parent endpoint not yet resolvable) — accept-only, no dial',
-            );
-          } else if (role === 'primary') {
-            // F1: PRIMARY for this room. The live pipe is driven at the produce
-            // event (interRelayContext.onPrimaryProducer → PrimaryPipeCoordinator):
-            // it mints+connects the primary pipe, pipes the producer, and announces
-            // the PIPED consumer id over the accepted standby socket. No work here
-            // beyond recording the role.
-            if (roomId) {
-              standbyPrewarmRooms.delete(roomId); // no longer standby — stop the re-warm sweep for it
-              stopStandbyHeartbeat(roomId); // REQ-RO-006: stop any stale ping loop from a prior standby stint
-            }
-            logger.info({ roomId, relayMode, role }, 'G1: relay is PRIMARY for room');
-          } else {
-            // STANDBY: resolve the primary's WS endpoint so the inter-relay link
-            // can be opened to it. G3.2a (HERE): resolve relayIds[0] -> primaryUrl
-            // from the shared endpoint cache (populated by subscribeRelayEndpoints,
-            // Step 6.5) and stash it for the live socket open. G3.2b (bench/live):
-            // `new WebSocket(primaryUrl)` + feed inbound `pipe-producer` frames
-            // into the signaling server's handler. BENCH-2: on first peer join the
-            // standby calls standbyWarmPipe.ensure(topology, router, pipePort)
-            // (resolves the real producerId, else placeholder) and on each inbound
-            // announce standbyWarmPipe.onAnnounce(roomId) re-runs the warm pipe with
-            // the real id. The record + resolve + re-run contract is unit-tested
-            // (inter-relay-warmpipe.test.ts); resolvePrimaryEndpoint is unit-tested
-            // (relay-endpoint-resolver.test.ts).
-            const primaryUrl = resolvePrimaryEndpoint(relayEndpointCache, relayIds);
-            standbyLink.primaryUrl = primaryUrl;
-            // G3.2b: OPEN the live inter-relay link to the primary. The primary
-            // pushes pipe-producer announces down it; each cuts the warm pipe over
-            // to the real producerId. The paused warm pipe is opened on first peer
-            // join (onStandbyRoomReady). Skipped until the URL resolves from chain.
-            if (primaryUrl !== null) standbyLinkManager.connectTo(primaryUrl);
-            logger.info(
-              { roomId, relayMode, role, primaryUrl, resolved: primaryUrl !== null },
-              primaryUrl !== null
-                ? 'G3.2b: relay is STANDBY for room — opened live inter-relay link to primary'
-                : 'G1: relay is STANDBY for room — primary endpoint not yet resolvable from cache (chain not yet observed); retries on next assignment',
-            );
-
-            // Pre-warm standby: create this room's Router (and open the warm
-            // pipe, onStandbyRoomReady) NOW instead of waiting for the first
-            // real peer join, so failover promotion is a fast reconnect, not
-            // a cold start. Fire-and-forget (roomId is already known-good at
-            // this point); failures are logged, not fatal to the poller.
-            // Tracked in standbyPrewarmRooms so the periodic sweep above
-            // self-heals a missed one-time warm-up.
-            if (roomId) {
-              const prewarmMode: 'sfu' | 'mcu' = relayMode === 1 ? 'mcu' : 'sfu';
-              standbyPrewarmRooms.set(roomId, prewarmMode);
-              void prewarmRoom(roomId, prewarmMode).catch((err) => {
-                logger.error({ err, roomId }, 'Standby pre-warm: Router pre-creation failed');
-              });
-
-              // REQ-RO-006 (Layer B): ping the primary directly so a genuinely
-              // dead primary is caught locally in ~3s instead of waiting on the
-              // ~30s on-chain watcher cadence — see promoteToPrimary. Restart
-              // fresh on every re-pairing so a stale heartbeat against an old
-              // primaryUrl never lingers.
-              startStandbyHeartbeat(roomId, primaryUrl);
-            }
-          }
-
-          if (relayMode === 1) {
-            logger.info(
-              { roomId, relayMode },
-              'MCU pipeline initialized for room — composite output mode',
-            );
-          } else {
-            logger.info(
-              { roomId, relayMode },
-              'SFU room assigned — individual stream forwarding',
-            );
-          }
-        }
-      } else if (eventName === 'RelayPromoted') {
-        // Pre-warm standby correctness gap: this relay's local role
-        // (interRelayContext.role) was set ONCE at pairing time by the
-        // RoomAssigned branch above and never updated again. promote_relay /
-        // promote_relay_after_ejection / promote_relay_via_health_alert all
-        // emit RelayPromoted (same room_manager_events module this poller
-        // already watches) instead of RoomAssigned, so without this branch a
-        // promoted standby's Router exists (pre-warmed, good) but its
-        // producer/consumer role wiring stays stale. If THIS relay is the
-        // new_primary, flip role in memory immediately — no re-pairing
-        // needed, the Router was already created by the pre-warm above.
-        const data = event.parsedJson as Record<string, unknown>;
-        const roomId = data['room_id'] as string | undefined;
-        const newPrimary = data['new_primary'] as string | undefined;
-        if (roomId && newPrimary === myMinerId) {
-          // REQ-RO-006: routed through the SAME promoteToPrimary the fast local
-          // ping-based path uses, so this is a harmless no-op if that path
-          // already fired for this room (idempotent — see promoteToPrimary's
-          // doc) — and, unlike the role-flip-only behavior this replaced, it
-          // now ALSO resumes the paused warm-pipe consumer, which nothing
-          // previously did for a promotion confirmed only on-chain.
-          promoteToPrimary(roomId);
-          logger.info({ roomId, newPrimary }, 'RelayPromoted: this relay is now PRIMARY for room (role flipped in memory)');
-        }
-      } else if (eventName === 'RelaySlotReplaced') {
-        // Mid-call standby-swap (relay_replacement.move) — CP-quorum voted a fresh candidate
-        // in for a dead STANDBY (never index 0/primary, that's RelayPromoted's event above).
-        // Two relays care about this event, mutually exclusive:
-        //   - new_relay_id === myMinerId: this relay just became a standby for the room --
-        //     treat exactly like the RoomAssigned standby branch (pre-warm + open the inter-
-        //     relay link to the primary), reusing the same resolvePrimaryEndpoint/prewarmRoom.
-        //   - dead_relay_id === myMinerId: this relay was EJECTED from the room -- stop its
-        //     re-warm sweep (it no longer serves this room at all).
-        const data = event.parsedJson as Record<string, unknown>;
-        const roomId = data['room_id'] as string | undefined;
-        const deadRelayId = data['dead_relay_id'] as string | undefined;
-        const newRelayId = data['new_relay_id'] as string | undefined;
-        if (!roomId) {
-          // no-op: malformed event
-        } else if (newRelayId === myMinerId) {
-          const priorRelayIds = roomAssignedRelays.get(roomId) ?? [];
-          const updatedRelayIds = priorRelayIds.map((id) => (id === deadRelayId ? newRelayId : id));
-          roomAssignedRelays.set(roomId, updatedRelayIds);
-
-          interRelayContext.role = 'standby';
-          probeLiveness.role = 'standby';
-
-          const primaryUrl = resolvePrimaryEndpoint(relayEndpointCache, updatedRelayIds);
-          standbyLink.primaryUrl = primaryUrl;
-          if (primaryUrl !== null) standbyLinkManager.connectTo(primaryUrl);
-          logger.info(
-            { roomId, deadRelayId, newRelayId, primaryUrl, resolved: primaryUrl !== null },
-            'RelaySlotReplaced: this relay is the newly voted-in STANDBY for room',
-          );
-
-          // Pre-warm — same fire-and-forget contract as the RoomAssigned standby branch.
-          const prewarmMode: 'sfu' | 'mcu' = 'sfu'; // relay_mode isn't carried on this event; sfu is the pre-warm default (mcu re-warms via the periodic sweep once the room's real mode is observed)
-          standbyPrewarmRooms.set(roomId, prewarmMode);
-          void prewarmRoom(roomId, prewarmMode).catch((err) => {
-            logger.error({ err, roomId }, 'RelaySlotReplaced: standby pre-warm failed');
-          });
-
-          // REQ-RO-006 — same fast local ping loop as the RoomAssigned standby
-          // branch, against the freshly-resolved primaryUrl for this swap.
-          startStandbyHeartbeat(roomId, primaryUrl);
-        } else if (deadRelayId === myMinerId) {
-          standbyPrewarmRooms.delete(roomId); // ejected from this room — stop the re-warm sweep
-          stopStandbyHeartbeat(roomId); // REQ-RO-006: no longer serving this room at all
-          logger.info({ roomId, deadRelayId }, 'RelaySlotReplaced: this relay was ejected from room (dead standby replaced)');
-        }
-      }
-    });
+    roomPoller.start(
+      createRoomEventHandler({
+        myMinerId,
+        interRelayContext,
+        probeLiveness,
+        roomTreePosition,
+        roomAssignedRelays,
+        relayEndpointCacheRef,
+        standbyLink,
+        standbyLinkManager,
+        standbyPrewarmRooms,
+        prewarmRoom,
+        startStandbyHeartbeat,
+        stopStandbyHeartbeat,
+        promoteToPrimary,
+        logger,
+      }),
+    );
 
     const metricsPort = parseInt(process.env['METRICS_PORT'] ?? '4001', 10);
     logger.info(
@@ -1173,66 +356,25 @@ if (isMainModule) {
     );
 
     // ── P17 M2b-P8 (DOH-020/021/024): F60 reactive lifecycle ──────────────────
-    // The SelfShutdownWatcher self-terminates the relay on a self-targeted on-chain
-    // RelaySlashed / NodeDegraded(level 2) or a network pause; both it and a
-    // SIGTERM/SIGINT funnel through the SAME ordered runGracefulShutdown (P5) — the
-    // blind setTimeout(exit, 5000) is replaced by the 30s-drain / 60s-force-kill
-    // sequence with C-A (HealthMonitor → reactive) + C-B (heartbeat/healthz → LAST).
-    const gracefulCfg = readGracefulShutdownConfig();
-    const chainListener = new ChainEventListener({
-      client: graphqlClient,
-      packageId: config.originalPackageId ?? config.packageId,
-      logger: logger.child({ component: 'self-shutdown-listener' }),
-    });
-    let selfShutdownWatcher: SelfShutdownWatcher | undefined;
-
-    const runRelayShutdown = (reason: string): void => {
-      void runGracefulShutdown(
-        buildRelayShutdownPlan(reason, {
-          logger,
-          setAccepting,
-          closeRooms,
-          stopHealthMonitor, // C-A: relocated from FIRST into stopReactive
-          stopWatcher: () => selfShutdownWatcher?.stop(),
-          stopChainListener: () => chainListener.stop(),
-          stopStandbyLink: () => standbyLinkManager.shutdown(),
-          stopRelayEndpoints: () => stopRelayEndpoints(),
-          stopRoomPoller: () => {
-            pipeLiveness.stop(); // F1: stop the probe-liveness poll alongside the room poller
-            roomPoller.stop();
-          },
-          stopHeartbeat, // C-B: relocated from EARLY into the LAST group
-          closeRelayProbe,
-          closeMetricsServer: () => metricsServer.close(),
-          closeMediasoup: () => manager.close(),
-          closeWss: () =>
-            new Promise<void>((resolve) =>
-              wss.close(() => {
-                logger.info('Relay daemon closed');
-                resolve();
-              }),
-            ),
-          exit: (code) => process.exit(code),
-          config: gracefulCfg,
-        }),
-      );
-    };
-
-    // Relay = the only slashable daemon → arms { slash, degraded, paused }.
-    ({ watcher: selfShutdownWatcher } = await startRelaySelfShutdownWatcher({
+    // Assembled in relay-shutdown.ts; see setupRelayShutdown's docstring.
+    await setupRelayShutdown({
+      logger,
       client,
+      graphqlClient,
       config,
       minerCapId,
-      listener: chainListener,
-      onSelfShutdown: (reason) => {
-        logger.error({ reason }, 'self-shutdown triggered — initiating graceful shutdown');
-        runRelayShutdown(reason);
-      },
-      logger,
-    }));
-
-    process.on('SIGTERM', () => runRelayShutdown('SIGTERM'));
-    process.on('SIGINT', () => runRelayShutdown('SIGINT'));
+      setAccepting,
+      closeRooms,
+      stopHealthMonitor,
+      standbyLinkManager,
+      stopRelayEndpoints: () => stopRelayEndpoints(),
+      pipeLiveness,
+      roomPoller,
+      stopHeartbeat,
+      metricsServer,
+      manager,
+      wss,
+    });
   })().catch((err) => {
     logger.fatal({ err }, 'Relay daemon crashed during startup');
     process.exit(1);

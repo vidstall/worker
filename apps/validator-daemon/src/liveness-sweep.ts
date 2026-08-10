@@ -11,30 +11,13 @@
  * submits `execute_ejection` (a crank anyone can call, mirroring
  * `economic_layer::distribute_rewards`).
  *
- * DISCOVERY (mirrors canary/validator-discovery.ts's convention): each of the
- * three registries' `get_active_*` getters is read via a read-only `devInspect`
- * (no gas, no signature) using a hand-copied positional BCS schema matching the
- * Move struct's field order EXACTLY (load-bearing, same convention as
- * ValidatorInfoSchema there).
- *
- * STALENESS: VALIDATOR-ATTESTED, not on-chain-provable. `cast_liveness_vote` no
- * longer gates on the target's on-chain last_heartbeat/epoch — epoch granularity
- * floors at the network's real epoch length (e.g. 1 HOUR on devnet), which cannot
- * express a sub-hour SLA like "5 minutes no response". Instead this module tracks
- * each node's most recent heartbeat EVENT (RelayHeartbeat / CPHeartbeat /
- * ValidatorHeartbeat), which carries a REAL wall-clock timestamp
- * (unlike the on-chain epoch field), via four EventPoller subscriptions. A node is
- * voted stale once its most-recently-seen heartbeat event is older than
- * `staleThresholdMs` (default 5 minutes) in real time. The 2/3-of-active-validator
- * quorum on-chain is the sole authority for the actual ejection, the same trust
- * model canary_audit already uses for its >=2-distinct-validator attestation.
- *
- * STAKE POSITION LOOKUP: `StakePosition` is a SHARED object (post owned→shared
- * migration, see liveness_voting.move's module doc) with no on-chain miner_id ->
- * object_id index, so `execute_ejection`'s `position` argument is resolved via a
- * GraphQL `objects(filter: { type: "<pkg>::staking::StakePosition" })` scan
- * (Sui's documented mechanism for finding shared objects by type, independent of
- * owner) rather than a Move-side lookup table.
+ * Discovery (BCS schemas + discoverRole/discoverAllActiveNodes) lives in
+ * `liveness/node-discovery.ts`; heartbeat tracking (HeartbeatTracker) lives in
+ * `liveness/heartbeat-tracker.ts`; vote-casting/ejection (castLivenessVote/
+ * findStakePositionId/executeEjection) lives in `liveness/voting.ts`. This file
+ * keeps `startLivenessSweep` + the public option/handle types, wiring those
+ * pieces together, and re-exports `discoverAllActiveNodes`/`findStakePositionId`
+ * so external import sites (`from '.../liveness-sweep.js'`) are unchanged.
  *
  * CRASH-SAFE: every discovery / vote / ejection attempt is independently
  * try/caught and logged — a single failed devInspect or TX must never crash the
@@ -42,35 +25,18 @@
  * SelfShutdownWatcher).
  */
 
-import { join } from 'node:path';
 import type { SuiClient } from '@mysten/sui/client';
-import type { SuiGraphQLClient, GraphQLQueryResult } from '@mysten/sui/graphql';
+import type { SuiGraphQLClient } from '@mysten/sui/graphql';
 import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { Transaction } from '@mysten/sui/transactions';
-import { normalizeSuiAddress } from '@mysten/sui/utils';
-import { bcs } from '@mysten/sui/bcs';
-import {
-  createLogger,
-  executeWithRetry,
-  EventPoller,
-  type NetworkConfig,
-  type Logger,
-} from '@dvconf/shared';
+import { createLogger, EventPoller, type NetworkConfig, type Logger } from '@dvconf/shared';
+import { discoverAllActiveNodes } from './liveness/node-discovery.js';
+import { HeartbeatTracker, cursorDir } from './liveness/heartbeat-tracker.js';
+import { castLivenessVote, findStakePositionId, executeEjection } from './liveness/voting.js';
+
+export { discoverAllActiveNodes, type LivenessCandidate } from './liveness/node-discovery.js';
+export { findStakePositionId } from './liveness/voting.js';
 
 const MOD = 'liveness-sweep';
-
-/** Base dir for these cursors -- DATA_DIR (mirrors ChainEventListener's own
- *  default), NOT process.cwd(), so a container recreate (redeploy) doesn't
- *  force a full event-history replay from genesis. */
-const cursorDir = (name: string): string => join(process.env.DATA_DIR ?? '.', '.cursors', name);
-
-const ZERO = '0x0000000000000000000000000000000000000000000000000000000000000000';
-
-// Role codes (dvconf::constants — role_user=0, role_validator=1, role_relay=2, role_cp=3).
-// (role_signaling=4 was removed along with the standalone signaling node type.)
-const ROLE_VALIDATOR = 1;
-const ROLE_RELAY = 2;
-const ROLE_CP = 3;
 
 /** Default tick cadence: independent of, and much slower than, the canary cell loop. */
 const DEFAULT_TICK_INTERVAL_MS = 60_000;
@@ -97,317 +63,6 @@ const DEFAULT_STALE_THRESHOLD_MS = 20 * 60_000;
  * costs that peer's registration and stake.
  */
 const DEFAULT_STARTUP_GRACE_MS = 10 * 60_000;
-
-// ── BCS schemas (VERBATIM copies of each registry's *Info struct, positional / load-bearing order) ──
-
-const ValidatorInfoSchema = bcs.struct('ValidatorInfo', {
-  operator: bcs.Address,
-  miner_id: bcs.Address,
-  stake_amount: bcs.u64(),
-  reputation: bcs.u64(),
-  registered_at: bcs.u64(),
-  last_heartbeat: bcs.u64(),
-  session_count: bcs.u64(),
-});
-
-// relay_registry.move:26-33
-const RelayNodeInfoSchema = bcs.struct('RelayNodeInfo', {
-  operator: bcs.Address,
-  miner_id: bcs.Address,
-  stake_amount: bcs.u64(),
-  reputation: bcs.u64(),
-  registered_at: bcs.u64(),
-  last_heartbeat: bcs.u64(),
-  region: bcs.vector(bcs.u8()),
-  endpoint_url: bcs.vector(bcs.u8()),
-  reserved_primary_count: bcs.u64(),
-  reserved_standby_count: bcs.u64(),
-});
-
-// control_plane_registry.move:27-33
-const CPNodeInfoSchema = bcs.struct('CPNodeInfo', {
-  operator: bcs.Address,
-  miner_id: bcs.Address,
-  stake_amount: bcs.u64(),
-  last_heartbeat: bcs.u64(),
-  is_active: bcs.bool(),
-  registered_at: bcs.u64(),
-  reputation: bcs.u64(),
-});
-
-interface DevInspectLike {
-  error?: string | null;
-  results?: Array<{ returnValues?: Array<[number[], string]> } | undefined> | null;
-}
-
-/** A discovered node candidate for liveness voting. */
-export interface LivenessCandidate {
-  minerId: string;
-  role: number;
-}
-
-/**
- * Read-only devInspect of one registry's `get_active_*` getter, decoded via
- * `schema` and projected to `{minerId, role}`. CRASH-SAFE:
- * resolves to `[]` on any failure (mirrors discoverActiveValidatorMinerIds).
- */
-async function discoverRole(
-  client: SuiClient,
-  config: NetworkConfig,
-  target: string,
-  registryObjectId: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  schema: any,
-  role: number,
-  logger: Logger,
-): Promise<LivenessCandidate[]> {
-  try {
-    const tx = new Transaction();
-    tx.moveCall({ target, arguments: [tx.object(registryObjectId)] });
-    const r = (await client.devInspectTransactionBlock({
-      transactionBlock: tx,
-      sender: ZERO,
-    })) as DevInspectLike;
-
-    if (r.error) {
-      logger.warn({ target, err: r.error }, 'liveness-sweep discovery devInspect error');
-      return [];
-    }
-    const bytes = r.results?.[0]?.returnValues?.[0]?.[0];
-    if (bytes === undefined) {
-      logger.warn({ target }, 'liveness-sweep discovery devInspect returned no values');
-      return [];
-    }
-
-    const infos = bcs.vector(schema).parse(Uint8Array.from(bytes)) as Array<{ miner_id: string }>;
-    return infos.map((i) => ({
-      minerId: normalizeSuiAddress(i.miner_id),
-      role,
-    }));
-  } catch (err) {
-    logger.warn({ target, err }, 'liveness-sweep discovery failed');
-    return [];
-  }
-}
-
-/** Discover all active nodes across all three role registries. */
-export async function discoverAllActiveNodes(
-  client: SuiClient,
-  config: NetworkConfig,
-  logger: Logger,
-): Promise<LivenessCandidate[]> {
-  const pkg = config.packageId;
-  const [validators, relays, cps] = await Promise.all([
-    discoverRole(
-      client, config,
-      `${pkg}::validator_registry::get_active_validators`,
-      config.validatorRegistryId, ValidatorInfoSchema, ROLE_VALIDATOR, logger,
-    ),
-    discoverRole(
-      client, config,
-      `${pkg}::relay_registry::get_active_relays`,
-      config.relayRegistryId, RelayNodeInfoSchema, ROLE_RELAY, logger,
-    ),
-    discoverRole(
-      client, config,
-      `${pkg}::control_plane_registry::get_active_cps`,
-      config.cpRegistryId, CPNodeInfoSchema, ROLE_CP, logger,
-    ),
-  ]);
-  return [...validators, ...relays, ...cps];
-}
-
-/** module name -> the heartbeat event's own `::TypeName` suffix, for filtering. */
-const HEARTBEAT_EVENT_MODULES: ReadonlyArray<{ module: string; eventSuffix: string }> = [
-  { module: 'relay_registry', eventSuffix: '::RelayHeartbeat' },
-  { module: 'control_plane_registry', eventSuffix: '::CPHeartbeat' },
-  { module: 'validator_registry', eventSuffix: '::ValidatorHeartbeat' },
-];
-
-/**
- * Tracks each miner's most-recently-OBSERVED heartbeat event, in real wall-clock
- * time (`event.timestampMs`, not the on-chain epoch the event also carries) — the
- * mechanism the "5 minutes no response" SLA is actually measured against. Backed
- * by four EventPollers (one per role), each with its own cursor file; on a fresh
- * boot with no cursor, EventPoller replays full history from genesis, which
- * self-seeds `lastSeenMs` for every node's most recent heartbeat before this
- * process started watching live.
- */
-class HeartbeatTracker {
-  private readonly lastSeenMs = new Map<string, number>();
-  private readonly pollers: EventPoller[];
-
-  constructor(graphqlClient: SuiGraphQLClient, config: NetworkConfig, pollIntervalMs: number, logger: Logger) {
-    this.pollers = HEARTBEAT_EVENT_MODULES.map(
-      ({ module, eventSuffix }) =>
-        new EventPoller({
-          client: graphqlClient,
-          packageId: config.originalPackageId ?? config.packageId,
-          module,
-          pollingIntervalMs: pollIntervalMs,
-          cursorPath: cursorDir(`liveness-${module}-heartbeat.json`),
-          logger: logger.child({ poller: module }),
-        }),
-    );
-    // Bind eventSuffix per poller for the handler below.
-    this.pollers.forEach((poller, i) => {
-      const { eventSuffix } = HEARTBEAT_EVENT_MODULES[i]!;
-      void poller.start(async (event) => {
-        if (!event.type?.endsWith(eventSuffix)) return;
-        const parsed = event.parsedJson as { miner_id?: string } | undefined;
-        if (!parsed?.miner_id) return;
-        const minerId = normalizeSuiAddress(parsed.miner_id);
-        const seenAtMs = Number(event.timestampMs ?? Date.now());
-        const prev = this.lastSeenMs.get(minerId);
-        if (prev === undefined || seenAtMs > prev) this.lastSeenMs.set(minerId, seenAtMs);
-      });
-    });
-  }
-
-  /**
-   * Most recent real-time heartbeat-event timestamp for `minerId`, or `undefined`
-   * if none has ever been observed (a freshly registered/never-heartbeated node,
-   * or history not yet replayed) — callers should NOT treat "undefined" as stale.
-   */
-  lastSeen(minerId: string): number | undefined {
-    return this.lastSeenMs.get(minerId);
-  }
-
-  /** First-observation default: called once per newly discovered, never-seen node. */
-  seed(minerId: string, atMs: number): void {
-    if (!this.lastSeenMs.has(minerId)) this.lastSeenMs.set(minerId, atMs);
-  }
-
-  stop(): void {
-    for (const poller of this.pollers) poller.stop();
-  }
-}
-
-/** Cast `cast_liveness_vote` against `targetMinerId`, signed by this validator's main wallet. */
-async function castLivenessVote(
-  client: SuiClient,
-  signer: Ed25519Keypair,
-  config: NetworkConfig,
-  minerCapId: string,
-  targetMinerId: string,
-  logger: Logger,
-): Promise<boolean> {
-  const result = await executeWithRetry(
-    client,
-    signer,
-    (tx: Transaction) => {
-      tx.moveCall({
-        target: `${config.packageId}::liveness_voting::cast_liveness_vote`,
-        arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.livenessVoteBoxId),
-          tx.object(config.minerStoreId),
-          tx.object(config.validatorRegistryId),
-          tx.object(config.relayRegistryId),
-          tx.object(config.cpRegistryId),
-          tx.object(minerCapId),
-          tx.pure.id(targetMinerId),
-        ],
-      });
-    },
-    'cast-liveness-vote',
-    logger,
-  );
-  return result !== null;
-}
-
-// ── GraphQL: resolve a miner_id's StakePosition shared-object id ──
-
-const STAKE_POSITION_QUERY = `
-  query FindStakePositions($type: String!, $after: String) {
-    objects(filter: { type: $type }, first: 50, after: $after) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        address
-        asMoveObject { contents { json } }
-      }
-    }
-  }
-`;
-
-interface StakePositionQueryResult {
-  objects: {
-    pageInfo: { hasNextPage: boolean; endCursor: string | null };
-    nodes: Array<{ address: string; asMoveObject: { contents: { json: unknown } } | null }>;
-  };
-}
-
-/**
- * Scan all shared `StakePosition` objects of this deployment's ORIGINAL package
- * (the struct's type is pinned to the defining package forever, same rationale
- * as NetworkConfig.originalPackageId / EventPoller) looking for one whose
- * `miner_id` field matches `targetMinerId`. Returns `null` if not found or the
- * query fails (crash-safe — caller skips the ejection attempt this tick).
- */
-export async function findStakePositionId(
-  graphqlClient: SuiGraphQLClient,
-  config: NetworkConfig,
-  targetMinerId: string,
-  logger: Logger,
-  maxPages = 20,
-): Promise<string | null> {
-  const type = `${config.originalPackageId ?? config.packageId}::staking::StakePosition`;
-  let cursor: string | null = null;
-  try {
-    for (let page = 0; page < maxPages; page++) {
-      const result: GraphQLQueryResult<StakePositionQueryResult> = await graphqlClient.query<
-        StakePositionQueryResult,
-        { type: string; after: string | null }
-      >({ query: STAKE_POSITION_QUERY, variables: { type, after: cursor } });
-
-      const conn = result.data?.objects;
-      if (!conn) break;
-
-      for (const node of conn.nodes) {
-        const json = node.asMoveObject?.contents.json as { miner_id?: string } | undefined;
-        if (json?.miner_id === targetMinerId) return node.address;
-      }
-
-      if (!conn.pageInfo.hasNextPage) break;
-      cursor = conn.pageInfo.endCursor;
-    }
-  } catch (err) {
-    logger.warn({ err, targetMinerId }, 'liveness-sweep: findStakePositionId GraphQL query failed');
-    return null;
-  }
-  return null;
-}
-
-/** Submit `registration::execute_ejection` for a target whose quorum has already been approved. */
-async function executeEjection(
-  client: SuiClient,
-  signer: Ed25519Keypair,
-  config: NetworkConfig,
-  stakePositionId: string,
-  logger: Logger,
-): Promise<boolean> {
-  const result = await executeWithRetry(
-    client,
-    signer,
-    (tx: Transaction) => {
-      tx.moveCall({
-        target: `${config.packageId}::registration::execute_ejection`,
-        arguments: [
-          tx.object(config.networkRegistryId),
-          tx.object(config.livenessVoteBoxId),
-          tx.object(config.minerStoreId),
-          tx.object(config.relayRegistryId),
-          tx.object(config.validatorRegistryId),
-          tx.object(config.cpRegistryId),
-          tx.object(stakePositionId),
-        ],
-      });
-    },
-    'execute-ejection',
-    logger,
-  );
-  return result !== null;
-}
 
 export interface LivenessSweepOptions {
   client: SuiClient;

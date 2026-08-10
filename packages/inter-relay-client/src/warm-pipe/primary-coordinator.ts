@@ -1,14 +1,18 @@
 /**
- * Primary-side pipe half (Phase 5.3 spike — the missing production half) and
- * the primary warm-pipe coordinator (F1 — REQ-RO-001/002/008), including its
+ * Primary warm-pipe coordinator (F1 — REQ-RO-001/002/008), including its
  * reverse (standby → primary) leg (REQ-RMS-034/037).
+ *
+ * The primary-side pipe wiring (createPrimaryPipeTransport /
+ * pipeProducerOntoPrimaryTransport) lives in primary-pipe-transport.ts and is
+ * re-exported here for backward compatibility. The reverse leg's mint/drain
+ * logic lives in primary-coordinator-reverse.ts as free functions taking an
+ * explicit deps object; this class keeps thin wrapper methods around them.
  *
  * Split out of the former `inter-relay.ts` (see warm-pipe/index.ts).
  */
 
 import type { types as msTypes } from 'mediasoup';
 import type { Logger } from '@dvconf/shared';
-import { pipeSrtpEnabled, produceLocalFromPipe } from '../relay-role-manager.js';
 import {
   meshKey,
   primaryPortKey,
@@ -16,64 +20,19 @@ import {
   DEFAULT_PEER_RELAY_ID,
   type PipeConnectParams,
 } from './pipe-protocol.js';
+import { createPrimaryPipeTransport, pipeProducerOntoPrimaryTransport } from './primary-pipe-transport.js';
+import {
+  type PrimaryReverseLegDeps,
+  type ReverseMintPendingEntry,
+  reverseMint as reverseMintImpl,
+  drainReverseMints as drainReverseMintsImpl,
+  ensureReverseLegTransport,
+} from './primary-coordinator-reverse.js';
 
-// ── Primary-side pipe half (Phase 5.3 spike — the missing production half) ──
-
-/**
- * The PRIMARY half of the warm pipe — the piece that did NOT exist before
- * (only the STANDBY half lived in relay-role-manager.ensureWarmPipe).
- *
- * `ensureWarmPipe` builds a PipeTransport on the STANDBY and `consume()`s a
- * producerId that lives on the PRIMARY. For RTP to actually cross between two
- * SEPARATE daemon processes the primary must ALSO:
- *
- *   1. createPipeTransport on its own router (this helper),
- *   2. exchange + `connect({ip, port, srtpParameters})` BOTH ends (the standby's
- *      params arrive over the inter-relay WS link; the caller drives connect),
- *   3. `pipeTransport.consume({producerId})` the room's real producer onto the
- *      pipe (pipeProducerOntoPrimaryTransport) — THIS mints the piped producer
- *      the standby then sees and is what puts RTP on the wire.
- *
- * mediasoup's high-level `router.pipeToRouter({producerId, router})` does all
- * of this automatically, but ONLY for two routers in the SAME process. In
- * production primary + standby are distinct processes, so this manual pairing
- * is required.
- *
- * Additive — does NOT change ensureWarmPipe's signature or behaviour. Pure
- * mediasoup wiring (no logger coupling): the caller owns link-health logging.
- */
-export async function createPrimaryPipeTransport(
-  router: msTypes.Router,
-  pipePort: number,
-): Promise<msTypes.PipeTransport> {
-  // announcedIp = deploy-routable address the standby connects back to,
-  // externalized via ANNOUNCED_IP (default loopback for local/bench). Mirrors
-  // the room-handler.ts WebRTC-transport pattern.
-  const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
-  return router.createPipeTransport({
-    listenIp: { ip: '0.0.0.0', announcedIp },
-    port: pipePort,
-    enableRtx: false,
-    enableSrtp: pipeSrtpEnabled(),
-  } as Parameters<msTypes.Router['createPipeTransport']>[0]);
-}
-
-/**
- * Consume the room's real producer onto the primary's already-connected pipe
- * transport. The returned Consumer's `.id` is the producerId the piped
- * producer carries on the standby router — exactly the id the primary must
- * announce (buildPipeProducerAnnounce) so the standby's ensureWarmPipe
- * consumes the REAL producer rather than the `pipe-producer-pending-*`
- * placeholder.
- */
-export async function pipeProducerOntoPrimaryTransport(
-  pipeTransport: msTypes.PipeTransport,
-  producerId: string,
-): Promise<msTypes.Consumer> {
-  return pipeTransport.consume({ producerId } as Parameters<
-    msTypes.PipeTransport['consume']
-  >[0]);
-}
+// Re-exported so existing `from '.../primary-coordinator.js'` imports (incl.
+// warm-pipe/index.ts and standby-coordinator-reverse.ts) keep resolving these
+// unchanged.
+export { createPrimaryPipeTransport, pipeProducerOntoPrimaryTransport } from './primary-pipe-transport.js';
 
 // ── Primary-side warm-pipe coordinator (F1 — REQ-RO-001/002/008) ─────────
 
@@ -170,7 +129,7 @@ export interface PrimaryPipeCoordinatorDeps {
 }
 
 /** Per-room primary-pipe state (module-private; mirrors WarmPipeState shape). */
-interface PrimaryPipeState {
+export interface PrimaryPipeState {
   /** The primary's PipeTransport once minted; null until both router + params seen. */
   pipeTransport: msTypes.PipeTransport | null;
   /** True once the transport has been connect()'d to the standby's params. */
@@ -222,21 +181,7 @@ export class PrimaryPipeCoordinator {
   // B4a: the entry carries the ORIGINAL publisher's producerPeerId so a
   // queued-then-drained mint can be fanned bound to the real publisher (the A6
   // double-race tail) — undefined on the legacy/default path.
-  private readonly reverseMintPending = new Map<
-    string,
-    Array<{
-      producerId: string;
-      kind: msTypes.MediaKind;
-      rtpParameters: msTypes.RtpParameters;
-      producerPeerId?: string;
-      // T-B (REQ-RMS-043/044/046, T7 I-1) — the IMMUTABLE origin + inbound hop budget carried on the
-      // queued announce (same inbound-announce source the immediate reverse path reads), so a queued-
-      // then-drained mint threads them into onReverseMinted → registerReverseMinted. Undefined on the
-      // shipped star / pre-tree path → the drain fires onReverseMinted 4-arg (byte-stable).
-      originProducerId?: string;
-      hopTtl?: number;
-    }>
-  >();
+  private readonly reverseMintPending = new Map<string, ReverseMintPendingEntry[]>();
   // REQ-RMS-034 — per-leg dedup of reverse-minted producer ids (mint exactly once).
   private readonly reverseMintedIds = new Map<string, Set<string>>();
   // B6b (REQ-RMS-035) — per-leg dedup of FORWARD-piped producer ids (pipe exactly
@@ -263,6 +208,16 @@ export class PrimaryPipeCoordinator {
       this.states.set(key, s);
     }
     return s;
+  }
+
+  /** Builds the explicit deps object the reverse-leg free functions take (never closed over). */
+  private reverseLegDeps(): PrimaryReverseLegDeps {
+    return {
+      states: this.states,
+      reverseMintPending: this.reverseMintPending,
+      reverseMintedIds: this.reverseMintedIds,
+      deps: this.deps,
+    };
   }
 
   /**
@@ -502,6 +457,9 @@ export class PrimaryPipeCoordinator {
   // it). The dual of the forward onProducer/drain: mint LOCALLY (no announce),
   // with an announce-before-leg-connected QUEUE (REQ-RMS-037 ordering) + per-leg
   // dedup (REQ-RMS-034 mint exactly once). onReverseAnnounce (A4) calls this.
+  //
+  // The method bodies live in primary-coordinator-reverse.ts as free functions
+  // taking an explicit PrimaryReverseLegDeps object; these are thin wrappers.
 
   /**
    * Mint a LOCAL hub producer on the primary from the announced reverse-pipe
@@ -517,144 +475,43 @@ export class PrimaryPipeCoordinator {
       kind: msTypes.MediaKind;
       rtpParameters: msTypes.RtpParameters;
       producerPeerId?: string;
-      // T-B (REQ-RMS-043/044/046, T7 I-1) — carried onto the reverseMintPending entry so the DRAIN
-      // (Path B) preserves them for the tree hub-fan. reverseMint/mintOne never READ them (the mint is
-      // origin-agnostic); they only ride the queue. Undefined on the shipped path → byte-stable.
       originProducerId?: string;
       hopTtl?: number;
     },
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<msTypes.Producer | null> {
-    const key = meshKey(roomId, peerRelayId);
-    const transport = this.states.get(key)?.pipeTransport ?? null;
-    if (!transport) {
-      const q = this.reverseMintPending.get(key) ?? [];
-      q.push(announced);
-      this.reverseMintPending.set(key, q);
-      this.deps.logger?.debug(
-        { roomId, peerRelayId, producerId: announced.producerId },
-        'R3: reverse announce queued -- awaiting leg transport connect',
-      );
-      return null;
-    }
-    return this.mintOne(key, transport, announced);
-  }
-
-  /**
-   * The shared mint+dedup primitive. Mints EXACTLY ONCE per producerId on this
-   * leg (REQ-RMS-034). A benign idempotent dup from mediasoup ("already exists")
-   * is swallowed -> null (mirror forward Fix-1). A TRANSIENT produce failure
-   * UN-MARKS the id so a later announce can retry (mirror A2 reverse-consume
-   * self-heal at inter-relay.ts:1253-1257) then rethrows.
-   */
-  private async mintOne(
-    key: string,
-    transport: msTypes.PipeTransport,
-    announced: {
-      producerId: string;
-      kind: msTypes.MediaKind;
-      rtpParameters: msTypes.RtpParameters;
-      producerPeerId?: string;
-    },
-  ): Promise<msTypes.Producer | null> {
-    let seen = this.reverseMintedIds.get(key);
-    if (!seen) {
-      seen = new Set();
-      this.reverseMintedIds.set(key, seen);
-    }
-    if (seen.has(announced.producerId)) return null;
-    seen.add(announced.producerId);
-    try {
-      // T6 — tree mode mints a FRESH local id per hop (freshId); default keeps the
-      // shipped same-id reverse mint byte-stable. Dedup above stays on the announced id.
-      return await produceLocalFromPipe(transport, announced, { freshId: this.deps.treeActive === true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (/already exists|duplicate/i.test(message)) return null; // benign idempotent dup
-      seen.delete(announced.producerId); // transient -> allow retry
-      throw err;
-    }
+    return reverseMintImpl(roomId, announced, peerRelayId, this.reverseLegDeps());
   }
 
   /**
    * Drain every queued reverse announce onto the (now-connected) leg transport,
    * minting a local hub producer for each (REQ-RMS-037). Called on leg connect.
    * No-op if the leg transport is still absent. Returns the minted producers.
-   *
-   * RESILIENT (C1; mirrors A2's "one bad queued item must not discard the rest"
-   * lesson at the reverse-consume drain): we snapshot+clear the pending queue,
-   * then mint each item INDEPENDENTLY. A transient mintOne throw on item k must
-   * NOT abort the loop and lose items k+1..n (they were already cleared from the
-   * pending map) -> instead we log, RE-QUEUE the failed item onto the LIVE
-   * pending map (safe: we iterate the separate `pend` snapshot), and CONTINUE.
-   * mintOne already un-marked the id on a transient throw (seen.delete), so the
-   * re-queued retry re-mints; a benign dup still returns null (no double-mint).
    */
   async drainReverseMints(
     roomId: string,
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<msTypes.Producer[]> {
-    const key = meshKey(roomId, peerRelayId);
-    const transport = this.states.get(key)?.pipeTransport ?? null;
-    if (!transport) return [];
-    const pend = this.reverseMintPending.get(key) ?? [];
-    this.reverseMintPending.set(key, []);
-    const out: msTypes.Producer[] = [];
-    for (const a of pend) {
-      try {
-        const p = await this.mintOne(key, transport, a);
-        if (p) {
-          out.push(p);
-          // B4a (REQ-RMS-037) — fan the queued-then-drained mint (the A6 double-
-          // race tail: it bypassed the handler's immediate registerReverseMinted
-          // because reverseMint returned null when queued). Thread the entry's
-          // ORIGINAL producerPeerId so the fan binds to the real publisher. Fires
-          // exactly once per successful mint (inside `if (p)`); dedup'd upstream
-          // by mintOne's reverseMintedIds set so a benign dup never re-fans.
-          // T-B (REQ-RMS-043/044/046, T7 I-1) — ALSO thread the IMMUTABLE origin + inbound hop budget
-          // the entry carried, so the tree hub-fan re-forwards on the origin (not the fresh mint id)
-          // with the real budget (not a reseeded full diameter). Guard-widen: the shipped star / pre-
-          // tree drain (both undefined) keeps the EXACT 4-arg call the coordinator arity test pins.
-          if (a.originProducerId === undefined && a.hopTtl === undefined) {
-            this.deps.onReverseMinted?.(roomId, p, peerRelayId, a.producerPeerId);
-          } else {
-            this.deps.onReverseMinted?.(roomId, p, peerRelayId, a.producerPeerId, a.originProducerId, a.hopTtl);
-          }
-        }
-      } catch (err) {
-        this.deps.logger?.warn(
-          {
-            roomId,
-            peerRelayId,
-            producerId: a.producerId,
-            error: err instanceof Error ? err.message : String(err),
-          },
-          'R3: reverse mint failed mid-drain - continuing, re-queued for retry',
-        );
-        const live = this.reverseMintPending.get(key) ?? [];
-        live.push(a);
-        this.reverseMintPending.set(key, live);
-      }
-    }
-    return out;
+    return drainReverseMintsImpl(roomId, peerRelayId, this.reverseLegDeps());
   }
 
   /**
-   * Ensure the primary's reverse-leg pipe transport exists by MIRRORING the FULL
-   * onProducer handshake -- mint + connect + the §2 paramSender DOWN-reply that
-   * carries the primary's OWN bound port (I1: the reply is PART of the handshake;
-   * onProducer is the only other paramSender call site, so without it here the
-   * standby never learns the primary's port -> half-open pipe -> no reverse
-   * media, and a later onProducer sees pipeTransport != null and SKIPS its own
-   * reply). Then drains any queued reverse announces. If the standby params are
-   * not yet present we CANNOT connect -> log + return; a later
-   * onStandbyConnectParams completes the pair.
+   * Ensure the primary's reverse-leg pipe transport exists (mint + connect +
+   * the §2 paramSender DOWN-reply), then drains BOTH queues.
    *
-   * The create-leg branch calls REAL mediasoup (createPrimaryPipeTransport) so it
-   * is NOT unit-tested here -- A5's hermetic integration test MUST cover the
-   * reverse-announce-arrives-BEFORE-any-forward-producer path (ensureReverseLeg's
-   * reason to exist). The already-bound drain-only branch is unit-covered
-   * (RED-RA-3b-order / -resilient).
+   * RC-A (REQ-RMS-035) — this leg uses ONE bidirectional pipeTransport for BOTH
+   * forward (primary→standby) and reverse (standby→primary). The forward queue
+   * (s.pendingProducers) is flushed by drain(), which is called from onProducer
+   * (only if standbyParams were present at produce time) and onStandbyConnectParams
+   * (only if already connected). When the leg is instead brought up HERE by the
+   * REVERSE path — a reverse announce mints+connects the transport — there is NO
+   * later forward onProducer to flush the queue, so the LAST standby to bring up
+   * its leg via the reverse path had its forward pendingProducers orphaned (live
+   * proof: relay-3's leg minted via ensureReverseLeg but ZERO subsequent forward
+   * pipes → it never received the primary's producers). Drain the forward queue
+   * too. drain() self-guards (!s.connected || s.pipeTransport === null → return)
+   * and is idempotent (forwardPipedIds Set dedup), so it is safe whether or not
+   * the transport was just minted, and a no-op when nothing is queued.
    */
   async ensureReverseLeg(
     roomId: string,
@@ -662,61 +519,7 @@ export class PrimaryPipeCoordinator {
     peerRelayId: string = DEFAULT_PEER_RELAY_ID,
   ): Promise<void> {
     const s = this.getState(roomId, peerRelayId);
-    if (s.pipeTransport === null) {
-      if (s.standbyParams === null) {
-        this.deps.logger?.debug(
-          { roomId, peerRelayId },
-          'R3: ensureReverseLeg deferred -- standby pipe-connect params not yet present',
-        );
-        return;
-      }
-      if (s.pipePort === null) {
-        s.pipePort = this.deps.portAllocator.allocate(primaryPortKey(roomId, peerRelayId));
-      }
-      // A5 MUST cover this real-mediasoup mint+connect+reply path for the
-      // reverse-announce-before-any-forward-producer case (not unit-tested).
-      const transport = await createPrimaryPipeTransport(router, s.pipePort);
-      s.pipeTransport = transport;
-      await transport.connect({
-        ip: s.standbyParams.ip,
-        port: s.standbyParams.port,
-        srtpParameters: s.standbyParams.srtpParameters,
-      } as Parameters<msTypes.PipeTransport['connect']>[0]);
-      s.connected = true;
-      // §2 handshake DOWN-reply with the primary's OWN bound port (byte-mirrors
-      // onProducer): without it the standby can't complete the pipe. SRTP field
-      // is guard-spread so a flag-OFF reply stays byte-identical; peerRelayId is
-      // DEFAULT-gated so the legacy single-standby reply routes to the legacy link.
-      const announcedIp = process.env['ANNOUNCED_IP'] ?? '127.0.0.1';
-      this.deps.paramSender(
-        roomId,
-        {
-          ip: announcedIp,
-          port: transport.tuple.localPort,
-          ...(transport.srtpParameters !== undefined
-            ? { srtpParameters: transport.srtpParameters }
-            : {}),
-        },
-        peerRelayId === DEFAULT_PEER_RELAY_ID ? undefined : peerRelayId,
-      );
-      this.deps.logger?.info(
-        { roomId, peerRelayId, primaryPort: transport.tuple.localPort },
-        'R3: reverse-leg pipe transport minted + connected to standby + replied DOWN',
-      );
-    }
-    // RC-A (REQ-RMS-035) — this leg uses ONE bidirectional pipeTransport for BOTH
-    // forward (primary→standby) and reverse (standby→primary). The forward queue
-    // (s.pendingProducers) is flushed by drain(), which is called from onProducer
-    // (only if standbyParams were present at produce time) and onStandbyConnectParams
-    // (only if already connected). When the leg is instead brought up HERE by the
-    // REVERSE path — a reverse announce mints+connects the transport — there is NO
-    // later forward onProducer to flush the queue, so the LAST standby to bring up
-    // its leg via the reverse path had its forward pendingProducers orphaned (live
-    // proof: relay-3's leg minted via ensureReverseLeg but ZERO subsequent forward
-    // pipes → it never received the primary's producers). Drain the forward queue
-    // too. drain() self-guards (!s.connected || s.pipeTransport === null → return)
-    // and is idempotent (forwardPipedIds Set dedup), so it is safe whether or not
-    // the transport was just minted, and a no-op when nothing is queued.
+    await ensureReverseLegTransport(roomId, router, s, peerRelayId, this.deps);
     await this.drain(roomId, s, peerRelayId);
     await this.drainReverseMints(roomId, peerRelayId);
   }

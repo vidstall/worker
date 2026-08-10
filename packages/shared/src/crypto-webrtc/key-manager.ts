@@ -8,68 +8,31 @@
 /**
  * REQ-MCS-012 (P3) — KeyManager: promotes the P1 keying spike to production.
  *
- * Built to the FROZEN contract:
- *   - CONTRACTS.md §1 — the sealed `e2eeKeyBundle` (coordinator → broadcast → open).
- *   - CONTRACTS.md §2 — KID == epoch (monotonic, bumps per membership change) +
- *     grace window (previous-KID key retained for E2EE_KID_GRACE_WINDOW_MS).
- *   - CONTRACTS.md §3 — ed25519→X25519 seal/open (the open side is the in-closure
- *     session opener, NOT a raw private key).
- *   - CONTRACTS.md §4 (+ the AMENDED per-sender `info` block) — PathAKeyDerivation
- *     with a REQUIRED, delimiter-free `senderId` on the production path (D-M2-21).
- *   - SEQUENCES.md diagram 1 (key distribution) + diagram 2 (ASYMMETRIC rekey:
- *     ratchet-on-join / fresh-rekey-on-leave, dual trigger).
+ * Built to the FROZEN contract: CONTRACTS.md §1 (sealed `e2eeKeyBundle`), §2 (KID ==
+ * epoch + grace window), §3 (ed25519→X25519 seal/open via the in-closure opener, NOT
+ * a raw private key), §4 AMENDED (delimiter-free per-sender `senderId`, D-M2-21);
+ * SEQUENCES.md diagram 1 (key distribution) + 2 (ASYMMETRIC rekey).
  *
- * DRY: this REUSES the shipped `e2ee-spike.ts` primitives wholesale — it never
- * reimplements crypto. `generateRoomKey` / `sealRoomKeyToRoster` /
- * `electCoordinator(WithLiveness)` / `ratchetOnJoin` / `freshRekeyOnLeave` /
- * `KidKeyStore` / `PathAKeyDerivation` are all imported, not re-coded.
+ * DRY: REUSES the shipped `e2ee-spike.ts` primitives wholesale — never reimplements
+ * crypto. SCOPE: LIBRARY only — live per-producer transform wiring in useRelay is P6.
+ * MODULE SPLIT: caller-facing types + `assertSenderIdSafe` live in
+ * `key-manager-types.ts`; per-sender K_content derivation lives in
+ * `key-manager-content-keys.ts`. This file is the class itself.
  *
- * SCOPE: this is the LIBRARY only. The LIVE per-producer transform wiring (attach
- * the lookups to RTCRtpSender/Receiver in useRelay) is P6 when E2EE flips on — this
- * file does not touch useRelay or the transform shim.
+ * MEMBERSHIP STATE-MACHINE (P3-fix hardening): FIX-1..7 (dedicated non-expiring
+ * current-key field / no-ratchet-across-a-leave / grace eviction / deferred-join /
+ * idempotent joins / regressing- and divergent-bundle handling / single clock
+ * domain) are documented at their point of use below (`promoteCurrentKey`,
+ * `reconcileToKid`, `onMemberJoin`, `applyBundle`, `keyLookupForSender`).
  *
- * MEMBERSHIP STATE-MACHINE (P3-fix hardening — QC + 2 crypto-adversary review):
- *   - The CURRENT epoch K_room lives in a DEDICATED, NON-EXPIRING field
- *     (`currentKey`); only SUPERSEDED (previous) KIDs go into the grace-bounded
- *     `KidKeyStore`. A stable room therefore NEVER loses its own key (FIX-1/B3) —
- *     grace applies to previous keys ONLY (CONTRACTS §2/§6).
- *   - Each epoch transition records its TYPE: a LEAVE injects fresh-random material
- *     (tracked in `freshRekeyKids`), which is NOT ratchet-reconstructable, so
- *     `reconcileToKid` REFUSES to ratchet across a leave epoch (FIX-2/B1).
- *   - Superseded KIDs are EVICTED from the store on each store/lookup so raw K_room
- *     bytes do not live forever (grace bounds LIFETIME, not just usability, FIX-3/F1).
- *   - A JOIN arriving while a leave-bundle is still pending (no current key) is
- *     DEFERRED, not thrown — "latest epoch wins" gracefully (FIX-4/C1).
- *   - A duplicate/replayed JOIN for an already-applied joiner is a no-op (FIX-5/E1).
- *   - `applyBundle` does NOT store a regressing kid, does NOT refresh a known kid's
- *     grace on replay, and ALARMs (never overwrites) a same-kid DIVERGENT key
- *     (FIX-6/A4b — the containable half of the split-brain HIGH).
- *   - `keyLookupForSender`'s grace check uses the KeyManager's OWN clock, not the
- *     caller's wall-clock `nowMs` (FIX-7/C2 — single clock domain).
+ * KNOWN M2 LIMITATION (D-M2-8): a partition can make two members fresh-rekey at the
+ * SAME epoch → two DIVERGENT K_room values at one KID. FIX-6 stops silent overwrite
+ * (alarm + keep-first); full resolution needs epoch consensus (MLS/M3). Accepted.
  *
- * KNOWN M2 LIMITATION — same-kid split-brain under partition (D-M2-8):
- *   Two members that DISAGREE about the roster (a network partition) can each
- *   fresh-rekey at the SAME epoch, yielding two DIVERGENT K_room values at one KID.
- *   FIX-6 stops the receiver from SILENTLY overwriting its key with a conflicting
- *   same-kid bundle (it alarms and keeps-first), but the fundamental "same kid,
- *   divergent key under partition" cannot be RESOLVED in M2 — there is no epoch
- *   authentication / membership consensus. Cryptographically authenticating the
- *   epoch (so all members agree which key is canonical at a KID) is EXACTLY what
- *   MLS adds in M3. This is an accepted, disclosed M2 limitation.
- *
- * CRYPTO-CLAIM DISCIPLINE (D-M2-8): the group key still has NO forward-secrecy / PCS
- * (MLS → M3). Path C cryptographic validator-exclusion is now WIRED here (Lane D
- * Phase 2): when constructed with an `oobSecret` this KeyManager selects
- * PathCKeyDerivation, so for a high-privacy INVITE room a covertly-admitted in-room
- * validator holds K_room but, lacking the OOB, derives the Path A key and is
- * cryptographically excluded from content (STRUCTURAL exclusion, to our knowledge
- * novel / argued-from-absence). Without an `oobSecret` the instance is unchanged
- * Path A — open rooms + Path A stay content-blind by ECONOMICS, not crypto; the relay
- * is structurally blind in ALL modes; content security depends on keeping the invite
- * link secret. `freshRekeyOnLeave` gives cryptographic eviction for FUTURE frames only
- * (the leaver still knows past keys); the group key has no FS/PCS. Per-sender keying is
- * NONCE-DOMAIN SEPARATION, NOT per-sender authentication — ANY member can derive ANY
- * sender's K_content from the shared K_room (impersonation stays an MLS/M3 concern).
+ * CRYPTO-CLAIM DISCIPLINE (D-M2-8): the group key has NO forward-secrecy/PCS (→M3).
+ * Path C (`oobSecret`) excludes a covertly-admitted validator lacking the OOB from
+ * content; without it, Path A is content-blind by ECONOMICS. Per-sender keying is
+ * NONCE-DOMAIN SEPARATION, not authentication.
  *
  * LOGGING (HARD-GATE): NEVER log K_room, sealedKey, KDF output, the opener secret,
  * or private keys. Log only { kid, epoch, roomId, envelopeCount }.
@@ -94,60 +57,23 @@ import type { SessionOpener } from './session-keypair.js';
 import type { KeyLookup } from './sframe-transform.js';
 import { clientLog } from './log.js';
 import { fromB64 } from '@mysten/bcs';
+import {
+  type RosterMember,
+  type KeyManagerOptions,
+  type DivergenceAlarm,
+  assertSenderIdSafe,
+} from './key-manager-types.js';
+import {
+  contentKeyForSenderAtKid as deriveContentKeyForSenderAtKid,
+  contentBitsForSenderAtKid as deriveContentBitsForSenderAtKid,
+  localContentKey as deriveLocalContentKey,
+  keyLookupForSender as buildKeyLookupForSender,
+} from './key-manager-content-keys.js';
+
+export type { RosterMember, KeyManagerOptions };
+export { assertSenderIdSafe };
 
 const MOD = 'crypto/key-manager';
-
-/** A roster entry as fed by the caller (WS membership, D-M2-18). */
-export interface RosterMember {
-  /** Signaling/relay peer id (opaque). */
-  peerId: string;
-  /** base64 ed25519 SESSION pubkey (== on-chain peer_pubkey per CONTRACTS §0). */
-  sessionPubkeyB64: string;
-}
-
-export interface KeyManagerOptions {
-  roomId: string;
-  /** This client's own session pubkey (base64) — its roster identity + senderId. */
-  localSessionPubkeyB64: string;
-  /** In-closure unseal capability from `createSessionKeypair({ withOpener: true })`. */
-  opener: SessionOpener;
-  /** Grace window (ms) keeping the previous KID's key (CONTRACTS §2, env default 2000). */
-  graceWindowMs: number;
-  /**
-   * Monotonic clock for KID grace-window bookkeeping (defaults to `Date.now`). This
-   * SINGLE clock backs both `KidKeyStore.set` (here) AND the receiver lookup's grace
-   * check (FIX-7: the lookup ignores the caller-supplied `nowMs` and uses THIS clock),
-   * so the grace arithmetic is always consistent; tests inject a controllable clock.
-   */
-  now?: () => number;
-  /**
-   * Lane D Path C: the room's STATIC out-of-band >=128-bit secret. When present, the
-   * KeyManager selects PathCKeyDerivation (HKDF salt = oobSecret) so a roster member
-   * WITHOUT it derives the empty-salt Path A key and is AES-GCM-excluded from content.
-   * Immutable for the instance's life (one KeyManager == one room == one path). Admission
-   * password NEVER feeds this; this NEVER gates admission. NEVER logged (HARD-GATE).
-   */
-  oobSecret?: Uint8Array;
-}
-
-/** A divergence alarm sink (FIX-6): fired on a same-kid conflicting bundle. KID/epoch ONLY. */
-type DivergenceAlarm = (info: { roomId: string; epoch: number; kid: number }) => void;
-
-/**
- * Reject a `senderId` that could inject into the HKDF `info` string
- * `dvconf-e2ee/v1|<roomId>|kid=<kid>|snd=<senderId>` (CONTRACTS §4 AMENDED, D-M2-21
- * (b)). The senderId is a base64 session pubkey, which never contains a pipe, so
- * this is a defence-in-depth guard against a forged/empty id silently restoring the
- * shared-key nonce-reuse bug. Throws on empty or any delimiter substring.
- */
-export function assertSenderIdSafe(senderId: string): void {
-  if (typeof senderId !== 'string' || senderId.length === 0) {
-    throw new Error('KeyManager: senderId is REQUIRED on the production derivation path (D-M2-21)');
-  }
-  if (senderId.includes('|') || senderId.includes('kid=') || senderId.includes('snd=')) {
-    throw new Error('KeyManager: senderId must be delimiter-free (no `|`/`kid=`/`snd=`) (D-M2-21)');
-  }
-}
 
 /**
  * Production KeyManager. One instance per local member per room. Coordinates the
@@ -155,60 +81,47 @@ export function assertSenderIdSafe(senderId: string): void {
  * per-producer `KeyLookup` for the SFrame transform.
  */
 export class KeyManager {
-  private readonly roomId: string;
-  private readonly localPubkey: string;
+  /* eslint-disable @typescript-eslint/member-ordering */
+  readonly roomId: string;
+  readonly localPubkey: string;
   private readonly opener: SessionOpener;
-  private readonly now: () => number;
-  /**
-   * The content-key derivation strategy: PathC iff a usable OOB is held, else the
-   * certified Path A. Typed as the PathA base (PathCKeyDerivation extends it) so the
-   * choke-point call-sites are path-agnostic. Selected once in the ctor (immutable).
-   */
-  private readonly kdf: PathAKeyDerivation;
-  /** Lane D Path C static OOB salt (immutable; defensive-copied on ingest). undefined ⇒ Path A. NEVER logged. */
-  private readonly oobSecret?: Uint8Array;
+  /** Grace-window clock. NOT `private` — `key-manager-content-keys.ts` reads it
+   * directly to stay on the same clock domain as `keyForKid` (FIX-7/C2). */
+  readonly now: () => number;
+  /** Content-key derivation strategy: PathC iff a usable OOB is held, else the
+   * certified Path A (selected once in the ctor, immutable). */
+  readonly kdf: PathAKeyDerivation;
+  /** Lane D Path C static OOB salt (defensive-copied on ingest). undefined ⇒ Path A. NEVER logged. */
+  readonly oobSecret?: Uint8Array;
 
   /** Current roster {peerId → sessionPubkey}. The set the coordinator seals to. */
   private roster: RosterMember[] = [];
-  /** Peers considered unresponsive (coordinator liveness fallback, D-M2-3). */
+  /** Peers considered unresponsive (liveness fallback, D-M2-3). */
   private readonly unresponsive = new Set<string>();
 
   /** Monotonic membership epoch; `kid === epoch` (CONTRACTS §2). Bumps per change. */
   private _epoch = 0;
 
-  /**
-   * The CURRENT epoch's raw K_room (FIX-1/B3). Held in a DEDICATED field that NEVER
-   * expires — the grace window applies to SUPERSEDED keys only (CONTRACTS §2/§6). On
-   * each rekey the old current key is moved into `kidStore` (starting ITS grace) and
-   * this field is replaced. Null only before bootstrap / while a leave-bundle is
-   * pending on a non-coordinator.
-   */
+  /** The CURRENT epoch's raw K_room (FIX-1/B3), in a DEDICATED field that NEVER
+   * expires — grace applies to SUPERSEDED keys only. Null only before bootstrap /
+   * while a leave-bundle is pending on a non-coordinator. */
   private currentKey: Uint8Array | null = null;
 
-  /**
-   * Receiver-side KID→raw-K_room store with the grace window (DRY: shipped spike).
-   * Holds ONLY SUPERSEDED (previous) KIDs — never the current epoch (that is
-   * `currentKey`). Expired entries are evicted on store/lookup (FIX-3).
-   */
+  /** Receiver-side KID→raw-K_room store with the grace window (DRY: shipped spike).
+   * Holds ONLY SUPERSEDED KIDs; expired entries evicted on store/lookup (FIX-3). */
   private readonly kidStore: KidKeyStore;
 
-  /**
-   * KIDs whose key was a FRESH-RANDOM rekey (a LEAVE), NOT a ratchet (FIX-2/B1). A
-   * member that missed one of these CANNOT reconstruct it by ratcheting — it must
-   * recover via `applyBundle`. `reconcileToKid` throws if its span crosses one.
-   */
+  /** KIDs whose key was a FRESH-RANDOM rekey (a LEAVE), NOT a ratchet (FIX-2/B1) —
+   * `reconcileToKid` throws if its span crosses one. */
   private readonly freshRekeyKids = new Set<number>();
 
-  /**
-   * Joiner session pubkeys whose JOIN has already been applied at the CURRENT roster
-   * generation (FIX-5/E1). A redelivered membership event (WS reconnect / poll
-   * overlap) for an already-applied joiner is a no-op (no epoch bump, no ratchet).
-   * Cleared on a LEAVE (the roster generation changes).
-   */
+  /** Joiner session pubkeys already applied at the CURRENT roster generation
+   * (FIX-5/E1) — a redelivered JOIN is a no-op. Cleared on a LEAVE. */
   private readonly appliedJoiners = new Set<string>();
 
-  /** Cache of derived K_content CryptoKeys, keyed by `${senderId}#${kid}`. */
-  private readonly contentKeyCache = new Map<string, Promise<CryptoKey>>();
+  /** Cache of derived K_content CryptoKeys, keyed by `${senderId}#${kid}`. NOT
+   * `private` — `key-manager-content-keys.ts` shares it. */
+  readonly contentKeyCache = new Map<string, Promise<CryptoKey>>();
 
   /** FIX-6 divergence alarm sink (defaults to a structured clientLog.warn). */
   private divergenceAlarm: DivergenceAlarm;
@@ -218,11 +131,8 @@ export class KeyManager {
     this.localPubkey = opts.localSessionPubkeyB64;
     this.opener = opts.opener;
     this.now = opts.now ?? Date.now;
-    // Defensive-copy the OOB on ingest so the documented per-instance immutability is
-    // ENFORCED, not merely conventional: a caller mutating its Uint8Array after
-    // construction cannot retroactively change this room's derived content keys.
+    // Defensive-copy so per-instance immutability is ENFORCED, not conventional.
     this.oobSecret = opts.oobSecret ? opts.oobSecret.slice() : undefined;
-    // Strategy-select (Lane D): PathC iff a usable OOB is held; else the certified Path A.
     this.kdf = this.oobSecret && this.oobSecret.length > 0
       ? new PathCKeyDerivation()
       : new PathAKeyDerivation();
@@ -261,14 +171,9 @@ export class KeyManager {
     return this.coordinatorPubkey() === this.localPubkey;
   }
 
-  /**
-   * True iff this client is the coordinator elected among the EXISTING members,
-   * i.e. the roster EXCLUDING `excludedPubkey` (the joiner). On a JOIN the joiner
-   * has no K_room yet and cannot seal to itself, so the existing members elect the
-   * seal-to-joiner coordinator among themselves (D-M2-3 over the pre-join set). This
-   * keeps "who seals the ratchet key to the joiner" deterministic even when the
-   * joiner's pubkey would otherwise win the election.
-   */
+  /** True iff this client is the coordinator elected among the EXISTING members
+   * (roster EXCLUDING `excludedPubkey`, the joiner) — a joiner has no K_room yet
+   * and cannot seal to itself (D-M2-3 over the pre-join set). */
   private isCoordinatorAmongExisting(excludedPubkey: string): boolean {
     const existing = this.rosterPubkeys().filter((p) => p !== excludedPubkey);
     if (existing.length === 0) return false;
@@ -291,12 +196,11 @@ export class KeyManager {
 
   /**
    * Raw K_room bytes for a given kid, grace-window aware (FIX-1/B3): the CURRENT
-   * epoch resolves the DEDICATED non-expiring field; any other (superseded) kid
-   * resolves the grace-bounded store. Returns null if there is no usable key for
-   * that kid (rekeyed-out / grace lapsed / not yet received). Evicts expired entries
-   * as a side effect (FIX-3/F1).
+   * epoch resolves the DEDICATED non-expiring field; any other kid resolves the
+   * grace-bounded store. Null if unusable. Evicts expired entries (FIX-3/F1).
+   * NOT `private` — `key-manager-content-keys.ts` calls this directly.
    */
-  private keyForKid(kid: number, nowMs: number): Uint8Array | null {
+  keyForKid(kid: number, nowMs: number): Uint8Array | null {
     if (kid === this._epoch) return this.currentKey;
     this.kidStore.evictExpired(this.now()); // FIX-3: bound lifetime, not just usability
     return this.kidStore.get(kid, nowMs);
@@ -324,37 +228,25 @@ export class KeyManager {
     this.divergenceAlarm = alarm;
   }
 
-  /**
-   * TEST-ONLY: record that `kid` was a LEAVE (fresh-rekey) epoch the observer SAW but
-   * has not yet keyed (FIX-2 span-scan). In production this is set by `onMemberLeave`;
-   * the helper lets a test position an anchored member that recorded a FUTURE leave in
-   * its span without the no-rewind machinery of replaying events.
-   */
+  /** TEST-ONLY: record `kid` as a LEAVE (fresh-rekey) epoch (FIX-2 span-scan). */
   recordLeaveEpochForTest(kid: number): void {
     this.freshRekeyKids.add(kid);
   }
 
-  /** Build the SyntheticMember-shaped roster the spike seal path consumes. */
+  /** Build the SyntheticMember-shaped roster the spike seal path consumes (anonymous
+   * seal — privateKeyRaw is unused and a fresh zero buffer per member). */
   private sealRoster(pubkeys: string[]): SyntheticMember[] {
-    // sealRoomKeyToRoster only reads publicKeyB64 + publicKeyRaw (it seals, anonymous
-    // box — it never touches privateKeyRaw). A FRESH zero buffer per member removes the
-    // shared-mutable-buffer footgun; the seal side never reads it.
     return pubkeys.map((b64) => ({
       publicKeyB64: b64,
       publicKeyRaw: fromB64(b64),
-      privateKeyRaw: new Uint8Array(0), // unused on the SEAL side (anonymous crypto_box_seal)
+      privateKeyRaw: new Uint8Array(0),
     }));
   }
 
-  /**
-   * Promote a freshly-generated/-adopted key to the CURRENT epoch (FIX-1): the OLD
+  /** Promote a freshly-generated/-adopted key to the CURRENT epoch (FIX-1): the OLD
    * current key (if any) is demoted into the grace-bounded store under its OWN kid
-   * (`prevKid`) with setAtMs=now (that starts ITS grace), then `currentKey` is
-   * replaced. The current key itself is never grace-bounded. Evicts expired
-   * superseded entries (FIX-3). `prevKid` is the epoch the OLD current key belonged
-   * to (the caller passes the epoch BEFORE it bumped), so a superseded kid is
-   * grace-bounded under its correct label.
-   */
+   * (`prevKid`), starting its grace, then `currentKey` is replaced. Evicts expired
+   * superseded entries (FIX-3). */
   private promoteCurrentKey(newCurrent: Uint8Array, prevKid: number): void {
     if (this.currentKey && prevKid >= 0 && prevKid !== this._epoch) {
       // demote the prior current key: it becomes a superseded KID with its OWN grace.
@@ -364,11 +256,9 @@ export class KeyManager {
     this.kidStore.evictExpired(this.now()); // FIX-3
   }
 
-  /**
-   * COORDINATOR bootstrap (first key, SEQUENCES diagram 1): bump to epoch 1 (or next),
-   * generate a fresh K_room, seal to the whole roster, store locally, return the
-   * broadcast bundle. Throws if not the coordinator.
-   */
+  /** COORDINATOR bootstrap (first key, SEQUENCES diagram 1): bump epoch, generate a
+   * fresh K_room, seal to the whole roster, store locally, return the broadcast
+   * bundle. Throws if not the coordinator. */
   async bootstrapRoomKey(): Promise<E2EEKeyBundle> {
     if (!this.isCoordinator()) {
       throw new Error('KeyManager: only the coordinator bootstraps K_room');
@@ -390,19 +280,12 @@ export class KeyManager {
     return bundle;
   }
 
-  /**
-   * MEMBER apply an incoming bundle (SEQUENCES diagram 1, NON-coordinator path):
-   * adopt the bundle's epoch/kid, find MY envelope, open it via the in-closure opener
-   * (NOT openOwnEnvelope which needs a raw private key), store K_room at that kid.
-   * Throws if I have no envelope or it does not open under my key.
-   *
-   * FIX-6 (A4b) hardening:
-   *   (i) a REGRESSING bundle (kid < current epoch) is informational ONLY — it does
-   *       NOT store / refresh an already-known or expired kid's grace clock.
-   *   (ii) a SAME-kid bundle (kid == current epoch) whose key material DIFFERS from
-   *       what is already current is NOT silently overwritten — it fires a divergence
-   *       alarm (KID/epoch only, NEVER the key) and is rejected (keep-first).
-   */
+  /** MEMBER apply an incoming bundle (SEQUENCES diagram 1, NON-coordinator path):
+   * adopt epoch/kid, find MY envelope, open via the in-closure opener (NOT
+   * openOwnEnvelope), store K_room at that kid. Throws if no envelope / wrong key.
+   * FIX-6 (A4b): (i) a REGRESSING bundle is informational only. (ii) a SAME-kid
+   * bundle whose material DIFFERS from current fires a divergence alarm and is
+   * rejected (keep-first), never silently overwritten. */
   async applyBundle(bundle: E2EEKeyBundle): Promise<void> {
     const mine: SealedEnvelope | undefined = bundle.envelopes.find(
       (e) => e.recipientPubkey === this.localPubkey,
@@ -412,9 +295,7 @@ export class KeyManager {
     }
     const kRoom = await this.opener.unsealRoomKey(mine.sealedKey); // throws on wrong key
 
-    // FIX-6 (i): a strictly-regressing bundle is informational — do NOT store it, do
-    // NOT refresh any grace clock. (A late/replayed old-kid bundle must not revive an
-    // expired key or roll the epoch back.)
+    // FIX-6 (i): a strictly-regressing bundle is informational — do not store/refresh.
     if (bundle.kid < this._epoch) {
       clientLog.info(MOD, 'ignored regressing K_room bundle (informational)', {
         roomId: this.roomId,
@@ -425,8 +306,7 @@ export class KeyManager {
       return;
     }
 
-    // FIX-6 (ii): a same-kid bundle (kid == current) whose material DIFFERS from the
-    // current key is a split-brain divergence — alarm and KEEP-FIRST, never overwrite.
+    // FIX-6 (ii): a same-kid divergence — alarm and KEEP-FIRST, never overwrite.
     if (bundle.kid === this._epoch && this.currentKey) {
       if (bytesEqual(kRoom, this.currentKey)) {
         // identical replay at the same kid — idempotent, do NOT refresh anything.
@@ -450,24 +330,13 @@ export class KeyManager {
 
   // ── ASYMMETRIC rekey (D-M2-5, SEQUENCES diagram 2) ──
 
-  /**
-   * JOIN (member-add): epoch++, kid=epoch. EXISTING members (incl. coordinator)
-   * self-derive K_room[new] = ratchetOnJoin(K_room[old]) LOCALLY (O(1), one-way).
-   * The COORDINATOR additionally seals K_room[new] to the JOINER ONLY and returns a
-   * single-envelope bundle; a non-coordinator returns null (it only self-ratchets).
-   *
-   * The joiner opens that bundle → gets K_room[new] and CANNOT derive K_room[old]
-   * (one-way KDF = backward secrecy).
-   *
-   * FIX-5 (E1): a redelivered JOIN for an ALREADY-applied joiner is a no-op (no epoch
-   * bump, no ratchet) — a double-ratchet would permanently diverge members.
-   * FIX-4 (C1): if there is no current key yet (a leave-bundle is still pending on a
-   * non-coordinator), the local ratchet is DEFERRED — we do NOT ratchet, do NOT bump
-   * the epoch past the pending bundle, and do NOT throw; the next broadcast bundle
-   * reconciles the key. A deferred join is NOT recorded as applied (so the later REAL
-   * join for the same joiner still ratchets it — recording it during the defer would let
-   * FIX-5 idempotency suppress the real join and permanently diverge that member).
-   */
+  /** JOIN (member-add): epoch++, kid=epoch. EXISTING members self-derive
+   * K_room[new] = ratchetOnJoin(K_room[old]) LOCALLY (O(1), one-way); the
+   * COORDINATOR additionally seals K_room[new] to the JOINER ONLY. The joiner
+   * CANNOT derive K_room[old] (backward secrecy). FIX-5 (E1): a redelivered JOIN
+   * for an already-applied joiner is a no-op. FIX-4 (C1): with no current key yet
+   * (leave-bundle pending), the ratchet is DEFERRED (not recorded as applied, so
+   * the later real join still ratchets it) rather than thrown. */
   onMemberJoin(joiner: RosterMember): E2EEKeyBundle | null {
     // FIX-5: idempotency on the joiner id — a duplicate event does not advance state.
     if (this.appliedJoiners.has(joiner.sessionPubkeyB64)) {
@@ -479,14 +348,8 @@ export class KeyManager {
       });
       return null;
     }
-    // FIX-4: a JOIN while no current key is held (a leave-bundle is still pending on a
-    // non-coordinator) — DEFER. We do NOT ratchet (we have no key to ratchet) and we do
-    // NOT bump the epoch PAST the pending bundle (that would make the awaited leave
-    // bundle look like a regressing kid in applyBundle and never adopt → wedge). The
-    // joiner is NOT recorded as applied here: a deferred join has not been ratcheted in,
-    // so the post-recovery REAL join for the same joiner must still ratchet it (recording
-    // it now would let FIX-5 idempotency suppress that real join → permanent divergence).
-    // The NEXT authoritative broadcast bundle reconciles the key.
+    // FIX-4: no current key (leave-bundle pending) — DEFER, don't ratchet/bump epoch
+    // past the pending bundle. Not recorded as applied, so a real join still ratchets.
     if (!this.currentKey) {
       clientLog.info(MOD, 'deferred JOIN (no current key — awaiting pending bundle)', {
         roomId: this.roomId,
@@ -497,9 +360,8 @@ export class KeyManager {
       return null;
     }
 
-    // Record the joiner as applied ONLY on the path that actually ratchets it in (after
-    // the FIX-4 defer check) so a previously-deferred join is re-applied when it later
-    // really joins; FIX-5 idempotency then suppresses only genuine duplicates.
+    // Recorded as applied only past the FIX-4 defer check, so a previously-deferred
+    // join is re-applied when it later really joins.
     this.appliedJoiners.add(joiner.sessionPubkeyB64);
     const kOld = this.currentKey;
     const prevKid = this._epoch;
@@ -529,23 +391,12 @@ export class KeyManager {
     return bundle;
   }
 
-  /**
-   * LEAVE/revoke (member-remove): epoch++, kid=epoch. The coordinator generates a
+  /** LEAVE/revoke (member-remove): epoch++, kid=epoch. The coordinator generates a
    * FRESH-RANDOM K_room[new] = freshRekeyOnLeave() (a ratchet CANNOT evict — the
    * leaver knows K_room[old]) and reseals to the N-1 remaining in ONE broadcast
-   * bundle (O(N)); returns it. A non-coordinator just bumps its epoch and waits for
-   * the bundle (returns null). The leaver knows K_room[old] but CANNOT reach the
-   * fresh-random K_room[new] = cryptographic eviction for FUTURE frames.
-   *
-   * The caller MUST have already removed the leaver from the roster (so the reseal
-   * roster is the N-1 remaining and re-election excludes the leaver).
-   *
-   * The leave epoch is recorded as a FRESH-REKEY kid (FIX-2/B1): it is NOT
-   * ratchet-reconstructable, so `reconcileToKid` must refuse to ratchet across it. A
-   * non-coordinator that bumps its epoch here holds NO key for the new epoch until
-   * the broadcast bundle arrives — a JOIN in that window is deferred, not thrown
-   * (FIX-4).
-   */
+   * bundle. A non-coordinator bumps its epoch and waits for the bundle. Caller MUST
+   * have already removed the leaver from the roster. The leave epoch is recorded as
+   * a FRESH-REKEY kid (FIX-2/B1) — `reconcileToKid` must refuse to cross it. */
   async onMemberLeave(leaverSessionPubkeyB64: string): Promise<E2EEKeyBundle | null> {
     this.unresponsive.delete(leaverSessionPubkeyB64); // it is gone, not merely silent
     this.appliedJoiners.delete(leaverSessionPubkeyB64); // FIX-5: roster generation changed
@@ -553,10 +404,8 @@ export class KeyManager {
     this._epoch += 1;
     this.freshRekeyKids.add(this._epoch); // FIX-2: this epoch is fresh-random, not a ratchet
     if (!this.isCoordinator()) {
-      // non-coordinator: epoch bumped; it holds NO key for the new epoch yet and will
-      // adopt the coordinator's fresh bundle (FIX-4: a JOIN before that is deferred).
-      // Demote the prior current key into the grace store so in-flight OLD-kid frames
-      // still decrypt during the rekey, then clear the current key (pending the bundle).
+      // non-coordinator: bumped, no key yet — demote prior current key into grace
+      // store (in-flight OLD-kid frames still decrypt), then await the bundle.
       if (this.currentKey && prevKid >= 0) {
         this.kidStore.set(prevKid, this.currentKey, this.now());
         this.kidStore.evictExpired(this.now());
@@ -583,12 +432,8 @@ export class KeyManager {
   }
 
   // ── Observer: forced/admin eviction via on-chain capability_events (D-M2-5) ──
-  //
-  // The PRIMARY trigger (routine WS membership) is the onMemberJoin/onMemberLeave
-  // methods above. These are the ADDITIONAL on-chain forced-eviction triggers. A thin
-  // adapter over the shipped `useChainEvents` capability_events watcher subscribes a
-  // `CapabilityRevoked` → onCapabilityRevoked / `CapabilityIssued` → onCapabilityIssued
-  // (the live hook wiring is minimal; the library exposes the handlers).
+  // ADDITIONAL trigger alongside the routine-WS-membership onMemberJoin/Leave above;
+  // a thin `useChainEvents` adapter subscribes CapabilityRevoked/Issued to these.
 
   /** on-chain CapabilityIssued (forced admin add) → JOIN ratchet. */
   onCapabilityIssued(joiner: RosterMember): E2EEKeyBundle | null {
@@ -602,19 +447,12 @@ export class KeyManager {
 
   // ── Out-of-order ratchet reconciliation (P1 carry-forward c, epoch-driven) ──
 
-  /**
-   * Reconcile a member that missed one or more JOIN ratchets to the K_room at
-   * `targetKid` by ratcheting forward from its last anchor by the epoch delta. The
-   * ratchet is deterministic and one-way, so a member that processed the same joins
-   * in a DIFFERENT order converges on the SAME K_room at `targetKid`. No-op if
-   * already at/after the target.
-   *
-   * FIX-2 (B1): only valid across JOIN (ratchet) epochs. A LEAVE injects fresh-random
-   * material that is NOT reconstructable by ratcheting, so a missed LEAVE MUST be
-   * recovered from the coordinator's broadcast bundle (applyBundle). If any epoch in
-   * the span `(currentEpoch, targetKid]` was a LEAVE (in `freshRekeyKids`), this
-   * THROWS rather than silently deriving a WRONG-but-accepted key.
-   */
+  /** Reconcile a member that missed one or more JOIN ratchets to the K_room at
+   * `targetKid` by ratcheting forward by the epoch delta (deterministic, one-way —
+   * order-independent convergence). No-op if already at/after the target. FIX-2
+   * (B1): only valid across JOIN epochs — if any epoch in `(currentEpoch,
+   * targetKid]` was a LEAVE (`freshRekeyKids`), THROWS rather than silently
+   * deriving a wrong key (a missed LEAVE must come from `applyBundle`). */
   reconcileToKid(targetKid: number): void {
     if (targetKid <= this._epoch) return;
     // FIX-2: refuse to ratchet across any fresh-rekey (LEAVE) epoch in the span.
@@ -641,72 +479,22 @@ export class KeyManager {
   }
 
   // ── Per-sender content key (D-M2-21 — the acceptance gate) ──
+  // The derivation logic itself lives in `key-manager-content-keys.ts`; these are
+  // thin instance-method wrappers kept here so the public API is unchanged.
 
-  private cacheKey(senderId: string, kid: number): string {
-    return `${senderId}#${kid}`;
-  }
-
-  /**
-   * Derive (and cache) the per-sender K_content CryptoKey for `(senderId, kid)`. The
-   * production path REQUIRES a delimiter-free senderId (D-M2-21 (a)+(b)) — it throws
-   * on a missing/empty/injected id. Returns null only when there is no K_room for
-   * `kid` (rekeyed-out / grace lapsed / not yet received). FIX-1: the CURRENT epoch
-   * resolves the dedicated non-expiring key.
-   */
   async contentKeyForSenderAtKid(senderId: string, kid: number): Promise<CryptoKey | null> {
-    assertSenderIdSafe(senderId);
-    const kRoom = this.keyForKid(kid, this.now());
-    if (!kRoom) return null;
-    return this.deriveCached(senderId, kid, kRoom);
+    return deriveContentKeyForSenderAtKid(this, senderId, kid);
   }
 
-  /** Shared derive-and-cache for the content key (keeps the cache key consistent). */
-  private deriveCached(senderId: string, kid: number, kRoom: Uint8Array): Promise<CryptoKey> {
-    const ck = this.cacheKey(senderId, kid);
-    let p = this.contentKeyCache.get(ck);
-    if (!p) {
-      p = this.kdf.deriveContentKey({ kRoom, roomId: this.roomId, kid, senderId, oobSecret: this.oobSecret });
-      this.contentKeyCache.set(ck, p);
-    }
-    return p;
-  }
-
-  /** TEST-ONLY: raw HKDF bits for a (sender, kid) to assert per-sender separation. */
   async contentBitsForSenderAtKid(senderId: string, kid: number): Promise<Uint8Array | null> {
-    assertSenderIdSafe(senderId);
-    const kRoom = this.keyForKid(kid, this.now());
-    if (!kRoom) return null;
-    return this.kdf.deriveContentBits({ kRoom, roomId: this.roomId, kid, senderId, oobSecret: this.oobSecret });
+    return deriveContentBitsForSenderAtKid(this, senderId, kid);
   }
 
-  /**
-   * The LOCAL sender's own K_content for the CURRENT kid (encrypt side — senderId =
-   * this client's session pubkey). Returns null if no K_room is in effect yet.
-   */
   async localContentKey(): Promise<CryptoKey | null> {
-    return this.contentKeyForSenderAtKid(this.localPubkey, this._epoch);
+    return deriveLocalContentKey(this);
   }
 
-  /**
-   * PER-PRODUCER KeyLookup FACTORY (D-M2-21 (c)). Returns a `KeyLookup` (the
-   * sframe-transform.ts type) bound to ONE producer: `(kid, nowMs) => K_content
-   * CryptoKey | null` for THAT producer at THAT kid. Validates the senderId UP FRONT
-   * so an injected/empty id is rejected at factory time, not silently per frame.
-   *
-   * FIX-7 (C2): the grace check uses the KeyManager's OWN injected clock (`this.now()`),
-   * NOT the caller-supplied `nowMs`. The transform may still CALL the lookup with a
-   * wall-clock `nowMs` (the `KeyLookup` signature is unchanged for compatibility), but
-   * we do NOT TRUST it — a custom monotonic / performance.now KeyManager clock and the
-   * transform's wall clock are different domains, and mixing them silently breaks the
-   * grace arithmetic. Single clock domain = the KeyManager's.
-   */
   keyLookupForSender(senderId: string): KeyLookup {
-    assertSenderIdSafe(senderId); // reject empty/injected at factory time
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    return (kid: number, _callerNowMs: number): Promise<CryptoKey | null> | (CryptoKey | null) => {
-      const kRoom = this.keyForKid(kid, this.now()); // FIX-7: KM clock, ignore caller nowMs
-      if (!kRoom) return null;
-      return this.deriveCached(senderId, kid, kRoom);
-    };
+    return buildKeyLookupForSender(this, senderId);
   }
 }
