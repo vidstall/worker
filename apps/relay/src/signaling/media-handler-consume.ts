@@ -44,6 +44,29 @@ export async function handleConsume(
     }
   }
 
+  // A relay can be PROMOTED to primary mid-session (e.g. cp-daemon reassignment
+  // after the old primary died) and then receive a REAL local produce (handleProduce)
+  // from a peer that reconnects here — that producer lands in room.peers[*].producers,
+  // NOT in the inter-relay pipe registry above (which only holds producers piped in
+  // FROM an upstream primary). Without this fallback, a client that fast-cuts-over
+  // and blind-consumes (no producerId) this relay gets "not ready" forever even
+  // though a live producer already exists, because the registry check above never
+  // finds it. Mirrors handleJoin's existing room.peers[*].producers loop.
+  if (!producerId) {
+    for (const [otherPeerId, otherPeer] of room.peers) {
+      if (otherPeerId === mapping.peerId) continue;
+      const localProducer = otherPeer.producers[0];
+      if (localProducer) {
+        producerId = localProducer.id;
+        logger.debug(
+          { roomId: mapping.roomId, producerId, peerId: mapping.peerId, producerPeerId: otherPeerId },
+          'Resolved locally-produced room producer for client consume (promoted-primary standby)',
+        );
+        break;
+      }
+    }
+  }
+
   if (!producerId) {
     // No producerId supplied and none announced yet — standby not ready.
     sendJson(ws, { type: 'error', message: 'No producer available for room yet' });
