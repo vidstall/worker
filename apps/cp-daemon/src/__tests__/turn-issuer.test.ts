@@ -110,6 +110,32 @@ describe('generateSharedSecret (pure helper)', () => {
   });
 });
 
+describe('generateSharedSecret with TURN_STATIC_SECRET override', () => {
+  const ORIGINAL = process.env['TURN_STATIC_SECRET'];
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env['TURN_STATIC_SECRET'];
+    else process.env['TURN_STATIC_SECRET'] = ORIGINAL;
+  });
+
+  it('falls back to random 32 bytes when unset', () => {
+    delete process.env['TURN_STATIC_SECRET'];
+    expect(generateSharedSecret().length).toBe(32);
+  });
+
+  it('returns the raw UTF-8 bytes of the env value when set', () => {
+    process.env['TURN_STATIC_SECRET'] = 'abc123secret';
+    expect(generateSharedSecret().equals(Buffer.from('abc123secret', 'utf8'))).toBe(true);
+  });
+
+  it('returns the identical Buffer across calls for the same env value (coturn must see one shared secret)', () => {
+    process.env['TURN_STATIC_SECRET'] = 'fixed-secret';
+    const a = generateSharedSecret();
+    const b = generateSharedSecret();
+    expect(a.equals(b)).toBe(true);
+  });
+});
+
 describe('TurnIssuer', () => {
   let submitCalls: Array<{ label: string; args: Record<string, unknown> }>;
   let submitFn: SubmitFn;

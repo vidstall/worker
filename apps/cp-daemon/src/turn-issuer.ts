@@ -95,7 +95,19 @@ export function hashCredentialPassword(password: string): Uint8Array {
   return new Uint8Array(createHash('sha256').update(password).digest());
 }
 
+// MVP static-secret mode: when TURN_STATIC_SECRET is set, every call
+// returns the SAME value (as raw UTF-8 bytes -- coturn's
+// --static-auth-secret flag hashes its literal string value with no
+// decoding, so this must match byte-for-byte, see coturn.yml). This means
+// rotateSecret() becomes a harmless same-value no-op refresh rather than
+// real rotation, and emergencyEvictSecret() cannot actually evict anything
+// coturn-side -- coturn keeps accepting credentials signed with the
+// "evicted" secret until its container is restarted with a new
+// TURN_STATIC_SECRET. True live/dynamic secret sync to coturn is a known,
+// deferred gap (unset TURN_STATIC_SECRET restores real random rotation).
 export function generateSharedSecret(): Buffer {
+  const staticSecret = process.env['TURN_STATIC_SECRET'];
+  if (staticSecret) return Buffer.from(staticSecret, 'utf8');
   return randomBytes(SHARED_SECRET_BYTES);
 }
 
