@@ -21,7 +21,7 @@ import {
   createRoom,
   createEscrow,
   resolveRoomRelayUrl,
-  getStandbyRelayUrl,
+  getStandbyRelayUrls,
   CREATE_ROOM_POLL_OPTS,
   JOIN_ROOM_POLL_OPTS,
 } from './chain.js';
@@ -196,9 +196,12 @@ export async function startBotSession(
    * browser client's fix for the same problem (services/client's useRelay.ts).
    * Re-resolves assigned_relays fresh from chain each call, so a SECOND death
    * (of the now-active former-standby) naturally picks up whatever the
-   * on-chain CP-quorum replacement-voting has since voted in. Fails fast (no
-   * retry loop) when there's no standby or it's unhealthy — this is a test
-   * harness, a clear degraded signal is more useful than retrying forever.
+   * on-chain CP-quorum replacement-voting has since voted in — AND, even
+   * before that promotion has landed on-chain, tries every OTHER assigned
+   * standby in order (not just assigned_relays[1]) rather than only ever
+   * retrying the one that just died. Fails fast (no retry loop) once every
+   * candidate is exhausted — this is a test harness, a clear degraded signal
+   * is more useful than retrying forever.
    */
   const handleRelayDeath = async (): Promise<void> => {
     if (stopped || cutoverInFlight) return;
@@ -208,8 +211,8 @@ export async function startBotSession(
         { module: 'bot-session', sessionId: id, roomId },
         'primary relay WS closed — attempting standby cutover',
       );
-      const standbyUrl = await getStandbyRelayUrl(client, networkConfig, roomId, logger);
-      if (!standbyUrl) {
+      const standbyUrls = await getStandbyRelayUrls(client, networkConfig, roomId, logger);
+      if (standbyUrls.length === 0) {
         logger.error(
           { module: 'bot-session', sessionId: id, roomId },
           'relay died and no standby is assigned — bot session degraded',
@@ -217,11 +220,22 @@ export async function startBotSession(
         degraded = true;
         return;
       }
-      const gate = createStandbyFlapGate({ probeUrl: `${wsToProbeUrl(standbyUrl)}/api/probe` });
-      if (!(await gate.check())) {
+      let standbyUrl: string | null = null;
+      for (const candidate of standbyUrls) {
+        const gate = createStandbyFlapGate({ probeUrl: `${wsToProbeUrl(candidate)}/api/probe` });
+        if (await gate.check()) {
+          standbyUrl = candidate;
+          break;
+        }
+        logger.warn(
+          { module: 'bot-session', sessionId: id, roomId, candidate },
+          'standby candidate reported unhealthy — trying next assigned relay',
+        );
+      }
+      if (!standbyUrl) {
         logger.error(
-          { module: 'bot-session', sessionId: id, roomId, standbyUrl },
-          'standby relay reported unhealthy — bot session degraded',
+          { module: 'bot-session', sessionId: id, roomId, standbyUrls },
+          'every assigned standby reported unhealthy — bot session degraded',
         );
         degraded = true;
         return;

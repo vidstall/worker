@@ -338,22 +338,31 @@ export async function getRelayEndpoint(
 }
 
 /**
- * Resolve the room's STANDBY relay's (`assigned_relays[1]`) endpoint_url, or
- * null if no standby is assigned yet (or its endpoint isn't resolvable).
- * Single-shot, no polling — used at relay-death time by session.ts's
- * handleRelayDeath to attempt an immediate standby cutover; if the standby
- * isn't ready at that exact moment, the caller fails fast rather than retrying.
+ * Resolves the endpoint_url of every relay in assigned_relays AFTER the
+ * primary (index 0), in on-chain order — not just assigned_relays[1]. A
+ * relay death can chain (standby 1 dies after already being promoted to
+ * active use, before cp-daemon's async promotion has rewritten the
+ * assignment), so the caller must be able to try assigned_relays[2], [3],
+ * etc., not just the first standby slot — mirrors cp-daemon's
+ * room-health-sweep.ts, which walks assigned_relays.slice(1) rather than a
+ * hardcoded index. Single-shot, no polling — used at relay-death time by
+ * session.ts's handleRelayDeath to attempt an immediate standby cutover.
+ * Skips (does not fail on) any id whose endpoint isn't resolvable.
  */
-export async function getStandbyRelayUrl(
+export async function getStandbyRelayUrls(
   client: SuiClient,
   config: NetworkConfig,
   roomId: string,
   logger: Logger,
-): Promise<string | null> {
+): Promise<string[]> {
   const assignedIds = await getAssignedRelayIds(client, config, roomId, logger);
-  const standbyId = assignedIds[1];
-  if (!standbyId) return null;
-  return getRelayEndpoint(client, config, standbyId, logger);
+  const standbyIds = assignedIds.slice(1);
+  const urls: string[] = [];
+  for (const id of standbyIds) {
+    const url = await getRelayEndpoint(client, config, id, logger);
+    if (url) urls.push(url);
+  }
+  return urls;
 }
 
 export interface ResolveRelayEndpointOpts {

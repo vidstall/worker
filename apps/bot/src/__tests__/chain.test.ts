@@ -16,7 +16,7 @@ const {
   getAssignedRelayIds,
   getActiveRelays,
   getRelayEndpoint,
-  getStandbyRelayUrl,
+  getStandbyRelayUrls,
   resolveRoomRelayUrl,
 } = await import('../chain.js');
 
@@ -164,6 +164,7 @@ function encodeAddress(id: string): number[] {
 
 const RELAY_ID = `0x${'a'.repeat(64)}`;
 const OTHER_RELAY_ID = `0x${'b'.repeat(64)}`;
+const THIRD_RELAY_ID = `0x${'d'.repeat(64)}`;
 const ROOM_ID = `0x${'c'.repeat(64)}`;
 
 /** Encode one RelayNodeInfo entry matching chain.ts's RelayNodeInfoBcs field order. */
@@ -280,44 +281,48 @@ describe('getRelayEndpoint', () => {
   });
 });
 
-describe('getStandbyRelayUrl', () => {
-  it('resolves assigned_relays[1]\'s endpoint when a standby is assigned', async () => {
-    const assignBytes = encodeIdVector([RELAY_ID, OTHER_RELAY_ID]);
-    const urlBytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://standby.example')));
+describe('getStandbyRelayUrls', () => {
+  it('resolves BOTH standby endpoints in order when assigned_relays has 3 entries (not just index 1)', async () => {
+    const assignBytes = encodeIdVector([RELAY_ID, OTHER_RELAY_ID, THIRD_RELAY_ID]);
+    const url1Bytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://standby-1.example')));
+    const url2Bytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://standby-2.example')));
     let call = 0;
     const client = makeClient(() => {
       call += 1;
       if (call === 1) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
-      return { results: [{ returnValues: [] }, { returnValues: [[urlBytes, 'vector<u8>']] }] };
+      if (call === 2) return { results: [{ returnValues: [] }, { returnValues: [[url1Bytes, 'vector<u8>']] }] };
+      return { results: [{ returnValues: [] }, { returnValues: [[url2Bytes, 'vector<u8>']] }] };
     });
-    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
-    expect(url).toBe('wss://standby.example');
+    const urls = await getStandbyRelayUrls(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(urls).toEqual(['wss://standby-1.example', 'wss://standby-2.example']);
   });
 
-  it('resolves null when only a primary is assigned (no standby yet)', async () => {
+  it('resolves [] when only a primary is assigned (no standby yet)', async () => {
     const assignBytes = encodeIdVector([RELAY_ID]);
     const client = makeClient(() => ({ results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] }));
-    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
-    expect(url).toBeNull();
+    const urls = await getStandbyRelayUrls(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(urls).toEqual([]);
   });
 
-  it('resolves null when the room is entirely unassigned', async () => {
+  it('resolves [] when the room is entirely unassigned', async () => {
     const emptyBytes = encodeIdVector([]);
     const client = makeClient(() => ({ results: [{ returnValues: [[emptyBytes, 'vector<u8>']] }] }));
-    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
-    expect(url).toBeNull();
+    const urls = await getStandbyRelayUrls(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(urls).toEqual([]);
   });
 
-  it('resolves null (tolerant) when the standby id is assigned but its endpoint lookup fails', async () => {
-    const assignBytes = encodeIdVector([RELAY_ID, OTHER_RELAY_ID]);
+  it('skips (does not fail on) a standby id whose endpoint lookup fails, still returning the OTHER resolvable standby', async () => {
+    const assignBytes = encodeIdVector([RELAY_ID, OTHER_RELAY_ID, THIRD_RELAY_ID]);
+    const url2Bytes = encodeByteVector(Array.from(new TextEncoder().encode('wss://standby-2.example')));
     let call = 0;
     const client = makeClient(() => {
       call += 1;
       if (call === 1) return { results: [{ returnValues: [[assignBytes, 'vector<u8>']] }] };
-      return { error: 'MoveAbort ... 501 ...' };
+      if (call === 2) return { error: 'MoveAbort ... 501 ...' }; // standby 1's endpoint lookup fails
+      return { results: [{ returnValues: [] }, { returnValues: [[url2Bytes, 'vector<u8>']] }] };
     });
-    const url = await getStandbyRelayUrl(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
-    expect(url).toBeNull();
+    const urls = await getStandbyRelayUrls(client as never, fakeConfig, ROOM_ID, fakeLogger() as never);
+    expect(urls).toEqual(['wss://standby-2.example']);
   });
 });
 

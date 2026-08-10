@@ -4,14 +4,14 @@ const registerUserMock = vi.fn();
 const createRoomMock = vi.fn();
 const createEscrowMock = vi.fn();
 const resolveRoomRelayUrlMock = vi.fn();
-const getStandbyRelayUrlMock = vi.fn();
+const getStandbyRelayUrlsMock = vi.fn();
 
 vi.mock('../chain.js', () => ({
   registerUser: registerUserMock,
   createRoom: createRoomMock,
   createEscrow: createEscrowMock,
   resolveRoomRelayUrl: resolveRoomRelayUrlMock,
-  getStandbyRelayUrl: getStandbyRelayUrlMock,
+  getStandbyRelayUrls: getStandbyRelayUrlsMock,
   CREATE_ROOM_POLL_OPTS: { timeoutMs: 30_000, pollIntervalMs: 2_000 },
   JOIN_ROOM_POLL_OPTS: { timeoutMs: 10_000, pollIntervalMs: 1_000 },
 }));
@@ -90,7 +90,7 @@ describe('startBotSession', () => {
     createRoomMock.mockReset();
     createEscrowMock.mockReset().mockResolvedValue(undefined);
     resolveRoomRelayUrlMock.mockReset();
-    getStandbyRelayUrlMock.mockReset();
+    getStandbyRelayUrlsMock.mockReset();
     flapGateCheckMock.mockReset().mockResolvedValue(true);
     botPeerMock.mockClear();
     connectMock.mockReset().mockResolvedValue(undefined);
@@ -235,7 +235,7 @@ describe('startBotSession — standby cutover on relay death', () => {
     createRoomMock.mockReset();
     createEscrowMock.mockReset().mockResolvedValue(undefined);
     resolveRoomRelayUrlMock.mockReset().mockResolvedValue('wss://primary.example:4000');
-    getStandbyRelayUrlMock.mockReset();
+    getStandbyRelayUrlsMock.mockReset();
     flapGateCheckMock.mockReset().mockResolvedValue(true);
     botPeerMock.mockClear();
     connectMock.mockReset().mockResolvedValue(undefined);
@@ -253,7 +253,7 @@ describe('startBotSession — standby cutover on relay death', () => {
 
   it('cuts over to the standby relay when the primary dies and the standby is healthy', async () => {
     createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
-    getStandbyRelayUrlMock.mockResolvedValueOnce('wss://standby.example:4000');
+    getStandbyRelayUrlsMock.mockResolvedValueOnce(['wss://standby.example:4000']);
 
     const session = await startBotSession({ roomMode: 'create', mediaMode: 'camera' }, baseDeps());
     expect(session.isDegraded()).toBe(false);
@@ -270,9 +270,26 @@ describe('startBotSession — standby cutover on relay death', () => {
     expect(session.isDegraded()).toBe(false);
   });
 
+  it('falls through to standby 2 when standby 1 is unhealthy (not just retrying the same dead relay)', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlsMock.mockResolvedValueOnce(['wss://standby-1.example:4000', 'wss://standby-2.example:4000']);
+    flapGateCheckMock.mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'camera' }, baseDeps());
+    expect(botPeerMock).toHaveBeenCalledTimes(1);
+
+    const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+    onRelayClosed();
+
+    await vi.waitFor(() => expect(botPeerMock).toHaveBeenCalledTimes(2));
+    expect(botPeerMock.mock.calls[1]![0].relayUrl).toBe('wss://standby-2.example:4000');
+    expect(flapGateCheckMock).toHaveBeenCalledTimes(2); // standby 1 probed (failed), then standby 2 (succeeded)
+    expect(session.isDegraded()).toBe(false);
+  });
+
   it('marks the session degraded (no second BotPeer) when no standby is assigned', async () => {
     createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
-    getStandbyRelayUrlMock.mockResolvedValueOnce(null);
+    getStandbyRelayUrlsMock.mockResolvedValueOnce([]);
 
     const session = await startBotSession({ roomMode: 'create', mediaMode: 'listen' }, baseDeps());
     const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
@@ -284,7 +301,7 @@ describe('startBotSession — standby cutover on relay death', () => {
 
   it('marks the session degraded (no cutover) when the standby flap-gate reports unhealthy', async () => {
     createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
-    getStandbyRelayUrlMock.mockResolvedValueOnce('wss://standby.example:4000');
+    getStandbyRelayUrlsMock.mockResolvedValueOnce(['wss://standby.example:4000']);
     flapGateCheckMock.mockResolvedValueOnce(false);
 
     const session = await startBotSession({ roomMode: 'create', mediaMode: 'listen' }, baseDeps());
@@ -306,7 +323,7 @@ describe('startBotSession — standby cutover on relay death', () => {
     onRelayClosed();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(getStandbyRelayUrlMock).not.toHaveBeenCalled();
+    expect(getStandbyRelayUrlsMock).not.toHaveBeenCalled();
     expect(botPeerMock).toHaveBeenCalledTimes(1);
     expect(session.isDegraded()).toBe(false);
   });
