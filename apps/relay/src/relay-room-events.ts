@@ -10,7 +10,7 @@ import type { Logger, InMemoryRelayEndpointCache } from '@dvconf/shared';
 import { determineRole, type RoomTopology } from '@dvconf/inter-relay-client';
 import type { InterRelayContext } from './signaling/index.js';
 import type { ProbeState } from './metrics-server.js';
-import { resolvePrimaryEndpoint, resolveTreeParentDial } from './relay-endpoint-resolver.js';
+import { resolvePrimaryEndpoint, resolveRelayEndpoint, resolveTreeParentDial } from './relay-endpoint-resolver.js';
 import { deriveTreePosition, type TreePosition } from './tree-position.js';
 import { RMS_TREE_ACTIVE, RMS_TREE_DEGREE, RMS_TREE_MAX_HEIGHT } from './relay-wiring-context.js';
 
@@ -222,6 +222,56 @@ export function createRoomEventHandler(
         // previously did for a promotion confirmed only on-chain.
         promoteToPrimary(roomId);
         logger.info({ roomId, newPrimary }, 'RelayPromoted: this relay is now PRIMARY for room (role flipped in memory)');
+      } else if (roomId && newPrimary && !RMS_TREE_ACTIVE) {
+        // Cascading-failure gap: a SURVIVING standby (not the one just promoted)
+        // never learned its primary changed. Its inter-relay pipe + heartbeat
+        // stayed dialed at the OLD (now-dead) primary forever, so if a LATER
+        // failure knocks out the new primary too, this standby is the next
+        // fallback candidate but has never received a single real producer —
+        // clients cut over to it successfully (WS join/consume succeeds) but
+        // nothing streams. Re-target this standby's pipe + heartbeat to the
+        // new primary now, mirroring the RoomAssigned/RelaySlotReplaced
+        // standby branches' dial+heartbeat sequence. Gated on !RMS_TREE_ACTIVE
+        // (default off, not deployed) — tree mode's equivalent gap (tree
+        // position not recomputed for surviving nodes) is a separate,
+        // out-of-scope follow-up.
+        const assignedRelayIds = roomAssignedRelays.get(roomId);
+        if (assignedRelayIds && assignedRelayIds.includes(myMinerId)) {
+          // Keep roomAssignedRelays' membership correct and put newPrimary at
+          // index 0 (mirrors RelaySlotReplaced's array-patch precedent) so any
+          // other code path assuming [0]=primary stays correct. Do NOT drop
+          // the dead old primary from the list here -- this event doesn't
+          // tell us it was ejected (that's RelaySlotReplaced's job).
+          const reordered = [newPrimary, ...assignedRelayIds.filter((id) => id !== newPrimary)];
+          roomAssignedRelays.set(roomId, reordered);
+
+          // Defensive re-assert: this relay's OWN Layer B heartbeat (still
+          // pinging the now-dead OLD primary) could have already self-
+          // promoted it to 'primary' in error moments before this on-chain
+          // event landed. This event is authoritative -- correct the role
+          // back to 'standby'.
+          interRelayContext.role = 'standby';
+          probeLiveness.role = 'standby';
+
+          // Resolve the NEW primary's endpoint directly -- RelayPromoted
+          // gives us the true new primary id explicitly, so there's no need
+          // to depend on roomAssignedRelays' (now-fixed-up) ordering.
+          const primaryUrl = resolveRelayEndpoint(relayEndpointCacheRef.current!, newPrimary);
+          standbyLink.primaryUrl = primaryUrl;
+          if (primaryUrl !== null) standbyLinkManager.connectTo(primaryUrl);
+
+          // Idempotent restart (startStandbyHeartbeat always stops the prior
+          // controller first) -- safe even if a heartbeat was already running
+          // against the old primary.
+          startStandbyHeartbeat(roomId, primaryUrl);
+
+          logger.info(
+            { roomId, newPrimary, primaryUrl, resolved: primaryUrl !== null },
+            primaryUrl !== null
+              ? 'RelayPromoted: surviving standby re-targeted inter-relay link to NEW primary'
+              : 'RelayPromoted: surviving standby needs to re-target to NEW primary but its endpoint is not yet resolvable from cache',
+          );
+        }
       }
     } else if (eventName === 'RelaySlotReplaced') {
       // Mid-call standby-swap (relay_replacement.move) — CP-quorum voted a fresh candidate

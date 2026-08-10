@@ -148,6 +148,8 @@ export function createSignalingServer(
    * room already exists (created here, or by a real join racing it).
    */
   prewarmRoom: (roomId: string, roomMode: 'sfu' | 'mcu') => Promise<void>;
+  /** Clears the WS ping/pong liveness interval (P17 shutdown, LAST group). */
+  stopWsHeartbeat: () => void;
 } {
   const port = parseInt(process.env['WS_PORT'] ?? '4000', 10);
   const relayMode = (process.env['RELAY_MODE']?.toLowerCase() ?? 'sfu') as 'sfu' | 'mcu';
@@ -318,6 +320,38 @@ export function createSignalingServer(
       protocols.has(INTER_RELAY_SUBPROTOCOL) ? INTER_RELAY_SUBPROTOCOL : false,
   });
 
+  // Client sockets whose TCP connection dies without a clean close handshake
+  // were never cleaned up -- ws.on('close') never fires, so the peer's
+  // producers sit in room state forever as "ghost" producers, endlessly
+  // re-announced to every future joiner (join-handler.ts) but never deliver
+  // real media. Standard `ws` ping/pong liveness pattern: each tick, terminate
+  // any socket that didn't pong since the LAST tick, then ping+reset every
+  // survivor. Worst-case detection time is 2x WS_HEARTBEAT_INTERVAL_MS below.
+  // ws.terminate() synchronously fires the SAME ws.on('close', ...) handler
+  // already wired in handleConnection -- full teardown (handleDisconnect ->
+  // removePeer) happens there, unchanged; this loop never calls
+  // removePeer/handleDisconnect itself.
+  const wsAlive = new WeakMap<WebSocket, boolean>();
+  const wsHeartbeatIntervalMs = parseInt(process.env['WS_HEARTBEAT_INTERVAL_MS'] ?? '30000', 10);
+  const wsHeartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      // Inter-relay peers (G3.2b tagged) have their own liveness mechanism
+      // (pipe-liveness-observer.ts + reconnect logic) -- exempt them here so
+      // this loop never races/conflicts with that path.
+      if (state.interRelayPeers.has(ws)) continue;
+
+      if (wsAlive.get(ws) === false) {
+        logger.warn('WS heartbeat: peer missed pong, terminating stale connection');
+        ws.terminate();
+        continue;
+      }
+
+      wsAlive.set(ws, false);
+      ws.ping();
+    }
+  }, wsHeartbeatIntervalMs);
+  wsHeartbeat.unref();
+
   // Wraps every dispatched message in its own span (`ws.signal.<type>`) --
   // relay's actual "request" lifecycle (call setup, ICE/mediasoup
   // signaling) runs over this WS dispatcher, and OTel has no official `ws`
@@ -410,7 +444,10 @@ export function createSignalingServer(
   }
 
   wss.on('connection', (ws: WebSocket, req) => {
-    handleConnection(state, ws, req, interRelayToken, metrics, interRelay, handleMessage, logger);
+    wsAlive.set(ws, true);
+    handleConnection(state, ws, req, interRelayToken, metrics, interRelay, handleMessage, logger, (s) =>
+      wsAlive.set(s, true),
+    );
   });
 
   wss.on('listening', () => {
@@ -440,5 +477,6 @@ export function createSignalingServer(
     prewarmRoom: async (roomId: string, roomMode: 'sfu' | 'mcu') => {
       await ensureRoomPrewarmed(state, manager, roomId, roomMode, config, interRelay, logger);
     },
+    stopWsHeartbeat: () => clearInterval(wsHeartbeat),
   };
 }

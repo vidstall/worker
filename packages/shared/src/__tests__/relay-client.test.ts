@@ -6,13 +6,18 @@
  * tests confirm `ready` rejects cleanly instead.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { RelayClient, type WsLike } from '../mediasoup-node/relay-client.js';
 
-/** Minimal WsLike fake -- records registered handlers so a test can fire them. */
-function fakeWs(): WsLike & { emit: (event: string, ...args: unknown[]) => void } {
+/** Minimal WsLike fake -- records registered handlers so a test can fire them.
+ *  `ping`/`terminate` are omitted by default (matching a minimal transport
+ *  with no liveness support); pass `withHeartbeat: true` to add spies for
+ *  them, exercising RelayClient's heartbeat loop. */
+function fakeWs(
+  opts: { withHeartbeat?: boolean } = {},
+): WsLike & { emit: (event: string, ...args: unknown[]) => void } {
   const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
-  return {
+  const ws: WsLike & { emit: (event: string, ...args: unknown[]) => void } = {
     send: vi.fn(),
     close: vi.fn(),
     on: (event: string, handler: (...args: unknown[]) => void) => {
@@ -24,6 +29,11 @@ function fakeWs(): WsLike & { emit: (event: string, ...args: unknown[]) => void 
       for (const handler of handlers.get(event) ?? []) handler(...args);
     },
   };
+  if (opts.withHeartbeat) {
+    ws.ping = vi.fn();
+    ws.terminate = vi.fn();
+  }
+  return ws;
 }
 
 describe('RelayClient', () => {
@@ -93,5 +103,87 @@ describe('RelayClient — close observability (bare, no network call)', () => {
     const ws = fakeWs();
     new RelayClient(ws, null, {}, undefined, undefined);
     expect(() => ws.emit('close')).not.toThrow();
+  });
+});
+
+describe('RelayClient — WS ping/pong heartbeat (client side)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not ping before the socket opens', () => {
+    const ws = fakeWs({ withHeartbeat: true });
+    new RelayClient(ws, null, {}, undefined, undefined, 1000);
+    vi.advanceTimersByTime(5000);
+    expect(ws.ping).not.toHaveBeenCalled();
+  });
+
+  it('pings each tick once open, and keeps pinging when pong answers every ping', () => {
+    const ws = fakeWs({ withHeartbeat: true });
+    new RelayClient(ws, null, {}, undefined, undefined, 1000);
+    ws.emit('open');
+
+    vi.advanceTimersByTime(1000);
+    expect(ws.ping).toHaveBeenCalledTimes(1);
+    ws.emit('pong');
+
+    vi.advanceTimersByTime(1000);
+    expect(ws.ping).toHaveBeenCalledTimes(2);
+    expect(ws.terminate).not.toHaveBeenCalled();
+  });
+
+  it('terminates the socket after a missed pong (2 ticks with no pong reply)', () => {
+    const ws = fakeWs({ withHeartbeat: true });
+    new RelayClient(ws, null, {}, undefined, undefined, 1000);
+    ws.emit('open');
+
+    vi.advanceTimersByTime(1000); // tick 1: ping sent, no pong
+    expect(ws.ping).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1000); // tick 2: still no pong -> terminate
+    expect(ws.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to close() when the transport has no terminate()', () => {
+    const ws = fakeWs({ withHeartbeat: true });
+    delete (ws as { terminate?: unknown }).terminate;
+    new RelayClient(ws, null, {}, undefined, undefined, 1000);
+    ws.emit('open');
+
+    vi.advanceTimersByTime(2000);
+    expect(ws.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the heartbeat when close() is called explicitly', () => {
+    const ws = fakeWs({ withHeartbeat: true });
+    const client = new RelayClient(ws, null, {}, undefined, undefined, 1000);
+    ws.emit('open');
+    client.close();
+
+    vi.advanceTimersByTime(5000);
+    expect(ws.ping).not.toHaveBeenCalled();
+  });
+
+  it('stops the heartbeat once the socket close event fires', () => {
+    const ws = fakeWs({ withHeartbeat: true });
+    new RelayClient(ws, null, {}, undefined, undefined, 1000);
+    ws.emit('open');
+    vi.advanceTimersByTime(1000);
+    expect(ws.ping).toHaveBeenCalledTimes(1);
+
+    ws.emit('close');
+    vi.advanceTimersByTime(5000);
+    expect(ws.ping).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the heartbeat entirely when the WsLike has no ping() support', () => {
+    const ws = fakeWs(); // no withHeartbeat -- no ping/terminate
+    new RelayClient(ws, null, {}, undefined, undefined, 1000);
+    ws.emit('open');
+    expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+    expect(ws.close).not.toHaveBeenCalled();
   });
 });

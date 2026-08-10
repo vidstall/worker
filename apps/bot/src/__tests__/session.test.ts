@@ -72,6 +72,7 @@ const fakeBotConfig = {
   port: 8095,
   controlToken: '',
   metricsPort: 8096,
+  wsHeartbeatIntervalMs: 30000,
 };
 
 function baseDeps() {

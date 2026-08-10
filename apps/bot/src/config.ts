@@ -34,6 +34,11 @@ export interface BotConfig {
   /** Prometheus metrics server port (separate listener from `port` above,
    *  same pattern as cp-daemon/validator-daemon/signaling). Default 8096. */
   metricsPort: number;
+  /** RelayClient WS ping/pong liveness interval (ms) -- same knob/default as
+   *  the relay's own WS_HEARTBEAT_INTERVAL_MS, reused here since it's the
+   *  client-side counterpart of the same liveness concept in a different
+   *  process. Default 30000. */
+  wsHeartbeatIntervalMs: number;
 }
 
 export function loadBotConfig(): BotConfig {
@@ -45,5 +50,6 @@ export function loadBotConfig(): BotConfig {
     port: Number(process.env['PORT'] ?? '8095'),
     controlToken: process.env['BOT_CONTROL_TOKEN'] ?? '',
     metricsPort: Number(process.env['BOT_METRICS_PORT'] ?? '8096'),
+    wsHeartbeatIntervalMs: Number(process.env['WS_HEARTBEAT_INTERVAL_MS'] ?? '30000'),
   };
 }

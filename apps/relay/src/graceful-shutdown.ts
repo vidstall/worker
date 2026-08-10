@@ -46,6 +46,8 @@ export interface RelayShutdownDeps {
   closeMetricsServer: () => void;
   /** (4) LAST — mediasoup Workers. */
   closeMediasoup: () => void;
+  /** (4) LAST — clears the WS ping/pong liveness interval (alongside closeWss). */
+  stopWsHeartbeat: () => void;
   /** (4) LAST — the client WebSocket server (resolves when fully closed). */
   closeWss: () => Promise<void>;
   exit: (code: number) => never;
@@ -90,6 +92,7 @@ export function buildRelayShutdownPlan(
       deps.closeRelayProbe();
       deps.closeMetricsServer();
       deps.closeMediasoup();
+      deps.stopWsHeartbeat(); // stop ping/pong interval before closing wss
       await deps.closeWss();
     },
     exit: deps.exit,

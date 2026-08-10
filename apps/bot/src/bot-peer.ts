@@ -88,6 +88,11 @@ export interface BotPeerOptions {
    *  WS closes (expected or not). session.ts uses this to attempt a standby
    *  cutover; a caller that doesn't care can omit it (log-only, as before). */
   onRelayClosed?: () => void;
+  /** Threaded into RelayClient's WS ping/pong liveness interval (ms) — lets
+   *  the bot detect a relay whose TCP connection died without a clean close
+   *  handshake, instead of relying solely on `ws.on('close')`. Defaults to
+   *  RelayClient's own default (30s) when omitted. */
+  heartbeatIntervalMs?: number;
 }
 
 /** Base64-encode a 32-byte ed25519 public key for the `join` message's
@@ -170,6 +175,7 @@ export class BotPeer {
       { roomId: this.opts.roomId, peerId: this.opts.peerId, relayUrl: this.opts.relayUrl },
       this.opts.logger,
       this.opts.onRelayClosed,
+      this.opts.heartbeatIntervalMs,
     );
     await this.client.ready;
 

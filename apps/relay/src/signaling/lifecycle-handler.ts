@@ -120,6 +120,10 @@ export function handleConnection(
   interRelay: InterRelayContext | undefined,
   dispatch: (ws: WebSocket, msg: SignalingMessage) => Promise<void>,
   logger: Logger,
+  /** Reports a pong to the ws-heartbeat interval owned by signaling/index.ts
+   *  (a WeakMap it keeps, not tracked here) -- keeps this module decoupled
+   *  from how aliveness is stored, same injection pattern as `dispatch`. */
+  markAlive: (ws: WebSocket) => void,
 ): void {
   // G3.2b: identify inter-relay peers by their Bearer token (timingSafeEqual).
   // Computed once and reused for both the F60 stop-accept gate and the tagging
@@ -252,5 +256,9 @@ export function handleConnection(
 
   ws.on('error', (err) => {
     logger.error({ err }, 'WebSocket error');
+  });
+
+  ws.on('pong', () => {
+    markAlive(ws);
   });
 }

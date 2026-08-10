@@ -109,6 +109,7 @@ if (isMainModule) {
       registerReverseMinted,
       reannounceLocalProducersUp,
       prewarmRoom,
+      stopWsHeartbeat,
     } =
       createSignalingServer(
         manager,
@@ -371,6 +372,7 @@ if (isMainModule) {
       pipeLiveness,
       roomPoller,
       stopHeartbeat,
+      stopWsHeartbeat,
       metricsServer,
       manager,
       wss,

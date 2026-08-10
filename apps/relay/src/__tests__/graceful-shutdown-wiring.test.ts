@@ -31,6 +31,7 @@ function makeDeps() {
     stopRelayEndpoints: recAsync('stopRelayEndpoints'),
     stopRoomPoller: rec('stopRoomPoller'),
     stopHeartbeat: rec('stopHeartbeat'),
+    stopWsHeartbeat: rec('stopWsHeartbeat'),
     closeRelayProbe: rec('closeRelayProbe'),
     closeMetricsServer: rec('closeMetricsServer'),
     closeMediasoup: rec('closeMediasoup'),
@@ -74,6 +75,7 @@ describe('buildRelayShutdownPlan', () => {
     expect(calls).toEqual(
       expect.arrayContaining([
         'stopHeartbeat',
+        'stopWsHeartbeat',
         'closeRelayProbe',
         'closeMetricsServer',
         'closeMediasoup',

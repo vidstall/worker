@@ -6,9 +6,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { WebSocket } from 'ws';
+import type { IncomingMessage } from 'node:http';
 import { createLogger } from '@dvconf/shared';
-import { handleDisconnect } from '../signaling/lifecycle-handler.js';
+import { handleDisconnect, handleConnection } from '../signaling/lifecycle-handler.js';
 import { createSignalingServerState } from '../signaling/state.js';
 import { MetricsTracker } from '../metrics.js';
 import { PeerStatsWindow, type PeerQualitySample } from '../stats-window.js';
@@ -106,5 +108,43 @@ describe('handleDisconnect + PeerStatsWindow cleanup', () => {
 
     const metrics = new MetricsTracker();
     await expect(handleDisconnect(state, ws, metrics, undefined, logger)).resolves.toBeUndefined();
+  });
+});
+
+describe('handleConnection — pong wiring', () => {
+  /** Minimal EventEmitter-based fake `ws` -- handleConnection registers real
+   *  `.on('message'|'close'|'error'|'pong', ...)` listeners, so a bare
+   *  `{} as WebSocket` cast (used elsewhere in this file for handleDisconnect-
+   *  only tests) can't exercise this path; a real emitter can. */
+  function fakeConnectingWs(): WebSocket {
+    return new EventEmitter() as unknown as WebSocket;
+  }
+
+  it('calls markAlive(ws) exactly once when the socket emits pong', () => {
+    const state = createSignalingServerState();
+    const ws = fakeConnectingWs();
+    const req = { headers: {} } as IncomingMessage;
+    const metrics = new MetricsTracker();
+    const dispatch = vi.fn().mockResolvedValue(undefined);
+    const markAlive = vi.fn();
+
+    handleConnection(state, ws, req, '', metrics, undefined, dispatch, logger, markAlive);
+    (ws as unknown as EventEmitter).emit('pong');
+
+    expect(markAlive).toHaveBeenCalledOnce();
+    expect(markAlive).toHaveBeenCalledWith(ws);
+  });
+
+  it('does not call markAlive before a pong is received', () => {
+    const state = createSignalingServerState();
+    const ws = fakeConnectingWs();
+    const req = { headers: {} } as IncomingMessage;
+    const metrics = new MetricsTracker();
+    const dispatch = vi.fn().mockResolvedValue(undefined);
+    const markAlive = vi.fn();
+
+    handleConnection(state, ws, req, '', metrics, undefined, dispatch, logger, markAlive);
+
+    expect(markAlive).not.toHaveBeenCalled();
   });
 });

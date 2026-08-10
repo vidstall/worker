@@ -35,6 +35,7 @@ export interface RelayShutdownWiringDeps {
   pipeLiveness: { stop: () => void };
   roomPoller: { stop: () => void };
   stopHeartbeat: () => void;
+  stopWsHeartbeat: () => void;
   metricsServer: { close: () => void };
   manager: { close: () => void };
   wss: WebSocketServer;
@@ -60,6 +61,7 @@ export async function setupRelayShutdown(deps: RelayShutdownWiringDeps): Promise
     pipeLiveness,
     roomPoller,
     stopHeartbeat,
+    stopWsHeartbeat,
     metricsServer,
     manager,
     wss,
@@ -89,6 +91,7 @@ export async function setupRelayShutdown(deps: RelayShutdownWiringDeps): Promise
           roomPoller.stop();
         },
         stopHeartbeat, // C-B: relocated from EARLY into the LAST group
+        stopWsHeartbeat, // WS ping/pong liveness interval -- LAST group alongside closeWss
         closeRelayProbe,
         closeMetricsServer: () => metricsServer.close(),
         closeMediasoup: () => manager.close(),

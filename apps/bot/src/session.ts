@@ -249,6 +249,7 @@ export async function startBotSession(
         onRelayClosed: () => {
           void handleRelayDeath();
         },
+        heartbeatIntervalMs: botConfig.wsHeartbeatIntervalMs,
       });
       await newPeer.connect();
       if (videoSource) await newPeer.produceVideo(videoSource.createTrack());
@@ -283,6 +284,7 @@ export async function startBotSession(
     onRelayClosed: () => {
       void handleRelayDeath();
     },
+    heartbeatIntervalMs: botConfig.wsHeartbeatIntervalMs,
   });
   logger.info({ module: 'bot-session', sessionId: id, relayUrl }, 'joining relay…');
   await timePhase('ws_connect', () => peer.connect());
