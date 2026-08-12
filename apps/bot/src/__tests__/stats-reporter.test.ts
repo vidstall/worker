@@ -199,7 +199,19 @@ describe('startStatsReporter', () => {
     };
   }
 
-  it('POSTs a sample to <relayHttpOrigin>/stats/report immediately on start', async () => {
+  const PUSHGATEWAY_URL = 'https://pushgateway.example.com';
+  const METRICS_AUTH_TOKEN = 'test-token';
+
+  /** Pulls one metric line's value out of a Prometheus exposition-format
+   *  body (see metrics-push.ts's buildExpositionBody), e.g. extracts `20`
+   *  from `dvconf_relay_peer_jitter_ms{roomId="0xroom",peerId="bot-1"} 20`. */
+  function metricValue(body: string, metricName: string): number {
+    const match = new RegExp(`^${metricName}\\{[^}]*\\} (\\S+)$`, 'm').exec(body);
+    if (!match) throw new Error(`metric ${metricName} not found in body:\n${body}`);
+    return Number(match[1]);
+  }
+
+  it('PUTs a sample to <pushgatewayUrl>/metrics/job/dvconf_bot/instance/<peerId> immediately on start', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const transport = makeTransport();
@@ -208,19 +220,22 @@ describe('startStatsReporter', () => {
       relayUrl: 'wss://relay.example.com',
       roomId: '0xroom',
       peerId: 'bot-1',
+      pushgatewayUrl: PUSHGATEWAY_URL,
+      metricsAuthToken: METRICS_AUTH_TOKEN,
     });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     stop();
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://relay.example.com/stats/report');
-    expect(init.method).toBe('POST');
-    const body = JSON.parse(init.body as string) as { roomId: string; peerId: string; sample: unknown };
-    expect(body.roomId).toBe('0xroom');
-    expect(body.peerId).toBe('bot-1');
+    expect(url).toBe(`${PUSHGATEWAY_URL}/metrics/job/dvconf_bot/instance/bot-1`);
+    expect(init.method).toBe('PUT');
+    expect((init.headers as Record<string, string>)['Authorization']).toBe(`Bearer ${METRICS_AUTH_TOKEN}`);
+    const body = init.body as string;
+    expect(body).toContain('roomId="0xroom"');
+    expect(body).toContain('peerId="bot-1"');
   });
 
-  it('stops polling once stop() is called', async () => {
+  it('stops polling once stop() is called, and clears the Pushgateway grouping key on stop', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
@@ -230,12 +245,18 @@ describe('startStatsReporter', () => {
       relayUrl: 'ws://localhost:4000',
       roomId: '0xroom',
       peerId: 'bot-1',
+      pushgatewayUrl: PUSHGATEWAY_URL,
+      metricsAuthToken: METRICS_AUTH_TOKEN,
     });
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     stop();
+    // stop() itself fires the DELETE that clears this peer's grouping key.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, deleteInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(deleteInit.method).toBe('DELETE');
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('never throws when the transport is already closed', async () => {
@@ -253,7 +274,7 @@ describe('startStatsReporter', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('merges recv-transport jitter into the POSTed sample when a recv transport is supplied', async () => {
+  it('merges recv-transport jitter into the pushed sample when a recv transport is supplied', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const sendTransport = makeTransport();
@@ -267,14 +288,19 @@ describe('startStatsReporter', () => {
 
     const stop = startStatsReporter(
       { send: sendTransport, recv: recvTransport },
-      { relayUrl: 'wss://relay.example.com', roomId: '0xroom', peerId: 'bot-1' },
+      {
+        relayUrl: 'wss://relay.example.com',
+        roomId: '0xroom',
+        peerId: 'bot-1',
+        pushgatewayUrl: PUSHGATEWAY_URL,
+        metricsAuthToken: METRICS_AUTH_TOKEN,
+      },
     );
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     stop();
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const body = JSON.parse(init.body as string) as { sample: Record<string, number> };
-    expect(body.sample['jitterMs']).toBe(20);
+    expect(metricValue(init.body as string, 'dvconf_relay_peer_jitter_ms')).toBe(20);
   });
 
   it('falls back to send-only stats when recv getStats() fails', async () => {
@@ -289,13 +315,18 @@ describe('startStatsReporter', () => {
 
     const stop = startStatsReporter(
       { send: sendTransport, recv: recvTransport },
-      { relayUrl: 'wss://relay.example.com', roomId: '0xroom', peerId: 'bot-1' },
+      {
+        relayUrl: 'wss://relay.example.com',
+        roomId: '0xroom',
+        peerId: 'bot-1',
+        pushgatewayUrl: PUSHGATEWAY_URL,
+        metricsAuthToken: METRICS_AUTH_TOKEN,
+      },
     );
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     stop();
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const body = JSON.parse(init.body as string) as { sample: Record<string, number> };
-    expect(body.sample['jitterMs']).toBe(0);
+    expect(metricValue(init.body as string, 'dvconf_relay_peer_jitter_ms')).toBe(0);
   });
 });

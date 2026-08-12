@@ -189,6 +189,20 @@ export async function startBotSession(
   // True once a relay death couldn't be recovered (no standby, or the standby
   // was also unhealthy) — surfaced via BotSession.isDegraded()/GET /bots.
   let degraded = false;
+  // Hoisted for the SAME reason as stopped/cutoverInFlight/degraded above --
+  // handleRelayDeath's closure reads these (see its produceVideo/produceAudio
+  // calls below), and the primary peer's onRelayClosed callback (wired into
+  // the very first BotPeer, further down) can fire before this function ever
+  // reaches its own media_start block if the primary relay's WS closes
+  // immediately after connect (confirmed live: a relay stuck without a valid
+  // TLS cert closes the WS right away) -- a `let` declared only at that later
+  // point left videoSource/audioSource in the temporal dead zone at the
+  // moment handleRelayDeath's closure tried to read them, throwing
+  // `ReferenceError: Cannot access 'videoSource' before initialization` and
+  // aborting that standby candidate for a reason that had nothing to do with
+  // the candidate itself.
+  let videoSource: InstanceType<WrtcNonstandard['RTCVideoSource']> | null = null;
+  let audioSource: InstanceType<WrtcNonstandard['RTCAudioSource']> | null = null;
 
   /**
    * Fired when the currently-active relay's WS closes (expected — the relay
@@ -256,6 +270,8 @@ export async function startBotSession(
               void handleRelayDeath();
             },
             heartbeatIntervalMs: botConfig.wsHeartbeatIntervalMs,
+            pushgatewayUrl: botConfig.pushgatewayUrl,
+            metricsAuthToken: botConfig.metricsAuthToken,
           });
           await newPeer.connect();
           if (videoSource) await newPeer.produceVideo(videoSource.createTrack());
@@ -308,18 +324,19 @@ export async function startBotSession(
       void handleRelayDeath();
     },
     heartbeatIntervalMs: botConfig.wsHeartbeatIntervalMs,
+    pushgatewayUrl: botConfig.pushgatewayUrl,
+    metricsAuthToken: botConfig.metricsAuthToken,
   });
   logger.info({ module: 'bot-session', sessionId: id, relayUrl }, 'joining relay…');
   await timePhase('ws_connect', () => peer.connect());
   logger.info({ module: 'bot-session', sessionId: id, mediaMode: opts.mediaMode }, 'joined relay, starting media…');
 
   const stopFns: Array<() => void> = [];
-  // Lifted out of the media_start block below so handleRelayDeath can mint
+  // videoSource/audioSource themselves are declared earlier (see the
+  // hoisted block above handleRelayDeath) so handleRelayDeath can mint
   // fresh tracks (.createTrack()) from the SAME still-running ffmpeg pacing
   // loop on cutover, instead of restarting ffmpeg — mirrors the browser fix's
   // reuse of localStreamRef.current instead of re-acquiring getUserMedia.
-  let videoSource: InstanceType<WrtcNonstandard['RTCVideoSource']> | null = null;
-  let audioSource: InstanceType<WrtcNonstandard['RTCAudioSource']> | null = null;
 
   if (wantsVideo(opts.mediaMode) || wantsAudio(opts.mediaMode)) {
     await timePhase('media_start', async () => {

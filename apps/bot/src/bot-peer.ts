@@ -93,6 +93,12 @@ export interface BotPeerOptions {
    *  handshake, instead of relying solely on `ws.on('close')`. Defaults to
    *  RelayClient's own default (30s) when omitted. */
   heartbeatIntervalMs?: number;
+  /** Threaded into startStatsReporter (stats-reporter.ts) -- observer
+   *  Pushgateway base URL + Bearer token for this peer's dvconf_relay_peer_*
+   *  quality-sample push. Either omitted/empty ⇒ that push silently
+   *  no-ops. */
+  pushgatewayUrl?: string;
+  metricsAuthToken?: string;
 }
 
 /** Base64-encode a 32-byte ed25519 public key for the `join` message's
@@ -220,6 +226,8 @@ export class BotPeer {
         roomId: this.opts.roomId,
         peerId: this.opts.peerId,
         logger: this.opts.logger,
+        pushgatewayUrl: this.opts.pushgatewayUrl,
+        metricsAuthToken: this.opts.metricsAuthToken,
       },
     );
   }

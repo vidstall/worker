@@ -1,13 +1,23 @@
 /**
  * Bot-side connection-quality reporter — mirrors services/client/client/src/
- * hooks/useConnectionStats.ts's getStats()-polling + POST-to-relay logic
- * (REQ-MCS-VIZ), so the bot's send transport shows up in cli/observer's
- * user/ metrics the same way a real browser participant does. Without this,
- * the relay only ever sees the bot's SERVER-observed RTC stats
- * (dvconf_rtc_*, apps/relay/src/rtc-quality-metrics.ts) — the bot never
- * self-reports the client-side dvconf_relay_peer_* sample
+ * hooks/useConnectionStats.ts's getStats()-polling + direct-Pushgateway-push
+ * logic (REQ-MCS-VIZ), so the bot's send transport shows up in
+ * cli/observer's user/ metrics the same way a real browser participant
+ * does. Without this, the relay only ever sees the bot's SERVER-observed
+ * RTC stats (dvconf_rtc_*, apps/relay/src/rtc-quality-metrics.ts) — the bot
+ * never self-reports the client-side dvconf_relay_peer_* sample
  * cli/observer/metrics_user.py::collect_user_sample() actually reads, so
  * `user/<peerId>.json` never gets written for a bot session.
+ *
+ * The extraction/delta math below (extractRawSample/mergeRawExtract/
+ * computeDeltaStats/buildReportSample) still POSTs its result nowhere
+ * itself -- the actual transport is metrics-push.ts's
+ * pushBotQualitySample(), a direct PUT to the observer Pushgateway. This
+ * file used to POST the built sample to relay's `/stats/report` bridge
+ * instead; that bridge required knowing the CURRENT relay's URL, so a
+ * standby cutover (or an already-dead primary) misrouted or silently
+ * dropped every report -- see metrics-push.ts's docstring for the full
+ * reasoning (same fix the browser client already shipped).
  *
  * Deliberately duplicated (not imported) from the client package: apps/bot
  * is a separate Node/pnpm workspace with no existing dependency on the
@@ -17,6 +27,7 @@
  * useConnectionStats.ts if that file ever changes.
  */
 import type { Logger } from '@dvconf/shared';
+import { pushBotQualitySample, clearBotQualityPush } from './metrics-push.js';
 
 /** Matches relay's STATS_REPORT_MIN_INTERVAL_MS
  *  (apps/relay/src/metrics-server.ts) -- reporting faster just gets
@@ -280,9 +291,12 @@ export function buildReportSample(
 }
 
 /** wss://... -> https://..., ws://... -> http://... -- same swap RoomPage.tsx
- *  does before hitting /stats/report: the relay's SAME public origin
- *  (Caddy path-routes /stats/report alongside the WS upgrade on :443), not
- *  a separate metrics port with no published mapping. */
+ *  used to do before hitting /stats/report. No longer called from this
+ *  file's own tick() (see StatsReporterOptions/pushgatewayUrl below) --
+ *  kept exported/tested as a pure utility since nothing else in this
+ *  package needs a scheme swap like it, but the reporter itself now pushes
+ *  straight to the Pushgateway instead of relay's `/stats/report` bridge,
+ *  which needed this to build that bridge's URL. */
 export function relayHttpOrigin(relayUrl: string): string {
   const url = new URL(relayUrl);
   url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
@@ -294,6 +308,11 @@ export interface StatsReporterOptions {
   roomId: string;
   peerId: string;
   logger?: Logger;
+  /** Observer Pushgateway base URL + Bearer token -- see metrics-push.ts.
+   *  Either empty ⇒ the push silently no-ops (not configured), same
+   *  posture as the bridge it replaced. */
+  pushgatewayUrl?: string;
+  metricsAuthToken?: string;
 }
 
 /** The subset of mediasoup-client's `Transport` this reporter needs --
@@ -317,21 +336,22 @@ export interface StatsReporterTransports {
 /** Start polling both transports' `getStats()` every POLL_INTERVAL_MS,
  *  merging them into one sample (see mergeRawExtract's doc -- send and recv
  *  are separate RTCPeerConnections in mediasoup's architecture, so this is
- *  NOT two independent reports; a second independent POST per tick would
- *  overwrite the relay's per-field gauges with an incomplete report each
- *  time), and POSTing the merged sample to the relay's /stats/report side
- *  channel -- fire-and-forget, same as RoomPage.tsx's REQ-MCS-VIZ reporting
- *  effect. Failures (network, relay down, room already closed) are logged
- *  and otherwise ignored -- reporting quality metrics must never be able to
- *  disrupt the bot's actual media session. Connection-lifecycle bookkeeping
- *  (setup time / ICE success rate / reconnect time) is wired to the send
- *  transport only -- both transports typically establish at nearly the same
- *  time in practice, and splitting lifecycle tracking across two transports
- *  isn't needed for the receiver-side quality fields (jitter etc.) this
+ *  NOT two independent reports; a second independent push per tick would
+ *  overwrite the Pushgateway's per-field gauges with an incomplete report
+ *  each time), and pushing the merged sample straight to the observer
+ *  Pushgateway (metrics-push.ts's pushBotQualitySample) -- fire-and-forget,
+ *  same as RoomPage.tsx's REQ-MCS-VIZ reporting effect. Failures (network,
+ *  Pushgateway down, not configured) are logged and otherwise ignored --
+ *  reporting quality metrics must never be able to disrupt the bot's actual
+ *  media session. Connection-lifecycle bookkeeping (setup time / ICE
+ *  success rate / reconnect time) is wired to the send transport only --
+ *  both transports typically establish at nearly the same time in
+ *  practice, and splitting lifecycle tracking across two transports isn't
+ *  needed for the receiver-side quality fields (jitter etc.) this
  *  dual-transport support exists for. Returns a stop() that clears the
- *  interval; BotPeer.close() calls this. */
+ *  interval AND clears this peer's Pushgateway grouping key (see
+ *  clearBotQualityPush); BotPeer.close() calls this. */
 export function startStatsReporter(transports: StatsReporterTransports, opts: StatsReporterOptions): () => void {
-  const base = relayHttpOrigin(opts.relayUrl);
   const createdAt = Date.now();
   let setupMs: number | null = null;
   let iceAttempts = 0;
@@ -396,20 +416,20 @@ export function startStatsReporter(transports: StatsReporterTransports, opts: St
       reconnectionTimeMs: reconnectionMs,
     });
 
-    try {
-      await fetch(`${base}/stats/report`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roomId: opts.roomId, peerId: opts.peerId, sample }),
-      });
-    } catch (err) {
-      opts.logger?.warn({ module: 'bot-stats-reporter', err }, 'POST /stats/report failed');
-    }
+    pushBotQualitySample(
+      opts.pushgatewayUrl ?? '',
+      opts.metricsAuthToken ?? '',
+      opts.roomId,
+      opts.peerId,
+      sample,
+      opts.logger,
+    );
   };
 
   void tick();
   const interval = setInterval(() => void tick(), POLL_INTERVAL_MS);
   return () => {
     clearInterval(interval);
+    clearBotQualityPush(opts.pushgatewayUrl ?? '', opts.metricsAuthToken ?? '', opts.peerId, opts.logger);
   };
 }
