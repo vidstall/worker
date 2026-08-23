@@ -359,6 +359,50 @@ describe('startBotSession — standby cutover on relay death', () => {
     expect(botPeerMock).toHaveBeenCalledTimes(1);
   });
 
+  it('recovers via standby cutover when the primary relay is dead on arrival during the initial connect', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlsMock.mockResolvedValueOnce(['wss://standby.example:4000']);
+
+    // Mirrors what a real dead-on-arrival relay does (confirmed live via a
+    // broken TLS cert): the SAME underlying WS-close event both rejects the
+    // primary's own connect() call AND fires onRelayClosed (wired in before
+    // that connect() is awaited) -- racing the initial connect's rejection
+    // against a detached background cutover. This is the bug being
+    // regression-tested: without awaiting the cutover, startBotSession used
+    // to reject here even though the standby cutover went on to succeed a
+    // moment later.
+    connectMock.mockImplementationOnce(() => {
+      const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+      onRelayClosed();
+      return Promise.reject(new Error('write EPROTO ... tlsv1 alert internal error'));
+    });
+
+    const session = await startBotSession({ roomMode: 'create', mediaMode: 'camera' }, baseDeps());
+
+    expect(session.isDegraded()).toBe(false);
+    expect(botPeerMock).toHaveBeenCalledTimes(2);
+    expect(botPeerMock.mock.calls[1]![0].relayUrl).toBe('wss://standby.example:4000');
+    expect(closeMock).toHaveBeenCalledTimes(1); // dead-on-arrival primary torn down
+    // Only ever reaches the normal media_start phase once, against whichever
+    // peer ended up live -- the primary never got far enough to produce.
+    expect(produceVideoMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows the original connect error when the primary is dead on arrival and no standby recovers it', async () => {
+    createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
+    getStandbyRelayUrlsMock.mockResolvedValueOnce([]);
+
+    connectMock.mockImplementationOnce(() => {
+      const onRelayClosed = botPeerMock.mock.calls[0]![0].onRelayClosed!;
+      onRelayClosed();
+      return Promise.reject(new Error('write EPROTO ... tlsv1 alert internal error'));
+    });
+
+    await expect(startBotSession({ roomMode: 'create', mediaMode: 'camera' }, baseDeps())).rejects.toThrow(
+      'write EPROTO',
+    );
+  });
+
   it('a user-initiated stop() does not trigger a bogus cutover when its own WS close fires afterward', async () => {
     createRoomMock.mockResolvedValueOnce({ roomId: '0xroom' });
 

@@ -186,6 +186,17 @@ export async function startBotSession(
   // Guards against overlapping cutover attempts (defensive — in practice only
   // one relay is ever "current" at a time, so at most one onRelayClosed fires).
   let cutoverInFlight = false;
+  // Shares the in-flight handleRelayDeath() call so a caller other than the
+  // onRelayClosed callback that triggered it can await the SAME attempt
+  // instead of racing it — the initial `peer.connect()` below needs this: a
+  // primary relay that's already dead-on-arrival (e.g. a bad TLS cert) closes
+  // its WS during that very first connect, which both rejects the connect()
+  // promise AND fires onRelayClosed. Without sharing the promise here, the
+  // rejection reached the caller (HTTP 502, no joinUrl) before the detached
+  // onRelayClosed-triggered cutover a few seconds later ever got a chance to
+  // recover the session — confirmed live: the cutover succeeded onto a
+  // standby, but the bot's own POST /bots had already failed the request.
+  let activeCutoverPromise: Promise<void> | null = null;
   // True once a relay death couldn't be recovered (no standby, or the standby
   // was also unhealthy) — surfaced via BotSession.isDegraded()/GET /bots.
   let degraded = false;
@@ -217,9 +228,26 @@ export async function startBotSession(
    * candidate is exhausted — this is a test harness, a clear degraded signal
    * is more useful than retrying forever.
    */
-  const handleRelayDeath = async (): Promise<void> => {
-    if (stopped || cutoverInFlight) return;
+  const handleRelayDeath = (): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    if (activeCutoverPromise) return activeCutoverPromise;
     cutoverInFlight = true;
+    activeCutoverPromise = runCutover().finally(() => {
+      cutoverInFlight = false;
+      activeCutoverPromise = null;
+    });
+    return activeCutoverPromise;
+  };
+
+  const runCutover = async (): Promise<void> => {
+    // Timed from the moment the death was detected (mirrors the browser
+    // client's attemptStandbyCutover's startedAt in standby-cutover.ts), so
+    // downtimeMs below covers the whole outage -- not just the final
+    // candidate's connect time.
+    const cutoverStartedAt = Date.now();
+    // Captured BEFORE any candidate reassigns `relayUrl` below, so a
+    // successful cutover's log line names the relay that actually died.
+    const deadRelayUrl = relayUrl;
     try {
       logger.warn(
         { module: 'bot-session', sessionId: id, roomId },
@@ -282,12 +310,49 @@ export async function startBotSession(
           // onRelayClosed.
           peer.close();
           peer = newPeer;
+          relayUrl = candidate;
           degraded = false;
           cutOver = true;
-          logger.info(
-            { module: 'bot-session', sessionId: id, roomId, standbyUrl: candidate },
-            'bot session cut over to standby relay',
-          );
+          // downtime-events table (User/Room dashboards) — same shape as the
+          // browser client's cutover log (standby-cutover.ts): deadRelayUrl +
+          // downtimeMs let Loki correlate WHICH failover this was and how
+          // long it took, not just that the bot's relay changed. eventEpochMs
+          // is a separate numeric field (not just the log line's own
+          // ingestion timestamp) so LogQL min/max/avg aggregation has
+          // something numeric to aggregate over.
+          {
+            const now = Date.now();
+            // Field shape/module/message text and top-level roomId/peerId are a
+            // DELIBERATE exact mirror of the browser client's own cutover log
+            // (standby-cutover.ts's clientLog.info('webrtc/useRelay', 'Primary
+            // relay dropped...', {...context})) -- both dashboards' "Relay
+            // Failover Downtime" panels (peer-quality.json, rooms.json) match
+            // on `module="webrtc/useRelay"` and `message=~"Primary relay
+            // dropped.*"` and read deadRelayUrl/url/downtimeMs/eventEpochMs as
+            // Loki's `| json`-flattened context_* fields; a synthetic bot
+            // session is supposed to be indistinguishable from a real client
+            // in the resulting telemetry (see docs/evaluation-method/
+            // observation.md section 5) so it has to emit the identical shape,
+            // not just the identical field VALUES. sessionId/standbyUrl ride
+            // along as extra top-level fields for anyone reading raw Loki
+            // lines; the dashboards ignore fields they don't index.
+            logger.info(
+              {
+                module: 'webrtc/useRelay',
+                message: 'Primary relay dropped — cut over to a fallback standby',
+                roomId,
+                peerId: `bot-${id}`,
+                sessionId: id,
+                context: {
+                  url: candidate,
+                  deadRelayUrl,
+                  downtimeMs: now - cutoverStartedAt,
+                  eventEpochMs: now,
+                },
+              },
+              'bot session cut over to standby relay',
+            );
+          }
           break;
         } catch (err) {
           logger.warn(
@@ -309,8 +374,6 @@ export async function startBotSession(
         'standby cutover failed — bot session degraded',
       );
       degraded = true;
-    } finally {
-      cutoverInFlight = false;
     }
   };
 
@@ -328,7 +391,24 @@ export async function startBotSession(
     metricsAuthToken: botConfig.metricsAuthToken,
   });
   logger.info({ module: 'bot-session', sessionId: id, relayUrl }, 'joining relay…');
-  await timePhase('ws_connect', () => peer.connect());
+  try {
+    await timePhase('ws_connect', () => peer.connect());
+  } catch (err) {
+    // A primary relay that's dead on arrival (e.g. a bad TLS cert, confirmed
+    // live) closes its WS during THIS connect() call, which both rejects it
+    // AND fires onRelayClosed above -- await that same in-flight cutover
+    // (handleRelayDeath() dedups via activeCutoverPromise, so this is a
+    // no-op wait if onRelayClosed already started one, or starts a fresh
+    // attempt if connect() failed some other way that never touched the
+    // WS). `peer` is reassigned in place on a successful cutover, so
+    // media_start below transparently continues against the standby --
+    // only rethrow the ORIGINAL connect error when no standby could be
+    // reached either.
+    await handleRelayDeath();
+    if (degraded) {
+      throw err;
+    }
+  }
   logger.info({ module: 'bot-session', sessionId: id, mediaMode: opts.mediaMode }, 'joined relay, starting media…');
 
   const stopFns: Array<() => void> = [];
